@@ -248,46 +248,106 @@ def _default_daemon(log, phone: str | None):
     return Daemon(Session(Device(host=phone, log=log)), log=log)
 
 
+def _lock_instance():
+    """The lock that keeps one daemon running, held for its lifetime (the OS frees it if it dies).
+    The open file, or None if another daemon holds it."""
+    path = store.HOME / "serve.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: bool = False,
-                phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT) -> int:
+                phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT,
+                wait_for_other: float = 60.0) -> int:
     """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
     import uvicorn
 
     from .client import healthy, viewer_url
+
+    def running(found: dict) -> int:
+        print(f"already running: {viewer_url(found)}", flush=True)
+        if new_token:
+            print("the running daemon keeps its token; stop it first (tapwright serve --stop) to get a new one",
+                  flush=True)
+        return 0
+
     info = store.read_serve_info()
     if await asyncio.to_thread(healthy, info):
-        print(f"already running: {viewer_url(info)}", flush=True)
-        return 0
-    sock = _bind(port)
-    if sock is None:
-        for _ in range(20):  # another daemon may be starting on that port right now
+        return running(info)
+    lock = _lock_instance()
+    if lock is None:  # another daemon is starting, or stuck
+        deadline = time.monotonic() + wait_for_other
+        while time.monotonic() < deadline:
             await asyncio.sleep(0.5)
             info = store.read_serve_info()
             if await asyncio.to_thread(healthy, info):
-                print(f"already running: {viewer_url(info)}", flush=True)
-                return 0
-        sock = _bind(0)
-    token = info["token"] if info.get("token") and not new_token else secrets.token_urlsafe(32)
-    actual = sock.getsockname()[1]
-    log = configure_logging(store.HOME / "serve.log")
-    daemon = make_daemon(log.info, phone)
+                return running(info)
+        print("another tapwright serve is starting or stuck; see ~/.tapwright/serve.log", flush=True)
+        return 1
+    log = logging.getLogger("tapwright")
+    daemon = server = sock = serving = stopping = None
+    helpers: list[asyncio.Task] = []
     stop = asyncio.Event()
-    app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
-    server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None, access_log=False))
-    store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token, "started": int(time.time())})
-    log.info("listening on http://127.0.0.1:%d", actual)
-    print(f"Tapwright live view: http://127.0.0.1:{actual}/?token={token}", flush=True)
-    serving = asyncio.create_task(server.serve(sockets=[sock]))
-    helpers = [asyncio.create_task(daemon.supervise(stop))]
-    if not keep_alive:
-        helpers.append(asyncio.create_task(_idle_watch(daemon, stop, idle_limit)))
-    stopping = asyncio.create_task(stop.wait())
-    await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
-    stop.set()
-    server.should_exit = True
-    for task in helpers + [stopping]:
-        task.cancel()
-    await asyncio.gather(serving, *helpers, stopping, return_exceptions=True)
-    await daemon.close()
-    log.info("stopped")
-    return 0
+    code = 0
+    try:
+        log = configure_logging(store.HOME / "serve.log")
+        try:
+            sock = _bind(port) or _bind(0)
+            if sock is None:
+                raise OSError("no free port on 127.0.0.1")
+            token = info["token"] if info.get("token") and not new_token else secrets.token_urlsafe(32)
+            actual = sock.getsockname()[1]
+            daemon = make_daemon(log.info, phone)
+            app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
+            server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
+                                                   access_log=False, timeout_graceful_shutdown=3))
+            store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,
+                                    "started": int(time.time())})
+            log.info("listening on http://127.0.0.1:%d", actual)
+            print(f"Tapwright live view: http://127.0.0.1:{actual}/?token={token}", flush=True)
+            serving = asyncio.create_task(server.serve(sockets=[sock]))
+            helpers = [asyncio.create_task(daemon.supervise(stop))]
+            if not keep_alive:
+                helpers.append(asyncio.create_task(_idle_watch(daemon, stop, idle_limit)))
+            stopping = asyncio.create_task(stop.wait())
+            await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
+            if serving.done() and not serving.cancelled() and serving.exception() is not None:
+                log.error("the server stopped with an error", exc_info=serving.exception())
+                code = 1
+        except Exception:
+            log.exception("tapwright serve failed")
+            code = 1
+    finally:  # also on Ctrl+C, which arrives as cancellation
+        stop.set()
+        if daemon is not None:
+            daemon.hub.close()  # ends open stream responses, which would hold the server up
+        if server is not None:
+            server.should_exit = True
+        tasks = [t for t in [*helpers, stopping] if t is not None]
+        for task in tasks:
+            task.cancel()
+        waiting = [t for t in [serving, *tasks] if t is not None]
+        if waiting:
+            await asyncio.gather(*waiting, return_exceptions=True)
+        if daemon is not None:
+            try:
+                await asyncio.shield(daemon.close())
+            except Exception:
+                log.exception("closing the phone session failed")
+        if sock is not None:
+            sock.close()
+        lock.close()
+        log.info("stopped")
+    return code

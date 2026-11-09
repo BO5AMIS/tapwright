@@ -1,6 +1,8 @@
 """Find the running `tapwright serve`, or start it, and call its API (standard library only)."""
+import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -49,51 +51,77 @@ def healthy(info: dict, timeout: float = 2.0) -> dict | None:
     if not info.get("port") or not info.get("token"):
         return None
     try:
-        return _request(info, "GET", "/api/health", timeout=timeout)
-    except (OSError, DaemonError, ValueError):
+        status = _request(info, "GET", "/api/health", timeout=timeout)
+    except (OSError, DaemonError, ValueError, http.client.HTTPException):
         return None
+    return status if isinstance(status, dict) and "protocol" in status else None
 
 
-def start_daemon() -> None:
+def start_daemon() -> subprocess.Popen:
     """`tapwright serve` in the background: no console window, and it outlives the agent that
     started it (on Windows it leaves the agent host's job object when Windows allows that)."""
     cmd = [sys.executable, "-m", "tapwright", "serve"]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True}
     if os.name != "nt":
-        subprocess.Popen(cmd, start_new_session=True, **quiet)
-        return
+        return subprocess.Popen(cmd, start_new_session=True, **quiet)
     flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     try:
-        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **quiet)
+        return subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **quiet)
     except OSError:  # the job doesn't allow breaking away
-        subprocess.Popen(cmd, creationflags=flags, **quiet)
+        return subprocess.Popen(cmd, creationflags=flags, **quiet)
 
 
 def find_or_start(wait: float = 60.0) -> dict:
     info = store.read_serve_info()
     if healthy(info):
         return info
-    start_daemon()
+    proc = start_daemon()
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         time.sleep(0.5)
         info = store.read_serve_info()
         if healthy(info):
             return info
+        if proc is not None and proc.poll() is not None:
+            raise DaemonError("reconnecting", "tapwright serve exited at start; see ~/.tapwright/serve.log")
     raise DaemonError("reconnecting", "tapwright serve didn't start; see ~/.tapwright/serve.log")
 
 
-def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
-    """One agent tool in the daemon: {"texts", "image", "notes"}. Raises DaemonError for refusals."""
-    info = find_or_start()
+def _refused(e: BaseException) -> bool:
+    return isinstance(e, ConnectionRefusedError) or (
+        isinstance(e, urllib.error.URLError) and isinstance(e.reason, ConnectionRefusedError))
+
+
+def _timed_out(e: BaseException) -> bool:
+    return isinstance(e, (TimeoutError, socket.timeout)) or (
+        isinstance(e, urllib.error.URLError) and isinstance(e.reason, (TimeoutError, socket.timeout)))
+
+
+def _attempt(info: dict, tool: str, args: dict, timeout: float, client_id: str, retry_ok: bool) -> dict:
+    """One request. Only a refused connection (nothing was sent) is passed up for a retry."""
     try:
         return _request(info, "POST", f"/api/{tool}", args, timeout, client_id)
     except DaemonError:
         raise
-    except OSError:  # the daemon went away between the check and the call
+    except (OSError, http.client.HTTPException) as e:
+        if retry_ok and _refused(e):
+            raise
+        if _timed_out(e):
+            raise DaemonError("timeout", f"no answer from tapwright serve within {timeout:.0f} s; "
+                                         "look at the screen before retrying") from None
+        raise DaemonError("reconnecting", str(e)) from None
+
+
+def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
+    """One agent tool in the daemon: {"texts", "image", "notes"}. Raises DaemonError for refusals.
+    It never sends an action twice: it retries only when the connection was refused."""
+    info = find_or_start()
+    try:
+        return _attempt(info, tool, args, timeout, client_id, retry_ok=True)
+    except OSError:  # refused: the daemon went away between the check and the call
         info = find_or_start()
-        return _request(info, "POST", f"/api/{tool}", args, timeout, client_id)
+        return _attempt(info, tool, args, timeout, client_id, retry_ok=False)
 
 
 def shutdown(info: dict) -> None:
