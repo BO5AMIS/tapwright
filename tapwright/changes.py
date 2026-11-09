@@ -28,6 +28,27 @@ def _stayed(a: Element, b: Element) -> bool:
     return math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]) <= MOVE_PT
 
 
+def _shift(a: Element, b: Element) -> tuple[float, float]:
+    return b.x - a.x, b.y - a.y
+
+
+def _moved_by(a: Element, b: Element, shift: tuple[float, float]) -> bool:
+    dx, dy = _shift(a, b)
+    return abs(dx - shift[0]) <= MOVE_PT and abs(dy - shift[1]) <= MOVE_PT
+
+
+def _content_shift(pairs: list[tuple[Element, Element]]) -> tuple[float, float] | None:
+    """How far the content moved: the displacement most unique elements with an identifier or text agree on
+    (within a point), if at least three do; else None."""
+    shifts = [_shift(a, b) for a, b in pairs if a.identifier or a.text]
+    best = max(shifts, key=lambda s: sum(abs(s[0] - t[0]) <= MOVE_PT and abs(s[1] - t[1]) <= MOVE_PT for t in shifts),
+               default=None)
+    if best is None:
+        return None
+    agreeing = sum(abs(best[0] - t[0]) <= MOVE_PT and abs(best[1] - t[1]) <= MOVE_PT for t in shifts)
+    return (round(best[0]), round(best[1])) if agreeing >= 3 else None
+
+
 def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_content: bool = False) -> list[Element]:
     """`new` (a fresh read, in reading order) with the refs of the elements still on screen, and new
     numbers for the others, counted on from the highest ref in use. `used` is the highest number this
@@ -47,12 +68,19 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_cont
         after.setdefault(_key(e), []).append(e)
     kept: dict[int, str] = {}  # id(new element) -> the ref it keeps
     content_moved = moves_content
-    for key, group in after.items():
-        was = before.get(key, [])
-        if len(was) == 1 and len(group) == 1:
-            if key[1] == "id" or key[2] or _stayed(was[0], group[0]):
-                kept[id(group[0])] = was[0].ref
-                content_moved = content_moved or not _stayed(was[0], group[0])
+    pairs = [(before[key][0], group[0]) for key, group in after.items()
+             if len(group) == 1 and len(before.get(key, [])) == 1]
+    shift = _content_shift(pairs) if moves_content else None
+    for was, now in pairs:
+        if moves_content and not was.identifier:
+            # no identifier: a same-named element elsewhere may be another row's. It keeps its ref only
+            # if it moved the way the content did (or, without an estimate, stayed put).
+            ok = _stayed(was, now) if shift is None else _moved_by(was, now, shift)
+        else:
+            ok = bool(_key(was)[1] == "id" or was.text or _stayed(was, now))
+        if ok:
+            kept[id(now)] = was.ref
+            content_moved = content_moved or not _stayed(was, now)
     for key, group in after.items():
         was = before.get(key, [])
         if (not content_moved and not (len(was) == 1 and len(group) == 1) and len(was) == len(group)

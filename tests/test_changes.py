@@ -277,3 +277,39 @@ def test_a_scroll_refreshes_duplicates_even_when_nothing_seems_to_have_moved():
     assert refs(carried)[3:] == ["e7", "e8", "e9"]  # the Edit buttons are all new
     up = changes.update(old, _rows("ABC"), moves_content=True)
     assert refs(up.items)[3:] == ["e7", "e8", "e9"]
+
+
+def test_an_idless_button_that_stayed_put_while_the_content_scrolled_gets_a_fresh_ref():
+    """Only row A's "Edit" was visible; after the scroll only row C's is, at the same y."""
+    old = [el(f"e{i + 1}", role="text", label=f"Row {c}", y=100 * i) for i, c in enumerate("ABCDE")]
+    old.append(el("e6", label="Edit", x=200, y=10))
+    new = [el(f"e{i + 1}", role="text", label=f"Row {c}", y=100 * i) for i, c in enumerate("CDEFG")]
+    new.append(el("e6", label="Edit", x=200, y=10))
+    carried = changes.carry_refs(old, new, moves_content=True)
+    assert refs(carried)[:3] == ["e3", "e4", "e5"] and "e6" not in refs(carried)  # A's Edit ref is gone
+    assert changes.carry_refs(old, new)[-1].ref == "e6"  # after a plain action the same layout is the same button
+
+
+def test_elements_that_scrolled_together_keep_their_refs_and_show_as_moved():
+    old = [el("e1", label="General", y=300, actions=("tap",)), el("e2", label="Wi-Fi", y=400, actions=("tap",)),
+           el("e3", label="Bluetooth", y=500, actions=("tap",))]
+    new = [replace(e, rect=(0, e.y - 150, 100, 40)) for e in old]
+    carried = changes.carry_refs(old, new, moves_content=True)
+    assert refs(carried) == ["e1", "e2", "e3"]
+    assert changes.diff(old, carried)[0] == '↕ e1 button "General" @0,150 100x40 [tap]'
+
+
+def test_too_few_agreeing_pairs_means_an_idless_element_must_have_stayed_put():
+    old = [el("e1", label="General", y=300), el("e2", label="Wi-Fi", y=400), el("e3", label="Stays", y=0)]
+    new = [replace(old[0], rect=(0, 150, 100, 40)), replace(old[1], rect=(0, 250, 100, 40)), old[2]]
+    carried = changes.carry_refs(old, new, moves_content=True)
+    assert refs(carried) == ["e4", "e5", "e3"]  # only 2 pairs agree: no estimate; the two that moved are new
+    with_id = [replace(old[0], identifier="gen")]
+    assert refs(changes.carry_refs(with_id, [replace(with_id[0], rect=(0, 150, 100, 40))], moves_content=True)) == ["e1"]
+
+
+def test_back_to_a_screen_with_a_done_button_elsewhere_gets_a_fresh_ref():
+    old = [el("e1", label="Done", y=100)]
+    new = [el("e1", label="Done", y=500)]
+    assert refs(changes.carry_refs(old, new, moves_content=True)) == ["e2"]
+    assert refs(changes.carry_refs(old, new, moves_content=False)) == ["e1"]  # a tap: a move is news, not a swap

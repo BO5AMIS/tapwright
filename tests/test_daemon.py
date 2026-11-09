@@ -1022,6 +1022,6 @@ def test_after_a_scroll_the_old_refs_of_identical_buttons_are_not_found():
             await d.run_tool("a", "tap", {"target": {"ref": "e4"}, "look": False})  # "Edit A" would press B's button
         assert e.value.code == "not_found" and "no longer on the screen; look again" in str(e.value)
         view = d.control.client("a")
-        assert [x.ref for x in view.items if x.label == "Edit"] == ["e28", "e29", "e30"]
+        assert [x.ref for x in view.items if x.label == "Edit"] == ["e30", "e31", "e32"]
         await finish(stop, task)
     run(go)

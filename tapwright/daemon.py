@@ -370,7 +370,7 @@ class Daemon:
                 await s.refresh()
                 known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
                 held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
-                view.items = changes.carry_refs(held, s.items, view.top_ref)
+                view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
                 view.top_ref = max(view.top_ref, changes.highest(view.items))
                 view.read_at = self.control.clock()  # the next target in the same window needn't read again
                 s.items = view.items
