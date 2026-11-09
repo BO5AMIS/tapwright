@@ -1,6 +1,8 @@
 """MCP tools pass through to the daemon (client.call faked)."""
 import asyncio
 import base64
+import re
+from datetime import datetime, timedelta
 
 import pytest
 from mcp.types import ImageContent, TextContent
@@ -50,6 +52,58 @@ def test_a_crash_outside_the_daemon_is_internal_logged_and_not_echoed(monkeypatc
     assert out.content[0].text == "Error internal: look failed unexpectedly. This is a bug; report it."
     assert any("look" in r.getMessage() and r.exc_info and "disk on fire" in str(r.exc_info[1])
                for r in caplog.records)
+
+
+def test_save_screenshot_names_prunes_and_answers_with_the_path(tmp_path):
+    (tmp_path / "keep-me.jpg").write_bytes(b"mine")
+    start = datetime(2026, 11, 9, 12, 0, 0)
+    paths = []
+    for i in range(55):
+        line = mcp_server.save_screenshot(tmp_path, "look", b"jpeg%d" % i, (600, 1200),
+                                          now=start + timedelta(milliseconds=i))
+        paths.append(line)
+    ours = sorted(p.name for p in tmp_path.iterdir() if re.fullmatch(r"\d{8}-\d{6}-\d{3}-look\.jpg", p.name))
+    assert len(ours) == 50 and (tmp_path / "keep-me.jpg").exists()       # newest 50; others left alone
+    assert ours[-1] == "20261109-120000-054-look.jpg" and ours[0] == "20261109-120000-005-look.jpg"
+    assert paths[-1] == f"Screenshot: {tmp_path / ours[-1]} (600x1200)"
+    assert (tmp_path / ours[-1]).read_bytes() == b"jpeg54"
+
+
+def test_file_mode_replaces_the_image_with_a_path_line(monkeypatch, tmp_path):
+    def fake_call(tool, args, client_id, timeout=120.0):
+        return {"text": "Screen 1x1\nSettled in 0.10 s.", "image": base64.b64encode(b"JPEG").decode(),
+                "image_size": [600, 1200]}
+    monkeypatch.setattr(client, "call", fake_call)
+    monkeypatch.setattr(mcp_server, "SHOTS_DIR", tmp_path)
+    out = asyncio.run(mcp_server._tool("look", screenshot=True))
+    assert not out.is_error and len(out.content) == 1 and out.content[0].type == "text"
+    last = out.content[0].text.splitlines()[-1]
+    assert re.fullmatch(r"Screenshot: .+-look\.jpg \(600x1200\)", last)
+    saved = list(tmp_path.iterdir())
+    assert len(saved) == 1 and saved[0].read_bytes() == b"JPEG"
+
+
+def test_without_file_mode_the_image_is_sent(monkeypatch):
+    def fake_call(tool, args, client_id, timeout=120.0):
+        return {"text": "Screen", "image": base64.b64encode(b"JPEG").decode(), "image_size": [600, 1200]}
+    monkeypatch.setattr(client, "call", fake_call)
+    monkeypatch.setattr(mcp_server, "SHOTS_DIR", None)
+    out = asyncio.run(mcp_server._tool("look", screenshot=True))
+    assert [c.type for c in out.content] == ["text", "image"] and out.content[1].mime_type == "image/jpeg"
+
+
+def test_look_takes_screenshot_width_and_labels_and_actions_take_screenshot(monkeypatch):
+    seen = {}
+
+    def fake_call(tool, args, client_id, timeout=120.0):
+        seen.clear()
+        seen.update(args)
+        return {"text": "Screen", "image": None, "image_size": None}
+    monkeypatch.setattr(client, "call", fake_call)
+    asyncio.run(mcp_server.look(screenshot=False, width=300, labels=True))
+    assert seen == {"screenshot": False, "width": 300, "labels": True}
+    asyncio.run(mcp_server.tap(target=mcp_server.Target(ref="e1"), screenshot=True))
+    assert seen["screenshot"] is True
 
 
 def test_a_tool_call_passes_text_and_image_end_to_end(monkeypatch):

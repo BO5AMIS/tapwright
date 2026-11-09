@@ -21,3 +21,4 @@ def test_serve_view_and_mcp_commands():
     assert view.returncode == 0
     mcp = subprocess.run([sys.executable, "-m", "tapwright", "mcp", "--help"], capture_output=True, text=True)
     assert mcp.returncode == 0 and "--host" not in mcp.stdout
+    assert "--screenshots" in mcp.stdout

@@ -14,6 +14,7 @@ from typing import NamedTuple
 from PIL import Image, UnidentifiedImageError
 
 from . import changes, ui
+from . import shot as shotlib
 from .control import Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
 from .stream import PRESETS, FrameHub, StreamPump
@@ -150,8 +151,10 @@ class Daemon:
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
-                 settle_quiet: float = MIN_QUIET) -> None:
+                 settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0) -> None:
         self.session = session
+        # screenshots: how long to wait for a stream frame before asking the phone, and how old one may be
+        self.shot_wait, self.shot_fresh = shot_wait, shot_fresh
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
@@ -356,6 +359,7 @@ class Daemon:
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         args = _checked(name, args)
+        shot = self._shot_args(args, default=name in ("look", "wait"), custom=name == "look")  # bad width: refused here
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
         target = args.get("target")
@@ -369,7 +373,7 @@ class Daemon:
         if name in ("look", "wait"):
             if name == "wait":
                 await asyncio.sleep(min(max(args.get("seconds", 1.0), 0.2), 30.0))
-            return await self._look(view, bool(args.get("screenshot", True)), [], notes)
+            return await self._look(view, shot, [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
@@ -430,8 +434,10 @@ class Daemon:
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
-            return _answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE, settled_line(done.seconds)], notes)
-        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
+            return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
+                                                 settled_line(done.seconds)], notes), view, shot)
+        answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
+        return await self._add_shot(answer, view, shot)
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: bytes | None = None) -> tuple[float, bool]:
@@ -484,10 +490,51 @@ class Daemon:
         frame = self.hub.latest
         return (frame.seq, hashlib.sha1(frame.jpeg).digest()) if frame else (0, None)
 
-    async def _look(self, view, screenshot: bool, lines: list, notes: list) -> dict:
+    def _shot_args(self, args: dict, *, default: bool, custom: bool) -> tuple[int, bool] | None:
+        """(width, labels) when a screenshot is wanted, else None. Only `look` takes width and labels;
+        an action's screenshot uses look's defaults (AGENT-TOOLS §3.5)."""
+        if not custom:
+            return (shotlib.DEFAULT_WIDTH, False) if args.get("screenshot", default) else None
+        width = args.get("width", shotlib.DEFAULT_WIDTH)
+        if isinstance(width, bool) or not isinstance(width, (int, float)) or width != int(width):
+            raise Refused("bad_params", "width must be a whole number of pixels")
+        if not shotlib.MIN_WIDTH <= width <= shotlib.MAX_WIDTH:
+            raise Refused("bad_params", f"width must be {shotlib.MIN_WIDTH}-{shotlib.MAX_WIDTH} pixels, not {width:g}")
+        if not args.get("screenshot", default):
+            return None
+        return int(width), bool(args.get("labels", False))
+
+    async def _newest_frame(self) -> bytes | None:
+        """The newest stream frame if it's recent, else the next one if it comes soon, else None."""
+        latest = self.hub.latest
+        if latest is not None and self.hub.now_ms() - latest.at <= self.shot_fresh * 1000:
+            return latest.jpeg
+        frame = await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
+        return frame.jpeg if frame else None
+
+    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None) -> dict:
+        """Add the picture to an answer: from the stream (full resolution), else the phone's /screenshot.
+        A picture that can't be had is a Note line, never an error. Decoding and resizing happen only here,
+        so only when a picture was asked for."""
+        if shot is None:
+            return answer
+        width, labels = shot
+        try:
+            source = await self._newest_frame()
+            if source is None:
+                source = await self._read(self.session.screenshot_png)
+            boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
+            jpeg, size = await asyncio.to_thread(shotlib.render, source, self.session.screen, width, boxes)
+        except Exception as e:
+            answer["text"] += f"\nNote: no screenshot: {e}"
+            return answer
+        answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
+        return answer
+
+    async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list) -> dict:
         async def read():
             view.read_mark = self._mark()
-            text, image = await self.session.look(screenshot=screenshot)
+            text, image = await self.session.look(screenshot=False)
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
             view.alert, view.keyboard = _alert_key(self.session.last_alert), self.session.last_keyboard
@@ -500,7 +547,7 @@ class Daemon:
                 raise
             view.moved = True  # no list came back: the screen has probably changed
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
-        return _answer([*lines, text], notes, image)
+        return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False,
                      seconds: float | None = None) -> dict:

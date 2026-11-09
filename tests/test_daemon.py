@@ -2,10 +2,12 @@
 import asyncio
 import base64
 import hashlib
+import io
 import re
 
 import pytest
-from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button
+from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button, image_bytes
+from PIL import Image
 
 from tapwright import daemon as daemon_module
 from tapwright.control import Controller, Refused
@@ -25,7 +27,8 @@ def make(session=None, **options) -> Daemon:
     clock = Clock()
     settings = dict(control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None, heartbeat=0.02,
                     backoff=(0.01,), ready_wait=2.0, stream_linger=0, stream_retry=0.01,
-                    settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0, settle_quiet=0.03)
+                    settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0, settle_quiet=0.03,
+                    shot_wait=0.01, shot_fresh=1.0)
     settings.update(options)
     return Daemon(session or FakeSession(), **settings)
 
@@ -67,8 +70,8 @@ def test_look_then_act_by_ref():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "look", {})
-        assert r["text"].startswith("Screen 400x800") and r["image"] == base64.b64encode(b"JPEG").decode()
-        assert r["image_size"] is None  # b"JPEG" isn't a picture
+        assert r["text"].startswith("Screen 400x800") and r["image"]
+        assert r["image_size"] == [600, 1200]  # no stream frame here: the phone's screenshot, resized
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert r == {"text": 'Tapped e1 button "OK" id=ok-button @10,10 100x40.', "image": None, "image_size": None}
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
@@ -486,27 +489,6 @@ def test_a_look_that_fails_after_an_action_is_a_note():
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
         assert unsettled(r) == ["Tapped (5, 5).", "Note: couldn't look afterwards: boom."]
         assert SETTLED.fullmatch(r["text"].splitlines()[1])  # the settle line sits before the notes
-        await finish(stop, task)
-    run(go)
-
-
-def test_a_real_picture_comes_with_its_size():
-    import io
-
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new("RGB", (30, 20)).save(buf, "JPEG")
-
-    class Pictured(FakeSession):
-        async def look(self, screenshot=True):
-            text, _ = await super().look(screenshot)
-            return text, buf.getvalue()
-
-    async def go():
-        d = make(Pictured())
-        stop, task = await started(d)
-        r = await d.run_tool("a", "look", {})
-        assert r["image_size"] == [30, 20] and base64.b64decode(r["image"]) == buf.getvalue()
         await finish(stop, task)
     run(go)
 
@@ -1448,5 +1430,121 @@ def test_the_list_is_current_by_the_hubs_clock_not_the_wall_clock():
         await d.run_tool("a", "look", {"screenshot": False})
         d.control.clock.t += 5.0
         assert d._current(d.control.client("a"))
+        await finish(stop, task)
+    run(go)
+
+
+BLUE = (0, 0, 255)
+
+
+def blue_frame() -> bytes:
+    return image_bytes((800, 1600), BLUE, "JPEG")
+
+
+def pixel(answer: dict, xy):
+    return Image.open(io.BytesIO(base64.b64decode(answer["image"]))).convert("RGB").getpixel(xy)
+
+
+def test_look_takes_its_picture_from_the_newest_stream_frame():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        r = await d.run_tool("a", "look", {"width": 300})
+        assert r["image_size"] == [300, 600]
+        assert Image.open(io.BytesIO(base64.b64decode(r["image"]))).size == (300, 600)
+        b = pixel(r, (150, 300))
+        assert b[2] > 200 and b[0] < 60  # the stream's blue frame
+        assert "screenshot" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_without_a_frame_it_asks_the_phone_for_a_screenshot():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {})
+        assert "screenshot" in d.session.calls and r["image_size"] == [600, 1200]
+        g = pixel(r, (300, 600))
+        assert g[1] > 200 and g[0] < 60  # the /screenshot's green
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_stale_frame_is_not_used():
+    async def go():
+        d = make(shot_fresh=0.02, shot_wait=0.05)
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        await asyncio.sleep(0.06)
+        r = await d.run_tool("a", "look", {})
+        assert "screenshot" in d.session.calls and pixel(r, (300, 600))[1] > 200
+        await finish(stop, task)
+    run(go)
+
+
+def test_labels_draw_the_actionable_elements():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        plain_look = await d.run_tool("a", "look", {"width": 400})
+        labelled = await d.run_tool("a", "look", {"width": 400, "labels": True})
+        assert pixel(plain_look, (11, 30))[2] > 200            # e1 is at 10,10 100x40
+        p = pixel(labelled, (11, 30))
+        assert p[0] > 180 and p[1] < 80 and p[2] < 80          # its left edge
+        assert pixel(labelled, (60, 30))[2] > 200              # its inside is untouched
+        await finish(stop, task)
+    run(go)
+
+
+def test_width_must_be_160_to_1320():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in (100, 1400, "wide"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "look", {"width": bad})
+            assert e.value.code == "bad_params" and "width" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_look_without_a_screenshot_has_no_image():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["image"] is None and r["image_size"] is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_action_adds_a_picture_only_when_asked():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert (await d.run_tool("a", "tap", {**TAP, "look": False}))["image"] is None
+        r = await d.run_tool("a", "tap", {**TAP, "look": False, "screenshot": True})
+        assert r["image"] is None  # look: false never has an image
+        r = await d.run_tool("a", "tap", {**TAP, "screenshot": True})
+        assert r["image_size"] == [600, 1200]
+        assert (await d.run_tool("a", "tap", TAP))["image"] is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_failed_screenshot_is_a_note_not_an_error():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.fail["screenshot"] = DeviceError("boom")
+        r = await d.run_tool("a", "look", {})
+        assert r["image"] is None and r["image_size"] is None
+        assert r["text"].splitlines()[-1].startswith("Note: no screenshot: ")
+        assert d.session.SCREEN_TEXT.splitlines()[0] in r["text"]  # the list still came
         await finish(stop, task)
     run(go)

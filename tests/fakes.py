@@ -1,9 +1,19 @@
 """Stand-ins for tests: a clock that runs only when told, and (Task 5) a fake Session."""
 import asyncio
+import io
+
+from PIL import Image
 
 from tapwright import ui
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
 from tapwright.session import Snapshot
+
+
+def image_bytes(size, color, fmt="PNG") -> bytes:
+    """A solid picture, for the stream frame or `/screenshot` of a test."""
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, fmt)
+    return buf.getvalue()
 
 
 class Clock:
@@ -119,6 +129,10 @@ class FakeSession:
         self._record("look")
         self.items = list(self.tree)
         return self.SCREEN_TEXT, (b"JPEG" if screenshot else None)
+
+    async def screenshot_png(self):
+        self._record("screenshot")
+        return image_bytes((800, 1600), (0, 255, 0), "PNG")  # green: tells it apart from the blue stream frame
 
     async def snapshot(self, keyboard=False):
         self._record("snapshot")

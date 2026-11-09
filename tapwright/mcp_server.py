@@ -9,8 +9,12 @@ The phone belongs to `tapwright serve`, which this server starts when needed; a 
 may be watching or driving in its live view at the same time.
 """
 import asyncio
+import base64
 import logging
+import re
 import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -32,6 +36,26 @@ INSTRUCTIONS = (
     "and retry), `paused` (ask the user to resume), `stale` (look again), `locked` (ask the user to "
     "unlock the phone), `reconnecting` (wait, then look)."
 )
+
+
+SHOTS_DIR: Path | None = None  # set by `tapwright mcp --screenshots DIR`
+KEEP_SHOTS = 50
+_SHOT_NAME = re.compile(r"^\d{8}-\d{6}-\d{3}-[a-z_]+\.jpg$")
+
+
+def save_screenshot(directory: Path, tool: str, jpeg: bytes, size, now: datetime | None = None) -> str:
+    """Write the picture to DIR/<time>-<tool>.jpg, keep the newest 50 of ours, and return the answer line."""
+    directory.mkdir(parents=True, exist_ok=True)
+    now = now or datetime.now()
+    path = directory / f"{now:%Y%m%d-%H%M%S}-{now.microsecond // 1000:03d}-{tool}.jpg"
+    path.write_bytes(jpeg)
+    ours = sorted(p for p in directory.iterdir() if _SHOT_NAME.match(p.name))
+    for old in ours[:-KEEP_SHOTS]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return f"Screenshot: {path} ({size[0]}x{size[1]})"
 
 
 def _result(text: str, image: str | None = None, is_error: bool = False) -> CallToolResult:
@@ -98,13 +122,18 @@ async def _tool(name: str, **args) -> CallToolResult:
     except Exception:  # the daemon unreachable: never crash the server
         logger.exception("tool %s crashed", name)
         return _error("internal", f"{name} failed unexpectedly. This is a bug; report it.")
-    return _result(answer.get("text") or "(no answer)", answer.get("image"))
+    text, image = answer.get("text") or "(no answer)", answer.get("image")
+    if image and SHOTS_DIR is not None:  # file mode: one text item, the picture on disk
+        text += "\n" + save_screenshot(SHOTS_DIR, name, base64.b64decode(image), answer.get("image_size") or [0, 0])
+        image = None
+    return _result(text, image)
 
 
 @server.tool(structured_output=False)
-async def look(screenshot: bool = True) -> CallToolResult:
-    """The current screen: every visible element (type, label, id, position) and a screenshot."""
-    return await _tool("look", screenshot=screenshot)
+async def look(screenshot: bool = True, width: int = 600, labels: bool = False) -> CallToolResult:
+    """The current screen: every visible element (type, label, id, position) and a screenshot `width` pixels
+    wide (160-1320). labels draws each element that has actions, with its ref, on the picture."""
+    return await _tool("look", screenshot=screenshot, width=width, labels=labels)
 
 
 @server.tool(structured_output=False)
@@ -114,9 +143,9 @@ async def list_apps() -> CallToolResult:
 
 
 @server.tool(structured_output=False)
-async def launch_app(bundle_id: str, look: bool = True) -> CallToolResult:
+async def launch_app(bundle_id: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Open an app by bundle id (from list_apps), bringing it to the front."""
-    return await _tool("launch_app", bundle_id=bundle_id, look=look)
+    return await _tool("launch_app", bundle_id=bundle_id, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
@@ -126,57 +155,57 @@ async def terminate_app(bundle_id: str) -> CallToolResult:
 
 
 @server.tool(structured_output=False)
-async def tap(target: Target, look: bool = True) -> CallToolResult:
+async def tap(target: Target, look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Tap an element. `target` is exactly one of {"ref": "e3"} (from the last look), {"id": "login-button"},
     {"label": "Log in"} (exact, ignoring case), {"text": "Log in"} (exact, then partial) or {"x": 120, "y": 300}
     (points), plus "index" (0 is the first) with id, label or text when several match."""
-    return await _tool("tap", target=target, look=look)
+    return await _tool("tap", target=target, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
-async def long_press(target: Target, seconds: float = 1.0, look: bool = True) -> CallToolResult:
+async def long_press(target: Target, seconds: float = 1.0, look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Press and hold an element (context menus, drag handles). `target` is as for tap."""
-    return await _tool("long_press", target=target, seconds=seconds, look=look)
+    return await _tool("long_press", target=target, seconds=seconds, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
 async def type_text(text: str, target: Target | None = None, replace: bool = False, submit: bool = False,
-                    look: bool = True) -> CallToolResult:
+                    look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Type into a field: the target (as for tap) is tapped first to focus it; without a target, into the
     focused field. replace clears the field first; submit presses return afterwards."""
-    return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, look=look)
+    return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] = "down", amount: float = 0.5,
-                 look: bool = True) -> CallToolResult:
+                 look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Scroll the content: "down" shows what is below. amount is a share of the screen (0.1-0.8)."""
-    return await _tool("scroll", direction=direction, amount=amount, look=look)
+    return await _tool("scroll", direction=direction, amount=amount, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
-async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True) -> CallToolResult:
+async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Drag from one point to another, in points (sliders, carousels, swipe actions, edge gestures)."""
-    return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look)
+    return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
-async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bool = True) -> CallToolResult:
+async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Press a hardware button. home leaves the app (it keeps running)."""
-    return await _tool("press_button", name=name, look=look)
+    return await _tool("press_button", name=name, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
-async def alert(action: Literal["accept", "dismiss", "text"], look: bool = True) -> CallToolResult:
+async def alert(action: Literal["accept", "dismiss", "text"], look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Answer the system alert on screen (accept = the default/allow button, dismiss = cancel/don't
     allow), or read its text."""
-    return await _tool("alert", action=action, look=look)
+    return await _tool("alert", action=action, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
-async def open_url(url: str, look: bool = True) -> CallToolResult:
+async def open_url(url: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
     """Open a URL or deep link (myapp://screen) on the phone."""
-    return await _tool("open_url", url=url, look=look)
+    return await _tool("open_url", url=url, look=look, screenshot=screenshot)
 
 
 @server.tool(structured_output=False)
@@ -185,5 +214,7 @@ async def wait(seconds: float = 1.0) -> CallToolResult:
     return await _tool("wait", seconds=seconds)
 
 
-def run() -> None:
+def run(screenshots: str | None = None) -> None:
+    global SHOTS_DIR
+    SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     device.run(server.run_stdio_async)

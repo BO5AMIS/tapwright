@@ -1,7 +1,9 @@
 """Session without a phone: a recording device answers WebDriverAgent's requests."""
 import asyncio
+import base64
 
 import pytest
+from fakes import image_bytes
 
 from tapwright import session as session_module
 from tapwright import ui as ui_module
@@ -290,3 +292,16 @@ def test_an_unknown_scale_is_remembered_and_snapshots_never_read_it(phone):
     assert text.splitlines()[0] == "Screen 430x932 pt · 1 elements"
     asyncio.run(s.read_scale(refresh=True))  # a new connection reads it again
     assert paths().count("/screenshot") == 2
+
+
+def test_screenshot_png_is_the_phones_screenshot(phone):
+    png = image_bytes((4, 8), (1, 2, 3), "PNG")
+
+    class WithScreenshot(Recorder):
+        async def http(self, method, path, payload=None, timeout=30.0):
+            if path.endswith("/screenshot"):
+                self.requests.append((method, path, payload))
+                return {"value": base64.b64encode(png).decode()}
+            return await super().http(method, path, payload, timeout)
+    s = Session(WithScreenshot())
+    assert asyncio.run(s.screenshot_png()) == png

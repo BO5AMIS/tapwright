@@ -124,6 +124,10 @@ class Session:
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return Snapshot(tree, self.app, self.scale)
 
+    async def screenshot_png(self) -> bytes:
+        """WebDriverAgent's /screenshot (PNG, full resolution): the fallback when the stream has no frame."""
+        return base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
+
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
         """(text, jpeg bytes or None): the screen as elements, and as a picture."""
         snap = await self.snapshot(keyboard)

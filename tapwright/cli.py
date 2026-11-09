@@ -14,7 +14,7 @@
                      browser, the agent tools and an HTTP API. Agent tools start it by
                      themselves; it stops after 30 minutes unused (--keep-alive: never)
   tapwright view     open the live view in your browser (starts the daemon if needed)
-  tapwright mcp      the MCP server for agents (stdio); it talks to the daemon
+  tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
 
 Connection: USB when the phone is plugged in, else the local network; serve --phone dials an
 address such as the phone's Tailscale IP (experimental).
@@ -302,11 +302,13 @@ def main() -> int:
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
     sub.add_parser("view")
-    sub.add_parser("mcp")
+    p = sub.add_parser("mcp")
+    p.add_argument("--screenshots", metavar="DIR",
+                   help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")
     a = ap.parse_args()
     if a.cmd == "mcp":
         from . import mcp_server
-        mcp_server.run()
+        mcp_server.run(screenshots=a.screenshots)
         return 0
     if a.cmd == "view":
         return view()
