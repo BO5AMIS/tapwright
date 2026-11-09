@@ -5,7 +5,9 @@ import asyncio
 import base64
 import hashlib
 import io
+import dataclasses
 import math
+import re
 import time
 import traceback
 from contextlib import nullcontext
@@ -36,6 +38,7 @@ class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
     capped: bool  # the cap ended the wait with frames still changing
+WAIT_MIN, WAIT_MAX = 0.1, 30.0  # seconds, for `wait`
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -101,7 +104,29 @@ def _checked(name: str, args: dict) -> dict:
         checked["target"] = ui.parse_target(args["target"])  # bad_params, with an example of a target
     if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
         raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
+    if name == "wait":
+        seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, not to an agent
+        if isinstance(seconds, bool) or not WAIT_MIN <= checked["seconds"] <= WAIT_MAX:
+            raise Refused("bad_params", f"seconds must be a number from {WAIT_MIN:g} to {WAIT_MAX:g}, not {seconds!r}")
+    if name in ("open_app", "close_app") and (not isinstance(args["app"], str) or not args["app"].strip()):
+        raise Refused("bad_params", f"app must be a bundle id or an app's name, not {args['app']!r}")
+    if name == "toggle" and args.get("value") is not None and not isinstance(args["value"], bool):
+        raise Refused("bad_params", f"value must be true or false, not {args['value']!r}")
     return checked
+
+
+class Unchanged(str):
+    """A handler's result that did nothing on the phone (`toggle` to the state it's already in): it is
+    the whole answer, with no change block."""
+
+
+class Toggled(str):
+    """`toggle`'s result: the answer's first line is rewritten from the element's line after the tap."""
+    ref: str = ""
+
+
+def app_line(a: dict) -> str:
+    return f"{a['bundle_id']}  {a['name']} {a['version']} ({a['build']})"
 
 
 def _target(a: dict) -> ui.Target:
@@ -115,8 +140,10 @@ def _field(a: dict) -> ui.Target | None:
 
 # Agent actions: tool -> (what it does on the session, seconds to settle before the look; None: no look)
 ACTIONS = {
-    "launch_app": (lambda s, a: s.launch(a["bundle_id"]), LONG_CAP),
-    "terminate_app": (lambda s, a: s.terminate(a["bundle_id"]), None),
+    "open_app": (None, LONG_CAP),  # None: the handler is a Daemon method (Daemon._handlers), which needs the agent's list
+    "close_app": (None, None),
+    "toggle": (None, CAP),
+    "back": (None, CAP),
     "tap": (lambda s, a: s.tap(_target(a)), CAP),
     "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), CAP),
     "type_text": (lambda s, a: s.type_text(a["text"], replace=bool(a.get("replace")), submit=bool(a.get("submit")),
@@ -128,10 +155,12 @@ ACTIONS = {
     "alert": (lambda s, a: s.alert(a["action"]), CAP),
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
-MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "launch_app", "open_url", "press_button")  # identical elements can't be told apart after these
-READS = ("look", "list_apps", "wait")
-REQUIRED = {"launch_app": ("bundle_id",), "terminate_app": ("bundle_id",), "type_text": ("text",),
-            "tap": ("target",), "long_press": ("target",),
+MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "open_url", "press_button")  # identical elements can't be told apart after these
+READS = ("look", "apps")
+BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+SPECIAL = ("wait",)  # sleep before they answer, so they don't hold the phone's queue meanwhile
+REQUIRED = {"open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
+            "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",)}
 
@@ -172,6 +201,8 @@ class Daemon:
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
         self._queues: set = set()
+        self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
+                          "back": self._back}
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -280,6 +311,7 @@ class Daemon:
                 await s.ensure()
             await s.settings(PRESETS[self.preset])
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
+            await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
@@ -353,26 +385,25 @@ class Daemon:
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
-        if name not in ACTIONS and name not in READS:
-            raise Refused("unsupported", f"no tool named {name!r}; the tools are {', '.join([*READS, *ACTIONS])}")
+        if name not in ACTIONS and name not in READS and name not in SPECIAL:
+            raise Refused("unsupported", f"no tool named {name!r}; the tools are "
+                                         f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
         missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         args = _checked(name, args)
-        shot = self._shot_args(args, default=name in ("look", "wait"), custom=name == "look")  # bad width: refused here
+        shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
         target = args.get("target")
         view = self.control.client(client_id)
         notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
         await self.wait_connected()
-        if name == "list_apps":
-            apps = await self._read(self.session.apps)
-            text = "\n".join(f"{a['bundle_id']}  {a['name']} {a['version']} ({a['build']})" for a in apps)
-            return _answer([text or "no apps"], notes)
-        if name in ("look", "wait"):
-            if name == "wait":
-                await asyncio.sleep(min(max(args.get("seconds", 1.0), 0.2), 30.0))
+        if name == "apps":
+            return await self._apps(notes)
+        if name == "wait":
+            return await self._wait(view, args, notes, shot)
+        if name == "look":
             return await self._look(view, shot, [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
@@ -380,7 +411,7 @@ class Daemon:
         by_ref = target is not None and target.kind == "ref"
         # type_text at a point acts on the input under it, so it needs a current list too
         by_lookup = target is not None and (target.kind in ("id", "label", "text")
-                                            or (name == "type_text" and target.kind == "point"))
+                                            or (name in ("type_text", "toggle") and target.kind == "point"))
 
         fresh, full, box = [True], [False], {}
 
@@ -410,7 +441,8 @@ class Daemon:
                 s.items = view.items
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
-            return await call(s, args)
+            handler = self._handlers.get(name)
+            return await (handler(view, args) if handler else call(s, args))
 
         try:
             result = await self.control.agent(act)
@@ -421,6 +453,8 @@ class Daemon:
                                           "happened") from None
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
+        if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
+            return _answer([str(result)], notes)
         looks = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
         view.moved = view.moved or not looks
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
@@ -430,6 +464,8 @@ class Daemon:
         done = await self._settle(self._mark()[0], cap=settle, since=mark[1])
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
+        if name == "back" and not done.changed:
+            raise Refused("not_actionable", "no_action: Nothing to go back to.")
         if not done.changed and not (full[0] or view.moved) and mark[1] == view.read_mark[1]:
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays
@@ -437,7 +473,98 @@ class Daemon:
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
+        if isinstance(result, Toggled) and (now := next((e for e in view.items if e.ref == result.ref), None)):
+            # the first line shows the state the switch has now, as the new list reads it
+            answer["text"] = answer["text"].replace(str(result), f"Toggled {now.line(actions=False)}.", 1)
         return await self._add_shot(answer, view, shot)
+
+    async def _apps(self, notes: list) -> dict:
+        apps = await self._read(self.session.apps)
+        if not apps:
+            return _answer(["No apps installed by you."], notes)
+        try:
+            front = await self._read(self.session.foreground_bundle_id)
+        except Refused:
+            raise
+        except Exception:
+            front = None  # the list is still right without the marker
+        lines = [app_line(a) + (" *" if a["bundle_id"] == front else "") for a in apps]
+        return _answer([*lines, "* = in front."], notes)
+
+    async def _app(self, query: str) -> tuple[str, str]:
+        """(bundle id, how to show it) for what the agent named. An exact bundle id wins as given (system
+        apps such as Settings aren't in `apps`); otherwise a name, ignoring case, against the installed
+        apps: an exact name first, then part of one."""
+        q = query.strip()
+        names = self.session.app_names
+        if BUNDLE_ID.match(q):
+            return q, f"{names[q]} ({q})" if q in names else q
+        apps = await self.session.apps()
+        low = q.lower()
+        hits = ([a for a in apps if a["name"].lower() == low]
+                or [a for a in apps if low in a["name"].lower() or low in a["bundle_id"].lower()])
+        if not hits:
+            raise Refused("not_found", f'no installed app matches "{q}"; call apps to see them')
+        if len(hits) > 1:
+            raise Refused("ambiguous", f'{len(hits)} installed apps match "{q}". Pick one by its bundle id:\n'
+                                       + "\n".join(app_line(a) for a in hits[:10]))
+        return hits[0]["bundle_id"], f"{hits[0]['name']} ({hits[0]['bundle_id']})"
+
+    async def _open_app(self, view, a: dict) -> str:
+        bundle_id, shown = await self._app(a["app"])
+        try:
+            await self.session.launch(bundle_id)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        return f"Opened {shown}."
+
+    async def _close_app(self, view, a: dict) -> str:
+        bundle_id, shown = await self._app(a["app"])
+        await self.session.terminate(bundle_id)
+        return f"Closed {shown}."
+
+    async def _wait(self, view, args: dict, notes: list, shot) -> dict:
+        """Sleep outside the phone's queue (a person may act meanwhile), then answer with what changed."""
+        seconds = args["seconds"]
+        await self.control.sleep(seconds)
+        result = f"Waited {seconds:.1f} s."
+        if not args.get("look", True):
+            return _answer([result], notes)
+        full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
+        answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
+        return await self._add_shot(answer, view, shot)
+
+    async def _toggle(self, view, a: dict) -> str:
+        target = _target(a)
+        if target.point is not None:
+            x, y = target.point
+            found = ui.at_point(view.items, target.point, "switch")
+            if found is None:
+                raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes a toggle.")
+        else:
+            found = ui.resolve(view.items, target)
+        line = found.line(actions=False)
+        if found.role != "switch" or found.checked is None:
+            raise Refused("not_actionable", f"no_action: {line} is not a switch")
+        want = a.get("value")
+        if want is not None and found.checked == want:
+            return Unchanged(f"{line} is already {'true' if want else 'false'}.")
+        await self.session.tap(ui.Target(ref=found.ref))
+        done = Toggled(f"Toggled {dataclasses.replace(found, checked=not found.checked).line(actions=False)}.")
+        done.ref = found.ref
+        return done
+
+    async def _back(self, view, a: dict) -> str:
+        s = self.session
+        point = await s.back_point()
+        if point is not None:
+            await s.tap(ui.Target(x=point[0], y=point[1]))
+            return "Went back by tapping the back button."
+        width, height = s.screen
+        await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
+        return "Went back by swiping from the left edge."
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: bytes | None = None) -> tuple[float, bool]:

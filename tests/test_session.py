@@ -305,3 +305,66 @@ def test_screenshot_png_is_the_phones_screenshot(phone):
             return await super().http(method, path, payload, timeout)
     s = Session(WithScreenshot())
     assert asyncio.run(s.screenshot_png()) == png
+
+
+NAV_TREE = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" x="0" y="0" width="430" '
+            'height="932"><XCUIElementTypeNavigationBar type="XCUIElementTypeNavigationBar" x="0" y="59" width="430" '
+            'height="44"><XCUIElementTypeButton type="XCUIElementTypeButton" label="Back" x="8" y="59" width="80" '
+            'height="44"/></XCUIElementTypeNavigationBar></XCUIElementTypeApplication></AppiumAUT>')
+
+
+def with_answers(phone, answers):
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path in answers:
+            phone.requests.append((method, path, payload))
+            return answers[path]
+        return await original(method, path, payload, timeout)
+    phone.http = http
+
+
+def test_back_point_and_foreground_come_from_the_phones_tree(phone):
+    with_answers(phone, {ui_module.SOURCE_PATH: {"value": NAV_TREE},
+                         "/wda/activeAppInfo": {"value": {"bundleId": "com.apple.Preferences", "name": "Settings"}}})
+    s = Session(phone)
+    assert asyncio.run(s.back_point()) == (48.0, 81.0)
+    assert asyncio.run(s.foreground_bundle_id()) == "com.apple.Preferences"
+
+
+def test_the_header_names_the_app_from_the_installed_list(phone):
+    class Apps(Recorder):
+        async def user_apps(self):
+            return [{"bundle_id": "app.example.mobile", "name": "Example", "version": "1", "build": "1"}]
+    phone = Apps()
+    phone.via = "USB"
+    with_answers(phone, {ui_module.SOURCE_PATH: {"value": SETTINGS_TREE},
+                         "/wda/activeAppInfo": {"value": {"bundleId": "app.example.mobile", "name": "app.example.mobile"}}})
+    s = Session(phone)
+    asyncio.run(s.read_app_names())
+    text, _ = asyncio.run(s.look(screenshot=False))
+    assert "App: Example (app.example.mobile)" in text.splitlines()
+
+
+def test_springboard_is_the_home_screen_and_an_unknown_app_rereads_the_list(phone):
+    reads = []
+
+    class Apps(Recorder):
+        async def user_apps(self):
+            reads.append(1)
+            return [{"bundle_id": "app.example.new", "name": "New One", "version": "1", "build": "1"}] if len(reads) > 1 else []
+    phone = Apps()
+    answers = {ui_module.SOURCE_PATH: {"value": SETTINGS_TREE},
+               "/wda/activeAppInfo": {"value": {"bundleId": "com.apple.springboard", "name": "SpringBoard"}}}
+    with_answers(phone, answers)
+    s = Session(phone)
+    asyncio.run(s.read_app_names())
+    assert asyncio.run(s.snapshot()).app == ("Home screen", "com.apple.springboard")
+    answers["/wda/activeAppInfo"] = {"value": {"bundleId": "app.example.new", "name": "app.example.new"}}
+    assert asyncio.run(s.snapshot()).app == ("New One", "app.example.new") and len(reads) == 2
+    assert asyncio.run(s.snapshot()).app == ("New One", "app.example.new") and len(reads) == 2
+    answers["/wda/activeAppInfo"] = {"value": {"bundleId": "com.apple.Preferences", "name": "Settings"}}
+    assert asyncio.run(s.snapshot()).app == ("Settings", "com.apple.Preferences")  # a system app: WDA's own name
+    assert len(reads) == 3  # asked once for it, then remembered as not installed by you
+    asyncio.run(s.snapshot())
+    assert len(reads) == 3

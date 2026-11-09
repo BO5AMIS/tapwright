@@ -92,6 +92,12 @@ class FakeSession:
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
         self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
         self.app: tuple[str, str] | None = ("Example", "com.example.app")
+        self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
+        self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
+        self.foreground: str | None = None  # the bundle id the phone shows
+        self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
+        self.launched: list = []
+        self.closed: list = []
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -150,7 +156,17 @@ class FakeSession:
 
     async def apps(self):
         self._record("apps")
-        return [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
+        self.app_names = {a["bundle_id"]: a["name"] for a in self.installed}
+        return list(self.installed)
+
+    async def read_app_names(self, refresh=False):
+        self.app_names = {a["bundle_id"]: a["name"] for a in self.installed}
+
+    async def foreground_bundle_id(self):
+        return self.foreground
+
+    async def back_point(self):
+        return self.back_at
 
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
@@ -191,10 +207,12 @@ class FakeSession:
 
     async def launch(self, bundle_id):
         self._record("launch")
+        self.launched.append(bundle_id)
         return f"launched {bundle_id}"
 
     async def terminate(self, bundle_id):
         self._record("terminate")
+        self.closed.append(bundle_id)
         return f"closed {bundle_id}"
 
     async def alert(self, action):

@@ -412,6 +412,31 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
     return hits[0]
 
 
+def back_button(source: str, screen: tuple[float, float]) -> tuple[float, float] | None:
+    """The centre of the back button of the top NavigationBar in WebDriverAgent's XML: its first Button
+    left of the bar's centre. NavigationBar is a container, so it isn't in the element list. None when
+    no bar is on screen, or it has no such button."""
+    try:
+        root = ET.fromstring(_clean(source))
+    except ET.ParseError as e:
+        raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+
+    def on_screen(rect: tuple[float, float, float, float]) -> bool:
+        x, y, w, h = rect
+        return w > 0 and h > 0 and 0 <= x + w / 2 < screen[0] and 0 <= y + h / 2 < screen[1]
+
+    bars = [n for n in root.iter() if _kind(n) == "NavigationBar" and on_screen(_rect(n))]
+    if not bars:
+        return None
+    bar = min(bars, key=lambda n: _rect(n)[1])
+    bar_x, _, bar_w, _ = _rect(bar)
+    for node in bar.iter():  # document order: the first one is the leftmost in a left-to-right bar
+        x, y, w, h = _rect(node)
+        if _kind(node) == "Button" and on_screen((x, y, w, h)) and x + w / 2 < bar_x + bar_w / 2:
+            return x + w / 2, y + h / 2
+    return None
+
+
 def at_point(items: list[Element], point: tuple[float, float], role: str) -> Element | None:
     """The front-most listed element of `role` whose rect contains the point (a later element in
     reading order is drawn over an earlier one), or None. The far edge is outside, so two fields that

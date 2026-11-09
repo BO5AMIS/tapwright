@@ -32,6 +32,8 @@ class Session:
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
+        self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
+        self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -77,6 +79,28 @@ class Session:
             raise
 
     # ---- seeing ----
+    async def foreground_bundle_id(self) -> str | None:
+        try:
+            info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return None
+        return str(info.get("bundleId") or "") or None
+
+    async def read_app_names(self, refresh: bool = False) -> None:
+        """Bundle id -> display name for the apps you installed: what the header's `App:` line shows,
+        since WebDriverAgent's own name is the bundle id for most apps. Read once per connection
+        (`refresh`), and again when an unknown bundle id shows up."""
+        if refresh:
+            self.not_installed = set()
+        try:
+            self.app_names = {a["bundle_id"]: a["name"] for a in await self.device.user_apps() if a["name"]}
+        except ConnectionLost:
+            raise
+        except Exception:  # a nicety: without names the header shows what WebDriverAgent says
+            pass
+
     async def _app(self) -> tuple[str, str] | None:
         """(name, bundle id) of the foreground app, or None when WebDriverAgent can't say."""
         try:
@@ -86,7 +110,15 @@ class Session:
         except DeviceError:
             return None
         bundle = str(info.get("bundleId") or "")
-        return (str(info.get("name") or bundle), bundle) if bundle else None
+        if not bundle:
+            return None
+        if bundle == "com.apple.springboard":
+            return "Home screen", bundle
+        if bundle not in self.app_names and bundle not in self.not_installed:
+            await self.read_app_names()  # perhaps installed since; if not, don't ask again for this one
+            if bundle not in self.app_names:
+                self.not_installed.add(bundle)
+        return self.app_names.get(bundle) or str(info.get("name") or bundle), bundle
 
     async def read_scale(self, refresh: bool = False) -> float | None:
         """Pixels per point, read once: from WebDriverAgent's screen info, else (it only answers in some
@@ -143,6 +175,11 @@ class Session:
             img.save(buf, "JPEG", quality=80)
             image = buf.getvalue()
         return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more), image
+
+    async def back_point(self) -> tuple[float, float] | None:
+        """Where the top navigation bar's back button is, in points; None when there isn't one."""
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+        return ui.back_button(source, self.screen)
 
     async def refresh(self) -> ui.Tree:
         """Read the tree into `items` and nothing else: what resolving a target needs."""
@@ -235,7 +272,9 @@ class Session:
     # ---- apps ----
     async def apps(self) -> list[dict]:
         await self.ensure()
-        return await self.device.user_apps()
+        apps = await self.device.user_apps()
+        self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
+        return apps
 
     async def launch(self, bundle_id: str) -> str:
         await self._call("POST", "/session/{sid}/wda/apps/launch", {"bundleId": bundle_id}, timeout=60)

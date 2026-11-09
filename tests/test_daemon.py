@@ -10,6 +10,7 @@ from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, butt
 from PIL import Image
 
 from tapwright import daemon as daemon_module
+from tapwright import ui
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
 from tapwright.device import ConnectionLost, DeviceError
@@ -216,8 +217,8 @@ def test_other_tools():
     async def go():
         d = make()
         stop, task = await started(d)
-        assert (await d.run_tool("a", "list_apps", {}))["text"] == "com.example.app  Example 1.0 (7)"
-        assert (await d.run_tool("a", "terminate_app", {"bundle_id": "x"}))["text"] == "closed x"
+        assert (await d.run_tool("a", "apps", {}))["text"] == "com.example.app  Example 1.0 (7)\n* = in front."
+        assert "Closed com.example.x." in (await d.run_tool("a", "close_app", {"app": "com.example.x"}))["text"]
         assert (await d.run_tool("a", "alert", {"action": "text"}))["text"] == "alert texted"
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "format_phone", {})
@@ -330,8 +331,8 @@ def test_a_missing_argument_is_refused_up_front():
         stop, task = await started(d)
         generation = d.control.generation
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "launch_app", {})
-        assert e.value.code == "bad_params" and "bundle_id" in str(e.value)
+            await d.run_tool("a", "open_app", {})
+        assert e.value.code == "bad_params" and "app" in str(e.value)
         assert d.control.generation == generation and "launch" not in d.session.calls
         await finish(stop, task)
     run(go)
@@ -419,6 +420,9 @@ def test_bad_arguments_are_bad_params():
                                   ("swipe", {"x0": "abc", "y0": 0, "x1": 1, "y1": 1}, "x0"),
                                   ("swipe", {"x0": 0, "y0": 0, "x1": 1, "y1": float("nan")}, "y1"),
                                   ("wait", {"seconds": "soon"}, "seconds"),
+                                  ("toggle", {"target": {"ref": "e1"}, "value": "yes"}, "value"),
+                                  ("open_app", {"app": 5}, "app"),
+                                  ("close_app", {"app": ""}, "app"),
                                   ("long_press", {"target": {"x": 1, "y": 1}, "seconds": "long"}, "seconds"),
                                   ("scroll", {"direction": "sideways"}, "direction"),
                                   ("scroll", {"amount": "lots"}, "amount")):
@@ -1229,7 +1233,7 @@ def test_the_fixed_sleeps_are_gone():
     assert not hasattr(daemon_module, "SETTLE")
     assert (daemon_module.STILL, daemon_module.CAP, daemon_module.LONG_CAP) == (0.1, 2.0, 4.0)
     assert daemon_module.ACTIONS["tap"][1] == daemon_module.CAP
-    assert daemon_module.ACTIONS["launch_app"][1] == daemon_module.LONG_CAP
+    assert daemon_module.ACTIONS["open_app"][1] == daemon_module.LONG_CAP
     assert daemon_module.ACTIONS["open_url"][1] == daemon_module.LONG_CAP
 
 
@@ -1603,5 +1607,268 @@ def test_a_failure_with_no_message_still_says_what_it_was():
         d.session.fail["screenshot"] = DeviceError("")
         r = await d.run_tool("a", "look", {})
         assert r["text"].splitlines()[-1] == "Note: no screenshot: DeviceError"
+        await finish(stop, task)
+    run(go)
+
+
+# ---- apps, waiting, toggle and back (Task 7a) ----
+def switch(checked, ref="e1"):
+    return ui.Element(ref, "switch", "Wi-Fi", value="1" if checked else "0", rect=(300, 100, 60, 30),
+                      checked=checked, actions=("toggle",), type="Switch")
+
+
+async def looked(d, tree):
+    """The agent has looked once at `tree`."""
+    d.session.tree = tree
+    await d.run_tool("a", "look", {"screenshot": False})
+
+
+def test_the_old_tool_names_are_gone():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for old in ("list_apps", "launch_app", "terminate_app"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", old, {"bundle_id": "x"})
+            assert e.value.code == "unsupported"
+        await finish(stop, task)
+    run(go)
+
+
+def test_apps_marks_the_foreground_app_and_explains_the_mark():
+    async def go():
+        d = make()
+        d.session.installed.append({"bundle_id": "com.example.two", "name": "Two Words", "version": "2.1", "build": "9"})
+        stop, task = await started(d)
+        d.session.foreground = "com.example.two"
+        r = await d.run_tool("a", "apps", {})
+        assert r["text"].splitlines() == ["com.example.app  Example 1.0 (7)", "com.example.two  Two Words 2.1 (9) *",
+                                          "* = in front."]
+        d.session.installed.clear()
+        assert (await d.run_tool("a", "apps", {}))["text"] == "No apps installed by you."
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_takes_a_bundle_id_even_for_a_system_app():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "open_app", {"app": "com.apple.Preferences"})
+        assert d.session.launched == ["com.apple.Preferences"] and r["text"].startswith("Opened com.apple.Preferences.")
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_takes_a_name_ignoring_case_and_a_bundle_id_wins():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "open_app", {"app": "example"})
+        assert d.session.launched == ["com.example.app"] and r["text"].startswith("Opened Example (com.example.app).")
+        await d.run_tool("a", "open_app", {"app": "com.example.app"})
+        assert d.session.launched[-1] == "com.example.app"
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_ambiguous_and_unknown_names():
+    async def go():
+        d = make()
+        d.session.installed.append({"bundle_id": "com.example.beta", "name": "Example Beta", "version": "1", "build": "1"})
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_app", {"app": "exam"})
+        assert e.value.code == "ambiguous"
+        assert str(e.value).splitlines() == ['2 installed apps match "exam". Pick one by its bundle id:',
+                                             "com.example.app  Example 1.0 (7)", "com.example.beta  Example Beta 1 (1)"]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_app", {"app": "nothing like it"})
+        assert e.value.code == "not_found" and not d.session.launched
+        assert (await d.run_tool("a", "open_app", {"app": "Example"}))["text"].startswith("Opened Example")  # exact beats a part
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_bundle_id_that_does_not_exist_is_not_found():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.fail["launch"] = DeviceError("HTTP 500: unable to launch")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_app", {"app": "com.nope.nothing"})
+        assert e.value.code == "not_found" and "com.nope.nothing" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_waits_up_to_four_seconds_and_close_app_looks_at_nothing():
+    assert daemon_module.ACTIONS["open_app"][1] == daemon_module.LONG_CAP
+    assert daemon_module.ACTIONS["close_app"][1] is None
+    assert {"back", "open_app"} <= set(daemon_module.MOVES_CONTENT) and "launch_app" not in daemon_module.MOVES_CONTENT
+
+
+def test_close_app_by_name():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert d.session.closed == ["com.example.app"] and r["text"] == "Closed Example (com.example.app)."
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_app_names_are_read_at_connect():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        assert d.session.app_names == {"com.example.app": "Example"}
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_checks_its_seconds():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in (0, 0.05, 31, "x", True, None, float("inf")):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "wait", {"seconds": bad})
+            assert e.value.code == "bad_params" and "seconds" in str(e.value), bad
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_answers_with_the_changes_and_no_picture_unless_asked():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "OK", "ok-button")])
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", rect=(10, 60, 100, 40))]
+        r = await d.run_tool("a", "wait", {"seconds": 1})
+        lines = r["text"].splitlines()
+        assert lines[0] == "Waited 1.0 s." and lines[1] == "Same screen. Changes:"
+        assert any(line.startswith('+ e2 button "Done"') for line in lines)
+        assert not any(line.startswith("Settled in") for line in lines) and r["image"] is None
+        r = await d.run_tool("a", "wait", {"seconds": 0.5, "screenshot": True})
+        assert r["image"] and r["text"].splitlines()[0] == "Waited 0.5 s."
+        r = await d.run_tool("a", "wait", {"seconds": 0.5, "look": False})
+        assert r["text"] == "Waited 0.5 s."
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_sleeps_outside_the_phones_queue():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "OK", "ok-button")])
+        slept = []
+        original = d.control.sleep
+
+        async def sleep(seconds):
+            slept.append(seconds)
+            await original(seconds)
+        d.control.sleep = sleep
+        await d.run_tool("a", "wait", {"seconds": 3})
+        assert slept == [3.0]
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_flips_a_switch_and_shows_its_new_state():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [switch(False)])
+        d.session.tree = [switch(True)]
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert d.session.last_point == (330.0, 115.0)
+        lines = r["text"].splitlines()
+        assert lines[0].startswith("Toggled e1 switch") and "checked=true" in lines[0] and "[toggle]" not in lines[0]
+        assert any(line.startswith("~ e1 switch") and "checked" in line for line in lines)
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_with_a_value_taps_only_when_it_differs():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [switch(False)])
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": False})
+        assert r["text"] == 'e1 switch "Wi-Fi" checked=false @300,100 60x30 is already false.'
+        assert d.session.last_point is None and "tap" not in d.session.calls
+        d.session.tree = [switch(True)]
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+        assert "tap" in d.session.calls and "checked=true" in r["text"].splitlines()[0]
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+        assert r["text"].endswith("is already true.")
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_refuses_what_is_not_a_switch():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "OK", "ok-button")])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == 'no_action: e1 button "OK" id=ok-button @10,10 100x40 is not a switch'
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_at_a_point_uses_the_switch_under_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "OK", "ok-button"), switch(False, "e2")])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"x": 20, "y": 20}})  # over a button, not a switch
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: Nothing at (20, 20) takes a toggle."
+        assert "tap" not in d.session.calls
+        d.session.tree = [button("e1", "OK", "ok-button"), switch(True, "e2")]
+        r = await d.run_tool("a", "toggle", {"target": {"x": 310, "y": 110}})
+        assert d.session.last_point == (330.0, 115.0) and r["text"].startswith("Toggled e2 switch")
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_taps_the_navigation_bars_back_button():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.back_at = (48.0, 81.0)
+        r = await d.run_tool("a", "back", {})
+        assert d.session.last_point == (48.0, 81.0) and r["text"].startswith("Went back by tapping the back button.")
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_swipes_from_the_left_edge_when_there_is_no_button():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "back", {})
+        assert "swipe" in d.session.calls and d.session.last_point == (2, 400.0)
+        assert r["text"].startswith("Went back by swiping from the left edge.")
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_nothing_to_go_back_to_is_no_action():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")  # the swipe changes nothing on the screen
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {})
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: Nothing to go back to."
+        await feeder.stop()
         await finish(stop, task)
     run(go)
