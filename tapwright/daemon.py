@@ -116,11 +116,13 @@ def _checked(name: str, args: dict) -> dict:
     if args.get("target") is not None:
         checked["target"] = ui.parse_target(args["target"])  # bad_params, with an example of a target
     if name == "scroll":
+        if checked.get("direction") is None:  # null (the MCP server sends every argument) is left out
+            checked.pop("direction", None)
         if checked.get("direction", "down") not in ("up", "down", "left", "right"):
             raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
         if args.get("to") not in (None, "start", "end"):
             raise Refused("bad_params", f"to must be start or end, not {args['to']!r}")
-        if args.get("to") and "direction" in args and args["direction"] not in SCROLL_TO[args["to"]]:
+        if args.get("to") and "direction" in checked and checked["direction"] not in SCROLL_TO[args["to"]]:
             raise Refused("bad_params", f"to {args['to']} scrolls {' or '.join(SCROLL_TO[args['to']])}, not "
                                         f"{args['direction']}; leave direction out, or make them agree")
         if "amount" in checked and not SCROLL_MIN <= checked["amount"] <= SCROLL_MAX:

@@ -32,7 +32,8 @@ DEFAULTS = {
     "tap": {"force": False, "look": True, "screenshot": False},
     "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False},
     "type_text": {"target": None, "replace": True, "submit": False, "look": True, "screenshot": False},
-    "scroll": {"direction": "down", "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False},
+    # no default direction in the schema: it is down, or the way `to` goes (as Tapline declares it)
+    "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False},
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False},
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False},
@@ -105,14 +106,14 @@ def test_tools_forward_their_arguments_to_the_daemon(monkeypatch):
     monkeypatch.setattr(client, "call", fake_call)
     asyncio.run(mcp_server.tap(target=mcp_server.Target(label="Log in", index=1)))
     asyncio.run(mcp_server.look())
-    asyncio.run(mcp_server.scroll(to="end"))
+    asyncio.run(mcp_server.scroll(to="start"))
     asyncio.run(mcp_server.wait(seconds=1.5))
     asyncio.run(mcp_server.wait_for(text="Done", gone=True))
     asyncio.run(mcp_server.open_app(app="Settings"))
     assert seen == [
         ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "screenshot": False}),
         ("look", {"screenshot": True, "width": 600, "labels": False}),
-        ("scroll", {"direction": "down", "amount": 0.8, "to": "end", "target": None, "look": True,
+        ("scroll", {"direction": None, "amount": 0.8, "to": "start", "target": None, "look": True,
                     "screenshot": False}),
         ("wait", {"seconds": 1.5, "look": True, "screenshot": False}),
         ("wait_for", {"text": "Done", "id": None, "label": None, "gone": True, "timeout": 10.0, "look": True,

@@ -2592,11 +2592,33 @@ def test_the_innermost_scroll_view_is_the_area():
     run(go)
 
 
+def test_a_null_direction_is_a_direction_left_out():
+    """The MCP server sends every argument, `direction: null` when the agent gave none: with `to: start` that
+    once came as "down" and was refused, so the shared runner's lab reset never scrolled up (2026-11-09)."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        ends = []
+        original = d.session.swipe
+
+        async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
+            ends.append((y0, y1))
+            return await original(x0, y0, x1, y1, duration_ms, hold_ms)
+        d.session.swipe = swipe
+        r = await d.run_tool("a", "scroll", {"direction": None, "to": "start", "look": False})
+        assert r["text"].splitlines()[0] == "Scrolled the screen up." and ends[0][0] < ends[0][1]
+        r = await d.run_tool("a", "scroll", {"direction": None, "look": False})
+        assert r["text"] == "Scrolled the screen down." and ends[-1][0] > ends[-1][1]
+        await finish(stop, task)
+    run(go)
+
+
 def test_scroll_checks_its_arguments():
     async def go():
         d = make()
         stop, task = await started(d)
-        for bad in ({"direction": "sideways"}, {"amount": 0.05}, {"amount": 1.5}, {"to": "middle"}):
+        for bad in ({"direction": "sideways"}, {"amount": 0.05}, {"amount": 1.5}, {"to": "middle"},
+                    {"to": "start", "direction": "down"}):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "scroll", bad)
             assert e.value.code == "bad_params", bad

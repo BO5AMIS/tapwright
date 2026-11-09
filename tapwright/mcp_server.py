@@ -195,11 +195,11 @@ async def type_text(text: str, target: Target | None = None, replace: bool = Tru
 
 
 @server.tool(structured_output=False)
-async def scroll(direction: Literal["up", "down", "left", "right"] = "down", amount: float = 0.8,
+async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
                  to: Literal["start", "end"] | None = None, target: Target | None = None, look: bool = True,
                  screenshot: bool = False) -> CallToolResult:
-    """Scroll the content: "down" shows what is below. amount is a share of the scroll area; `to` keeps
-    scrolling to the start or end; `target` picks the scroll view."""
+    """Scroll the content: "down" shows what is below (the default, or the way `to` goes). amount is a share
+    of the scroll area; `to` keeps scrolling to the start or end; `target` picks the scroll view."""
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
                        screenshot=screenshot)
 
