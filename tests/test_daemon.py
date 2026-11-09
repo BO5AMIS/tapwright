@@ -7,7 +7,7 @@ from fakes import Clock, FakeDevice, FakeSession
 
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
-from tapwright.device import ConnectionLost
+from tapwright.device import ConnectionLost, DeviceError
 from tapwright.stream import PRESETS
 
 
@@ -396,11 +396,18 @@ def test_bad_arguments_are_bad_params():
     async def go():
         d = make()
         stop, task = await started(d)
-        for tool, args in (("tap", {}), ("swipe", {"x0": "abc", "y0": 0, "x1": 1, "y1": 1}),
-                           ("wait", {"seconds": "soon"})):
+        generation = d.control.generation
+        for tool, args, field in (("tap", {}, "ref"), ("tap", {"x": 1, "y": 1, "index": "abc"}, "index"),
+                                  ("swipe", {"x0": "abc", "y0": 0, "x1": 1, "y1": 1}, "x0"),
+                                  ("swipe", {"x0": 0, "y0": 0, "x1": 1, "y1": float("nan")}, "y1"),
+                                  ("wait", {"seconds": "soon"}, "seconds"),
+                                  ("long_press", {"x": 1, "y": 1, "seconds": "long"}, "seconds"),
+                                  ("scroll", {"direction": "sideways"}, "direction"),
+                                  ("scroll", {"amount": "lots"}, "amount")):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args)
-            assert e.value.code == "bad_params", tool
+            assert e.value.code == "bad_params" and field in str(e.value), (tool, args)
+        assert d.control.generation == generation and d.session.actions() == ["tap"]  # only the target-less tap got through, and failed in ui.find
         await finish(stop, task)
     run(go)
 
@@ -420,6 +427,38 @@ def test_a_crash_inside_a_tool_is_internal_and_logged():
             await d.run_tool("a", "look", {})
         assert e.value.code == "internal" and "bang" in str(e.value)
         assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("screen")  # still up
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_value_error_from_phone_data_is_internal_not_bad_params():
+    async def go():
+        logs = []
+        d = make(log=logs.append)
+        stop, task = await started(d)
+        d.session.fail["look"] = ValueError("could not convert string to float: 'x'")  # an unparsable rect
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {})
+        assert e.value.code == "internal" and any("Traceback" in m for m in logs)
+        d.session.fail["tap"] = ValueError("bad data")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+        assert e.value.code == "internal"
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_phone_side_error_is_internal_but_not_called_a_bug():
+    async def go():
+        logs = []
+        d = make(log=logs.append)
+        stop, task = await started(d)
+        d.session.fail["tap"] = DeviceError("HTTP 500: no such element")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+        assert e.value.code == "internal" and "the phone side failed" in str(e.value)
+        assert "HTTP 500" in str(e.value) and "bug" not in str(e.value)
+        assert not any("Traceback" in m for m in logs)
         await finish(stop, task)
     run(go)
 

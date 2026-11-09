@@ -5,6 +5,7 @@ import base64
 import io
 
 from . import store, ui
+from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
@@ -132,7 +133,7 @@ class Session:
     async def key(self, name: str) -> str:
         """backspace or enter, into whatever field has focus."""
         if name not in KEYS:
-            raise ValueError(f"key must be one of {', '.join(KEYS)}, not {name!r}")
+            raise Refused("bad_params", f"key must be one of {', '.join(KEYS)}, not {name!r}")
         await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
         return f"pressed {name}"
 

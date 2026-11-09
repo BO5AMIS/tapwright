@@ -9,6 +9,8 @@ Positions and sizes are in points (the phone's coordinate space, what taps use).
 import math
 from dataclasses import dataclass
 
+from .control import Refused
+
 # Element types worth listing even without a label (things an agent can act on).
 INTERACTIVE = {"Button", "TextField", "SecureTextField", "TextView", "SearchField", "Switch", "Slider",
                "Cell", "Link", "Tab", "TabBar", "SegmentedControl", "PickerWheel", "Stepper", "Toggle",
@@ -118,7 +120,7 @@ def find(items: list[Element], ref: str | None = None, label: str | None = None,
         if not hits:
             hits = [e for e in items if want in e.label.lower() or want in e.value.lower()]
     else:
-        raise ValueError("give a ref, an id, or a label")
+        raise Refused("bad_params", "give a ref, an id, or a label")
     if not hits:
         raise NotFound(f"nothing matches {'id=' + id if id else repr(label)} on the screen")
     if index >= len(hits):
@@ -177,7 +179,7 @@ def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0
         return cx + w * d / 2, cy, cx - w * d / 2, cy
     if direction == "left":
         return cx - w * d / 2, cy, cx + w * d / 2, cy
-    raise ValueError(f"direction must be up, down, left or right, not {direction!r}")
+    raise Refused("bad_params", f"direction must be up, down, left or right, not {direction!r}")
 
 
 def scroll_swipe(x: float, y: float, dx: float, dy: float, screen: tuple[float, float],

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from tapwright import session as session_module
+from tapwright.control import Refused
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
 from tapwright.session import Session
 
@@ -82,8 +83,9 @@ def test_keys_paths_settings_and_lock(phone):
     assert steps[2]["duration"] == 120 and (steps[2]["x"], steps[2]["y"]) == (10, 220)
     assert ("POST", "/session/S/appium/settings", {"settings": {"mjpegServerFramerate": 30}}) in phone.requests
     assert s.last_point == (10.0, 20.0)
-    with pytest.raises(ValueError):
+    with pytest.raises(Refused) as e:
         asyncio.run(s.key("escape"))
+    assert e.value.code == "bad_params"
 
 
 def test_reset_forgets_the_connection(phone):

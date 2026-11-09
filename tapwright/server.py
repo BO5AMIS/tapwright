@@ -18,13 +18,11 @@ from starlette.websockets import WebSocket
 
 from . import store
 from .control import Refused
+from .errors import HTTP_STATUS
 
 COOKIE = "tapwright_token"
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
-HTTP_STATUS = {"not_found": 404, "ambiguous": 409, "not_actionable": 409, "stale": 409, "busy": 409, "paused": 409,
-               "locked": 503, "reconnecting": 503, "not_connected": 503, "timeout": 504, "bad_params": 400,
-               "unsupported": 400, "internal": 500}
 DEFAULT_PORT = 8417
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
 

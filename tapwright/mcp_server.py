@@ -9,14 +9,18 @@ The phone belongs to `tapwright serve`, which this server starts when needed; a 
 may be watching or driving in its live view at the same time.
 """
 import asyncio
+import logging
 import uuid
 from typing import Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
+from pydantic import ValidationError
 
 from . import client, device
+
+logger = logging.getLogger("tapwright")
 
 INSTRUCTIONS = (
     "Test apps on the user's real iPhone. Start with list_apps and launch_app, then look. Every action "
@@ -50,9 +54,17 @@ class TapwrightServer(MCPServer):
     async def call_tool(self, name, arguments, context=None):
         try:
             return await super().call_tool(name, arguments, context)
-        except UnexpectedToolError as e:
-            return _error("internal", str(e))
+        except UnexpectedToolError:
+            logger.exception("tool %s crashed", name)
+            return _error("internal", f"{name} failed unexpectedly. This is a bug; report it.")
         except ToolError as e:
+            if isinstance(e.__cause__, ValidationError):  # the field names and what's wrong, not the input
+                lines = [f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                         for err in e.__cause__.errors()]
+                return _error("bad_params", "; ".join(lines))
+            if str(e).startswith("Unknown tool"):
+                tools = ", ".join(t.name for t in self._tool_manager.list_tools())
+                return _error("unsupported", f"no tool named {name!r}; the tools are {tools}")
             return _error("bad_params", str(e).removeprefix(f"Error executing tool {name}: "))
 
 
@@ -66,8 +78,9 @@ async def _tool(name: str, **args) -> CallToolResult:
         answer = await asyncio.to_thread(client.call, name, args, CLIENT_ID)
     except client.DaemonError as e:
         return _error(e.code, str(e))
-    except Exception as e:  # the daemon unreachable: never crash the server
-        return _error("internal", f"{type(e).__name__}: {e}")
+    except Exception:  # the daemon unreachable: never crash the server
+        logger.exception("tool %s crashed", name)
+        return _error("internal", f"{name} failed unexpectedly. This is a bug; report it.")
     return _result(answer.get("text") or "(no answer)", answer.get("image"))
 
 

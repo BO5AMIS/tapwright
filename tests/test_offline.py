@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from tapwright import ui
+from tapwright.control import Refused
 
 # A trimmed WebDriverAgent tree, shaped like /source?format=json on iOS 26.
 SOURCE = {"type": "XCUIElementTypeApplication", "label": "Example", "rect": {"x": 0, "y": 0, "width": 402, "height": 874},
@@ -85,8 +86,9 @@ def test_gestures():
     assert [s["type"] for s in tap] == ["pointerMove", "pointerDown", "pause", "pointerUp"]
     x0, y0, x1, y1 = ui.scroll_points("down", SCREEN, 0.5)
     assert y0 > y1 and x0 == x1  # content moves up: the finger goes up
-    with pytest.raises(ValueError):
+    with pytest.raises(Refused) as e:
         ui.scroll_points("sideways", SCREEN)
+    assert e.value.code == "bad_params"
 
 
 def test_path_and_wheel_scroll():

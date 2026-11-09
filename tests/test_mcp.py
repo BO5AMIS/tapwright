@@ -40,12 +40,31 @@ def test_every_code_comes_back_as_an_error(monkeypatch, code):
     assert out.is_error is True and [c.text for c in out.content] == [f"Error {code}: do the next thing"]
 
 
-def test_a_failure_outside_the_daemon_is_internal(monkeypatch):
+def test_a_crash_outside_the_daemon_is_internal_logged_and_not_echoed(monkeypatch, caplog):
     def broken(*a, **k):
         raise OSError("disk on fire")
     monkeypatch.setattr(client, "call", broken)
     out = asyncio.run(mcp_server.look())
-    assert out.is_error is True and out.content[0].text == "Error internal: OSError: disk on fire"
+    assert out.is_error is True
+    assert out.content[0].text == "Error internal: look failed unexpectedly. This is a bug; report it."
+    assert any("look" in r.getMessage() and r.exc_info and "disk on fire" in str(r.exc_info[1])
+               for r in caplog.records)
+
+
+def test_a_tool_call_passes_text_and_image_end_to_end(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: {
+        "text": "tapped e1", "image": base64.b64encode(b"JPEG").decode(), "image_size": [1, 1]})
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"ref": "e1"}))
+    assert out.is_error is False and out.content[0].text == "tapped e1"
+    assert isinstance(out.content[1], ImageContent) and base64.b64decode(out.content[1].data) == b"JPEG"
+
+
+def test_an_unknown_tool_is_unsupported_and_names_the_tools(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    out = asyncio.run(mcp_server.server.call_tool("format_phone", {}))
+    text = out.content[0].text
+    assert out.is_error is True and text.startswith("Error unsupported: ")
+    assert "format_phone" in text and "look" in text
 
 
 def test_arguments_the_schema_rejects_are_bad_params(monkeypatch):
@@ -54,3 +73,12 @@ def test_arguments_the_schema_rejects_are_bad_params(monkeypatch):
     assert out.is_error is True
     assert out.content[0].text.startswith("Error bad_params: ") and "text" in out.content[0].text
     assert "Error executing tool" not in out.content[0].text
+
+
+def test_validation_text_names_fields_without_echoing_input(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"index": "secret-x", "look": "maybe"}))
+    text = out.content[0].text
+    assert out.is_error is True and text.startswith("Error bad_params: ")
+    assert "index" in text and "look" in text
+    assert "input_value" not in text and "secret-x" not in text and "pydantic" not in text

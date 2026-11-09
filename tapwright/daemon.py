@@ -4,6 +4,7 @@ that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
 import io
+import math
 import time
 import traceback
 
@@ -11,7 +12,7 @@ from PIL import Image, UnidentifiedImageError
 
 from . import ui
 from .control import Controller, Refused, classify
-from .device import ConnectionLost, NotSetUp, PhoneNotFound
+from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
 from .stream import PRESETS, FrameHub, StreamPump
 
 PROTOCOL = 1
@@ -37,6 +38,37 @@ def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | Non
     and the picture, if any, with its size."""
     text = "\n".join([*lines, *(f"Note: {n}" for n in notes or [])])
     return {"text": text, "image": base64.b64encode(image).decode() if image else None, "image_size": _size(image)}
+
+
+def _number(args: dict, key: str) -> float | None:
+    """args[key] as a finite float; None when it isn't given. Anything else is bad_params."""
+    value = args.get(key)
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = math.nan
+    if not math.isfinite(number):
+        raise Refused("bad_params", f"{key} must be a number, not {value!r}")
+    return number
+
+
+def _checked(name: str, args: dict) -> dict:
+    """The agent's arguments with numbers coerced, or Refused(bad_params) naming the one that's wrong.
+    This runs before anything reaches the phone, so a ValueError later is never the agent's fault."""
+    checked = dict(args)
+    for key in ("x", "y", "x0", "y0", "x1", "y1", "seconds", "amount"):
+        if (number := _number(args, key)) is not None:
+            checked[key] = number
+    if args.get("index") is not None:
+        try:
+            checked["index"] = int(args["index"])
+        except (TypeError, ValueError):
+            raise Refused("bad_params", f"index must be a whole number, not {args['index']!r}") from None
+    if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
+        raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
+    return checked
 
 
 def _target(a: dict) -> dict:
@@ -265,8 +297,9 @@ class Daemon:
             return await self._run_tool(client_id, name, args)
         except Refused:
             raise
-        except ValueError as e:
-            raise Refused("bad_params", str(e)) from e
+        except DeviceError as e:  # WebDriverAgent or the link answered with an error; not our bug
+            self.log(f"{name}: the phone side failed: {e}")
+            raise Refused("internal", f"the phone side failed: {e}") from e
         except Exception as e:  # one failed step never takes the daemon down
             self.log(f"{name} failed unexpectedly:\n{traceback.format_exc()}")
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
@@ -277,6 +310,7 @@ class Daemon:
         missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
+        args = _checked(name, args)
         view = self.control.client(client_id)
         notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
         await self.wait_connected()
@@ -286,11 +320,7 @@ class Daemon:
             return _answer([text or "no apps"], notes)
         if name in ("look", "wait"):
             if name == "wait":
-                try:
-                    seconds = float(args.get("seconds", 1.0))
-                except (TypeError, ValueError):
-                    raise Refused("bad_params", "seconds must be a number") from None
-                await asyncio.sleep(min(max(seconds, 0.2), 30.0))
+                await asyncio.sleep(min(max(args.get("seconds", 1.0), 0.2), 30.0))
             return await self._look(view, bool(args.get("screenshot", True)), [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
@@ -316,8 +346,6 @@ class Daemon:
                 result = await call(s, args)
             except ui.NotFound as e:  # raised as a refusal: the screen didn't change, so refs stay current
                 raise Refused("not_found", str(e)) from None
-            except ValueError as e:
-                raise Refused("bad_params", str(e)) from None
             view.items = s.items
             return result
 
