@@ -2,8 +2,9 @@
 
 Shared by Tapline and Tapwright, so one viewer page (and later an adapter for T3 Code's
 Device panel) can show either tool's live picture of a phone, with an overlay of the
-elements and input from a person. Version 1. Draft agreed between the two projects; not
-published.
+elements and input from a person. Version 1, agreed between the two projects; not
+published. Version 1.1 (2026-11-09) adds the error codes `not_actionable` and `internal`;
+agreed between the two projects and approved by the user.
 
 - **Server:** a tool's own process: Tapline's host, or `tapwright serve`.
 - **Client:** the viewer page, or an adapter.
@@ -81,7 +82,7 @@ JSON text messages. Both sides ignore types and fields they don't know.
 | `{ "type": "status", "protocol": 1, "state", "detail", "via", "fps", "driver", "paused", "size": { "w", "h" }, "accepts": […], "quality" }` | `state`: `live`, `connecting`, `reconnecting`, `locked` (the phone is locked; the server can't unlock it) or `no-device`. `detail`: optional plain text (needs setup, phone not found …). `via`: how the phone is reached (`usb`, `wifi`, `tailscale`). `driver`: `agent`, `person` or `null`. `size` in points. `accepts`: the input this server supports, from `tap`, `longPress`, `drag`, `scroll`, `text`, `enter`, `backspace`, `home`, `volume`, `quality`; clients hide the rest. `quality`: optional, the current stream preset (`sharp`, `balanced`, `light`) when the server accepts `quality`. |
 | `{ "type": "overlay", "rev", "at", "elements": [{ "ref", "type", "label", "id", "rect": { "x", "y", "w", "h" } }] }` | the elements on screen while overlays are on. `rev` matches `X-Tree-Rev` when the server has revisions; `at` is when it was read, so a client can dim an overlay older than the latest action. |
 | `{ "type": "action", "by": "agent" \| "person", "kind", "label", "rect", "point", "at", "ok", "code" }` | what was just done, for the viewer to show (a highlight or a tap mark). `rect`, `point` (in 0..1), `at`, `ok` optional; when `ok` is `false`, `code` says why (see errors). |
-| `{ "type": "error", "message", "code" }` | `code`, optional and machine-readable: `busy` (a person is driving), `paused`, `stale` (the screen changed; look again), `locked`, `reconnecting`, `unsupported`, `unauthorized` |
+| `{ "type": "error", "message", "code" }` | `code`, optional and machine-readable: `busy` (a person is driving), `paused`, `stale` (the screen changed; look again), `locked`, `reconnecting`, `unsupported`, `unauthorized`, `not_actionable` (the input reached the app, but a real touch there would do nothing or couldn't reach what's there; the message starts with the reason word, as in AGENT-TOOLS.md §4, e.g. `no_action: Nothing at (120, 640) takes a touch.`), `internal` (a bug or a failure on the phone side; the message says which) |
 
 ## Control
 
@@ -102,6 +103,7 @@ is looked up again.
 | Overlay | slow to read (1.5 to 7 s on busy screens, measured), so only on request | quick, on request |
 | `accepts` | everything | `tap`, `longPress`, `scroll`, `text`, `enter`, `backspace`, `quality` (capture size) |
 | Sees | the whole screen: keyboard, status bar, system alerts | only the app's window: no keyboard, status bar or system alerts |
+| A person's input refused | never `not_actionable`: viewer taps are real touches | `not_actionable` with the reason (`no_action`, `covered`, `under_tab_bar`, `disabled` …), since Tapline calls handlers instead of touching |
 
 T3 Code's Device panel is reached through a separate adapter in each tool, not through this
 protocol.
