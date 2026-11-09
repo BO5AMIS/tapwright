@@ -89,6 +89,15 @@ def test_gestures():
         ui.scroll_points("sideways", SCREEN)
 
 
+def test_path_and_wheel_scroll():
+    steps = ui.path([(0, 1.4, 2.6), (5, 3.0, 4.0), (40, 30.0, 40.0)])["actions"][0]["actions"]
+    assert steps[0] == {"type": "pointerMove", "duration": 0, "x": 1, "y": 3}
+    assert [s.get("duration") for s in steps[2:4]] == [10, 35]  # at least 10 ms per move
+    x0, y0, x1, y1 = ui.scroll_swipe(0.5, 0.5, 0.0, 0.25, SCREEN)
+    assert (x0, y0) == (201.0, 437.0) and x1 == x0 and y1 == y0 - 0.25 * 874  # dy > 0: the finger moves up
+    assert ui.scroll_swipe(0.5, 0.99, 0.0, -0.8, SCREEN)[3] == 873.0  # kept inside the screen
+
+
 def _profile(app_id="TEAM123456.com.example.tapwright.*", devices=("UDID1",)):
     plist = plistlib.dumps({"Name": "test", "TeamIdentifier": ["TEAM123456"], "ProvisionedDevices": list(devices),
                             "ExpirationDate": datetime.now() + timedelta(days=300),

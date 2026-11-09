@@ -149,6 +149,19 @@ def swipe(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350) ->
                      {"type": "pointerUp", "button": 0}])
 
 
+def path(points: list) -> dict:
+    """W3C actions replaying a finger path: [(t_ms from 0, x, y), ...] in points, at its own pace."""
+    _, x0, y0 = points[0]
+    steps = [{"type": "pointerMove", "duration": 0, "x": round(x0), "y": round(y0)},
+             {"type": "pointerDown", "button": 0}]
+    prev = points[0][0]
+    for t, x, y in points[1:]:
+        steps.append({"type": "pointerMove", "duration": max(int(t - prev), 10), "x": round(x), "y": round(y)})
+        prev = t
+    steps.append({"type": "pointerUp", "button": 0})
+    return _pointer(steps)
+
+
 def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0.5) -> tuple[float, ...]:
     """Swipe endpoints that scroll the content `direction` by `amount` of the screen.
     "down" shows what is below (the finger moves up)."""
@@ -164,3 +177,15 @@ def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0
     if direction == "left":
         return cx - w * d / 2, cy, cx + w * d / 2, cy
     raise ValueError(f"direction must be up, down, left or right, not {direction!r}")
+
+
+def scroll_swipe(x: float, y: float, dx: float, dy: float, screen: tuple[float, float]) -> tuple[float, ...]:
+    """Swipe endpoints, in points, for a wheel scroll at x, y (0..1) by dx, dy (fractions of the
+    screen, each at most 0.8). dy > 0 shows content further down, so the finger moves up."""
+    w, h = screen
+
+    def inside(v: float, size: float) -> float:
+        return min(max(v, 1.0), size - 1.0)
+    dx, dy = max(min(dx, 0.8), -0.8), max(min(dy, 0.8), -0.8)
+    x0, y0 = inside(x * w, w), inside(y * h, h)
+    return x0, y0, inside(x0 - dx * w, w), inside(y0 - dy * h, h)

@@ -5,7 +5,9 @@ import base64
 import io
 
 from . import store, ui
-from .device import Device, DeviceError
+from .device import Device, DeviceError, NotSetUp
+
+KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
 class Session:
@@ -14,20 +16,32 @@ class Session:
         self.sid = None
         self.screen = (390.0, 844.0)
         self.items: list[ui.Element] = []
+        self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
 
     async def ensure(self) -> None:
+        """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
+        free: a dead line shows up as ConnectionLost on the next request instead."""
         if self.device.rsd is None:
             await self.device.connect()
             await self.device.mount()
+        if self.sid is not None:
+            return
         runner = store.load_state().get("runner_id")
         if not runner:
-            raise DeviceError("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
-        if self.sid and await self.device.wda_alive():
-            return
+            raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
         self.sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
         size = (await self.device.http("GET", f"/session/{self.sid}/window/size"))["value"]
         self.screen = (float(size["width"]), float(size["height"]))
+
+    async def reset(self) -> None:
+        """Drop the connection; the next request reconnects and starts WebDriverAgent again."""
+        try:
+            await self.device.close()
+        except Exception:
+            pass
+        self.device.rsd = self.device.tunnel = self.device.runner = None
+        self.sid = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30) -> dict:
         await self.ensure()
@@ -63,6 +77,7 @@ class Session:
     async def tap(self, hold_ms: int = 60, **target) -> str:
         x, y, what = self._target(**target)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
+        self.last_point = (x, y)
         return f"{'long-pressed' if hold_ms > 300 else 'tapped'} {what}"
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False, **target) -> str:
@@ -80,7 +95,14 @@ class Session:
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350) -> str:
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms))
+        self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
+
+    async def path(self, points: list) -> str:
+        """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
+        await self._call("POST", "/session/{sid}/actions", ui.path(points))
+        self.last_point = (points[0][1], points[0][2])
+        return f"dragged through {len(points)} points"
 
     async def scroll(self, direction: str = "down", amount: float = 0.5) -> str:
         await self.ensure()
@@ -94,6 +116,20 @@ class Session:
         else:
             await self._call("POST", "/session/{sid}/wda/pressButton", {"name": name})
         return f"pressed {name}"
+
+    async def key(self, name: str) -> str:
+        """backspace or enter, into whatever field has focus."""
+        if name not in KEYS:
+            raise ValueError(f"key must be one of {', '.join(KEYS)}, not {name!r}")
+        await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
+        return f"pressed {name}"
+
+    async def settings(self, values: dict) -> None:
+        """WebDriverAgent settings, e.g. the MJPEG stream's frame rate and size."""
+        await self._call("POST", "/session/{sid}/appium/settings", {"settings": values})
+
+    async def locked(self) -> bool:
+        return bool((await self._call("GET", "/session/{sid}/wda/locked")).get("value"))
 
     async def alert(self, action: str) -> str:
         """accept, dismiss, or text: the system alert on screen (permission prompts and the like)."""
