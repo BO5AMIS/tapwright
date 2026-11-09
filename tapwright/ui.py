@@ -87,6 +87,7 @@ class Element:
     name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
     secure: bool = False  # a password field: its value is never shown
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
+    placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
 
     @property
     def x(self) -> float:
@@ -178,7 +179,11 @@ BACKDROP_HEIGHT = 0.4
 PASSIVE = {"text", "header", "image"}
 OVERLAY_MAX = 0.95  # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
 WRAPPER = 0.9  # a layer's listed descendant this big, and not a scroll view, is a transparent wrapper: no content
-SCROLL_HOLD_MS = 150  # a scroll's finger rests this long at the end, so the content stops instead of flinging
+# A scroll is a quick drag whose finger rests at the end, so the content stops where the finger does instead of
+# flinging. On the lab 200 ms and 80 ms stopped as well as 600 ms and 150 ms, in a 0.92 s call against 1.3 s
+# (an iPhone 14 Pro Max, iOS 26.5, 2026-11-09).
+SCROLL_MOVE_MS = 200
+SCROLL_HOLD_MS = 80
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -343,7 +348,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             checked = (value == "1") if role == "switch" else None
             candidate = Element("", role, label, identifier, value, rect, enabled,
                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
-                                kind == "SecureTextField")
+                                kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")))
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor

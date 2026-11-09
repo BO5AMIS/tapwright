@@ -742,7 +742,7 @@ class Daemon:
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
             seq, since = self._mark()
-            await s.swipe(x0, y0, x1, y1, 600, ui.SCROLL_HOLD_MS)
+            await s.swipe(x0, y0, x1, y1, ui.SCROLL_MOVE_MS, ui.SCROLL_HOLD_MS)
             if not to or swipes == MAX_SCROLL_SWIPES:
                 break
             await self._settle(seq, cap=RESOLVE_SETTLE, since=since)

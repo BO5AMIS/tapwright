@@ -2689,9 +2689,12 @@ def test_a_scroll_swipe_ends_with_a_hold_so_the_content_does_not_fling():
         stop, task = await started(d)
         await looked(d, [el("e1", "scroll", "Page", rect=(0, 0, 400, 800))])
         await d.run_tool("a", "scroll", {"direction": "down", "look": False})
-        assert d.session.holds == [150]
+        # a quick drag with a short rest: on the lab a 200 ms move and 80 ms rest stopped where the finger did,
+        # in a 0.92 s call against 1.3 s for 600 ms and 150 ms (2026-11-09)
+        assert (ui.SCROLL_MOVE_MS, ui.SCROLL_HOLD_MS) == (200, 80)
+        assert d.session.holds == [80] and d.session.moves == [200]
         await d.run_tool("a", "swipe", {"x0": 10, "y0": 300, "x1": 10, "y1": 100, "look": False})
-        assert d.session.holds == [150, 0]  # the raw swipe tool keeps its fling
+        assert d.session.holds == [80, 0]  # the raw swipe tool keeps its fling
         await finish(stop, task)
     run(go)
 

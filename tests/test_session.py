@@ -345,10 +345,95 @@ def _typing(phone, monkeypatch, **kwargs):
     _keyboard_after(phone, 1)
     _focus(phone, [FIELD_RECT])
     s = Session(phone)
-    s.items = list(FIELD)
+    s.items = _field(kwargs.pop("value", "old"))  # some text in it, so replace has something to clear
     text = kwargs.pop("text", "hi")
     asyncio.run(s.type_text(text, target=ui_module.Target(ref="e1"), **kwargs))
     return [(m, p, v) for m, p, v in phone.requests if p.endswith(("/clear", "/wda/keys"))]
+
+
+def test_replace_clears_the_field_its_focus_check_found_without_asking_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    asked = _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = [ui_module.Element("e1", "input", "Email", value="old", rect=(10, 10, 200, 40), actions=("tap", "type"))]
+    asyncio.run(s.type_text("hi", replace=True, target=ui_module.Target(ref="e1")))
+    assert len(asked) == 1  # element/active cost about 0.16 s a time on the phone
+    assert [p for _, p, _ in phone.requests if p.endswith("/clear")] == ["/session/S/element/f0/clear"]
+
+
+def _field(value: str = "", placeholder: str = "") -> list:
+    return [ui_module.Element("e1", "input", "Email", value=value, rect=(10, 10, 200, 40), actions=("tap", "type"),
+                              placeholder=placeholder)]
+
+
+def test_typing_again_into_the_field_it_just_typed_into_skips_the_tap_and_the_clear(phone, monkeypatch):
+    """The runner types into one field 20 times. With the field still focused by Tapwright's own typing and
+    nothing done since, its tap (0.45 s) and clear (0.4 s with text) are skipped: one element/active confirms
+    the focus, and backspaces go out with the keys, the cursor being at the end of its own text."""
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    asked = _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = _field("old")
+    asyncio.run(s.type_text("w1", replace=True, target=ui_module.Target(ref="e1")))
+    before = len(phone.requests)
+    s.items = _field("w1")  # what the answer's read shows
+    asyncio.run(s.type_text("w2", replace=True, target=ui_module.Target(ref="e1")))
+    after = [(p, v) for _, p, v in phone.requests[before:]]  # (_focus answers element/active unlogged)
+    assert [p.rsplit("/", 1)[1] for p, _ in after] == ["keys"] and len(asked) == 2
+    assert after[-1][1] == {"value": list("\b\bw2")}
+
+
+def test_after_any_other_action_typing_taps_the_field_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = _field("old")
+    asyncio.run(s.type_text("w1", replace=True, target=ui_module.Target(ref="e1")))
+    s.items = _field("w1")
+    asyncio.run(s.swipe(5.0, 400.0, 5.0, 100.0))  # the content moved: focus and cursor may have too
+    before = len(phone.requests)
+    asyncio.run(s.type_text("w2", replace=True, target=ui_module.Target(ref="e1")))
+    assert [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]][:1] == ["actions"]  # tapped first
+
+
+def test_when_focus_moved_by_itself_typing_taps_the_field_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = _field("old")
+    asyncio.run(s.type_text("w1", replace=True, target=ui_module.Target(ref="e1")))
+    s.items = _field("w1")
+    original = phone.http
+    moved = []
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/element/active") and not moved:
+            moved.append(1)
+            return {"value": {"ELEMENT": "next-field"}}  # the app moved focus on (a code field does)
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    before = len(phone.requests)
+    asyncio.run(s.type_text("w2", replace=True, target=ui_module.Target(ref="e1")))
+    kinds = [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]]
+    assert "actions" in kinds and "clear" in kinds  # the full path: tap, check, clear, keys
+
+
+def test_submit_ends_the_shortcut_and_an_empty_field_is_not_cleared(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = _field("Email", placeholder="Email")  # empty: the tree shows the placeholder as its value
+    asyncio.run(s.type_text("w1", replace=True, submit=True, target=ui_module.Target(ref="e1")))
+    assert not [p for _, p, _ in phone.requests if p.endswith("/clear")]
+    s.items = _field("w1", placeholder="Email")
+    before = len(phone.requests)
+    asyncio.run(s.type_text("w2", replace=True, target=ui_module.Target(ref="e1")))
+    assert [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]][:1] == ["actions"]  # return may move focus
 
 
 def test_replace_clears_the_field_before_the_keys_go_out(phone, monkeypatch):

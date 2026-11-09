@@ -10,6 +10,13 @@ from .control import TAP_MS, Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
+BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
+
+
+def _field_key(field: ui.Element) -> str | None:
+    """What says two reads show the same input: its identifier, else its label (None when it has neither)."""
+    name = field.identifier or field.label
+    return f"{field.role}:{name}" if name else None
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
@@ -36,6 +43,9 @@ class Session:
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
         self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
         self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
+        # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
+        # touched the phone since: typing there again needs no tap. Every other action clears it.
+        self.typed_into: tuple[str, str] | None = None
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -65,6 +75,7 @@ class Session:
         self.scale = self.app = None
         self.scale_read = False
         self.items = []
+        self.typed_into = None
         self.last_point = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30) -> dict:
@@ -211,6 +222,7 @@ class Session:
 
     # ---- acting ----
     async def tap(self, target: ui.Target, hold_ms: int = TAP_MS) -> str:
+        self.typed_into = None
         x, y, what = self._target(target)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
         self.last_point = (x, y)
@@ -227,20 +239,35 @@ class Session:
                 x, y = target.point
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
+        element, hit, again = None, None, False
         if target is not None:
             what = self._target(target)[2]
-            await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
-            hit = ui.resolve(self.items, target)  # focus is what counts: with a hardware keyboard no software one shows
-            if not isinstance(hit, tuple) and not await self._has_focus(hit):
-                raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
-        note = ""
-        if replace:
-            element = await self._active_element()
+            hit = ui.resolve(self.items, target)
+            key = _field_key(hit) if not isinstance(hit, tuple) else None
+            focused, self.typed_into = self.typed_into, None
+            if key and focused and focused[0] == key and await self._active_element() == focused[1]:
+                element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
+            else:
+                await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
+                # focus is what counts: with a hardware keyboard no software one shows
+                element = await self._has_focus(hit) if not isinstance(hit, tuple) else await self._active_element()
+                if element is None and not isinstance(hit, tuple):
+                    raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
+        note, keys = "", text + ("\n" if submit else "")
+        field = hit if isinstance(hit, ui.Element) else None
+        if replace and field is not None and not field.secure and field.value in ("", field.placeholder):
+            pass  # empty: nothing to clear (WebDriverAgent reports an empty field's placeholder as its value)
+        elif replace and again and field is not None and not field.secure and len(field.value) <= BACKSPACE_MAX:
+            keys = "\b" * len(field.value) + keys  # the cursor is at the end of the text we typed: delete it
+        elif replace:
+            element = element or await self._active_element()
             if element:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
                 note = " (couldn't find the focused field to clear, so the old text may remain)"
-        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text + ("\n" if submit else ""))})
+        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(keys)})
+        if field is not None and element and not submit:  # return may move focus on; keys never do
+            self.typed_into = (_field_key(field), element)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
 
     async def _active_element(self) -> str | None:
@@ -256,18 +283,19 @@ class Session:
             return None
         return None if value is None else str(value)
 
-    async def _has_focus(self, field: ui.Element) -> bool:
-        """Wait until the active element is the target. The keyboard can scroll the field after the tap, so the
-        pre-tap rect says nothing: the element's identifier (else its label) is compared first, then its rect
-        against where a fresh read of the tree shows the field now. Without this, keys would land in the old field."""
+    async def _has_focus(self, field: ui.Element) -> str | None:
+        """Wait until the active element is the target; that element's id, or None when it never is. The keyboard
+        can scroll the field after the tap, so the pre-tap rect says nothing: the element's identifier (else its
+        label) is compared first, then its rect against where a fresh read of the tree shows the field now.
+        Without this, keys would land in the old field."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FOCUS_WAIT
         while True:
             element = await self._active_element()
             if element and await self._is_field(element, field):
-                return True
+                return element
             if loop.time() >= deadline:
-                return False
+                return None
             await asyncio.sleep(FOCUS_POLL)
 
     async def _is_field(self, element: str, field: ui.Element) -> bool:
@@ -295,17 +323,20 @@ class Session:
         return same[0].rect if len(same) == 1 else None
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
+        self.typed_into = None
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
     async def path(self, points: list) -> str:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
+        self.typed_into = None
         await self._call("POST", "/session/{sid}/actions", ui.path(points))
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"
 
     async def press_button(self, name: str) -> str:
+        self.typed_into = None
         if name == "home":  # pressButton "home" does nothing on iOS 26 (measured); this one waits for the home screen
             await self._call("POST", "/wda/homescreen", {})
         else:
@@ -316,6 +347,7 @@ class Session:
         """backspace or enter, into whatever field has focus."""
         if name not in KEYS:
             raise Refused("bad_params", f"key must be one of {', '.join(KEYS)}, not {name!r}")
+        self.typed_into = None  # a backspace moves the cursor's text; enter may move focus
         await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
         return f"pressed {name}"
 
@@ -328,6 +360,8 @@ class Session:
 
     async def alert(self, action: str) -> str:
         """accept, dismiss, or text: the system alert on screen (permission prompts and the like)."""
+        if action != "text":
+            self.typed_into = None
         try:
             if action == "text":
                 return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
@@ -346,14 +380,17 @@ class Session:
         return apps
 
     async def launch(self, bundle_id: str) -> str:
+        self.typed_into = None
         await self._call("POST", "/session/{sid}/wda/apps/launch", {"bundleId": bundle_id}, timeout=60)
         return f"launched {bundle_id}"
 
     async def terminate(self, bundle_id: str) -> str:
+        self.typed_into = None
         await self._call("POST", "/session/{sid}/wda/apps/terminate", {"bundleId": bundle_id})
         return f"closed {bundle_id}"
 
     async def open_url(self, url: str) -> str:
+        self.typed_into = None
         await self._call("POST", "/session/{sid}/url", {"url": url})
         return f"opened {url}"
 
