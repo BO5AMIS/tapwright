@@ -14,7 +14,7 @@ from tapwright import ui
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
 from tapwright.device import ConnectionLost, DeviceError
-from tapwright.stream import PRESETS
+from tapwright.stream import NO_IDLE_WAIT, PRESETS
 
 SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
 
@@ -60,7 +60,7 @@ def test_connects_and_reports_status():
         s = d.status()
         assert (s["type"], s["protocol"], s["state"], s["via"]) == ("status", 1, "live", "usb")
         assert s["size"] == {"w": 400.0, "h": 800.0} and "drag" in s["accepts"] and s["quality"] == "balanced"
-        assert any(isinstance(c, tuple) and c[0] == "settings" and c[1] == PRESETS["balanced"]
+        assert any(isinstance(c, tuple) and c[0] == "settings" and c[1] == {**PRESETS["balanced"], **NO_IDLE_WAIT}
                    for c in d.session.calls)  # every setting, so a reused runner can't keep old ones
         await finish(stop, task)
     run(go)
@@ -532,7 +532,7 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
             await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
         assert e.value.code == "not_found"
         r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
-        assert r["text"].startswith('Tapped e7 button "8"')  # the re-read after a no-look action: id-less refs are new
+        assert r["text"].startswith('Tapped e9 button "8"')  # re-reads (the not_found one reads twice) give id-less refs new numbers
         await finish(stop, task)
     run(go)
 
@@ -2029,5 +2029,79 @@ def test_wait_wants_a_number_and_flags_must_be_booleans():
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args)
             assert e.value.code == "bad_params" and "true or false" in str(e.value), (tool, args)
+        await finish(stop, task)
+    run(go)
+
+
+def _redrawing(d, *trees):
+    """The session's next refresh() reads these trees in turn (the last one repeats), noting each in `events`."""
+    events, queue = [], list(trees)
+    real = d.session.refresh
+
+    async def refresh():
+        d.session.tree = queue.pop(0) if len(queue) > 1 else queue[0]
+        events.append("refresh")
+        return await real()
+    d.session.refresh = refresh
+
+    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None):
+        events.append(("settle", cap))
+        return daemon_module.Settled(0.0, False, False)
+    d._settle = settle
+    d.hub.publish(b"A")  # there is a stream, so the settle has something to wait on
+    return events
+
+
+def test_the_connect_settings_turn_xctests_idle_wait_off_and_a_quality_change_keeps_them():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        sent = [c[1] for c in d.session.calls if isinstance(c, tuple) and c[0] == "settings"]
+        assert sent[0] == {**PRESETS["balanced"], "waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}
+        await d.set_quality("light")
+        sent = [c[1] for c in d.session.calls if isinstance(c, tuple) and c[0] == "settings"]
+        assert sent[-1]["waitForIdleTimeout"] == 0 and sent[-1]["animationCoolOffTimeout"] == 0
+        assert sent[-1]["mjpegServerScreenshotQuality"] == PRESETS["light"]["mjpegServerScreenshotQuality"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_silent_re_read_waits_for_the_screen_to_be_still_first():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        events = _redrawing(d, [button("e1", "OK", "ok-button")])
+        d.control.clock.t += 5.0
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert events == [("settle", 1.0), "refresh"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_target_missing_from_a_mid_redraw_read_is_found_on_the_second_read():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        events = _redrawing(d, [button("e1", "Other", "other-button")], [button("e1", "OK", "ok-button")])
+        d.control.clock.t += 5.0
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert r["text"].startswith('Tapped e1 button "OK"')
+        assert events == [("settle", 1.0), "refresh", ("settle", 1.0), "refresh"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_target_missing_both_times_is_not_found():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        events = _redrawing(d, [button("e1", "Other", "other-button")])
+        d.control.clock.t += 5.0
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert e.value.code == "not_found" and events.count("refresh") == 2
         await finish(stop, task)
     run(go)

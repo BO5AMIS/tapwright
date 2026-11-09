@@ -317,3 +317,11 @@ def test_the_child_with_an_action_the_parent_lacks_is_kept():
 
 def test_unlabeled_pairs_are_never_collapsed():
     assert len(_pair({"kind": "Image", "label": ""}, {"kind": "Image", "label": ""})) == 2
+
+
+def test_a_calculator_key_is_a_button_but_the_keyboards_keys_stay_hidden():
+    pad = node("Other", rect=(0, 400, 430, 400), children=[node("Key", "7", "Seven", rect=(14, 520, 90, 90))])
+    [e] = [e for e in ui.elements(xml(pad), SCREEN) if e.type == "Key"]
+    assert (e.role, e.actions, e.line()) == ("button", ("tap",), 'e1 button "7" id=Seven @14,520 90x90 [tap]')
+    board = node("Keyboard", rect=(0, 600, 430, 300), children=[node("Key", "q", rect=(10, 620, 40, 50))])
+    assert [e.type for e in ui.elements(xml(board), SCREEN)] == []

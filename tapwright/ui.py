@@ -39,7 +39,7 @@ _CONTROL_REFS = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
 
 # XCUIElementType (without the prefix) -> role, docs/AGENT-TOOLS.md §3.3. Anything else: the type lowercased.
 # A StaticText with the Header trait is a `header`; a Button inside a TabBar is a `tab`.
-ROLES = {"Button": "button", "Link": "link", "StaticText": "text",
+ROLES = {"Button": "button", "Key": "button", "Link": "link", "StaticText": "text",
          "TextField": "input", "SecureTextField": "input", "SearchField": "input", "TextView": "input",
          "Switch": "switch", "Toggle": "switch", "Slider": "slider", "Image": "image", "Icon": "image",
          "Tab": "tab", "Cell": "cell", "ScrollView": "scroll", "Table": "scroll", "CollectionView": "scroll"}

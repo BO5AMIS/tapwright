@@ -21,6 +21,10 @@ PRESETS = {
     "light": {**_AS_CAPTURED, "mjpegServerScreenshotQuality": 25, "mjpegServerFramerate": 10},
 }
 
+# XCTest waits for the app to go idle after every action (measured 0.73 s per tap, 1.20 s against 0.47 s).
+# Tapwright's own stream settle replaces that wait, so it's off. Sent with every preset, never reset by one.
+NO_IDLE_WAIT = {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}
+
 _LENGTH = re.compile(rb"content-length:[ \t]*(\d+)\r\n", re.IGNORECASE)
 
 

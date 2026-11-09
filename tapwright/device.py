@@ -45,6 +45,28 @@ def run(fn, *args):
     return anyio.run(fn, *args, backend_options=options)
 
 
+def _start_failure_base() -> type:
+    from pymobiledevice3.services.dvt.testmanaged.dtx_services import XCUITestListener
+    return XCUITestListener
+
+
+class _StartFailure:
+    """Hears the test service's `initializationForUITestingDidFailWithError` (it happens on the first start
+    after another daemon stopped). It is built as an XCUITestListener subclass on first use, so that
+    importing this module doesn't import pymobiledevice3."""
+
+    def __new__(cls):
+        base = _start_failure_base()
+        impl = type("_StartFailureListener", (base,), {
+            "error": None,
+            "initialization_for_ui_testing_did_fail": cls._record})
+        return impl()
+
+    @staticmethod
+    async def _record(self, error) -> None:
+        self.error = f"{getattr(error, 'domain', '?')} code {getattr(error, 'code', '?')}"
+
+
 class Device:
     def __init__(self, udid: str | None = None, host: str | None = None, port: int | None = None, log=print):
         state = store.load_state()
@@ -140,9 +162,13 @@ class Device:
                 if p.get("bundleIdentifier") == runner_id:
                     await control.kill(p["pid"])
         cfg = await TestConfig.create_for(self.rsd, runner_bundle_id=runner_id)
-        self.runner = asyncio.create_task(XCUITestService(self.rsd).run(cfg), name="webdriveragent")
+        failure = _StartFailure()
+        self.runner = asyncio.create_task(XCUITestService(self.rsd).run(cfg, listener=failure), name="webdriveragent")
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
+            if failure.error is not None:  # the phone said so: don't wait out the minute
+                await self._stop_runner()
+                raise DeviceError(f"UI testing failed to start: {failure.error}")
             if self.runner.done():
                 exc = self.runner.exception()
                 raise DeviceError(f"WebDriverAgent stopped while starting: {exc}")

@@ -19,12 +19,13 @@ from . import changes, ui
 from . import shot as shotlib
 from .control import Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
-from .stream import PRESETS, FrameHub, StreamPump
+from .stream import NO_IDLE_WAIT, PRESETS, FrameHub, StreamPump
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
 BUTTONS = ("home", "volumeUp", "volumeDown")
 STILL = 0.1  # seconds without a changed frame before a screen counts as still (docs/AGENT-TOOLS.md §6)
+RESOLVE_SETTLE = 1.0  # the longest a silent re-read waits for the screen to be still
 CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
@@ -333,7 +334,7 @@ class Daemon:
                     await s.ensure()
             else:
                 await s.ensure()
-            await s.settings(PRESETS[self.preset])
+            await s.settings({**PRESETS[self.preset], **NO_IDLE_WAIT})
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
@@ -455,14 +456,10 @@ class Daemon:
                 # Resolve on the live tree. The agent's refs follow their elements onto it, so `e3` still
                 # means the same element when it moved. The view's freshness doesn't change: a person's
                 # action still makes refs stale, and `view.shown` (what the agent was told) stays put.
-                mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
-                await s.refresh()
-                known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
-                held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
-                view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
-                view.top_ref = max(view.top_ref, changes.highest(view.items))
-                view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
-                s.items = view.items
+                await self._silent_read(view)
+                if not by_ref and self._missing(s.items, target):
+                    # the app may have been mid-redraw: one more look, once it is still, before saying so
+                    await self._silent_read(view)
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
@@ -618,6 +615,29 @@ class Daemon:
         width, height = s.screen
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
+
+    async def _silent_read(self, view) -> None:
+        """Read the live tree for target resolution, once the screen is still (cap RESOLVE_SETTLE: no frames
+        means no wait). Read mid-redraw, an element can be briefly missing."""
+        s = self.session
+        await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+        mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
+        await s.refresh()
+        known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
+        held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
+        view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
+        view.top_ref = max(view.top_ref, changes.highest(view.items))
+        view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
+        s.items = view.items
+
+    @staticmethod
+    def _missing(items: list[ui.Element], target: ui.Target) -> bool:
+        """Does the target resolve to `not_found` (not `ambiguous`) on this list?"""
+        try:
+            ui.resolve(items, target)
+        except Refused as e:
+            return e.code == "not_found"
+        return False
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: bytes | None = None) -> tuple[float, bool]:
@@ -865,7 +885,7 @@ class Daemon:
         if preset not in PRESETS:
             raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
         if self.state in ("live", "locked"):
-            await self._read(lambda: self.session.settings(PRESETS[preset]))
+            await self._read(lambda: self.session.settings({**PRESETS[preset], **NO_IDLE_WAIT}))
         self.preset = preset
         self.broadcast(self.status())
 

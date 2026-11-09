@@ -1,6 +1,7 @@
 """device.py without a phone: what counts as a dead line, and the stream connection."""
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -138,7 +139,7 @@ class _Service:
     def __init__(self, rsd):
         pass
 
-    async def run(self, cfg):
+    async def run(self, cfg, listener=None):
         await asyncio.sleep(3600)
 
 
@@ -179,3 +180,44 @@ def test_no_phone_anywhere(monkeypatch):
     monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", none)
     with pytest.raises(PhoneNotFound):
         asyncio.run(Device(log=lambda *a: None).connect())
+
+
+def test_ui_testing_failing_to_start_ends_the_wait_at_once(monkeypatch):
+    """The phone's test service can answer initializationForUITestingDidFailWithError on a first start;
+    the 60 s wait for /status must not be what notices."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
+    import pymobiledevice3.services.dvt.instruments.process_control as process_control
+    import pymobiledevice3.services.dvt.testmanaged.xcuitest as xcuitest
+    monkeypatch.setattr(dvt_provider, "DvtProvider", _Ctx)
+    monkeypatch.setattr(device_info, "DeviceInfo", _Info)
+    monkeypatch.setattr(process_control, "ProcessControl", _Control)
+    monkeypatch.setattr(xcuitest, "TestConfig", _Config)
+
+    class _Error:
+        domain, code = "XCTestErrorDomain", 7
+
+    class _Failing:
+        def __init__(self, rsd):
+            pass
+
+        async def run(self, cfg, listener=None):
+            await asyncio.sleep(0.05)
+            await listener.initialization_for_ui_testing_did_fail(_Error())
+            await asyncio.sleep(3600)
+    monkeypatch.setattr(xcuitest, "XCUITestService", _Failing)
+
+    async def scenario():
+        d = Device(log=lambda *a: None)
+        d.rsd = object()
+
+        async def wda_alive():
+            return False
+        d.wda_alive = wda_alive
+        began = time.monotonic()
+        with pytest.raises(DeviceError, match=r"UI testing failed to start.*XCTestErrorDomain.*7"):
+            await d.start_wda("runner.id", wait=30)
+        assert time.monotonic() - began < 5
+        await d.close()
+
+    asyncio.run(scenario())
