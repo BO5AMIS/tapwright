@@ -395,6 +395,17 @@ def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
 
 
+def test_a_shown_keyboard_is_a_bottom_inset_so_swipes_stay_above_it():
+    """A scroll with the keyboard up swiped on the keys and moved nothing: the runner's lab reset failed (2026-11-09)."""
+    keys = node("Other", 0, 631, 430, 243, children=[node("Keyboard", 0, 631, 430, 243)])
+    view = node("Other", 0, 614, 430, 318, children=[node("Other", 0, 614, 430, 318), keys])
+    window = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), view])
+    tree = ui.read(under_window(lab_base(), window), PHONE)
+    assert tree.keyboard and tree.bottom_inset == 318.0
+    parked = node("Other", 0, 932, 430, 243, children=[node("Keyboard", 0, 932, 430, 243)])  # a hardware keyboard
+    assert ui.read(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[parked])), PHONE).bottom_inset is None
+
+
 def test_a_share_sheet_hides_the_app_behind_it_even_with_nothing_listed_to_act_on():
     """The share sheet is a Popover behind a dimming view; its share targets list as text, not as buttons, so the
     backdrop rule saw nothing to act on and left the app's buttons listed: a touch on one reached the sheet,

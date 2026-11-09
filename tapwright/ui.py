@@ -325,6 +325,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 cover = _keyboard_view(node, parents, screen_rect) if kind == "Keyboard" else rect
                 covering.append((number, Bar(kind, cover, Element("", role, label, identifier, rect=cover)
                                              .line(ref=False, actions=False))))
+                if kind == "Keyboard" and screen and cover[1] < screen[1]:
+                    bars.append((False, screen[1] - cover[1]))  # a swipe on the keys scrolls nothing: stay above
         if kind == "Button" and in_tab_bar:
             role = "tab"
         elif kind == "StaticText" and "Header" in traits:
