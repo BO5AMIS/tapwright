@@ -1097,11 +1097,11 @@ def test_a_faint_flicker_does_not_keep_a_still_screen_from_settling():
     run_virtual(go)
 
 
-def test_a_change_and_stillness_seen_during_the_call_end_the_settle_at_the_first_frame_after_it():
+def test_a_change_and_stillness_seen_during_the_call_end_the_settle_at_the_return():
     """The tap call returns about 200 ms after its effect shows on the stream; waiting for a fresh still run
     after the return cost about 0.15 s an action (2026-11-09, the lab)."""
     async def go():
-        d = make(settle_still=daemon_module.STILL)
+        d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
         on_loop_clock(d)
         d.hub.publish(b"A")
         early, since = d._mark()  # the gesture goes out
@@ -1110,10 +1110,39 @@ def test_a_change_and_stillness_seen_during_the_call_end_the_settle_at_the_first
             d.hub.publish(b"B")
             await asyncio.sleep(0.03)
         returned = d._mark()[0]
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = feed_later(d, b"B")
         seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
         await feeder.stop()
-        assert changed and seconds < 0.01  # the first frame after the return, 4 ms later
+        assert changed and seconds == 0.0  # still for 0.2 s up to the return, with a fresh frame: nothing to wait for
+    run_virtual(go)
+
+
+def feed_later(d, frame: bytes, delay: float = 0.02) -> FrameFeeder:
+    """A feeder whose first frame comes `delay` s from now (the next frame after a call returns)."""
+    feeder = FrameFeeder(d.hub)
+
+    async def start():
+        await asyncio.sleep(delay)
+        feeder.start(then=frame)
+    asyncio.create_task(start())
+    return feeder
+
+
+def test_a_still_run_seen_during_the_call_but_gone_quiet_waits_for_a_frame_after_the_return():
+    async def go():
+        d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        early, since = d._mark()
+        for _ in range(8):
+            d.hub.publish(b"B")
+            await asyncio.sleep(0.03)
+        await asyncio.sleep(0.3)  # the stream went quiet before the return: its last frame is old
+        returned = d._mark()[0]
+        feeder = feed_later(d, b"B")
+        seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
+        await feeder.stop()
+        assert changed and seconds == pytest.approx(0.02, abs=0.005)  # the first fresh frame
     run_virtual(go)
 
 

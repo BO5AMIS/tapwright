@@ -937,14 +937,19 @@ class Daemon:
         deadline = began + cap
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
+            last = None
             for arrived, frame in self.hub.since(early, upto=after_seq):
                 differs = differs or not alike(frame, since)
                 if alike(frame, first_of_run):
                     run += 1
                 else:
                     run, run_start, first_of_run = 1, arrived, frame
+                last = arrived
             if not differs:  # nothing showed during the call: only frames after the return count
                 run, run_start, first_of_run = 0, began, None
+            elif (gap and last is not None and run >= 2 and began - run_start >= still
+                  and began - last <= 1.5 * gap):
+                return Settled(0.0, True, False)  # changed, then still up to a fresh frame at the return
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
             wait = min(left, self.settle_first_frame if first else stall)
