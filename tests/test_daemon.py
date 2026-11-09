@@ -3007,3 +3007,16 @@ def test_a_tab_inside_the_tab_bar_is_touched_at_its_own_centre():
         assert d.session.last_point == (107.5, 890.5) and "visible part" not in r["text"]
         await finish(stop, task)
     run(go)
+
+
+def test_a_row_under_a_translucent_navigation_bar_is_touched_below_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        nav = ui.Bar("NavigationBar", (0.0, 0.0, 430.0, 100.0), "navigationbar @0,0 430x100")
+        await looked(d, [el("e1", "cell", "Row 0", rect=(0, 40, 430, 100), covered_by=(nav,))])
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 120.0) and "at its visible part (215, 120)" in r["text"]
+        await finish(stop, task)
+    run(go)

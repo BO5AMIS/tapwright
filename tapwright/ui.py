@@ -164,6 +164,10 @@ LAYER_MAX_DEPTH = 4  # it sits at most this many levels below the Application: w
 LAYER_COVER = 0.95  # it covers this share of the screen...
 LAYER_FILL = 0.5  # ...and what it lists fills this share (not a toast or a floating button)...
 LAYER_SCROLL = 0.9  # ...and it holds no scroll view covering this share (that is a main screen, not a sheet)
+# ...and it starts with a backdrop: an empty Button or Other at its top-left, this share of the screen's width
+# and height (UIKit's dimming view, an RN Modal's backdrop Pressable), before any other listed content.
+BACKDROP_WIDTH = 0.95
+BACKDROP_HEIGHT = 0.4
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -269,6 +273,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     covering: list[tuple[int, Bar]] = []  # the bars iOS draws over content, by number
     hidden: list[tuple[int, int, tuple[float, float, float, float]]] = []  # number ranges a later layer covers, and where
     visits = [0]
+    numbered: dict[int, ET.Element] = {}  # each visited node by its number...
+    ends: dict[int, int] = {}  # ...and the number after its subtree
     screen_rect = (0.0, 0.0, *screen) if screen else None
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
@@ -283,6 +289,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             return  # nothing in this subtree is on screen
         number = visits[0]
         visits[0] += 1
+        numbered[number] = node
         cx, cy = x + w / 2, y + h / 2
         visible = w > 0 and h > 0 and left <= cx < right and top <= cy < bottom
         if kind == "Alert" and visible and tree.alert is None:
@@ -333,9 +340,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             start = visits[0]
             walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside, depth + 1)
             spans.append((start, visits[0]))
+        ends[number] = visits[0]
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
             for k, child in enumerate(node):
-                if k and spans[k][1] > spans[k][0] and _layer(child, spans[k], found, screen_rect):
+                if k and spans[k][1] > spans[k][0] and _layer(child, spans[k], found, screen_rect, numbered, ends):
                     hidden.append((spans[0][0], spans[k][0], _rect(child)))  # the earlier children, under its rect
 
     inf = math.inf
@@ -368,11 +376,28 @@ def _holds(rect: tuple[float, float, float, float], point: tuple[float, float]) 
     return rect[0] <= point[0] < rect[0] + rect[2] and rect[1] <= point[1] < rect[1] + rect[3]
 
 
+def _backdrop(span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
+              screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]) -> bool:
+    """Does the layer (its nodes numbered `span`) hold a backdrop before its other listed content? An empty
+    Button or Other (it may itself be listed, but has no listed descendants) at the top-left, nearly as wide
+    as the screen and a good part as tall."""
+    listed = [number for _, number, _ in found if span[0] <= number < span[1]]
+    for n in range(span[0], span[1]):
+        node = numbered.get(n)
+        if node is None or _kind(node) not in ("Button", "Other") or n not in ends:
+            continue
+        x, y, w, h = _rect(node)
+        if (x <= 1 and y <= 1 and w >= BACKDROP_WIDTH * screen[2] and h >= BACKDROP_HEIGHT * screen[3]
+                and not any(n < m < ends[n] for m in listed) and not any(m < n for m in listed)):
+            return True
+    return False
+
+
 def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
-           screen: tuple[float, float, float, float]) -> bool:
+           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]) -> bool:
     """Is this node a layer in front of its earlier siblings (a sheet or modal)? It covers nearly the whole
-    screen and what it lists fills half of it, and it isn't a main screen: no scroll view in it (or itself)
-    covers nine tenths of the screen. (Its depth is checked by the caller.)"""
+    screen and what it lists fills half of it, it isn't a main screen (no scroll view in it, or itself,
+    covers nine tenths of the screen), and it has a backdrop. (Its depth is checked by the caller.)"""
     area = screen[2] * screen[3]
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
         return False
@@ -380,7 +405,7 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
         if _kind(n) in CLIPPING and (o := _overlap(_rect(n), screen))[2] * o[3] >= LAYER_SCROLL * area:
             return False
     inner = [_overlap(e.rect, screen) for e, number, _ in found if span[0] < number < span[1]]
-    return _union_area(inner) >= LAYER_FILL * area
+    return _union_area(inner) >= LAYER_FILL * area and _backdrop(span, found, screen, numbered, ends)
 
 
 def elements(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:

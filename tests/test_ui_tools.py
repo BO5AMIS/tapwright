@@ -280,3 +280,42 @@ def test_the_visible_part_is_cut_by_every_bar_and_keeps_the_strip_nearest_the_ce
     tab = ui.Bar("TabBar", (0.0, 849.0, 430.0, 83.0), "tabbar @0,849 430x83")
     # y 80-910, centre 495 (inside the toolbar): the strip 530-849 is nearer than the larger 100-430
     assert ui.visible_part((20, 80, 390, 830), (nav, tool, tab), PHONE) == (20, 530, 390, 319)
+
+
+# ---- a layer needs a backdrop (Task 8a, follow-up 2) ----
+def test_a_header_and_a_full_height_body_three_levels_down_hide_nothing():
+    header = node("Other", 0, 0, 430, 120, children=[node("Button", 20, 50, 100, 44, "Menu")])
+    body = node("Other", 0, 0, 430, 932, children=cards())
+    assert labels(ui.elements(phone(nested(2, header, body)), PHONE)) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
+
+
+def test_a_dimming_view_then_a_dialog_hides_the_base_screen():
+    dim = node("Other", 0, 0, 430, 932)  # childless, unlisted
+    dialog = node("Other", 30, 150, 370, 650, children=[node("Cell", 30, 150, 370, 650, "Dialog body")])
+    items = ui.elements(phone(nested(1, base_screen(), node("Other", 0, 0, 430, 932, children=[dim, dialog]))), PHONE)
+    assert labels(items) == ["Dialog body"]
+
+
+def test_a_first_child_with_listed_children_is_content_not_a_backdrop():
+    top = node("Other", 0, 0, 430, 500, children=[node("Cell", 0, 0, 430, 500, "Top")])
+    layer = node("Other", 0, 0, 430, 932, children=[top, node("Cell", 0, 500, 430, 432, "Bottom")])
+    assert {"Add", "Card", "Top", "Bottom"} <= set(labels(ui.elements(phone(nested(1, base_screen(), layer)), PHONE)))
+
+
+def test_a_backdrop_after_the_layers_content_does_not_count():
+    layer = node("Other", 0, 0, 430, 932, children=[node("Cell", 0, 500, 430, 432, "Content"),
+                                                    node("Button", 0, 0, 430, 510, "Late backdrop")])
+    assert "Add" in labels(ui.elements(phone(nested(1, base_screen(), layer)), PHONE))
+
+
+def test_the_backdrop_thresholds_are_named_constants():
+    assert (ui.BACKDROP_WIDTH, ui.BACKDROP_HEIGHT) == (0.95, 0.4)
+
+
+def test_a_translucent_large_title_bar_over_a_scrolling_list_leaves_the_part_below_it_to_touch():
+    rows = [node("Cell", 0, 40 + 100 * i, 430, 100, f"Row {i}") for i in range(8)]
+    items = ui.elements(phone(node("ScrollView", 0, 0, 430, 932, children=rows),
+                              node("NavigationBar", 0, 0, 430, 100, "Title")), PHONE)
+    row = next(e for e in items if e.label == "Row 0")  # y 40-140: its centre, 90, is under the bar
+    assert [b.kind for b in row.covered_by] == ["NavigationBar"]
+    assert ui.visible_part(row.rect, row.covered_by, PHONE) == (0, 100, 430, 40)
