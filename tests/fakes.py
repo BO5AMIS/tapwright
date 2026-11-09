@@ -51,6 +51,8 @@ class FakeSession:
         self.not_set_up = False
         self.ensure_delay = 0.0
         self.scale_reads = 0
+        self.last_alert: ui.Alert | None = None
+        self.last_keyboard = False
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
         self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
         self.app: tuple[str, str] | None = ("Example", "com.example.app")
@@ -95,7 +97,7 @@ class FakeSession:
     async def snapshot(self, keyboard=False):
         self._record("snapshot")
         self.items = list(self.tree)
-        return Snapshot(ui.Tree(self.items), self.app, 3.0)
+        return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
 
     async def read_scale(self, refresh=False):
         self.scale_reads += 1

@@ -39,13 +39,52 @@ def test_the_key_is_role_and_identifier_else_role_and_label():
     assert refs(changes.carry_refs(old[:1], different_role)) == ["e2"]
 
 
-def test_duplicates_are_paired_by_distance_in_reading_order():
+def test_a_shared_key_keeps_its_refs_only_when_every_member_stayed_put():
     old = [el("e1", label="7", x=0, y=0), el("e2", label="7", x=0, y=100), el("e3", label="7", x=0, y=200)]
-    new = [el("e1", label="7", x=0, y=95), el("e2", label="7", x=0, y=205)]  # the first one went away
-    assert refs(changes.carry_refs(old, new)) == ["e2", "e3"]
-    both_near_the_first = [el("e1", label="7", x=0, y=5), el("e2", label="7", x=0, y=10)]
-    assert refs(changes.carry_refs(old, both_near_the_first)) == ["e1", "e2"]  # greedy: the first claims e1
+    same = [el("e1", label="7", x=0, y=0.5), el("e2", label="7", x=0, y=100), el("e3", label="7", x=0, y=200)]
+    assert refs(changes.carry_refs(old, same)) == ["e1", "e2", "e3"]
+    one_went = [el("e1", label="7", x=0, y=95), el("e2", label="7", x=0, y=205)]
+    assert refs(changes.carry_refs(old, one_went)) == ["e4", "e5"]  # the group changed size: all fresh
+    shifted = [el("e1", label="7", x=0, y=5), el("e2", label="7", x=0, y=105), el("e3", label="7", x=0, y=205)]
+    assert refs(changes.carry_refs(old, shifted)) == ["e4", "e5", "e6"]
     assert refs(changes.carry_refs([], [el("e1", label="7"), el("e2", label="7", y=60)])) == ["e1", "e2"]
+
+
+def test_scrolling_a_list_of_identical_buttons_never_hands_a_ref_to_another_row():
+    def edits(ys):
+        return [el(f"e{i + 1}", label="Edit", y=y) for i, y in enumerate(ys)]
+    old = edits([100, 200, 300])  # the buttons of rows A, B, C
+    new = changes.carry_refs(old, edits([100, 200, 300]))  # after a scroll: B, C, D sit where A, B, C were
+    assert refs(new) == ["e1", "e2", "e3"]  # nothing moved, so the answer can't tell: only the rows' labels do
+    rows_old = [el("e1", role="text", label="Row A", y=90), el("e2", label="Edit", y=100), el("e3", label="Edit", y=200),
+                el("e4", label="Edit", y=300)]
+    rows_new = [el("e1", role="text", label="Row B", y=90), el("e2", label="Edit", y=100),
+                el("e3", label="Edit", y=200), el("e4", label="Edit", y=300), el("e5", label="Edit", y=400)]
+    carried = changes.carry_refs(rows_old, rows_new)
+    assert refs(carried) == ["e5", "e6", "e7", "e8", "e9"]  # four became five Edits: every old Edit ref is gone
+    assert not {"e2", "e3", "e4"} & set(refs(carried))
+
+
+def test_a_unique_key_keeps_its_ref_however_far_it_moved_and_a_move_shows():
+    old = [el("e7", label="General", y=500, actions=("tap",)), el("e8", label="Other", y=600)]
+    new = [el("e1", label="General", y=100, actions=("tap",))]
+    carried = changes.carry_refs(old, new)
+    assert refs(carried) == ["e7"]
+    assert changes.diff(old, carried) == ['- button "Other"', '↕ e7 button "General" @0,100 100x40 [tap]']
+
+
+def test_a_value_only_element_is_keyed_by_its_value():
+    old = [el("e1", role="text", value="42", y=0)]
+    assert refs(changes.carry_refs(old, [el("e1", role="text", value="42", y=300)])) == ["e1"]
+    assert refs(changes.carry_refs(old, [el("e1", role="text", value="43")])) == ["e2"]
+
+
+def test_an_unlabeled_element_keeps_its_ref_only_if_it_stayed_put():
+    old = [el("e1", role="image", y=0)]
+    assert refs(changes.carry_refs(old, [el("e1", role="image", y=0.5)])) == ["e1"]
+    assert refs(changes.carry_refs(old, [el("e1", role="image", y=80)])) == ["e2"]
+    with_id = [el("e1", role="image", identifier="logo", y=0)]
+    assert refs(changes.carry_refs(with_id, [el("e1", role="image", identifier="logo", y=80)])) == ["e1"]
 
 
 def test_no_change_is_one_line():
@@ -202,3 +241,9 @@ def test_full_forces_the_full_list_even_for_an_empty_screen():
     assert up.full and up.lines == [] and up.items == []
     up = changes.update([el("e1", label="A")], [el("e1", label="A")], full=True)
     assert up.full and refs(up.items) == ["e1"]
+
+
+def test_a_forced_full_list_does_not_diff():
+    old = [el("e1", label="A")]
+    up = changes.update(old, [el("e1", label="A"), el("e2", label="B", y=50)], full=True)
+    assert up.full and refs(up.items) == ["e1", "e2"] and up.lines == []

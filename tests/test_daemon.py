@@ -916,3 +916,91 @@ def test_the_scale_is_read_once_per_connection_at_connect():
         assert d.session.scale_reads == 1
         await finish(stop, task)
     run(go)
+
+
+def _alert(title="Allow Notifications?", buttons=("Allow", "Don't Allow")):
+    from tapwright import ui
+    return ui.Alert(title, tuple(buttons), (50, 300, 300, 200))
+
+
+def test_an_alert_appearing_changing_and_going_heads_the_change_block():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.last_alert = _alert()
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", 'Alert: "Allow Notifications?" [Allow] [Don\'t Allow]']
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
+        d.session.last_alert = _alert("Allow Location?", ("OK",))
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[2] == 'Alert: "Allow Location?" [OK]'
+        d.session.last_alert = None
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "Alert: gone"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_keyboard_showing_and_hiding_heads_the_change_block_before_the_element_lines():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.last_keyboard = True
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 60, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:4] == ["Same screen. Changes:", "Keyboard: shown",
+                                               '+ e2 button "Done" id=done @10,60 100x40 [tap]']
+        d.session.last_keyboard = False
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:3] == ["Same screen. Changes:", "Keyboard: hidden"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_look_records_the_alert_and_keyboard_so_they_are_not_news_afterwards():
+    async def go():
+        d = make()
+        d.session.last_alert, d.session.last_keyboard = _alert(), True
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_silent_re_read_counts_as_a_read_for_the_next_target():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "7"), button("e2", "7", rect=(10, 60, 100, 40))]
+        d.control.clock.t += 5.0
+        with pytest.raises(Refused):  # read the screen, then refused: nothing was done
+            await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
+        view = d.control.client("a")
+        assert view.read_at == d.control.clock() and view.seen == d.control.generation
+        await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
+        assert d.session.calls.count("refresh") == 1  # the second target is inside LIVE_AGE of that read
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_silent_re_read_gives_an_element_that_came_back_its_old_ref():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})  # e1 = OK
+        d.session.tree = [button("e1", "Other", "other-button")]
+        d.control.clock.t += 5.0
+        await d.run_tool("a", "tap", {"target": {"id": "other-button"}, "look": False})  # OK is gone: Other = e2
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Other", "other-button", rect=(10, 60, 100, 40))]
+        d.control.clock.t += 5.0
+        await d.run_tool("a", "tap", {"target": {"id": "other-button"}, "look": False})
+        view = d.control.client("a")
+        assert [(e.ref, e.label) for e in view.items] == [("e1", "OK"), ("e2", "Other")]
+        await finish(stop, task)
+    run(go)

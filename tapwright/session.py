@@ -29,6 +29,8 @@ class Session:
         self.scale_read = False  # whether that read has happened, so an unknown scale isn't asked for again
         self.items: list[ui.Element] = []
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
+        self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
+        self.last_keyboard = False
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
 
     async def ensure(self) -> None:
@@ -119,6 +121,7 @@ class Session:
         tree = ui.read(source, self.screen, keyboard=keyboard)
         self.items = tree.items
         self.app = await self._app()
+        self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return Snapshot(tree, self.app, self.scale)
 
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):

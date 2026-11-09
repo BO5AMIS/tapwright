@@ -157,6 +157,17 @@ def _same_rect(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
     return all(abs(p - q) <= 1.0 for p, q in zip(a, b))
 
 
+def _duplicate(parent: Element, child: Element) -> bool:
+    """Is `child` only the parent listed a second time? Only when nothing would be lost: the same role,
+    text, state and rect (within a point), no identifier the parent lacks, no action it lacks. Elements
+    without text are never collapsed."""
+    return bool(child.text and (parent.role, parent.text, parent.value, parent.checked, parent.selected,
+                                parent.enabled) == (child.role, child.text, child.value, child.checked,
+                                                    child.selected, child.enabled)
+                and child.identifier in ("", parent.identifier) and set(child.actions) <= set(parent.actions)
+                and _same_rect(parent.rect, child.rect))
+
+
 def _clean(source: str) -> str:
     """The XML without characters XML 1.0 forbids."""
     def drop(m: re.Match) -> str:
@@ -212,13 +223,14 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
-            if parent and (parent.role, parent.label) == (role, label) and _same_rect(parent.rect, rect):
+            enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
+            checked = (value == "1") if role == "switch" else None
+            candidate = Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
+                                "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name)
+            if parent and _duplicate(parent, candidate):
                 pass  # the same thing as its parent, exposed twice (React Native does): list it once
             elif len(tree.items) < MAX_ELEMENTS:
-                enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
-                checked = (value == "1") if role == "switch" else None
-                listed = Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
-                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name)
+                listed = candidate
                 tree.items.append(listed)
             else:
                 tree.more += 1
@@ -240,6 +252,10 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
     return read(source, screen, keyboard).items
 
 
+def alert_line(alert: Alert) -> str:
+    return f"Alert: {json.dumps(alert.title, ensure_ascii=False)} " + " ".join(f"[{b}]" for b in alert.buttons)
+
+
 def describe(items: list[Element], screen: tuple[float, float], scale: float | None = None,
              app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
              more: int = 0) -> str:
@@ -250,8 +266,7 @@ def describe(items: list[Element], screen: tuple[float, float], scale: float | N
     if app:
         lines.append(f"App: {app[0]} ({app[1]})")
     if alert:
-        lines.append(f"Alert: {json.dumps(alert.title, ensure_ascii=False)} "
-                     + " ".join(f"[{b}]" for b in alert.buttons))
+        lines.append(alert_line(alert))
     if keyboard:
         lines.append("Keyboard: shown")
     lines.extend(e.line() for e in items)

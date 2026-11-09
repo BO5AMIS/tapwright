@@ -34,6 +34,8 @@ class ClientView:
     shown: list = field(default_factory=list)  # the list as of the agent's last answer: what changes are measured against
     top_ref: int = 0  # the highest ref number this agent was given: numbers are never reused until a full list
     app: tuple[str, str] | None = None  # (name, bundle id) of the foreground app at the last read
+    alert: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert at the last answer
+    keyboard: bool = False  # whether the keyboard was shown at the last answer
 
 
 class Controller:

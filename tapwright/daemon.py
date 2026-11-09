@@ -42,6 +42,20 @@ def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | Non
     return {"text": text, "image": base64.b64encode(image).decode() if image else None, "image_size": _size(image)}
 
 
+def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...]] | None:
+    return (alert.title, alert.buttons) if alert else None
+
+
+def _furniture(view, alert: ui.Alert | None, keyboard: bool) -> list[str]:
+    """What an alert or the keyboard did since the agent's last answer, as the first lines of a change block."""
+    lines = []
+    if _alert_key(alert) != view.alert:
+        lines.append(ui.alert_line(alert) if alert else "Alert: gone")
+    if keyboard != view.keyboard:
+        lines.append(f"Keyboard: {'shown' if keyboard else 'hidden'}")
+    return lines
+
+
 def _number(args: dict, key: str) -> float | None:
     """args[key] as a finite float; None when it isn't given. Anything else is bad_params."""
     value = args.get(key)
@@ -353,8 +367,11 @@ class Daemon:
                 # means the same element when it moved. The view's freshness doesn't change: a person's
                 # action still makes refs stale, and `view.shown` (what the agent was told) stays put.
                 await s.refresh()
-                view.items = changes.carry_refs(view.items, s.items, view.top_ref)
+                known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
+                held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
+                view.items = changes.carry_refs(held, s.items, view.top_ref)
                 view.top_ref = max(view.top_ref, changes.highest(view.items))
+                view.read_at = self.control.clock()  # the next target in the same window needn't read again
                 s.items = view.items
             s.last_point = None
             return await call(s, args)
@@ -381,6 +398,7 @@ class Daemon:
             text, image = await self.session.look(screenshot=screenshot)
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
+            view.alert, view.keyboard = _alert_key(self.session.last_alert), self.session.last_keyboard
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             return text, image
         try:
@@ -400,7 +418,8 @@ class Daemon:
         async def read():
             snap = await s.snapshot()
             app_changed = snap.app is not None and view.app is not None and snap.app != view.app
-            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full)
+            head = _furniture(view, snap.tree.alert, snap.tree.keyboard)
+            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full, head)
             return snap, up
         try:
             snap, up = await self._read(read)
@@ -410,6 +429,7 @@ class Daemon:
         covered = not snap.tree.items and bool(view.shown)  # the agent saw elements; now there are none
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
+        view.alert, view.keyboard = _alert_key(snap.tree.alert), snap.tree.keyboard
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)
         if up.full:

@@ -282,3 +282,38 @@ def test_dropped_duplicates_do_not_count_against_the_cap_or_the_numbers():
                  children=[node("StaticText", f"Row {i}", rect=(10, 10 + i, 100, 20))]) for i in range(3)]
     items = ui.elements(xml(node("Other", rect=(0, 0, 430, 932), children=kids)), SCREEN)
     assert [e.ref for e in items] == ["e1", "e2", "e3"]
+
+
+def _pair(parent: dict, child: dict) -> list[ui.Element]:
+    p = {"kind": "Button", "label": "Go", "rect": (10, 10, 100, 40)}
+    c = {"kind": "Button", "label": "Go", "rect": (10, 10, 100, 40)}
+    p.update(parent)
+    c.update(child)
+    inner = node(c.pop("kind"), c.pop("label"), **c)
+    return _wrapped(node(p.pop("kind"), p.pop("label"), children=[inner], **p))
+
+
+def test_a_child_is_collapsed_only_when_nothing_is_lost():
+    assert len(_pair({}, {})) == 1
+    assert len(_pair({"name": "go-id"}, {"name": "go-id"})) == 1
+    assert len(_pair({}, {"name": "child-id"})) == 2  # the child's id would be lost
+    assert len(_pair({"name": "a"}, {"name": "b"})) == 2
+    assert len(_pair({}, {"value": "x"})) == 2  # a different value
+    assert len(_pair({}, {"traits": "Selected"})) == 2
+    assert len(_pair({}, {"enabled": "false"})) == 2
+    assert len(_pair({"kind": "Switch", "value": "1"}, {"kind": "Switch", "value": "0"})) == 2  # another state
+    assert len(_pair({"kind": "StaticText"}, {"kind": "Button"})) == 2  # another role
+    assert len(_pair({}, {"label": "Stop"})) == 2
+    assert len(_pair({}, {"rect": (10, 10, 100, 44)})) == 2
+
+
+def test_the_child_with_an_action_the_parent_lacks_is_kept():
+    assert len(_pair({"kind": "Other", "name": "g"}, {"kind": "Other", "name": "g"})) == 1  # no actions either side
+    inner = node("Cell", "Row", rect=(10, 10, 100, 40))
+    parent = node("Cell", "Row", rect=(10, 10, 100, 40), children=[inner])
+    [e] = _wrapped(parent)
+    assert e.actions == ("tap",)
+
+
+def test_unlabeled_pairs_are_never_collapsed():
+    assert len(_pair({"kind": "Image", "label": ""}, {"kind": "Image", "label": ""})) == 2
