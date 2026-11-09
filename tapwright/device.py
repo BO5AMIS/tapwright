@@ -16,11 +16,24 @@ import time
 from . import store
 
 WDA_PORT = 8100
+MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
 
 class DeviceError(RuntimeError):
     pass
+
+
+class ConnectionLost(DeviceError):
+    """The tunnel or WebDriverAgent stopped answering: a dead line, not an error reply."""
+
+
+class PhoneNotFound(DeviceError):
+    """No phone on USB, and none paired on the local network."""
+
+
+class NotSetUp(DeviceError):
+    """WebDriverAgent isn't set up on this phone yet (`tapwright setup`)."""
 
 
 def run(fn, *args):
@@ -66,17 +79,17 @@ class Device:
             self.udid = self.udid or on_usb[0].serial
             self.via = "USB"
         else:
-            udid = self.udid
+            from pymobiledevice3.remote.tunnel_service import get_remote_pairing_tunnel_services
+            services = await get_remote_pairing_tunnel_services(udid=self.udid)
+            if not services:
+                raise PhoneNotFound("no phone on USB, and none paired on this network (same Wi-Fi, unlocked, "
+                                    "Developer Mode on, `tapwright setup` done over USB once)")
+            for extra in services[1:]:
+                await extra.close()
+            found = services[0]
 
             async def provider(serial, autopair, remotepairing_fallback=True):
-                from pymobiledevice3.remote.tunnel_service import get_remote_pairing_tunnel_services
-                services = await get_remote_pairing_tunnel_services(udid=udid)
-                if not services:
-                    raise DeviceError("no phone on USB, and none paired on this network (same Wi-Fi, unlocked, "
-                                      "Developer Mode on, `tapwright setup` done over USB once)")
-                for extra in services[1:]:
-                    await extra.close()
-                return services[0], None
+                return found, None
             userspace_tunnel._create_no_root_tunnel_provider = provider
             self.via = "local network"
         self.tunnel = userspace_tunnel.UserspaceRsdTunnel(serial=self.udid)
@@ -146,40 +159,67 @@ class Device:
             return False
 
     async def http(self, method: str, path: str, payload: dict | None = None, timeout: float = 30.0) -> dict:
-        """One request to WebDriverAgent, through the tunnel (works the same over USB and network)."""
-        return await asyncio.wait_for(self._http(method, path, payload), timeout)
+        """One request to WebDriverAgent, through the tunnel (works the same over USB and network).
+        Raises DeviceError for an error reply, ConnectionLost when nothing usable comes back."""
+        try:
+            return await asyncio.wait_for(self._http(method, path, payload), timeout)
+        except asyncio.TimeoutError:
+            raise ConnectionLost(f"WebDriverAgent didn't answer {method} {path} within {timeout:.0f} s") from None
 
     async def _http(self, method: str, path: str, payload: dict | None) -> dict:
         body = json.dumps(payload).encode() if payload is not None else b""
         head = [f"{method} {path} HTTP/1.1", "Host: localhost", "Connection: close",
                 f"Content-Length: {len(body)}"] + (["Content-Type: application/json"] if payload is not None else [])
-        conn = await self.rsd.create_service_connection(WDA_PORT)
         try:
-            await conn.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + body)
-            raw = b""
-            while b"\r\n\r\n" not in raw:
-                chunk = await conn.recv_any(65536)
-                if not chunk:
-                    break
-                raw += chunk
-            header, _, rest = raw.partition(b"\r\n\r\n")
-            lines = header.decode("iso-8859-1").split("\r\n")
-            status = int(lines[0].split(" ", 2)[1])
-            length = next((int(ln.split(":", 1)[1]) for ln in lines[1:] if ln.lower().startswith("content-length:")),
-                          None)
-            if length is not None:
-                if length > len(rest):
-                    rest += await conn.recvall(length - len(rest))
-            else:
-                while chunk := await conn.recv_any(65536):
-                    rest += chunk
+            conn = await self.rsd.create_service_connection(WDA_PORT)
+        except Exception as e:
+            raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
+        try:
+            status, rest = await self._exchange(conn, ("\r\n".join(head) + "\r\n\r\n").encode() + body)
+            data = json.loads(rest or b"{}")
+        except DeviceError:
+            raise
+        except Exception as e:  # reset, closed, or cut off mid-answer
+            raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
         finally:
-            await conn.close()
-        data = json.loads(rest or b"{}")
+            try:
+                await conn.close()
+            except Exception:
+                pass
         if status >= 400 or (isinstance(data.get("value"), dict) and data["value"].get("error")):
             err = data.get("value", {}) if isinstance(data.get("value"), dict) else {}
             raise DeviceError(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
         return data
+
+    @staticmethod
+    async def _exchange(conn, request: bytes) -> tuple[int, bytes]:
+        """Send one HTTP request; the status code and the body."""
+        await conn.sendall(request)
+        raw = b""
+        while b"\r\n\r\n" not in raw:
+            chunk = await conn.recv_any(65536)
+            if not chunk:
+                break
+            raw += chunk
+        if b"\r\n\r\n" not in raw:
+            raise ConnectionLost("WebDriverAgent closed the connection without an answer")
+        header, _, rest = raw.partition(b"\r\n\r\n")
+        lines = header.decode("iso-8859-1").split("\r\n")
+        status = int(lines[0].split(" ", 2)[1])
+        length = next((int(ln.split(":", 1)[1]) for ln in lines[1:] if ln.lower().startswith("content-length:")), None)
+        if length is not None:
+            if length > len(rest):
+                rest += await conn.recvall(length - len(rest))
+        else:
+            while chunk := await conn.recv_any(65536):
+                rest += chunk
+        return status, rest
+
+    async def open_stream(self):
+        """A connection to WebDriverAgent's screen stream, request sent; read it with recv_any."""
+        conn = await self.rsd.create_service_connection(MJPEG_PORT)
+        await conn.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        return conn
 
     # ---- apps ----
     async def user_apps(self) -> list[dict]:
