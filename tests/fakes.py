@@ -109,6 +109,7 @@ class FakeSession:
         self.typed: list = []  # (text, replace, submit, target) of each type_text
         self.holds: list = []  # the hold at the end of each swipe, in ms
         self.moves: list = []  # each scroll swipe's move, in ms (the raw swipe tool's aren't recorded)
+        self.offscreen: list = []  # elements the last read found outside the screen (tests set it)
 
     def _record(self, name: str) -> None:
         self.calls.append(name)

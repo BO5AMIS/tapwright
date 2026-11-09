@@ -3264,6 +3264,28 @@ def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
     run(go)
 
 
+def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "button", "Top", "lab-top", rect=(16, 300, 398, 48))])
+        d.session.offscreen = [el("", "button", "Bottom", "lab-bottom", rect=(16, 1500, 398, 48))]
+        for target in ({"id": "lab-bottom"}, {"label": "Bottom"}, {"text": "bott"}):
+            for force in (False, True):  # a touch can't reach it, forced or not
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": target, "force": force})
+                assert e.value.code == "not_actionable", target
+                assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
+                                        'scroll it into view first.')
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "nowhere"}})
+        assert e.value.code == "not_found"
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
 KEYBOARD = ui.Bar("Keyboard", (0.0, 614.0, 430.0, 318.0), "keyboard @0,614 430x318")
 
 

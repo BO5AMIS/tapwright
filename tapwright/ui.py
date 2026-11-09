@@ -9,7 +9,7 @@ Format and vocabulary: docs/AGENT-TOOLS.md §3.
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
@@ -30,6 +30,7 @@ INTERACTIVE = {"Button", "TextField", "SecureTextField", "TextView", "SearchFiel
 CONTAINERS = {"Application", "Window", "Other", "Group", "ScrollView", "Table", "CollectionView",
               "NavigationBar", "Toolbar", "StatusBar", "Keyboard", "WebView", "Sheet", "Alert"}
 MAX_ELEMENTS = 200
+MAX_OFFSCREEN = 300  # elements kept from outside the screen, for an `off_screen` answer instead of `not_found`
 TEXT_LIMIT = 80
 # Views that clip their children: what is scrolled out of them is still in the tree, but not on screen.
 CLIPPING = {"ScrollView", "Table", "CollectionView", "WebView"}
@@ -157,6 +158,8 @@ class Tree:
     top_inset: float | None = None  # where the bars along the top edge end (y), None when there are none
     bottom_inset: float | None = None  # how far the bars along the bottom edge reach up from it
     app: tuple[str, str] | None = None  # (label, bundle id) from the root Application, when it says
+    # what would be listed but lies outside the screen or its scroll view (a target naming one is off_screen)
+    offscreen: list[Element] = field(default_factory=list)
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -305,6 +308,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         traits = {t.strip() for t in (node.get("traits") or "").split(",")}
         left, top, right, bottom = clip
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
+            if screen_rect is not None and not in_keyboard:
+                _offscreen(node, tree.offscreen)
             return  # nothing in this subtree is on screen
         number = visits[0]
         visits[0] += 1
@@ -360,6 +365,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             else:
                 listed = candidate
                 found.append((listed, number, inside))
+        elif worth and not visible and screen_rect is not None and not in_keyboard and kind != "Alert":
+            if (plain := _plain(node)) is not None and len(tree.offscreen) < MAX_OFFSCREEN:
+                tree.offscreen.append(plain)  # its centre is past the screen or its scroll view's edge
         if kind in CLIPPING:
             clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
         spans = []  # the numbers each child's subtree used
@@ -415,6 +423,36 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         else:
             tree.bottom_inset = max(tree.bottom_inset or 0.0, reach)
     return tree
+
+
+def _plain(node: ET.Element) -> Element | None:
+    """The element a node would be listed as, without what only a visible one gets (covers, duplicate folding):
+    for the off-screen list. None when it wouldn't be listed."""
+    kind = _kind(node)
+    _, _, w, h = rect = _rect(node)
+    label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
+    traits = {t.strip() for t in (node.get("traits") or "").split(",")}
+    identifier = "" if name == label else name
+    role = "header" if kind == "StaticText" and "Header" in traits else ROLES.get(kind, kind.lower())
+    worth = role == "scroll" or ((kind in INTERACTIVE or label or value or identifier)
+                                 and not (kind in CONTAINERS and not identifier))
+    if not worth or w <= 0 or h <= 0 or kind in ("Alert", "Keyboard"):
+        return None
+    enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
+    return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
+                   (value == "1") if role == "switch" else None, ROLE_ACTIONS.get(role, ()), kind, False, False, name,
+                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")))
+
+
+def _offscreen(node: ET.Element, out: list[Element]) -> None:
+    """Add a subtree that lies wholly outside the screen (or its scroll view) to `out`, in reading order, up to
+    MAX_OFFSCREEN. A keyboard's keys are never targets: its subtree is skipped (a parked one sits below the screen)."""
+    if len(out) >= MAX_OFFSCREEN or _kind(node) == "Keyboard":
+        return
+    if (plain := _plain(node)) is not None:
+        out.append(plain)
+    for child in node:
+        _offscreen(child, out)
 
 
 def _keyboard_view(keyboard: ET.Element, parents: dict[ET.Element, ET.Element],

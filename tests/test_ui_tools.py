@@ -395,6 +395,22 @@ def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
 
 
+def test_elements_past_the_screen_are_kept_apart_as_off_screen():
+    """React Native renders a whole scroll view: the lab's Bottom button is in the tree below the screen. It isn't
+    listed, but a target naming it must hear off_screen, not not_found (AGENT-TOOLS v1.2 reasons)."""
+    content = node("Other", 0, 0, 430, 2000, children=[
+        node("Button", 16, 300, 398, 48, "Top", name="lab-top"),
+        node("Button", 16, 1500, 398, 48, "Bottom", name="lab-bottom"),
+        node("Other", 16, 1600, 398, 100, children=[node("Button", 16, 1610, 398, 48, "Deeper", name="lab-deeper")])])
+    scroll = node("ScrollView", 0, 0, 430, 932, children=[content])
+    parked = node("Other", 0, 932, 430, 243, children=[node("Keyboard", 0, 932, 430, 243,
+                                                            children=[node("Key", 4, 940, 43, 56, "q")])])
+    tree = ui.read(under_window(scroll, parked), PHONE)
+    assert "lab-top" in {e.identifier for e in tree.items}
+    assert [e.identifier for e in tree.offscreen] == ["lab-bottom", "lab-deeper"]  # no keys from a parked keyboard
+    assert tree.offscreen[0].line(ref=False, actions=False) == 'button "Bottom" id=lab-bottom @16,1500 398x48'
+
+
 def test_a_shown_keyboard_is_a_bottom_inset_so_swipes_stay_above_it():
     """A scroll with the keyboard up swiped on the keys and moved nothing: the runner's lab reset failed (2026-11-09)."""
     keys = node("Other", 0, 631, 430, 243, children=[node("Keyboard", 0, 631, 430, 243)])

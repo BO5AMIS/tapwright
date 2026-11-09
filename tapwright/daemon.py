@@ -526,6 +526,7 @@ class Daemon:
                     await self._silent_read(view)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
                 self._refuse_behind_alert(view, force=False)  # an alert hides the app's elements: say so, not "not found"
+                self._refuse_off_screen(target)
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
@@ -766,6 +767,17 @@ class Daemon:
             alert = " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
+
+    def _refuse_off_screen(self, target: ui.Target) -> None:
+        """A target on no listed element but on one the last read found past the screen (or its scroll view's
+        edge): `off_screen`, not `not_found`. A touch can't reach it, so `force` doesn't either."""
+        try:
+            hit = ui.resolve(getattr(self.session, "offscreen", []), dataclasses.replace(target, index=0))
+        except Refused:
+            return
+        if isinstance(hit, ui.Element):
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
+                                            "scroll it into view first.")
 
     @staticmethod
     def _refuse_disabled(element: ui.Element) -> None:

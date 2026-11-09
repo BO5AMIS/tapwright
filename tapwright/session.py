@@ -46,6 +46,7 @@ class Session:
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
+        self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -74,7 +75,7 @@ class Session:
         self.sid = None
         self.scale = self.app = None
         self.scale_read = False
-        self.items = []
+        self.items, self.offscreen = [], []
         self.typed_into = None
         self.last_point = None
 
@@ -172,7 +173,7 @@ class Session:
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
         """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
         request a tree-only read leaves out."""
-        self.items = tree.items
+        self.items, self.offscreen = tree.items, tree.offscreen
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
@@ -207,7 +208,7 @@ class Session:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
         tree = ui.read(source, self.screen)
-        self.items = tree.items
+        self.items, self.offscreen = tree.items, tree.offscreen
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return tree
