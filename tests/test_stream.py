@@ -1,10 +1,52 @@
-"""The screen stream without a phone: parsing, newest-frame-wins, the on-demand pump."""
+"""The screen stream without a phone: parsing, newest-frame-wins, the on-demand pump, alike pictures."""
 import asyncio
+import io
 import random
 
-from tapwright.stream import PRESETS, FrameHub, MjpegParser, StreamPump
+from PIL import Image
+
+from tapwright.stream import PRESETS, Frame, FrameHub, MjpegParser, StreamPump, alike
 
 JPEGS = [b"\xff\xd8" + bytes([i]) * (1000 + 37 * i) + b"\xff\xd9" for i in range(5)]
+
+
+def picture(spot: int = 0, square: bool = False, grey: int = 255, size=(160, 320)) -> bytes:
+    """A JPEG like a stream frame: plain `grey`, with a 3x3 px spot `spot` levels darker (the faint shimmer
+    iOS 26 draws on a still screen), or a 16x16 black square (something drawn: a glyph, an icon)."""
+    im = Image.new("L", size, grey)
+    if spot:
+        im.paste(grey - spot, (40, 40, 43, 43))
+    if square:
+        im.paste(0, (80, 160, 96, 176))
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def frame(jpeg: bytes) -> Frame:
+    return Frame(1, 0, jpeg)
+
+
+def test_a_faint_flicker_is_the_same_picture():
+    """On iOS 26 a still screen is rarely byte-identical twice: a few pixels shimmer (2026-11-09, the lab)."""
+    assert alike(frame(picture()), frame(picture(spot=85)))
+
+
+def test_something_drawn_is_another_picture():
+    assert not alike(frame(picture()), frame(picture(square=True)))
+
+
+def test_a_turned_screen_is_another_picture():
+    assert not alike(frame(picture()), frame(picture(size=(320, 160))))
+
+
+def test_frames_that_are_no_pictures_compare_by_their_bytes():
+    assert alike(frame(b"A"), frame(b"A")) and not alike(frame(b"A"), frame(b"B"))
+    assert not alike(frame(b"A"), frame(picture()))
+
+
+def test_no_frame_is_like_no_other():
+    assert not alike(None, frame(b"A")) and not alike(frame(b"A"), None) and not alike(None, None)
 
 
 def mjpeg(*jpegs: bytes) -> bytes:

@@ -7,6 +7,10 @@ import math
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .stream import Frame
 
 PERSON_IDLE_S = 3.0  # a person counts as driving until idle this long
 AGENT_MAX_WAIT_S = 30.0  # an agent action waits at most this long for a person to finish
@@ -38,7 +42,7 @@ class ClientView:
     keyboard: bool = False  # whether the keyboard was shown at the last answer
     alert_now: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert on the newest read of any kind
     read_frame: bytes | None = None  # the stream frame at that moment: the picture that matches the list
-    read_mark: tuple[int, bytes | None] = (0, None)  # (seq, SHA-1) of the newest stream frame when `items` was read
+    read_mark: tuple[int, "Frame | None"] = (0, None)  # (seq, the newest stream frame) when `items` was read
 
 
 class Controller:

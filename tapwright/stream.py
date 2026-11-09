@@ -2,11 +2,15 @@
 and the newest frame for every viewer. A viewer that falls behind skips frames; nothing
 queues up."""
 import asyncio
+import io
 import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import cached_property
+
+from PIL import Image, ImageChops
 
 # WebDriverAgent settings per quality preset (POST /session/{sid}/appium/settings).
 # Frames go out as the phone captures them: full size, portrait. Resizing or rotating them on
@@ -27,12 +31,42 @@ NO_IDLE_WAIT = {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}
 
 _LENGTH = re.compile(rb"content-length:[ \t]*(\d+)\r\n", re.IGNORECASE)
 
+# Two frames show the same picture when, at 1/ALIKE_SCALE size in grey, no spot differs by more than
+# ALIKE_TOLERANCE levels. On iOS 26 a still screen is rarely byte-identical twice: a few pixels shimmer, up to
+# 14 levels at that size, while anything drawn (a glyph, an icon, a moved row) differs by 100 or more (the lab,
+# an iPhone 14 Pro Max, 2026-11-09). Decoding at that size costs about 2.5 ms a frame.
+ALIKE_SCALE = 8
+ALIKE_TOLERANCE = 24
+
 
 @dataclass(frozen=True)
 class Frame:
     seq: int
     at: int  # epoch ms on this computer's clock, when the frame arrived (WDA gives no capture time)
     jpeg: bytes
+
+    @cached_property
+    def thumb(self) -> Image.Image | None:
+        """The picture at 1/ALIKE_SCALE size in grey, decoded once; None when it is no picture."""
+        try:
+            im = Image.open(io.BytesIO(self.jpeg))
+            im.draft("L", (im.width // ALIKE_SCALE, im.height // ALIKE_SCALE))
+            return im.convert("L")
+        except (OSError, ValueError, Image.DecompressionBombError):
+            return None
+
+
+def alike(a: Frame | None, b: Frame | None) -> bool:
+    """Do two frames show the same picture (see ALIKE_TOLERANCE)? Frames that are no pictures are alike only
+    when their bytes are; no frame is like no other."""
+    if a is None or b is None:
+        return False
+    if a.jpeg == b.jpeg:
+        return True
+    x, y = a.thumb, b.thumb
+    if x is None or y is None or x.size != y.size:
+        return False
+    return ImageChops.difference(x, y).getextrema()[1] <= ALIKE_TOLERANCE
 
 
 class MjpegParser:

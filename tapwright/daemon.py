@@ -3,7 +3,6 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
-import hashlib
 import io
 import json
 import dataclasses
@@ -21,7 +20,7 @@ from . import shot as shotlib
 from .control import Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
 from .session import Snapshot
-from .stream import NO_IDLE_WAIT, PRESETS, FrameHub, StreamPump
+from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, StreamPump, alike
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
@@ -558,7 +557,7 @@ class Daemon:
             raise Refused("not_actionable", "no_action: nothing changed after back.")
         # a toggle that changed nothing on the stream is not trusted: the tree says whether the switch flipped
         if (not done.changed and name != "toggle" and not (full[0] or view.moved)
-                and mark[1] == view.read_mark[1]):
+                and (mark[1] is view.read_mark[1] or alike(mark[1], view.read_mark[1]))):
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
@@ -742,7 +741,7 @@ class Daemon:
                 break
             await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
             settled = self._mark()[1]
-            if settled is not None and settled == previous:
+            if alike(settled, previous):
                 break  # the swipe left the screen as the one before did: the end of the list
             previous = settled  # (with no stream there is nothing to compare: every swipe is made)
             if loop.time() - began >= SCROLL_CAP:
@@ -887,7 +886,7 @@ class Daemon:
         view.top_ref = max(view.top_ref, changes.highest(view.items))
         view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
         s.items = view.items
-        return done.capped or mark[1] is None or self._mark()[1] != mark[1]
+        return done.capped or mark[1] is None or not alike(self._mark()[1], mark[1])
 
     @staticmethod
     def _missing(items: list[ui.Element], target: ui.Target) -> bool:
@@ -910,9 +909,10 @@ class Daemon:
         phone call returned: only later frames count, since earlier ones may predate the effect. WebDriverAgent
         streams continuously even when nothing changes, so a silence is a stall, not stillness.
 
-        Still: at least 2 frames with one digest spanning `still` seconds (at least 2.5 median frame gaps,
-        so a slow stream isn't called still too soon). `changed`: a frame differs from the one at the start
-        of the action (`since`, its SHA-1 from _mark; None means there was no frame, so any frame counts).
+        Still: at least 2 frames alike (stream.alike) spanning `still` seconds (at least 2.5 median frame gaps,
+        so a slow stream isn't called still too soon). Each frame is compared with the first of its run, so a
+        slow fade, close to the last frame every time, is not still. `changed`: a frame is unlike the one at the
+        start of the action (`since`, from _mark; None means there was no frame, so any frame counts).
         `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
@@ -922,7 +922,7 @@ class Daemon:
         loop = asyncio.get_running_loop()
         began = loop.time()
         deadline = began + cap
-        seq, differs, run, run_start, previous = after_seq, False, 0, began, None
+        seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
             wait = min(left, self.settle_first_frame if first else stall)
@@ -935,10 +935,11 @@ class Daemon:
                     await asyncio.sleep(max(0.0, self.settle_fallback - (now - began)))
                 return Settled(loop.time() - began, True, False)  # or a stall
             seq = frame.seq
-            digest = hashlib.sha1(frame.jpeg).digest()
-            differs = differs or digest != since
-            run, run_start = (run + 1, run_start) if digest == previous else (1, now)
-            previous = digest
+            differs = differs or not alike(frame, since)
+            if alike(frame, first_of_run):
+                run += 1
+            else:
+                run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
                 if differs or (seq - after_seq >= 3 and now - began >= self.settle_quiet):
                     return Settled(now - began, differs, False)
@@ -952,10 +953,10 @@ class Daemon:
         fresh = frame is not None and self.hub.now_ms() - frame.at <= self.shot_fresh * 1000
         view.read_frame = frame.jpeg if fresh else None
 
-    def _mark(self) -> tuple[int, bytes | None]:
-        """(seq, SHA-1 of the newest frame): where the stream stood at this moment."""
+    def _mark(self) -> tuple[int, Frame | None]:
+        """(seq, the newest frame): where the stream stood at this moment."""
         frame = self.hub.latest
-        return (frame.seq, hashlib.sha1(frame.jpeg).digest()) if frame else (0, None)
+        return (frame.seq, frame) if frame else (0, None)
 
     def _shot_args(self, args: dict, *, default: bool, custom: bool) -> tuple[int, bool] | None:
         """(width, labels) when a screenshot is wanted, else None. Only `look` takes width and labels;
@@ -1069,7 +1070,7 @@ class Daemon:
         frame, (_, was) = self.hub.latest, view.read_mark
         if frame is None or was is None or self.hub.now_ms() - frame.at > FRESH_FRAME * 1000:
             return False
-        return hashlib.sha1(frame.jpeg).digest() == was
+        return alike(frame, was)
 
     async def _read(self, fn):
         """A read through the queue; after a dropped line, once more when reconnected."""

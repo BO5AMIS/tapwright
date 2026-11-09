@@ -1,7 +1,6 @@
 """The daemon's phone side with a fake session: connecting, tools, control rules, viewer input."""
 import asyncio
 import base64
-import hashlib
 import io
 import re
 
@@ -14,7 +13,7 @@ from tapwright import ui
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
 from tapwright.device import ConnectionLost, DeviceError
-from tapwright.stream import NO_IDLE_WAIT, PRESETS
+from tapwright.stream import NO_IDLE_WAIT, PRESETS, Frame
 
 SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
 
@@ -1047,8 +1046,49 @@ def test_mark_is_where_the_stream_stands():
         d = make()
         assert d._mark() == (0, None)
         d.hub.publish(b"A")
-        assert d._mark() == (1, hashlib.sha1(b"A").digest())
+        assert d._mark() == (1, d.hub.latest)
     run(go)
+
+
+def grey_jpeg(grey: int = 255, spot: int = 0) -> bytes:
+    """A plain grey frame, with a 3x3 px spot `spot` levels darker: iOS 26's faint shimmer on a still screen."""
+    im = Image.new("L", (160, 320), grey)
+    if spot:
+        im.paste(grey - spot, (40, 40, 43, 43))
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def test_a_faint_flicker_does_not_keep_a_still_screen_from_settling():
+    """The lab on iOS 26 shimmered in a few pixels: no two frames were byte-identical for long, so every
+    settle ran to its cap and `scroll to: start` swiped for 12 s at the top (2026-11-09)."""
+    async def go():
+        d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
+        on_loop_clock(d)
+        calm, shimmer = grey_jpeg(), grey_jpeg(spot=85)
+        d.hub.publish(calm)
+        seq, since = d._mark()
+        feeder = FrameFeeder(d.hub).start([shimmer, calm] * 200)
+        seconds, changed = await d.settle(seq, cap=2.0, since=since)
+        await feeder.stop()
+        assert not changed and seconds == pytest.approx(daemon_module.MIN_QUIET, abs=0.02)
+    run_virtual(go)
+
+
+def test_a_slow_fade_is_not_still_though_each_frame_is_close_to_the_last():
+    async def go():
+        d = make(settle_still=daemon_module.STILL)
+        on_loop_clock(d)
+        d.hub.publish(grey_jpeg(250))
+        seq, since = d._mark()
+        fade = [grey_jpeg(250 - 6 * i) for i in range(1, 41)]  # 6 levels a frame, 160 ms in all
+        feeder = FrameFeeder(d.hub).start(fade, then=fade[-1])
+        seconds, changed = await d.settle(seq, cap=2.0, since=since)
+        await feeder.stop()
+        # still once the fade is within the tolerance of its end (step 36, 0.14 s); frame-to-frame it'd be 0.1 s
+        assert changed and seconds >= 0.14 + daemon_module.STILL - 0.01
+    run_virtual(go)
 
 
 def test_settle_ends_once_the_picture_is_still():
@@ -1309,8 +1349,9 @@ def on_loop_clock(d: Daemon) -> None:
     d.hub._mono = d.hub._clock = loop.time
 
 
-def sha(frame: bytes) -> bytes:
-    return hashlib.sha1(frame).digest()
+def sha(frame: bytes) -> Frame:
+    """The mark of a picture: what `since` compares against."""
+    return Frame(0, 0, frame)
 
 
 def test_frames_from_before_the_call_returned_do_not_count():
