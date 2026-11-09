@@ -4,7 +4,9 @@ Shared by Tapline and Tapwright. Version 1, agreed by both projects and approved
 on 2026-11-09. Version 1.1 (2026-11-09) adds the `not_actionable` reason `no_action`, also
 agreed by both projects and approved by the user. Version 1.2 (2026-11-09) spells out the
 exact answer and message wording that both tools found while building and cross-checking on a
-real phone, also agreed by both projects and approved by the user. Each repo keeps an identical copy in `docs/`. It changes only by agreement
+real phone, also agreed by both projects and approved by the user. Version 1.3 (2026-11-09) adds
+what the second cross-check found: duplicate folding, bidi marks, `ambiguous` wording, inputs'
+actions, touching the visible part, and the cap note. Both projects agree on it, and the user approved it on 2026-11-09. Each repo keeps an identical copy in `docs/`. It changes only by agreement
 between the two projects and the user's approval, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
 
@@ -94,6 +96,9 @@ Settled in 0.31 s.
 - **The baseline** is the agent's list as of its last answer: the last `look`, or the list
   carried through every action answer since. It's never just the last full list. Scroll
   down and then back up gives `↕` both times.
+- **The change block is a literal diff,** including the element just acted on: typing
+  "eggs" into a field that held "egg" shows `~ … value="eggs" … (was "egg")`. Typing the
+  same text again is `No visible change.`.
 - **The full list replaces the changes** when:
   - the screen or route changed;
   - more than max(8, half the elements) changed;
@@ -146,8 +151,12 @@ Network: 2 requests in flight
   - Text is clipped to 80 characters, with whitespace flattened, JSON-quoted.
 - **`label="…"`** is added only when the label differs from the text, ignoring case and
   whitespace. On Tapwright the label *is* the text, so it never appears.
-- **Duplicates:** an element with the same role, the same quoted text and the same rect
-  (within 1 pt) as its nearest listed ancestor is listed once.
+- **Duplicates:** when an element and its nearest listed ancestor have the same quoted text
+  and the same rect (within 1 pt), only one is listed. It's the one that takes an action;
+  if both or neither do, the ancestor. That holds even when their roles differ: a labelled
+  wrapper around an input lists only `input` (WebDriverAgent shows it that way too).
+- **Invisible direction marks** (U+200E, U+200F, U+202A–U+202E, U+2066–U+2069) are removed
+  from text, label and value, before matching and before display.
 - **`id=` is always shown when present.** **Change Tapline:** `testID=` becomes `id=`.
 - **`value=` is shown when not empty.** **Change Tapwright:** today it's shown only when it
   differs from the label.
@@ -176,7 +185,8 @@ Network: 2 requests in flight
 - **`[actions]`** lists what the agent can do with the element: `tap`, `longPress`, `type`,
   `toggle`, `scroll`. Tapline reads them from the handlers. Tapwright infers them from the
   role: `button`, `link`, `cell` and `tab` get `tap`; `input` gets `tap, type`; `switch`
-  gets `toggle`; `scroll` gets `scroll`.
+  gets `toggle`; `scroll` gets `scroll`. An input always lists `tap, type` on both tools,
+  because a tap focuses it, as a finger's does.
 - **Selection state:** `selected` and `checked=` come where the tool knows them. Tapwright
   reads them from the value or the selected flag.
 - **The list holds up to 200 elements,** then `(+N more below; scroll)`.
@@ -213,11 +223,26 @@ text items.
 ## 4. Errors
 
 - An error is MCP `isError: true` with one text item: `Error <code>: <message>`. The message
-  says what to do next. `ambiguous` adds `Candidates:` lines, each an element line.
+  says what to do next. `ambiguous` reads, exactly:
+  ```
+  Error ambiguous: 2 elements match text "Nutrition".
+  Candidates:
+    e32 text "Nutrition" @76,730 263x23
+    e46 tab "Nutrition" [tap]
+  Retry with one of the refs, or add "index" (0-based).
+  ```
+  Up to 5 candidates are listed, each indented two spaces. If there are more, one further
+  indented line follows: `  (+N more; use a ref or "index")`.
 - For `not_actionable`, the reason is the message's first word, so scripts can read it
   without a new field: `disabled`, `off_screen`, `covered`, `under_tab_bar`,
   `behind_alert` or `no_action`. For example:
   `Error not_actionable: covered: e47 button "Save" is covered by e45 button "Cancel"; close it or pass force: true.`
+- **Touch the visible part.** Before refusing with `covered` or `under_tab_bar`, a tool clips
+  the element to the screen and to what's outside the bars and covers drawn over it. If the part
+  left is at least 10 pt high and 10 pt wide, the tool touches its centre (Tapline hit-tests
+  it), as a person would. Example: a card at y 808–898 with the tab bar from 849 is tapped at
+  y ≈ 828. The tool refuses only when that part is smaller. `force: true` acts at the
+  element's own centre.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;
@@ -313,6 +338,10 @@ Tapwright.`
     can be still while pixels move. That's fine for an element list.
   - **Tapwright** compares the stream's frames on the PC. When the picture didn't change, it
     can answer `No visible change.` without reading the tree again.
+- **The cap:** when the settle ends at the tool's cap with the screen still changing, the
+  answer ends with `Note: the screen was still changing after <cap> s (an animation or video); positions may be mid-change.`
+  `<cap>` is the tool's own cap: 2 s on both, and 4 s on Tapwright after a launch or
+  `open_url`.
 - **Timeouts:** each tool answers within its own limit or returns `timeout`, never hangs.
   The numbers belong in QUALITY-BAR.md, including on 3G.
 - **A person driving:** agents wait, as VIEWER-PROTOCOL "Control" says. They wait without an

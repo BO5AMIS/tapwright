@@ -196,14 +196,15 @@ def _same_rect(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
 
 
 def _duplicate(parent: Element, child: Element) -> bool:
-    """Is `child` only the parent listed a second time? Only when nothing would be lost: the same role,
-    text, state and rect (within a point), no identifier the parent lacks, no action it lacks. Elements
-    without text are never collapsed."""
-    return bool(child.text and (parent.role, parent.text, parent.value, parent.checked, parent.selected,
-                                parent.enabled) == (child.role, child.text, child.value, child.checked,
-                                                    child.selected, child.enabled)
-                and child.identifier in ("", parent.identifier) and set(child.actions) <= set(parent.actions)
-                and _same_rect(parent.rect, child.rect))
+    """Is `child` only the parent listed a second time? The same quoted text and rect (within a point), whatever
+    the roles. Identifier, value and checked only keep both when both carry one and they differ; selected and
+    enabled always compare. Elements without text are never collapsed."""
+    def clash(a: object, b: object) -> bool:
+        return a not in ("", None) and b not in ("", None) and a != b
+    return bool(child.text and parent.text == child.text and _same_rect(parent.rect, child.rect)
+                and (parent.selected, parent.enabled) == (child.selected, child.enabled)
+                and not clash(parent.identifier, child.identifier) and not clash(parent.value, child.value)
+                and not clash(parent.checked, child.checked))
 
 
 def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, float, float, float]:
@@ -341,7 +342,12 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
                                 kind == "SecureTextField")
             if parent and _duplicate(parent, candidate):
-                pass  # the same thing as its parent, exposed twice (React Native does): list it once
+                # the same thing as its parent, exposed twice (React Native does): list it once, the one
+                # that takes an action; both or neither, the ancestor
+                if candidate.actions and not parent.actions:
+                    i = next(i for i, f in enumerate(found) if f[0] is parent)
+                    found[i] = (candidate, found[i][1], found[i][2])  # in the parent's place and span
+                    listed = candidate
             else:
                 listed = candidate
                 found.append((listed, number, inside))
@@ -608,25 +614,24 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         for e in items:
             if e.ref == target.ref:
                 return e
-        if not items:
-            raise Refused("not_found", f"no {target.ref}: you haven't looked yet; look first")
-        raise Refused("not_found", f"{target.ref} is no longer on the screen; look again")
+        raise Refused("not_found", f"{target.ref} isn't on screen any more; look again.")
     if target.id is not None:
         # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
         hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
-        what, hint = f'id "{target.id}"', 'look for its id, or use {"label": …} or {"text": …}'
+        what, miss = f'id "{target.id}"', f'nothing on screen has id "{target.id}"; look, then pick another target.'
     elif target.label is not None:
         hits = _without_nested([e for e in items if _norm(e.label) == _norm(target.label)])
-        what, hint = f'label "{target.label}"', 'use {"text": …} for a partial match, or look'
+        what = f'label "{target.label}"'
+        miss = f'nothing on screen has label "{target.label}"; use {{text}} for a partial match, or look.'
     else:
         want = _norm(target.text)
         hits = [e for e in items if _norm(e.label) == want or _norm(e.value) == want]
         if not hits:
             hits = [e for e in items if want in _norm(e.label) or want in _norm(e.value)]
         hits = _without_nested(hits)
-        what, hint = f'text "{target.text}"', "scroll if it may be off screen, or look"
+        what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     if not hits:
-        raise Refused("not_found", f"nothing on screen has {what}; {hint}")
+        raise Refused("not_found", miss)
     if target.index is not None:
         if target.index >= len(hits):
             raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "
@@ -634,10 +639,9 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         return hits[target.index]
     if len(hits) > 1:
         shown = hits[:MAX_CANDIDATES]
-        raise Refused("ambiguous", f"{len(hits)} elements match {what}"
-                      + (f", showing {len(shown)}" if len(hits) > len(shown) else "")
-                      + "; use one of their refs, or add index (0 is the first). Candidates:\n"
-                      + "\n".join([*(e.line() for e in shown), *more_candidates(len(hits), len(shown))]))
+        raise Refused("ambiguous", f"{len(hits)} elements match {what}.\nCandidates:\n"
+                      + "\n".join([*(f"  {e.line()}" for e in shown), *more_candidates(len(hits), len(shown)),
+                                   'Retry with one of the refs, or add "index" (0-based).']))
     return hits[0]
 
 

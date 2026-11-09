@@ -691,7 +691,8 @@ class Daemon:
                 raise Refused("not_found", "No input on screen")
             if len(inputs) > 1:
                 shown = "\n".join([*(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES]),
-                                   *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES)])
+                                   *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES),
+                                   'Retry with one of the refs, or add "index" (0-based).'])
                 raise Refused("ambiguous", f"{len(inputs)} inputs on screen; pass a target to pick one:\n"
                                            f"Candidates:\n{shown}")
             field = inputs[0]

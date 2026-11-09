@@ -523,7 +523,9 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
         await d.run_tool("a", "look", {"screenshot": False})
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
-        assert e.value.code == "ambiguous" and str(e.value).endswith('e2 button "7" id=seven-again @10,60 100x40 [tap]')
+        assert e.value.code == "ambiguous" and str(e.value) == (
+            '2 elements match label "7".\nCandidates:\n  e1 button "7" @10,10 100x40 [tap]\n'
+            '  e2 button "7" id=seven-again @10,60 100x40 [tap]\nRetry with one of the refs, or add "index" (0-based).')
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
         assert r["text"].startswith('Tapped e2 button "7" id=seven-again')
@@ -661,7 +663,7 @@ def test_a_ref_whose_element_is_gone_after_a_re_read_is_not_found():
         await d.run_tool("a", "tap", {"target": {"id": "other-button"}, "look": False})
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert e.value.code == "not_found" and str(e.value).startswith("e1 is no longer on the screen; look again")
+        assert e.value.code == "not_found" and str(e.value) == "e1 isn't on screen any more; look again."
         await finish(stop, task)
     run(go)
 
@@ -736,7 +738,7 @@ def test_after_a_re_read_the_lines_carry_the_agents_refs():
         d.control.clock.t += 5.0
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
-        assert e.value.code == "ambiguous" and 'e2 button "7"' in str(e.value) and "use one of their refs" in str(e.value)
+        assert e.value.code == "ambiguous" and 'e2 button "7"' in str(e.value) and "Retry with one of the refs" in str(e.value)
         assert 'e3 button "7"' in str(e.value)  # e1 (OK) is gone; the new elements count on from it
         r = await d.run_tool("a", "tap", {"target": {"ref": "e3"}, "look": False})  # the refs in the candidates work
         assert r["text"].startswith('Tapped e3 button "7"')
@@ -2291,6 +2293,24 @@ def test_type_text_into_a_target_replaces_by_default_and_reads_the_value_back():
     run(go)
 
 
+def test_the_change_block_is_a_literal_diff_that_includes_the_field_typed_into():
+    """v1.3: "eggs" into a field holding "egg" shows the field's own `~` line; the same text again changes nothing."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Food", value="egg")])
+        d.session.tree = [inp("e1", "Food", value="eggs")]
+        r = await d.run_tool("a", "type_text", {"text": "eggs", "target": {"ref": "e1"}})
+        lines = r["text"].splitlines()
+        assert lines[0].endswith('Value is now "eggs".')
+        assert lines[1] == "Same screen. Changes:"
+        assert lines[2] == '~ e1 input "Food" value="eggs" @10,100 300x44 [tap, type] (was "egg")'
+        r = await d.run_tool("a", "type_text", {"text": "eggs", "target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:3] == ["Same screen. Changes:", "No visible change."]
+        await finish(stop, task)
+    run(go)
+
+
 def test_type_text_passes_replace_false_and_submit_on():
     async def go():
         d = make()
@@ -2324,6 +2344,7 @@ def test_type_text_without_a_target_and_several_inputs_is_ambiguous():
         message = str(e.value)
         assert e.value.code == "ambiguous"
         assert message.startswith("2 inputs on screen; pass a target to pick one:\nCandidates:\n")
+        assert message.endswith('\nRetry with one of the refs, or add "index" (0-based).')
         assert re.search(r'\n  e\d+ input "Name"', message) and re.search(r'\n  e\d+ input "Email"', message)
         assert not d.session.typed
         await finish(stop, task)
@@ -2890,8 +2911,9 @@ def test_type_text_ambiguity_says_how_many_more_inputs_there_are():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "x"})
         lines = str(e.value).splitlines()
-        assert lines[0].startswith("7 inputs on screen;") and len(lines) == 2 + 5 + 1
-        assert lines[-1] == '  (+2 more; use a ref or "index")'
+        assert lines[0].startswith("7 inputs on screen;") and len(lines) == 2 + 5 + 2
+        assert lines[-2] == '  (+2 more; use a ref or "index")'
+        assert lines[-1] == 'Retry with one of the refs, or add "index" (0-based).'
         await finish(stop, task)
     run(go)
 

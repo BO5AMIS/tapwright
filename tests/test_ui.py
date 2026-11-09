@@ -251,6 +251,14 @@ def _wrapped(wrapper: ET.Element) -> list[ui.Element]:
     return ui.elements(xml(node("Other", children=[wrapper])), SCREEN)
 
 
+def test_every_invisible_direction_mark_is_removed_from_text_label_and_value():
+    marks = "‎‏‪‫‬‭‮⁦⁧⁨⁩"
+    e = one("Cell", f"{marks}Tot{marks}al", value=f"4{marks}2", name=f"{marks}id")
+    assert (e.label, e.value, e.identifier) == ("Total", "42", "id")
+    assert ui.resolve([e], ui.Target(label="total")) is e and ui.resolve([e], ui.Target(text="42")) is e
+    assert e.line() == 'e1 cell "Total" id=id value="42" @10,10 100x40 [tap]'
+
+
 def test_a_wrapper_and_its_text_with_the_same_label_and_rect_are_one_element():
     """React Native exposes a wrapper and its text as two elements: list one."""
     text = node("Button", "Sign in", rect=(10, 10, 200, 40))
@@ -260,12 +268,32 @@ def test_a_wrapper_and_its_text_with_the_same_label_and_rect_are_one_element():
     assert e.ref == "e1"  # rects equal within 1 pt
 
 
-def test_a_different_role_is_no_duplicate_and_same_role_text_collapses():
+def test_roles_may_differ_and_the_one_with_actions_is_listed():
+    """v1.3: same quoted text and rect make one element, whatever the roles; the one that takes an action stays."""
     [e] = _wrapped(node("StaticText", "Sign in", rect=(10, 10, 200, 40), children=[node("StaticText", "Sign in", rect=(10, 10, 200, 40))]))
     assert (e.role, e.ref) == ("text", "e1")
     inner = node("Button", "Sign in", rect=(10, 10, 200, 40))
-    [a, b] = _wrapped(node("StaticText", "Sign in", rect=(10, 10, 200, 40), children=[inner]))
-    assert (a.role, b.role) == ("text", "button")  # same actions are inferred from the role, so equal roles tie
+    [e] = _wrapped(node("StaticText", "Sign in", rect=(10, 10, 200, 40), children=[inner]))
+    assert (e.role, e.ref, e.actions) == ("button", "e1", ("tap",))  # the child has the action
+    text = node("StaticText", "Sign in", rect=(10, 10, 200, 40))
+    [e] = _wrapped(node("Button", "Sign in", rect=(10, 10, 200, 40), children=[text]))
+    assert e.role == "button"  # the ancestor has it
+    [e] = _wrapped(node("Image", "Sign in", name="logo", rect=(10, 10, 200, 40), children=[node("StaticText", "Sign in", rect=(10, 10, 200, 40))]))
+    assert (e.role, e.identifier) == ("image", "logo")  # neither has one: the ancestor
+
+
+def test_an_other_wrapper_around_an_input_lists_only_the_input():
+    field = node("TextField", "Email", value="me@example.com", rect=(10, 10, 200, 40))
+    [e] = _wrapped(node("Other", "Email", rect=(10, 10, 200, 40), children=[field]))
+    assert e.line() == 'e1 input "Email" value="me@example.com" @10,10 200x40 [tap, type]'
+    [e] = _wrapped(node("Other", "Email", name="email-wrapper", rect=(10, 10, 200, 40), children=[field]))
+    assert e.role == "input"  # an identifier only one of them carries doesn't keep both
+
+
+def test_identifiers_and_values_keep_both_only_when_both_carry_them():
+    assert len(_pair({"kind": "Other", "name": "a"}, {"kind": "Button", "name": "b"})) == 2
+    assert len(_pair({"kind": "Other", "name": "a"}, {"kind": "Button", "value": "v"})) == 1
+    assert len(_pair({"kind": "StaticText", "value": "x"}, {"kind": "Button", "value": "y"})) == 2
 
 
 def test_different_labels_or_rects_are_kept():
@@ -273,8 +301,8 @@ def test_different_labels_or_rects_are_kept():
                           children=[node("StaticText", "Sign in", rect=(10, 10, 200, 40)),
                                     node("Button", "Sign in", rect=(10, 10, 200, 44)),
                                     node("Button", "Sign up", rect=(10, 10, 200, 40))]))
-    assert [(e.role, e.label, e.rect[3]) for e in items] == [("button", "Sign in", 40), ("text", "Sign in", 40),
-                                                             ("button", "Sign in", 44), ("button", "Sign up", 40)]
+    assert [(e.role, e.label, e.rect[3]) for e in items] == [("button", "Sign in", 40), ("button", "Sign in", 44),
+                                                             ("button", "Sign up", 40)]  # the text child folds into the button
 
 
 def test_dropped_duplicates_do_not_count_against_the_cap_or_the_numbers():
@@ -296,13 +324,14 @@ def _pair(parent: dict, child: dict) -> list[ui.Element]:
 def test_a_child_is_collapsed_only_when_nothing_is_lost():
     assert len(_pair({}, {})) == 1
     assert len(_pair({"name": "go-id"}, {"name": "go-id"})) == 1
-    assert len(_pair({}, {"name": "child-id"})) == 2  # the child's id would be lost
+    assert len(_pair({}, {"name": "child-id"})) == 1  # only the child carries an id: no clash
     assert len(_pair({"name": "a"}, {"name": "b"})) == 2
-    assert len(_pair({}, {"value": "x"})) == 2  # a different value
+    assert len(_pair({}, {"value": "x"})) == 1  # only the child carries a value
+    assert len(_pair({"value": "y"}, {"value": "x"})) == 2  # different values
     assert len(_pair({}, {"traits": "Selected"})) == 2
     assert len(_pair({}, {"enabled": "false"})) == 2
     assert len(_pair({"kind": "Switch", "value": "1"}, {"kind": "Switch", "value": "0"})) == 2  # another state
-    assert len(_pair({"kind": "StaticText"}, {"kind": "Button"})) == 2  # another role
+    assert len(_pair({"kind": "StaticText"}, {"kind": "Button"})) == 1  # another role folds (v1.3)
     assert len(_pair({}, {"label": "Stop"})) == 2
     assert len(_pair({}, {"rect": (10, 10, 100, 44)})) == 2
 

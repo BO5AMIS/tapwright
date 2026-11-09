@@ -66,10 +66,11 @@ def test_ref_and_id_resolve_on_the_list():
     assert ui.resolve(list_, ui.Target(ref="e7")) is list_[6]
     assert ui.resolve(list_, ui.Target(id="airplane-mode-cell")) is list_[4]
     e = code(ui.resolve, list_, ui.Target(ref="e99"))
-    assert e.code == "not_found" and str(e).startswith("e99 is no longer on the screen; look again")
+    assert e.code == "not_found" and str(e) == "e99 isn't on screen any more; look again."
     e = code(ui.resolve, list_, ui.Target(id="Airplane-Mode-Cell"))  # ids are exact
-    assert e.code == "not_found" and "look for its id" in str(e)
-    assert "look first" in str(code(ui.resolve, [], ui.Target(ref="e1")))
+    assert e.code == "not_found"
+    assert str(e) == 'nothing on screen has id "Airplane-Mode-Cell"; look, then pick another target.'
+    assert str(code(ui.resolve, [], ui.Target(ref="e1"))) == "e1 isn't on screen any more; look again."
 
 
 def test_a_real_identifier_wins_over_a_name_that_mirrors_a_label():
@@ -87,7 +88,8 @@ def test_label_is_exact_ignoring_case_and_never_partial():
     assert ui.resolve(list_, ui.Target(label="bluetooth")) is list_[8]
     assert ui.resolve(list_, ui.Target(label="  Wi-Fi, Home ")) is list_[7]
     e = code(ui.resolve, list_, ui.Target(label="Wi-Fi"))  # that's `text`
-    assert e.code == "not_found" and '{"text"' in str(e)
+    assert e.code == "not_found"
+    assert str(e) == 'nothing on screen has label "Wi-Fi"; use {text} for a partial match, or look.'
 
 
 def test_text_is_exact_first_then_partial_on_label_or_value():
@@ -97,7 +99,7 @@ def test_text_is_exact_first_then_partial_on_label_or_value():
     assert ui.resolve(list_, ui.Target(text="home")) is list_[7]       # partial in the value too
     assert ui.resolve(list_, ui.Target(text="On")) is list_[8]         # exact value beats the partial "Notifications"
     e = code(ui.resolve, list_, ui.Target(text="Display"))
-    assert e.code == "not_found" and "scroll" in str(e)
+    assert e.code == "not_found" and str(e) == 'nothing on screen shows "Display"; look, then pick another target.'
     assert ui.resolve(list_, ui.Target(text="  bluetooth  ")) is list_[8]
 
 
@@ -111,20 +113,20 @@ def test_several_matches_are_ambiguous_with_candidates():
     list_ = items("calculator")  # two buttons labelled "7", one with id=7-memory
     e = code(ui.resolve, list_, ui.Target(label="7"))
     assert e.code == "ambiguous"
-    head, _, candidates = str(e).partition("Candidates:\n")
-    assert head == '2 elements match label "7"; use one of their refs, or add index (0 is the first). '
-    assert candidates.splitlines() == ['e3 button "7" @14,520 90x90 [tap]',
-                                       'e7 button "7" id=7-memory @14,620 90x90 [tap]']
-    assert str(e).endswith("[tap]")  # the candidates are the end of the message
+    assert str(e) == ('2 elements match label "7".\nCandidates:\n'
+                      '  e3 button "7" @14,520 90x90 [tap]\n'
+                      '  e7 button "7" id=7-memory @14,620 90x90 [tap]\n'
+                      'Retry with one of the refs, or add "index" (0-based).')
 
 
 def test_ambiguity_shows_at_most_five():
     many = [ui.Element(f"e{i}", "button", "Row", rect=(0, i * 50, 100, 40), actions=("tap",)) for i in range(1, 8)]
     e = code(ui.resolve, many, ui.Target(text="row"))
-    head, _, candidates = str(e).partition("Candidates:\n")
-    lines = candidates.splitlines()
-    assert head.startswith('7 elements match text "row", showing 5;') and len(lines) == 6
-    assert lines[4].startswith("e5 ") and lines[-1] == '  (+2 more; use a ref or "index")'
+    lines = str(e).splitlines()
+    assert lines[0] == '7 elements match text "row".' and lines[1] == "Candidates:" and len(lines) == 9
+    assert lines[2].startswith("  e1 ") and lines[6].startswith("  e5 ")
+    assert lines[7] == '  (+2 more; use a ref or "index")'
+    assert lines[8] == 'Retry with one of the refs, or add "index" (0-based).'
 
 
 def test_index_picks_in_reading_order_and_is_checked():
