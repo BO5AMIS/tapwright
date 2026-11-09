@@ -2604,13 +2604,13 @@ def test_a_scroll_counts_as_moving_content_for_the_refs_it_carries():
 
 
 def scripted(d, *trees):
-    """The session's snapshot() reads these trees in turn; the last one stays."""
-    queue, real = list(trees), type(d.session).snapshot.__get__(d.session)
+    """The session's refresh() (the tree-only read) gives these trees in turn; the last one stays."""
+    queue, real = list(trees), type(d.session).refresh.__get__(d.session)
 
-    async def snapshot(keyboard=False, timeout=None):
+    async def refresh(timeout=None):
         d.session.tree = queue.pop(0) if len(queue) > 1 else queue[0]
-        return await real(keyboard, timeout)
-    d.session.snapshot = snapshot
+        return await real(timeout)
+    d.session.refresh = refresh
 
 
 def test_wait_for_text_returns_once_it_shows_up():
@@ -2669,7 +2669,7 @@ def test_wait_for_checks_its_arguments():
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "wait_for", bad)
             assert e.value.code == "bad_params", bad
-        assert d.session.calls.count("snapshot") == 0
+        assert d.session.calls.count("refresh") == 0
         await finish(stop, task)
     run(go)
 
@@ -2682,9 +2682,10 @@ def test_wait_for_answers_from_its_last_poll_without_reading_again():
         done = [el("e1", "text", "Loading"), el("e2", "text", "All done")]
         await looked(d, loading)
         scripted(d, loading, loading, done)
-        before = d.session.calls.count("snapshot")
+        before = d.session.calls.count("refresh")
         r = await d.run_tool("a", "wait_for", {"text": "all done"})
-        assert d.session.calls.count("snapshot") - before == 3 and "refresh" not in d.session.calls
+        assert d.session.calls.count("refresh") - before == 3 and d.session.calls.count("refresh") == 1 and d.session.calls.count("app") == 1  # the look
+        assert d.session.calls.count("app") == 1  # the foreground app is looked up once, for the answer
         assert r["text"].splitlines()[2].startswith("+ e2 text")
         assert [e.ref for e in d.control.client("a").items] == ["e1", "e2"]
         await finish(stop, task)
@@ -2697,11 +2698,11 @@ def test_each_wait_for_read_is_limited_by_the_time_that_is_left():
         stop, task = await started(d)
         with pytest.raises(Refused):
             await d.run_tool("a", "wait_for", {"text": "never", "timeout": 2})
-        timeouts = d.session.snapshot_timeouts
+        timeouts = d.session.read_timeouts
         assert timeouts[0] == 2.0 and timeouts == sorted(timeouts, reverse=True) and timeouts[-1] < 0.5
-        d.session.snapshot_timeouts.clear()
+        d.session.read_timeouts.clear()
         await d.run_tool("a", "wait_for", {"label": "OK"})
-        assert d.session.snapshot_timeouts == [5.0]  # never more than 5 s for one read
+        assert d.session.read_timeouts == [5.0]  # never more than 5 s for one read
         await finish(stop, task)
     run(go)
 
@@ -2711,7 +2712,7 @@ def test_waiting_for_something_to_go_that_was_never_there_succeeds_at_once():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "wait_for", {"text": "ghost", "gone": True})
-        assert r["text"].splitlines()[0] == "Done after 0.0 s." and d.session.calls.count("snapshot") == 1
+        assert r["text"].splitlines()[0] == "Done after 0.0 s." and d.session.calls.count("refresh") == 1 and d.session.calls.count("app") == 1
         await finish(stop, task)
     run(go)
 

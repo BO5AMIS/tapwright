@@ -152,7 +152,11 @@ class Session:
     async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
-        tree = ui.read(source, self.screen, keyboard=keyboard)
+        return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard))
+
+    async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
+        """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
+        request a tree-only read leaves out."""
         self.items = tree.items
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.app = await self._app()
@@ -184,9 +188,9 @@ class Session:
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
         return ui.back_button(source, self.screen)
 
-    async def refresh(self) -> ui.Tree:
-        """Read the tree into `items` and nothing else: what resolving a target needs."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+    async def refresh(self, timeout: float = 60) -> ui.Tree:
+        """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
         tree = ui.read(source, self.screen)
         self.items = tree.items
         self.last_insets = (tree.top_inset, tree.bottom_inset)

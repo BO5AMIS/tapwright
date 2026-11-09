@@ -648,8 +648,8 @@ class Daemon:
         began, left = clock(), timeout
         while True:
             # each read may take what is left of the timeout (at most WAIT_FOR_READ_MAX), so the timeout holds
-            snap = await self._read(lambda: self.session.snapshot(timeout=min(WAIT_FOR_READ_MAX, left)))
-            if self._missing(snap.tree.items, target) == gone:
+            tree = await self._read(lambda: self.session.refresh(timeout=min(WAIT_FOR_READ_MAX, left)))
+            if self._missing(tree.items, target) == gone:
                 break
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
@@ -661,7 +661,8 @@ class Daemon:
         if not args.get("look", True):
             return _answer([result], notes)
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
-        # the last poll is the answer's tree: no read of its own
+        # the last poll is the answer's tree: no read of its own, only the app lookup the polls left out
+        snap = await self._read(lambda: self.session.snapshot_from(tree))
         return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view, shot)
 
     async def _type_text(self, view, a: dict) -> Typed:

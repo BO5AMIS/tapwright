@@ -87,6 +87,12 @@ def test_the_tree_says_how_far_the_bars_reach_into_the_screen():
     assert ui.read(screen(node("Button", 8, 300, 80, 44, "OK")), SCREEN).top_inset is None  # no bars: unknown
 
 
+def test_bars_behind_an_alert_set_no_insets():
+    alert = node("Alert", 60, 300, 280, 180, "Allow?", children=[node("Button", 60, 420, 140, 60, "Don't Allow")])
+    tree = ui.read(screen(node("NavigationBar", 0, 59, 400, 44), node("TabBar", 0, 749, 400, 51), alert), SCREEN)
+    assert tree.alert is not None and (tree.top_inset, tree.bottom_inset) == (None, None)
+
+
 def test_swipes_stay_between_the_bars():
     for direction in ("up", "down"):
         _, y0, _, y1 = ui.scroll_area_points(direction, (0, 0, 400, 800), 1.0, band=(100.0, 720.0))

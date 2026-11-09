@@ -104,7 +104,7 @@ class FakeSession:
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.launched: list = []
         self.closed: list = []
-        self.snapshot_timeouts: list = []  # the per-read timeout each snapshot() was given
+        self.read_timeouts: list = []  # the per-read timeout each refresh() was given
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
         self.typed: list = []  # (text, replace, submit, target) of each type_text
 
@@ -151,7 +151,6 @@ class FakeSession:
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
-        self.snapshot_timeouts.append(timeout)
         self.items = list(self.tree)
         return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
 
@@ -159,10 +158,16 @@ class FakeSession:
         self.scale_reads += 1
         return 3.0
 
-    async def refresh(self):
+    async def refresh(self, timeout=None):
         self._record("refresh")
+        self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        return ui.Tree(self.items)
+        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard)
+
+    async def snapshot_from(self, tree):
+        """The foreground app for a tree that was already read: the one extra request a final answer needs."""
+        self._record("app")
+        return Snapshot(tree, self.app, 3.0)
 
     async def apps(self):
         self._record("apps")

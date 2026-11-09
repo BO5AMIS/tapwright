@@ -198,6 +198,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     Skips what has no size or whose centre (where a tap would land) is clipped by the screen or a
     scroll container, and the keyboard's keys unless `keyboard`. Raises DeviceError on a broken tree."""
     tree = Tree([])
+    bars: list[tuple[bool, float]] = []  # (at the top?, how far it reaches in) of each bar seen
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
              in_alert: bool, parent: Element | None = None) -> None:
@@ -216,9 +217,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             tree.keyboard = True
         if kind in BARS and visible and screen:
             if y < screen[1] * BAR_EDGE:
-                tree.top_inset = max(tree.top_inset or 0.0, y + h)
+                bars.append((True, y + h))
             elif y + h > screen[1] * (1 - BAR_EDGE):
-                tree.bottom_inset = max(tree.bottom_inset or 0.0, screen[1] - y)
+                bars.append((False, screen[1] - y))
         in_keyboard = in_keyboard or kind == "Keyboard"
         in_alert = in_alert or kind == "Alert"
         # WDA mirrors the label into name when there is no identifier
@@ -259,6 +260,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
     walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    for top, reach in ([] if tree.alert else bars):  # bars behind an alert aren't what a swipe would meet
+        if top:
+            tree.top_inset = max(tree.top_inset or 0.0, reach)
+        else:
+            tree.bottom_inset = max(tree.bottom_inset or 0.0, reach)
     return tree
 
 
