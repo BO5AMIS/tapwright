@@ -2,7 +2,9 @@
 
 Shared by Tapline and Tapwright. Version 1, agreed by both projects and approved by the user
 on 2026-11-09. Version 1.1 (2026-11-09) adds the `not_actionable` reason `no_action`, also
-agreed by both projects and approved by the user. Each repo keeps an identical copy in `docs/`. It changes only by agreement
+agreed by both projects and approved by the user. Version 1.2 (2026-11-09) spells out the
+exact answer and message wording that both tools found while building and cross-checking on a
+real phone, also agreed by both projects and approved by the user. Each repo keeps an identical copy in `docs/`. It changes only by agreement
 between the two projects and the user's approval, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
 
@@ -42,7 +44,7 @@ nested form wins: the schema enforces "exactly one", and every tool uses the sam
 | `{id: "login-button"}` | exact identifier | React Native's `testID` is the iOS accessibility identifier, so the same value works in both tools. **Change Tapline:** the key `testID` becomes `id` |
 | `{label: "Log in"}` | the accessibility label, exact, ignoring case | **Change Tapwright:** no substring fallback here; that's `text` |
 | `{text: "Log in"}` | visible text: an exact match first, then a substring; Tapwright matches the label or the value | |
-| `{x, y}` | what a touch at that point would hit, in points | Tapwright touches the screen there. Tapline can't touch, so it hit-tests: a point in the iOS tab bar's area is the tab under it, and with a React Native `Modal` open, the modal's content is tested first and what's behind it counts as covered. Later this goes through Fabric's hit test |
+| `{x, y}` | what a touch at that point would hit, in points | Tapwright touches the screen there. Tapline can't touch, so it hit-tests: a point in the iOS tab bar's area is the tab under it, and with a React Native `Modal` open, the modal's content is tested first and what's behind it counts as covered. Later this goes through Fabric's hit test. For `toggle`, `type_text` and `scroll`, it's the element of the right kind under the point. When there's none: `not_actionable: no_action: Nothing at (x, y) takes <a tap, typing, a toggle, a scroll>.` |
 
 - `index` (0-based, in reading order) picks among several matches. It applies to `id`,
   `label` and `text`, not to `ref` or `{x, y}`. **Change Tapline:** today `index` works
@@ -50,6 +52,11 @@ nested form wins: the schema enforces "exactly one", and every tool uses the sam
   non-zero index doesn't.
 - `id`, `label` and `text` are looked up on the live screen at call time, so they never go
   stale.
+- **A nested pair:** when a `label` or `text` target matches both an element and another match
+  that contains it, the one that takes the action wins (a button over its own text), as a
+  finger's touch would. If both or neither take it, they stay `ambiguous`.
+- **Tapwright `id`:** WebDriverAgent mirrors the label into the identifier when an app sets
+  none. A real identifier wins over a mirror.
 
 ## 3. Answers
 
@@ -68,16 +75,36 @@ Same screen. Changes:
 Settled in 0.31 s.
 ```
 
-- **The first line** is the verb in the past tense plus the element's line.
-- **Then the changes**, Tapline's format:
-  - `+` new, with its ref;
-  - `-` gone;
-  - `~` changed, with the old value;
-  - `↕` moved: up to 5 listed, more become a count;
+- **The first line** is the verb in the past tense, then the element's line **without its
+  `[actions]`**, then a full stop: `Tapped e3 button "Log in" id=login-button @24,610 354x48.`
+- **Then the changes.** The block always starts with `Same screen. Changes:`.
+- **Header lines that changed come first:** `Alert: "<title>" [Button] …` when an OS or app
+  alert appears or changes, `Alert: gone` when it closes, `Keyboard: shown` or
+  `Keyboard: hidden` (Tapwright), and `Network: N requests in flight` (Tapline). `Note:`
+  lines stay at the end of the answer. Then:
+  - `+ <element line>` for a new element, with its ref and `[actions]`;
+  - `- <role> "<text>"` for a gone element, with no ref and no position. Without text it's
+    `- <role> id=<id>`, and without that, `- <role>`;
+  - `~ <element line> (was "<old>")` when exactly one field changed. When several changed:
+    `(was text="…", value="…")`, naming each one. The fields are text, label, value,
+    checked, selected, disabled and actions. **A frame never appears in `~`**;
+  - `↕ <element line>` for a frame-only change of more than 1 pt in x, y, width or height,
+    size included. Up to 5 are listed; more become the single line `↕ N elements moved`;
   - `No visible change.` when nothing changed.
-- **The full list replaces the changes** when the screen or route changed, or when more than
-  max(8, half the elements) changed. It starts with the header (§3.2).
-- **The last line** gives how long the tool waited for the screen to settle (§6).
+- **The baseline** is the agent's list as of its last answer: the last `look`, or the list
+  carried through every action answer since. It's never just the last full list. Scroll
+  down and then back up gives `↕` both times.
+- **The full list replaces the changes** when:
+  - the screen or route changed;
+  - more than max(8, half the elements) changed;
+  - everything vanished. That case shows the empty-screen line (§3.2) and
+    `Note: something outside the app (a system sheet or browser) may cover it.` A tool may
+    add what to do next; Tapline adds `Tapline can't see it: ask the user, or use Tapwright.`
+
+  The full list starts with the header (§3.2).
+- **The last line** gives how long the tool waited for the screen to settle:
+  `Settled in 0.31 s.` (§6). `wait` answers `Waited 1.0 s.` and the change block instead,
+  with no settle line.
 - `look: false` returns only the first line. That's the fastest form, for scripted steps.
 - **No screenshot after actions by default.** `screenshot: true` on any action adds one, at
   `look`'s defaults.
@@ -110,9 +137,17 @@ Network: 2 requests in flight
 
 `<ref> <role> "<text or label>" [label="…"] [id=…] [value="…"] [disabled] [selected] [checked=true|false] @x,y WxH [actions]`
 
-- **The quoted part** is the visible text, or the label when there's no text. `label="…"`
-  is added only when the label differs from the text. Text is clipped to 80 characters, with
-  whitespace flattened, JSON-quoted.
+- **The quoted part** is the element's **own** text, or its label when there's no text.
+  - It's never its descendants' text. An accessible element (a button or a text, i.e. what
+    VoiceOver reads as one item) carries the text inside it, the way iOS forms its label, so
+    a pressable wrapping "Log in" is `button "Log in"`.
+  - A container that isn't accessible (a scroll view, a plain view) quotes nothing:
+    `e1 scroll @0,0 430x778 [scroll]`.
+  - Text is clipped to 80 characters, with whitespace flattened, JSON-quoted.
+- **`label="…"`** is added only when the label differs from the text, ignoring case and
+  whitespace. On Tapwright the label *is* the text, so it never appears.
+- **Duplicates:** an element with the same role, the same quoted text and the same rect
+  (within 1 pt) as its nearest listed ancestor is listed once.
 - **`id=` is always shown when present.** **Change Tapline:** `testID=` becomes `id=`.
 - **`value=` is shown when not empty.** **Change Tapwright:** today it's shown only when it
   differs from the label.
@@ -126,16 +161,17 @@ Network: 2 requests in flight
 | `button` | Button | role button, imagebutton or togglebutton; anything pressable without a role |
 | `link` | Link | role link |
 | `text` | StaticText | Text; role text or summary |
-| `header` | StaticText with the header trait, if WebDriverAgent shows it (unverified); otherwise `text` | role header |
+| `header` | StaticText with the `Header` trait | role header |
 | `input` | TextField, SecureTextField, SearchField, TextView | TextInput; role search or textbox |
 | `switch` | Switch, Toggle | Switch; role switch |
 | `slider` | Slider | Slider; role adjustable |
 | `image` | Image, Icon | Image; role image or img |
 | `tab` | Tab, a Button inside a TabBar | role tab, and native tabs |
-| `cell` | Cell | none: list rows come out as `button` or `text` |
+| `cell` | Cell. WebDriverAgent gives cells no label, so a cell quotes nothing and its texts follow as `text`; a tap on them lands on the cell | none: list rows come out as `button` or `text` |
 | `scroll` | ScrollView, Table, CollectionView | ScrollView, FlatList, SectionList, VirtualizedList |
 | `alert` | none in the list: OS alerts are the `Alert:` header line, and their buttons stay in the list as `button`, tappable | an in-app element with role alert stays in the list (it's app content); OS alerts are the `Alert:` header line |
-| anything else | the type in lowercase | the role in lowercase (radio, checkbox, progressbar, menu, menuitem, tablist, timer, toolbar …), otherwise the component name |
+| `other` | Other | a container with no role (View and the like) |
+| anything else | the type in lowercase | the role in lowercase (radio, checkbox, progressbar, menu, menuitem, tablist, timer, toolbar …), otherwise `other` |
 
 - **`[actions]`** lists what the agent can do with the element: `tap`, `longPress`, `type`,
   `toggle`, `scroll`. Tapline reads them from the handlers. Tapwright infers them from the
@@ -196,6 +232,20 @@ text items.
   touches, so Tapwright never answers `no_action` to a tap.
 - **Change Tapwright:** today it never sets `isError`, prefixes `<code>:`, `error:` or
   `not found:`, and treats "not found" as a normal answer.
+- **Message wording.** Elements are named by their element line, or for gone ones by
+  `<role> "<text>"`, never by component or class names.
+  - **`not_found`:**
+    - id: `nothing on screen has id "x"; look, then pick another target.`
+    - label: `nothing on screen has label "x"; use {text} for a partial match, or look.`
+    - text: `nothing on screen shows "x"; look, then pick another target.`
+    - ref: `e12 isn't on screen any more; look again.`
+  - **Typing without a target:**
+    - no input: `Error not_found: No input on screen`;
+    - several: `Error ambiguous: <n> inputs on screen; pass a target to pick one:`, then
+      `Candidates:`. A tool that knows focus may add "and none is focused".
+  - **`no_action` reasons:** `has no tap action`, `has no long-press action`,
+    `is not a switch`, `is not an input`, `is not inside a scroll view`. At a point:
+    `Nothing at (x, y) takes <a tap, typing, a toggle, a scroll>.`
 
 | Code | Meaning | What the agent does | Raised by |
 |---|---|---|---|
@@ -228,10 +278,10 @@ text items.
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
 | `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported` |
 | `open_url` | `url`, `look`, `screenshot` | Tapline opens it inside the app; Tapwright opens it on the phone, so another app may take it (the answer says which app came up) |
-| `wait` | `seconds` (0.1–30, required), `look`, `screenshot` | answers with the changes. Out-of-range values are `bad_params`. **Change Tapwright:** today it clamps silently and always takes a screenshot |
+| `wait` | `seconds` (0.1–30, required), `look`, `screenshot` | answers `Waited 1.0 s.` and the change block, with no settle line. Out-of-range values are `bad_params`. **Change Tapwright:** today it clamps silently and always takes a screenshot |
 | `wait_for` | one of `text`, `id`, `label`; `gone`; `network_idle`; `timeout` (0.5–30 s, default 10); `look`, `screenshot` | `Done after 1.2 s.` plus the changes, or `timeout`. **Change Tapwright:** new. It polls the screen, its looks are slow (see QUALITY-BAR), and `network_idle` is `unsupported` |
 | `apps` | none | the apps the agent can drive, with the current one marked. Tapline: the connected apps. Tapwright: the installed apps. **Change Tapwright:** `list_apps` becomes `apps` |
-| `open_app` | `app` (id or name) | Shared description: "Drive this app from now on." Tapline selects that connected app (today's `select_app`). Tapline can't launch apps, so when the app isn't connected it answers `not_connected` with how to connect it, and the description says so. Tapwright launches the app or brings it to the front (today's `launch_app`) |
+| `open_app` | `app` (id or name) | Shared description: "Drive this app from now on." Tapline selects that connected app (today's `select_app`). Tapline can't launch apps, so when the app isn't connected it answers `not_connected` with how to connect it, and the description says so. Tapwright launches the app or brings it to the front (today's `launch_app`). An exact id wins (Tapline: a session id; Tapwright: a bundle id). Otherwise names match ignoring case. Several matches give `Error ambiguous: N connected apps match "X". Pick one by its session id:` (Tapwright: `installed apps` and `bundle id`), followed by their `apps` lines |
 | `viewer` | none | the live view's link. **Change Tapwright:** new; today only `tapwright view` gives it |
 
 ### 5.2 Extras: only where a tool can do them, same conventions
