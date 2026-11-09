@@ -15,6 +15,7 @@ import time
 from . import store
 
 WDA_PORT = 8100
+TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
 
 class DeviceError(RuntimeError):
@@ -87,13 +88,18 @@ class Device:
         raise DeviceError("no single network pairing record for this phone: run `tapwright setup` over USB")
 
     async def mount(self) -> None:
-        """Apple's developer disk image: needed for UI automation, mounted until the phone restarts."""
+        """Apple's developer disk image: needed for UI automation, mounted until the phone restarts.
+        It adds the test services, which the phone lists only on a new connection."""
         from pymobiledevice3.services.mobile_image_mounter import auto_mount
+        if TEST_SERVICE in self.rsd.peer_info["Services"]:
+            return
         try:
             await auto_mount(self.rsd)
         except Exception as e:  # already mounted is the common case
             if "already" not in str(e).lower():
                 self.log(f"developer disk image: {e}")
+        await self.tunnel.aclose()
+        await self.connect()
 
     # ---- WebDriverAgent ----
     async def start_wda(self, runner_id: str, wait: float = 60.0) -> None:
