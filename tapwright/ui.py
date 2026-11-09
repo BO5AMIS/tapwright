@@ -268,7 +268,7 @@ def find(items: list[Element], ref: str | None = None, label: str | None = None,
                 return e
         raise NotFound(f"no {ref} on the last screen; look again")
     if id:
-        hits = [e for e in items if id in (e.name, e.identifier)]
+        hits = [e for e in items if e.identifier == id] or [e for e in items if e.name == id]
     elif label:
         want = label.strip().lower()
         hits = [e for e in items if e.label.lower() == want or e.value.lower() == want]

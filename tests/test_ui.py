@@ -238,3 +238,10 @@ def test_traits_are_split_on_commas_and_stripped():
     assert one("StaticText", "General", traits="StaticText, Header").role == "header"
     assert one("Tab", "A", traits="Button, Selected").selected
     assert not one("Button", "B", traits="Button, NotEnabled").enabled
+
+
+def test_a_real_identifier_wins_over_a_name_that_mirrors_a_label():
+    mirror = one("Button", "Settings", name="Settings")  # id only because the name copies the label
+    real = one("StaticText", "Other", name="Settings")
+    assert ui.find([mirror, real], id="Settings") is real
+    assert ui.find([mirror], id="Settings") is mirror  # with no real id, the mirror still matches
