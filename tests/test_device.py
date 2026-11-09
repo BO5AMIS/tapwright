@@ -1,5 +1,6 @@
 """device.py without a phone: what counts as a dead line, and the stream connection."""
 import asyncio
+import importlib
 import json
 import time
 
@@ -8,6 +9,7 @@ import pytest
 import pymobiledevice3.remote.tunnel_service as tunnel_service
 import pymobiledevice3.usbmux as usbmux
 
+from tapwright import device as device_module
 from tapwright.device import MJPEG_PORT, ConnectionLost, Device, DeviceError, PhoneNotFound
 
 
@@ -182,9 +184,7 @@ def test_no_phone_anywhere(monkeypatch):
         asyncio.run(Device(log=lambda *a: None).connect())
 
 
-def test_ui_testing_failing_to_start_ends_the_wait_at_once(monkeypatch):
-    """The phone's test service can answer initializationForUITestingDidFailWithError on a first start;
-    the 60 s wait for /status must not be what notices."""
+def _fake_phone_side(monkeypatch, service):
     import pymobiledevice3.services.dvt.instruments.device_info as device_info
     import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
     import pymobiledevice3.services.dvt.instruments.process_control as process_control
@@ -193,31 +193,99 @@ def test_ui_testing_failing_to_start_ends_the_wait_at_once(monkeypatch):
     monkeypatch.setattr(device_info, "DeviceInfo", _Info)
     monkeypatch.setattr(process_control, "ProcessControl", _Control)
     monkeypatch.setattr(xcuitest, "TestConfig", _Config)
+    monkeypatch.setattr(xcuitest, "XCUITestService", service)
 
-    class _Error:
-        domain, code = "XCTestErrorDomain", 7
 
+class _Error:
+    domain, code = "XCTestErrorDomain", 7
+
+
+def _failing(method: str):
     class _Failing:
+        """A test service that reports `method` of the listener after a moment, then hangs."""
         def __init__(self, rsd):
             pass
 
         async def run(self, cfg, listener=None):
             await asyncio.sleep(0.05)
-            await listener.initialization_for_ui_testing_did_fail(_Error())
+            await getattr(listener, method)(_Error())
             await asyncio.sleep(3600)
-    monkeypatch.setattr(xcuitest, "XCUITestService", _Failing)
+    return _Failing
+
+
+async def _start(wait: float, alive=lambda: False) -> float:
+    d = Device(log=lambda *a: None)
+    d.rsd = object()
+
+    async def wda_alive():
+        return alive()
+    d.wda_alive = wda_alive
+    began = time.monotonic()
+    try:
+        await d.start_wda("runner.id", wait=wait)
+    finally:
+        took = time.monotonic() - began
+        await d.close()
+    return took
+
+
+@pytest.mark.parametrize("method", ["initialization_for_ui_testing_did_fail", "did_fail_to_bootstrap"])
+def test_ui_testing_failing_to_start_ends_the_wait_at_once(monkeypatch, method):
+    """The phone's test service can answer initializationForUITestingDidFailWithError on a first start;
+    the 60 s wait for /status must not be what notices."""
+    _fake_phone_side(monkeypatch, _failing(method))
+    began = time.monotonic()
+    with pytest.raises(DeviceError, match=r"UI testing failed to start.*XCTestErrorDomain.*7"):
+        asyncio.run(_start(30))
+    assert time.monotonic() - began < 5
+
+
+def test_without_the_keyword_the_old_path_still_starts(monkeypatch):
+    """If pymobiledevice3's run() stops taking `listener`, WebDriverAgent still starts, just without the hook."""
+    class _Plain:
+        def __init__(self, rsd):
+            pass
+
+        async def run(self, cfg):
+            await asyncio.sleep(3600)
+    _fake_phone_side(monkeypatch, _Plain)
+    asyncio.run(_start(5, alive=lambda: True))
+
+
+def test_without_the_listener_class_the_old_path_still_starts(monkeypatch):
+    import pymobiledevice3.services.dvt.testmanaged.dtx_services as dtx_services
+    importlib.import_module("pymobiledevice3.services.dvt.testmanaged.xcuitest")  # while the name still exists
+    monkeypatch.delattr(dtx_services, "XCUITestListener")
+
+    class _Plain:
+        calls = []
+
+        def __init__(self, rsd):
+            pass
+
+        def run(self, cfg, **kwargs):
+            self.calls.append(kwargs)
+            return asyncio.sleep(3600)
+    _fake_phone_side(monkeypatch, _Plain)
+    asyncio.run(_start(5, alive=lambda: True))
+    assert _Plain.calls == [{}]
+
+
+def test_a_runner_that_ignores_cancel_does_not_hang_the_stop(monkeypatch):
+    monkeypatch.setattr(device_module, "STOP_WAIT", 0.1)
 
     async def scenario():
+        async def stubborn():
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.5)
+                    return
         d = Device(log=lambda *a: None)
-        d.rsd = object()
-
-        async def wda_alive():
-            return False
-        d.wda_alive = wda_alive
+        d.runner = asyncio.create_task(stubborn())
+        await asyncio.sleep(0)
         began = time.monotonic()
-        with pytest.raises(DeviceError, match=r"UI testing failed to start.*XCTestErrorDomain.*7"):
-            await d.start_wda("runner.id", wait=30)
-        assert time.monotonic() - began < 5
-        await d.close()
-
+        await d._stop_runner()
+        assert time.monotonic() - began < 0.4 and d.runner is None
     asyncio.run(scenario())

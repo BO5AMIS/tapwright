@@ -2041,6 +2041,7 @@ def _redrawing(d, *trees):
     async def refresh():
         d.session.tree = queue.pop(0) if len(queue) > 1 else queue[0]
         events.append("refresh")
+        d.hub.publish(b"redraw%d" % len(events))  # the screen moved while the tree was read
         return await real()
     d.session.refresh = refresh
 
@@ -2103,5 +2104,77 @@ def test_a_target_missing_both_times_is_not_found():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
         assert e.value.code == "not_found" and events.count("refresh") == 2
+        await finish(stop, task)
+    run(go)
+
+
+def _recording_settles(d):
+    """Replace the settle: the caps it was asked for, in order."""
+    caps = []
+
+    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None):
+        caps.append(cap)
+        return daemon_module.Settled(0.0, True, False)
+    d._settle = settle
+    return caps
+
+
+def test_every_tool_settles_first_after_an_action_that_was_not_settled():
+    async def go():
+        for tool, args in (("alert", {"action": "accept"}), ("look", {"screenshot": False}),
+                           ("back", {}), ("press_button", {"name": "home"})):
+            d = make()
+            stop, task = await started(d)
+            await d.run_tool("a", "look", {"screenshot": False})
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+            caps = _recording_settles(d)
+            await d.run_tool("a", tool, args)
+            assert caps[0] == daemon_module.RESOLVE_SETTLE, tool
+            await finish(stop, task)
+    run(go)
+
+
+def test_an_action_after_a_settled_answer_does_not_settle_first():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # settled
+        caps = _recording_settles(d)
+        await d.run_tool("a", "alert", {"action": "accept", "look": False})
+        await d.run_tool("a", "look", {"screenshot": False})  # the alert wasn't settled: this one settles
+        assert caps == [daemon_module.RESOLVE_SETTLE]
+        await d.run_tool("a", "look", {"screenshot": False})  # and now it has been
+        assert caps == [daemon_module.RESOLVE_SETTLE]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_target_after_an_unsettled_action_settles_once_not_twice():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        d.control.clock.t += 5.0
+        caps = _recording_settles(d)
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert caps == [daemon_module.RESOLVE_SETTLE]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_missing_target_on_a_still_screen_is_not_read_twice():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clock.t += 5.0
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")  # the stream shows one picture throughout
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "nope"}, "look": False})
+        assert e.value.code == "not_found" and d.session.calls.count("refresh") == 1
+        await feeder.stop()
         await finish(stop, task)
     run(go)

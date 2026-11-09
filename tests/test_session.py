@@ -215,9 +215,64 @@ def test_type_text_at_a_point_needs_an_input_there(phone):
     with pytest.raises(Refused) as e:
         asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=120.0)))  # over a button
     assert e.value.code == "not_actionable" and str(e.value).startswith("no_action: Nothing at (20, 120)")
+    _keyboard_after(phone, 1)
     asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=20.0)))
     taps = [r for r in phone.requests if r[1].endswith("/actions")]
     assert taps and taps[0][2]["actions"][0]["actions"][0]["x"] == 110  # tapped the input's centre
+
+
+KEYBOARD = ('<XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="true" x="0" y="600" '
+            'width="430" height="300"/>')
+
+
+def _keyboard_after(phone, polls: int, monkeypatch=None):
+    """The source shows the keyboard from the `polls`-th read on (1: at once); returns the read counter."""
+    reads = []
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == ui_module.SOURCE_PATH:
+            reads.append(1)
+            up = len(reads) >= polls
+            return {"value": SETTINGS_TREE.replace("</XCUIElementTypeApplication>",
+                                                   (KEYBOARD if up else "") + "</XCUIElementTypeApplication>")}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    return reads
+
+
+FIELD = [ui_module.Element("e1", "input", "Email", rect=(10, 10, 200, 40), actions=("tap", "type"))]
+
+
+def test_typing_waits_for_the_keyboard_to_come_up(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    reads = _keyboard_after(phone, 2)  # the second read shows it
+    s = Session(phone)
+    s.items = list(FIELD)
+    assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
+    assert len(reads) == 2 and phone.requests[-1][1].endswith("/wda/keys")
+
+
+def test_typing_into_a_field_that_never_gets_the_keyboard_is_refused(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    _keyboard_after(phone, 10 ** 9)
+    s = Session(phone)
+    s.items = list(FIELD)
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+    assert e.value.code == "not_actionable"
+    assert str(e.value) == "no_action: e1 input \"Email\" @10,10 200x40 didn't take focus (no keyboard came up)."
+    assert not any(r[1].endswith("/wda/keys") for r in phone.requests)
+
+
+def test_replace_says_when_the_focused_field_could_not_be_found(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    s = Session(phone)
+    s.items = list(FIELD)
+    text = asyncio.run(s.type_text("hi", replace=True, target=ui_module.Target(ref="e1")))
+    assert text.startswith("typed 2 characters") and "couldn't find the focused field to clear" in text
 
 
 def _png(width: int) -> str:

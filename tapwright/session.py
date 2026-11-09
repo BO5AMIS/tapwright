@@ -9,6 +9,8 @@ from . import store, ui
 from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
+KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for the keyboard
+KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for the keyboard
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
@@ -214,15 +216,32 @@ class Session:
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
         if target is not None:
+            what = self._target(target)[2]
             await self.tap(target)
-            await asyncio.sleep(0.4)
+            if not await self._keyboard_comes_up():
+                raise Refused("not_actionable", f"no_action: {what} didn't take focus (no keyboard came up).")
+        note = ""
         if replace:
             focused = await self._call("GET", "/session/{sid}/element/active")
             element = (focused.get("value") or {}).get("ELEMENT") or next(iter((focused.get("value") or {}).values()), None)
             if element:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
+            else:
+                note = " (couldn't find the focused field to clear, so the old text may remain)"
         await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text + ("\n" if submit else ""))})
-        return f"typed {len(text)} characters" + (" and pressed return" if submit else "")
+        return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
+
+    async def _keyboard_comes_up(self) -> bool:
+        """Poll the tree (fast XML) until it shows the keyboard, for at most KEYBOARD_WAIT seconds."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + KEYBOARD_WAIT
+        while True:
+            source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+            if ui.read(source, self.screen).keyboard:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(KEYBOARD_POLL)
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350) -> str:
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms))

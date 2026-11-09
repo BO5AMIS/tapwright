@@ -17,6 +17,7 @@ from . import store
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
+STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
 
@@ -45,26 +46,21 @@ def run(fn, *args):
     return anyio.run(fn, *args, backend_options=options)
 
 
-def _start_failure_base() -> type:
-    from pymobiledevice3.services.dvt.testmanaged.dtx_services import XCUITestListener
-    return XCUITestListener
+def _failure_listener(on_failure):
+    """A pymobiledevice3 listener that calls `on_failure(error)` when the test service says UI
+    testing couldn't start, or None if its interface has moved (the wait for /status still catches it)."""
+    try:
+        from pymobiledevice3.services.dvt.testmanaged.dtx_services import XCUITestListener
+    except ImportError:
+        return None
 
+    class Listener(XCUITestListener):
+        async def initialization_for_ui_testing_did_fail(self, error) -> None:
+            on_failure(error)
 
-class _StartFailure:
-    """Hears the test service's `initializationForUITestingDidFailWithError` (it happens on the first start
-    after another daemon stopped). It is built as an XCUITestListener subclass on first use, so that
-    importing this module doesn't import pymobiledevice3."""
-
-    def __new__(cls):
-        base = _start_failure_base()
-        impl = type("_StartFailureListener", (base,), {
-            "error": None,
-            "initialization_for_ui_testing_did_fail": cls._record})
-        return impl()
-
-    @staticmethod
-    async def _record(self, error) -> None:
-        self.error = f"{getattr(error, 'domain', '?')} code {getattr(error, 'code', '?')}"
+        async def did_fail_to_bootstrap(self, error) -> None:
+            on_failure(error)
+    return Listener()
 
 
 class Device:
@@ -162,20 +158,34 @@ class Device:
                 if p.get("bundleIdentifier") == runner_id:
                     await control.kill(p["pid"])
         cfg = await TestConfig.create_for(self.rsd, runner_bundle_id=runner_id)
-        failure = _StartFailure()
-        self.runner = asyncio.create_task(XCUITestService(self.rsd).run(cfg, listener=failure), name="webdriveragent")
+        failed = asyncio.Event()
+        reason: list[str] = []
+
+        def on_failure(error) -> None:
+            reason.append(f"{getattr(error, 'domain', '?')} code {getattr(error, 'code', '?')}")
+            failed.set()
+        service = XCUITestService(self.rsd)
+        listener = _failure_listener(on_failure)
+        try:
+            run = service.run(cfg, listener=listener) if listener else service.run(cfg)
+        except TypeError:  # run() no longer takes a listener: start without the hook
+            run = service.run(cfg)
+        self.runner = asyncio.create_task(run, name="webdriveragent")
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
-            if failure.error is not None:  # the phone said so: don't wait out the minute
+            if failed.is_set():  # the phone said so: don't wait out the minute
                 await self._stop_runner()
-                raise DeviceError(f"UI testing failed to start: {failure.error}")
+                raise DeviceError(f"UI testing failed to start: {reason[0]}")
             if self.runner.done():
                 exc = self.runner.exception()
                 raise DeviceError(f"WebDriverAgent stopped while starting: {exc}")
             if await self.wda_alive():
                 self.log("WebDriverAgent is running")
                 return
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.wait_for(failed.wait(), 0.5)
+            except asyncio.TimeoutError:
+                pass
         raise DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)")
 
     async def wda_alive(self) -> bool:
@@ -280,7 +290,9 @@ class Device:
         runner, self.runner = self.runner, None
         if runner:
             runner.cancel()
-            await asyncio.gather(runner, return_exceptions=True)
+            await asyncio.wait({runner}, timeout=STOP_WAIT)  # a task that ignores the cancel mustn't hang us
+            if runner.done() and not runner.cancelled():
+                runner.exception()  # collected, so it isn't logged as never retrieved
 
     async def close(self) -> None:
         await self._stop_runner()

@@ -429,6 +429,7 @@ class Daemon:
         if name == "wait":
             return await self._wait(view, args, notes, shot)
         if name == "look":
+            await self._settle_pending(view)
             return await self._look(view, shot, [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
@@ -443,6 +444,8 @@ class Daemon:
         async def act():
             self._require_connected()
             s = self.session
+            if not (by_lookup and not self._current(view)):  # a silent re-read settles for itself
+                await self._settle_pending(view)
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
             # never looked, a person acted, or the line dropped: the agent's list may be anything
@@ -456,8 +459,7 @@ class Daemon:
                 # Resolve on the live tree. The agent's refs follow their elements onto it, so `e3` still
                 # means the same element when it moved. The view's freshness doesn't change: a person's
                 # action still makes refs stale, and `view.shown` (what the agent was told) stays put.
-                await self._silent_read(view)
-                if not by_ref and self._missing(s.items, target):
+                if await self._silent_read(view) and self._missing(s.items, target):
                     # the app may have been mid-redraw: one more look, once it is still, before saying so
                     await self._silent_read(view)
             s.last_point = None
@@ -478,6 +480,7 @@ class Daemon:
             return _answer([str(result)], notes)
         looks = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
         view.moved = view.moved or not looks
+        view.unsettled = not looks
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
             return _answer([str(result)], notes)
@@ -616,11 +619,20 @@ class Daemon:
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
-    async def _silent_read(self, view) -> None:
-        """Read the live tree for target resolution, once the screen is still (cap RESOLVE_SETTLE: no frames
-        means no wait). Read mid-redraw, an element can be briefly missing."""
+    async def _settle_pending(self, view) -> None:
+        """XCTest no longer waits for the app to go idle, so after an action that wasn't settled (`look: false`)
+        nothing may act or read until the screen is still (cap RESOLVE_SETTLE)."""
+        if view.unsettled:
+            await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+            view.unsettled = False
+
+    async def _silent_read(self, view) -> bool:
+        """Read the live tree for target resolution, once the screen is still (cap RESOLVE_SETTLE; with no
+        frames that is a `settle_fallback` wait, 0.6 s). Read mid-redraw, an element can be briefly missing.
+        True when a re-read could show something else: the stream moved, ended capped, or has no frames."""
         s = self.session
-        await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+        done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
+        view.unsettled = False
         mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
         await s.refresh()
         known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
@@ -629,6 +641,7 @@ class Daemon:
         view.top_ref = max(view.top_ref, changes.highest(view.items))
         view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
         s.items = view.items
+        return done.capped or mark[1] is None or self._mark()[1] != mark[1]
 
     @staticmethod
     def _missing(items: list[ui.Element], target: ui.Target) -> bool:
