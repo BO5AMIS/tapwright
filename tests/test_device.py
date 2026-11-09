@@ -66,6 +66,15 @@ def test_a_reset_is_a_dead_line():
     assert conn.closed
 
 
+def test_a_zero_or_negative_timeout_still_gives_the_request_a_chance():
+    """A computed deadline of 0 (or less) must not turn a healthy request into a 'dead line'."""
+    body = json.dumps({"value": {"ok": True}}).encode()
+    conn = Conn(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+    assert asyncio.run(device({8100: conn}).http("GET", "/status", timeout=0))["value"] == {"ok": True}
+    conn = Conn(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+    assert asyncio.run(device({8100: conn}).http("GET", "/status", timeout=-0.01))["value"] == {"ok": True}
+
+
 def test_silence_is_a_dead_line():
     with pytest.raises(ConnectionLost, match="didn't answer"):
         asyncio.run(device({8100: Conn(hang=True)}).http("GET", "/status", timeout=0.1))

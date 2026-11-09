@@ -2673,6 +2673,45 @@ def test_wait_for_times_out_with_the_timeout_code():
     run(go)
 
 
+def test_wait_for_never_reads_with_no_time_left():
+    """On the phone a read was given `min(5, left)` with left at 0: it timed out at once, counted as a lost
+    connection, and the daemon reconnected (2026-11-09). Every read gets a real deadline."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        given = []
+        real = type(d.session).refresh.__get__(d.session)
+
+        async def refresh(timeout=None):
+            given.append(timeout)
+            return await real(timeout)
+        d.session.refresh = refresh
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"text": "never", "timeout": 1})
+        assert e.value.code == "timeout"
+        assert given and min(given) > 0.1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_slow_read_in_wait_for_is_a_timeout_not_a_lost_phone():
+    """wait_for's own deadline running out mid-read answers `timeout`; the link to the phone is fine."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        lost = []
+        d.lost = lambda reason: lost.append(reason)
+
+        async def slow_refresh(timeout=None):
+            await asyncio.sleep(2.0)  # longer than the whole wait_for
+        d.session.refresh = slow_refresh
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"text": "never", "timeout": 0.5})
+        assert e.value.code == "timeout" and not lost and d.state == "live"
+        await finish(stop, task)
+    run(go)
+
+
 def test_wait_for_checks_its_arguments():
     async def go():
         d = make()
@@ -2705,14 +2744,16 @@ def test_wait_for_answers_from_its_last_poll_without_reading_again():
     run(go)
 
 
-def test_each_wait_for_read_is_limited_by_the_time_that_is_left():
+def test_each_wait_for_read_gets_its_own_deadline():
+    """wait_for's own deadline is kept by cancelling a read, never by shrinking the read's deadline:
+    a read with almost no time once failed at once and made the daemon reconnect (2026-11-09)."""
     async def go():
         d = make()
         stop, task = await started(d)
         with pytest.raises(Refused):
             await d.run_tool("a", "wait_for", {"text": "never", "timeout": 2})
         timeouts = d.session.read_timeouts
-        assert timeouts[0] == 2.0 and timeouts == sorted(timeouts, reverse=True) and timeouts[-1] < 0.5
+        assert timeouts and set(timeouts) == {5.0}
         d.session.read_timeouts.clear()
         await d.run_tool("a", "wait_for", {"label": "OK"})
         assert d.session.read_timeouts == [5.0]  # never more than 5 s for one read

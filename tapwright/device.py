@@ -17,6 +17,7 @@ from . import store
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
+MIN_TIMEOUT = 0.5  # seconds: the least any one request to WebDriverAgent is given
 STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
@@ -197,7 +198,10 @@ class Device:
 
     async def http(self, method: str, path: str, payload: dict | None = None, timeout: float = 30.0) -> dict:
         """One request to WebDriverAgent, through the tunnel (works the same over USB and network).
-        Raises DeviceError for an error reply, ConnectionLost when nothing usable comes back."""
+        Raises DeviceError for an error reply, ConnectionLost when nothing usable comes back.
+        A deadline shorter than MIN_TIMEOUT is raised to it: running out of the caller's own time is
+        not a dead line, and a 0 s deadline once made the daemon reconnect (2026-11-09)."""
+        timeout = max(timeout, MIN_TIMEOUT)
         try:
             return await asyncio.wait_for(self._http(method, path, payload), timeout)
         except asyncio.TimeoutError:

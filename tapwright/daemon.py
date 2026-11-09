@@ -648,18 +648,26 @@ class Daemon:
         target = ui.parse_target({kind: args[kind]})
         gone, timeout = bool(args.get("gone", False)), float(args.get("timeout", WAIT_FOR_DEFAULT))
         clock = self.control.clock
-        began, left = clock(), timeout
+        began = clock()
+        timed_out = Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
+                                       f"{'disappear' if gone else 'appear'}; it didn't happen.")
         while True:
-            # each read may take what is left of the timeout (at most WAIT_FOR_READ_MAX), so the timeout holds
-            tree = await self._read(lambda: self.session.refresh(timeout=min(WAIT_FOR_READ_MAX, left)))
+            left = timeout - (clock() - began)
+            if left < WAIT_FOR_MIN_LEFT:
+                raise timed_out
+            # The read gets its own full deadline, so a slow phone isn't taken for a dead one; wait_for's
+            # deadline is kept by cancelling the read, which answers `timeout` and leaves the link alone.
+            try:
+                tree = await asyncio.wait_for(
+                    self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), left)
+            except asyncio.TimeoutError:
+                raise timed_out from None
             if self._missing(tree.items, target) == gone:
                 break
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
-                raise Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
-                                         f"{'disappear' if gone else 'appear'}; it didn't happen.")
+                raise timed_out
             await self.control.sleep(min(WAIT_FOR_POLL, left))
-            left = timeout - (clock() - began)
         result = f"Done after {clock() - began:.1f} s."
         if not args.get("look", True):
             return _answer([result], notes)
