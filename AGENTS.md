@@ -37,6 +37,12 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 7. System alerts (notifications, location, tracking) appear in `look`. Answer them with
    `alert` the way the test needs, usually as a new user would.
 8. Start a fresh run with `terminate_app` then `launch_app`.
+9. A person may be watching the live view, or driving. Their input goes first. Refusals say
+   what to do: `busy` (a person is using the phone: wait a few seconds, retry), `paused` (the
+   user paused you: ask them to resume), `stale` (the screen changed since your last look:
+   look again), `locked` (ask the user to unlock the phone), `reconnecting` (wait, then look),
+   `timeout` (no answer in time: look at the screen before retrying, because the action may
+   have happened).
 
 ## Reporting
 

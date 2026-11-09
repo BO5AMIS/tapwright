@@ -63,6 +63,18 @@ The first start of a session mounts Apple's developer disk image on the phone (d
 once, needs internet) and starts WebDriverAgent; that takes up to a minute. Later starts
 take seconds.
 
+## 5. The live view
+
+```sh
+tapwright view
+```
+
+opens the phone's screen in your browser, live, and lets you drive it. It starts
+`tapwright serve` (the background process that owns the phone) if it isn't running; agent
+tools start it too. It stops by itself after 30 minutes without viewers or requests
+(`tapwright serve --keep-alive` keeps it running), or with `tapwright serve --stop`. Its log
+is `~/.tapwright/serve.log`.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -72,6 +84,10 @@ take seconds.
 | WebDriverAgent doesn't start | phone unlocked and screen on; Developer Mode on; run setup again to reinstall |
 | works on USB, not on Wi-Fi | same network, no client isolation; run `tapwright probe` with the phone on the Wi-Fi |
 | actions do nothing on a screen | look again: the screen may have changed; system alerts need `alert` |
+| "tapwright serve is running and owns the phone" | `smoke` and `probe` need the phone to themselves: `tapwright serve --stop` |
+| the live view says "missing or wrong token" | open the link `tapwright view` prints; `tapwright serve --new-token` makes a new one |
+| port 8417 in use | the daemon takes a free port by itself; `tapwright view` finds it |
+| "another tapwright serve is starting or stuck" | wait a minute and retry; if it stays, see `~/.tapwright/serve.log`, end the stuck process, then `tapwright serve` |
 
 ## Undo
 

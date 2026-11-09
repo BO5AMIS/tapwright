@@ -99,6 +99,29 @@ phone, sign up with a test email, and tell me if anything looks broken."*
 
 Every action returns the screen right after it, so each step is one call.
 
+## Live view
+
+`tapwright serve` is a small background process that owns the connection to the phone.
+Agent tools, the live view in your browser and any other client go through it, so you and
+an agent can share one phone. Agent tools start it by themselves. To watch:
+
+```sh
+tapwright view      # opens the live view in your browser
+```
+
+You see the phone's screen live and can drive it: click to tap, hold to long-press, drag to
+swipe, use the mouse wheel to scroll, and type into the focused field. The toolbar has Home,
+volume, the stream quality and **Pause agent**. Your input goes first: the agent waits while
+you drive. The live view is reachable from this computer only, with an access token in the
+link.
+
+- Drags play on the phone after you let go: WebDriverAgent can't follow a finger live.
+- About 25 frames per second at most: fine for testing, not for judging animation smoothness.
+- The volume buttons press the phone's real buttons.
+
+Other tools can use the same daemon: the agent tools over HTTP (`POST /api/<tool>`), and the
+live view protocol in [docs/VIEWER-PROTOCOL.md](docs/VIEWER-PROTOCOL.md).
+
 ## Without the cable
 
 After setup, unplug: on the same Wi-Fi, Tapwright finds the phone by itself. To reach the
@@ -106,7 +129,7 @@ phone over a VPN such as Tailscale, give its address:
 
 ```sh
 tapwright probe --host 100.x.y.z --watch   # can the phone be reached there? (experimental)
-tapwright mcp --host 100.x.y.z
+tapwright serve --phone 100.x.y.z    # the daemon dials that address
 ```
 
 Whether iOS accepts the developer connection through a VPN is what `probe` finds out.
