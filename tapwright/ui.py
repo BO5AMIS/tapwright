@@ -53,8 +53,12 @@ def _truthy(v) -> bool:
     return v not in (False, 0, "0", "false", "False", None)
 
 
+_BIDI_MARKS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))
+
+
 def _text(v) -> str:
-    return "" if v is None else str(v).strip()
+    """The text, without the invisible direction marks iOS puts around numbers ("\u200e42")."""
+    return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
 
 def elements(source: dict, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:

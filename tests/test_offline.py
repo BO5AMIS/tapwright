@@ -51,6 +51,15 @@ def test_keyboard_keys_only_on_request():
     assert "q" in [e.label for e in ui.elements(SOURCE, SCREEN, keyboard=True)]
 
 
+def test_direction_marks_are_dropped():
+    # iOS Calculator, measured: the result is a StaticText labelled "\u200e42".
+    node = {"type": "XCUIElementTypeStaticText", "label": "\u200e42", "name": "\u200e42", "value": "\u200e42",
+            "rect": {"x": 326, "y": 294, "width": 88, "height": 87}}
+    items = ui.elements(node, SCREEN)
+    assert items[0].line() == 'e1 StaticText "42" @326,294 88x87'
+    assert ui.find(items, label="42") is items[0]
+
+
 def test_describe_is_compact():
     text = ui.describe(ui.elements(SOURCE, SCREEN), SCREEN)
     assert text.splitlines()[0] == "screen 402x874 pt, 4 elements"
