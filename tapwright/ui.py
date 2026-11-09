@@ -1,102 +1,230 @@
 """The screen as an agent reads it, and the gestures it asks for. Pure functions over
-WebDriverAgent's accessibility tree (`/source?format=json`), so they're testable
-without a phone.
+WebDriverAgent's accessibility tree (`SOURCE_PATH`, XML), so they're testable without a phone.
 
 An element line looks like:
-    e12 Button "Log in" id=login-button @24,610 354x48
+    e12 button "Log in" id=login-button @24,610 354x48 [tap]
 Positions and sizes are in points (the phone's coordinate space, what taps use).
+Format and vocabulary: docs/AGENT-TOOLS.md §3.
 """
+import json
 import math
 from dataclasses import dataclass
+from xml.etree import ElementTree as ET
 
 from .control import Refused
+
+# The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
+# or focus attribute, so visibility comes from the rect and a focused input can't be known.
+SOURCE_PATH = "/source?format=xml&excluded_attributes=visible,accessible"
 
 # Element types worth listing even without a label (things an agent can act on).
 INTERACTIVE = {"Button", "TextField", "SecureTextField", "TextView", "SearchField", "Switch", "Slider",
                "Cell", "Link", "Tab", "TabBar", "SegmentedControl", "PickerWheel", "Stepper", "Toggle",
                "MenuItem", "Image", "Icon", "Key"}
 # Containers whose own label repeats their children's text: listed only with an identifier.
+# Scroll containers are the exception: they are always listed, so `scroll` can name its area.
+# An Alert is never listed; the header describes it and its buttons stay in the list.
 CONTAINERS = {"Application", "Window", "Other", "Group", "ScrollView", "Table", "CollectionView",
               "NavigationBar", "Toolbar", "StatusBar", "Keyboard", "WebView", "Sheet", "Alert"}
 MAX_ELEMENTS = 200
+TEXT_LIMIT = 80
+
+# XCUIElementType (without the prefix) -> role, docs/AGENT-TOOLS.md §3.3. Anything else: the type lowercased.
+# A StaticText with the Header trait is a `header`; a Button inside a TabBar is a `tab`.
+ROLES = {"Button": "button", "Link": "link", "StaticText": "text",
+         "TextField": "input", "SecureTextField": "input", "SearchField": "input", "TextView": "input",
+         "Switch": "switch", "Toggle": "switch", "Slider": "slider", "Image": "image", "Icon": "image",
+         "Tab": "tab", "Cell": "cell", "ScrollView": "scroll", "Table": "scroll", "CollectionView": "scroll"}
+# What an agent can do with an element, inferred from its role.
+ROLE_ACTIONS = {"button": ("tap",), "link": ("tap",), "cell": ("tap",), "tab": ("tap",), "input": ("tap", "type"),
+                "switch": ("toggle",), "scroll": ("scroll",)}
+
+_BIDI_MARKS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"))
+
+
+def _text(v) -> str:
+    """The text, without the invisible direction marks iOS puts around numbers ("‎42")."""
+    return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
+
+
+def clip(text: str, limit: int = TEXT_LIMIT) -> str:
+    """One line, at most `limit` characters, as a JSON string."""
+    return json.dumps(" ".join(text.split())[:limit], ensure_ascii=False)
 
 
 @dataclass
 class Element:
     ref: str
-    type: str
+    role: str
     label: str = ""
-    name: str = ""  # accessibility identifier (testID in React Native, accessibilityIdentifier in UIKit)
+    identifier: str = ""  # testID in React Native, accessibilityIdentifier in UIKit
     value: str = ""
-    x: float = 0
-    y: float = 0
-    width: float = 0
-    height: float = 0
+    rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # x, y, width, height in points
     enabled: bool = True
+    selected: bool = False
+    checked: bool | None = None  # a switch's state; None for everything else
+    actions: tuple[str, ...] = ()
+    type: str = ""  # the XCUIElementType without its prefix
+    in_alert: bool = False  # inside an OS alert
+    focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
+
+    @property
+    def x(self) -> float:
+        return self.rect[0]
+
+    @property
+    def y(self) -> float:
+        return self.rect[1]
+
+    @property
+    def width(self) -> float:
+        return self.rect[2]
+
+    @property
+    def height(self) -> float:
+        return self.rect[3]
 
     @property
     def center(self) -> tuple[float, float]:
         return self.x + self.width / 2, self.y + self.height / 2
 
-    def line(self) -> str:
-        parts = [self.ref, self.type]
-        if self.label:
-            parts.append(f'"{self.label[:120]}"')
-        if self.name and self.name != self.label:
-            parts.append(f"id={self.name}")
-        if self.value and self.value != self.label:
-            parts.append(f'value="{self.value[:80]}"')
+    @property
+    def text(self) -> str:
+        """What the screen shows for it: the label, else the value."""
+        return self.label or self.value
+
+    def line(self, ref: bool = True, actions: bool = True) -> str:
+        """`<ref> <role> "<text>" [id=…] [value="…"] [disabled] [selected] [checked=…] @x,y WxH [actions]`.
+        `ref=False` leaves the ref out (a gone element has no ref any more); `actions=False` leaves
+        out the `[actions]`. The label is the quoted text, so there is no separate `label=`."""
+        parts = [self.ref] if ref else []
+        parts.append(self.role)
+        if self.text:
+            parts.append(clip(self.text))
+        if self.identifier:
+            parts.append(f"id={self.identifier}")
+        # a switch's value ("1", "0") is already `checked=`
+        if self.value and self.value != self.text and self.checked is None:
+            parts.append(f"value={clip(self.value)}")
         if not self.enabled:
             parts.append("disabled")
+        if self.selected:
+            parts.append("selected")
+        if self.checked is not None:
+            parts.append(f"checked={'true' if self.checked else 'false'}")
         parts.append(f"@{round(self.x)},{round(self.y)} {round(self.width)}x{round(self.height)}")
+        if actions and self.actions:
+            parts.append(f"[{', '.join(self.actions)}]")
         return " ".join(parts)
 
 
-def _truthy(v) -> bool:
-    return v not in (False, 0, "0", "false", "False", None)
+@dataclass(frozen=True)
+class Alert:
+    """An OS alert on screen: its title, its button labels, and where it is."""
+    title: str
+    buttons: tuple[str, ...]
+    rect: tuple[float, float, float, float]
 
 
-_BIDI_MARKS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))
+@dataclass
+class Tree:
+    """One read of the accessibility tree."""
+    items: list[Element]
+    more: int = 0  # elements past MAX_ELEMENTS, not listed
+    alert: Alert | None = None
+    keyboard: bool = False
 
 
-def _text(v) -> str:
-    """The text, without the invisible direction marks iOS puts around numbers ("\u200e42")."""
-    return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
+def _rect(node: ET.Element) -> tuple[float, float, float, float]:
+    def num(key: str) -> float:
+        try:
+            return float(node.get(key, 0))
+        except ValueError:
+            return 0.0
+    return num("x"), num("y"), num("width"), num("height")
 
 
-def elements(source: dict, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:
-    """Flatten WDA's tree into the elements worth showing, in reading order, numbered e1...
-    Skips invisible and off-screen ones, and the keyboard's keys unless `keyboard`."""
-    out: list[Element] = []
+def _kind(node: ET.Element) -> str:
+    return _text(node.get("type") or node.tag).removeprefix("XCUIElementType")
 
-    def walk(node: dict, in_keyboard: bool) -> None:
-        kind = _text(node.get("type")).removeprefix("XCUIElementType")
-        rect = node.get("rect") or {}
-        x, y = float(rect.get("x", 0)), float(rect.get("y", 0))
-        w, h = float(rect.get("width", 0)), float(rect.get("height", 0))
+
+def _alert(node: ET.Element) -> Alert:
+    buttons = [_text(n.get("label")) or _text(n.get("name")) for n in node.iter() if _kind(n) == "Button"]
+    return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
+
+
+def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
+    """Flatten WDA's XML tree into the elements worth showing, in reading order, numbered e1...
+    Skips what has no size or lies off the screen, and the keyboard's keys unless `keyboard`."""
+    tree = Tree([])
+
+    def walk(node: ET.Element, in_keyboard: bool, in_tab_bar: bool, in_alert: bool) -> None:
+        kind = _kind(node)
+        x, y, w, h = rect = _rect(node)
         label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
-        visible = _truthy(node.get("isVisible", True)) and w > 0 and h > 0
+        traits = set((node.get("traits") or "").split(","))
+        visible = w > 0 and h > 0
         if screen and (x + w <= 0 or y + h <= 0 or x >= screen[0] or y >= screen[1]):
             visible = False
+        if kind == "Alert" and visible and tree.alert is None:
+            tree.alert = _alert(node)
+        if kind == "Keyboard" and visible:
+            tree.keyboard = True
         in_keyboard = in_keyboard or kind == "Keyboard"
-        if name == label:
-            name_shown = ""  # WDA mirrors the label into name when there is no identifier
+        in_alert = in_alert or kind == "Alert"
+        # WDA mirrors the label into name when there is no identifier
+        identifier = "" if name == label else name
+        role = ROLES.get(kind, kind.lower())
+        if kind == "Button" and in_tab_bar:
+            role = "tab"
+        elif kind == "StaticText" and "Header" in traits:
+            role = "header"
+        if kind == "Alert":
+            worth = False
+        elif role == "scroll":
+            worth = True
         else:
-            name_shown = name
-        worth = (kind in INTERACTIVE or label or value or name_shown) and not (kind in CONTAINERS and not name_shown)
-        if visible and worth and (keyboard or not in_keyboard) and len(out) < MAX_ELEMENTS:
-            out.append(Element(f"e{len(out) + 1}", kind, label, name_shown, value, x, y, w, h,
-                               _truthy(node.get("isEnabled", True))))
-        for child in node.get("children") or []:
-            walk(child, in_keyboard)
+            worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
+        if visible and worth and (keyboard or not in_keyboard):
+            if len(tree.items) < MAX_ELEMENTS:
+                enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
+                checked = (value == "1") if role == "switch" else None
+                tree.items.append(Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
+                                          "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind,
+                                          in_alert))
+            else:
+                tree.more += 1
+        for child in node:
+            walk(child, in_keyboard, in_tab_bar or kind == "TabBar", in_alert)
 
-    walk(source, False)
-    return out
+    walk(ET.fromstring(source), False, False, False)
+    return tree
 
 
-def describe(items: list[Element], screen: tuple[float, float]) -> str:
-    head = f"screen {round(screen[0])}x{round(screen[1])} pt, {len(items)} elements"
-    return "\n".join([head] + [e.line() for e in items])
+def elements(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:
+    return read(source, screen, keyboard).items
+
+
+def describe(items: list[Element], screen: tuple[float, float], scale: float | None = None,
+             app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
+             more: int = 0) -> str:
+    """The full list (docs/AGENT-TOOLS.md §3.2): the header lines, then one line per element.
+    `app` is (name, bundle id)."""
+    size = f"{round(screen[0])}x{round(screen[1])} pt" + (f" @{scale:g}x" if scale else "")
+    lines = [f"Screen {size} · {len(items)} elements"]
+    if app:
+        lines.append(f"App: {app[0]} ({app[1]})")
+    if alert:
+        lines.append(f"Alert: {json.dumps(alert.title, ensure_ascii=False)} "
+                     + " ".join(f"[{b}]" for b in alert.buttons))
+    if keyboard:
+        lines.append("Keyboard: shown")
+    lines.extend(e.line() for e in items)
+    if more:
+        lines.append(f"(+{more} more below; scroll)")
+    if not items:
+        lines.append("(nothing visible; the app may still be loading)")
+    return "\n".join(lines)
 
 
 class NotFound(Exception):
@@ -113,7 +241,7 @@ def find(items: list[Element], ref: str | None = None, label: str | None = None,
                 return e
         raise NotFound(f"no {ref} on the last screen; look again")
     if id:
-        hits = [e for e in items if e.name == id]
+        hits = [e for e in items if e.identifier == id]
     elif label:
         want = label.strip().lower()
         hits = [e for e in items if e.label.lower() == want or e.value.lower() == want]

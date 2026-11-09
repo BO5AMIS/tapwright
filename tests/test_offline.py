@@ -14,27 +14,23 @@ import pytest
 from tapwright import ui
 from tapwright.control import Refused
 
-# A trimmed WebDriverAgent tree, shaped like /source?format=json on iOS 26.
-SOURCE = {"type": "XCUIElementTypeApplication", "label": "Example", "rect": {"x": 0, "y": 0, "width": 402, "height": 874},
-          "isVisible": "1", "children": [
-              {"type": "XCUIElementTypeWindow", "rect": {"x": 0, "y": 0, "width": 402, "height": 874}, "children": [
-                  {"type": "XCUIElementTypeOther", "label": "Welcome Log in", "rect": {"x": 0, "y": 0, "width": 402, "height": 874},
-                   "children": [
-                       {"type": "XCUIElementTypeStaticText", "label": "Welcome", "name": "Welcome", "isVisible": "1",
-                        "rect": {"x": 24, "y": 96, "width": 200, "height": 30}},
-                       {"type": "XCUIElementTypeTextField", "label": "Email", "name": "email-input", "value": "",
-                        "rect": {"x": 24, "y": 500, "width": 354, "height": 44}},
-                       {"type": "XCUIElementTypeButton", "label": "Log in", "name": "login-button", "isEnabled": "1",
-                        "rect": {"x": 24, "y": 610, "width": 354, "height": 48}},
-                       {"type": "XCUIElementTypeButton", "label": "Log in with Apple", "name": "apple-login", "isEnabled": "0",
-                        "rect": {"x": 24, "y": 670, "width": 354, "height": 48}},
-                       {"type": "XCUIElementTypeButton", "label": "Hidden", "isVisible": "0",
-                        "rect": {"x": 24, "y": 730, "width": 354, "height": 48}},
-                       {"type": "XCUIElementTypeButton", "label": "Below", "rect": {"x": 24, "y": 1200, "width": 354, "height": 48}},
-                   ]},
-                  {"type": "XCUIElementTypeKeyboard", "rect": {"x": 0, "y": 600, "width": 402, "height": 274}, "children": [
-                      {"type": "XCUIElementTypeKey", "label": "q", "rect": {"x": 4, "y": 610, "width": 36, "height": 42}}]},
-              ]}]}
+# A trimmed WebDriverAgent tree, shaped like /source?format=xml on iOS 26.
+SOURCE = """<AppiumAUT>
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" label="Example" enabled="true" x="0" y="0" width="402" height="874">
+ <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="402" height="874">
+  <XCUIElementTypeOther type="XCUIElementTypeOther" label="Welcome Log in" enabled="true" x="0" y="0" width="402" height="874">
+   <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Welcome" label="Welcome" enabled="true" x="24" y="96" width="200" height="30"/>
+   <XCUIElementTypeTextField type="XCUIElementTypeTextField" name="email-input" label="Email" value="" enabled="true" x="24" y="500" width="354" height="44"/>
+   <XCUIElementTypeButton type="XCUIElementTypeButton" name="login-button" label="Log in" enabled="true" x="24" y="610" width="354" height="48"/>
+   <XCUIElementTypeButton type="XCUIElementTypeButton" name="apple-login" label="Log in with Apple" enabled="false" x="24" y="670" width="354" height="48"/>
+   <XCUIElementTypeButton type="XCUIElementTypeButton" label="Below" enabled="true" x="24" y="1200" width="354" height="48"/>
+  </XCUIElementTypeOther>
+  <XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="true" x="0" y="600" width="402" height="274">
+   <XCUIElementTypeKey type="XCUIElementTypeKey" label="q" enabled="true" x="4" y="610" width="36" height="42"/>
+  </XCUIElementTypeKeyboard>
+ </XCUIElementTypeWindow>
+</XCUIElementTypeApplication>
+</AppiumAUT>"""
 SCREEN = (402.0, 874.0)
 
 
@@ -42,8 +38,8 @@ def test_elements_are_flattened_in_reading_order():
     items = ui.elements(SOURCE, SCREEN)
     assert [e.label for e in items] == ["Welcome", "Email", "Log in", "Log in with Apple"]
     assert [e.ref for e in items] == ["e1", "e2", "e3", "e4"]
-    assert items[1].name == "email-input" and items[1].type == "TextField"
-    assert items[0].name == ""  # a name that only mirrors the label isn't shown
+    assert items[1].identifier == "email-input" and items[1].role == "input"
+    assert items[0].identifier == ""  # a name that only mirrors the label isn't shown
     assert not items[3].enabled
 
 
@@ -54,26 +50,26 @@ def test_keyboard_keys_only_on_request():
 
 def test_direction_marks_are_dropped():
     # iOS Calculator, measured: the result is a StaticText labelled "\u200e42".
-    node = {"type": "XCUIElementTypeStaticText", "label": "\u200e42", "name": "\u200e42", "value": "\u200e42",
-            "rect": {"x": 326, "y": 294, "width": 88, "height": 87}}
+    node = ('<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="&#8206;42" name="&#8206;42" '
+            'value="&#8206;42" x="326" y="294" width="88" height="87"/>')
     items = ui.elements(node, SCREEN)
-    assert items[0].line() == 'e1 StaticText "42" @326,294 88x87'
+    assert items[0].line() == 'e1 text "42" @326,294 88x87'
     assert ui.find(items, label="42") is items[0]
 
 
 def test_describe_is_compact():
     text = ui.describe(ui.elements(SOURCE, SCREEN), SCREEN)
-    assert text.splitlines()[0] == "screen 402x874 pt, 4 elements"
-    assert 'e3 Button "Log in" id=login-button @24,610 354x48' in text
-    assert "disabled" in text.splitlines()[4]
+    assert text.splitlines()[0] == "Screen 402x874 pt · 4 elements"
+    assert 'e3 button "Log in" id=login-button @24,610 354x48 [tap]' in text
+    assert text.splitlines()[4] == 'e4 button "Log in with Apple" id=apple-login disabled @24,670 354x48 [tap]'
 
 
 def test_find_by_id_label_ref_and_index():
     items = ui.elements(SOURCE, SCREEN)
     assert ui.find(items, id="login-button").label == "Log in"
-    assert ui.find(items, label="log in").name == "login-button"  # exact before substring
-    assert ui.find(items, label="apple").name == "apple-login"  # substring
-    assert ui.find(items, ref="e2").name == "email-input"
+    assert ui.find(items, label="log in").identifier == "login-button"  # exact before substring
+    assert ui.find(items, label="apple").identifier == "apple-login"  # substring
+    assert ui.find(items, ref="e2").identifier == "email-input"
     with pytest.raises(ui.NotFound):
         ui.find(items, label="nothing like this")
     with pytest.raises(ui.NotFound):

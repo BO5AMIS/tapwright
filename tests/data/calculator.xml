@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Calculator" label="Calculator" enabled="true" x="0" y="0" width="430" height="932" index="0">
+    <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="0">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0">
+        <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="&#8206;42" label="&#8206;42" value="&#8206;42" enabled="true" x="326" y="294" width="88" height="87" index="0"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="AC" label="clear" enabled="true" x="14" y="420" width="90" height="90" index="1"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="7" label="7" enabled="true" x="14" y="520" width="90" height="90" index="2"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="8" label="8" enabled="true" x="114" y="520" width="90" height="90" index="3"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="9" label="9" enabled="true" x="214" y="520" width="90" height="90" index="4"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="multiply" label="multiply" enabled="true" x="314" y="520" width="90" height="90" index="5"/>
+        <XCUIElementTypeButton type="XCUIElementTypeButton" name="7-memory" label="7" enabled="true" x="14" y="620" width="90" height="90" index="6"/>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>

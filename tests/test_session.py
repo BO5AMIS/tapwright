@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from tapwright import session as session_module
+from tapwright import ui as ui_module
 from tapwright.control import Refused
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
 from tapwright.session import Session
@@ -146,3 +147,59 @@ def test_tap_and_swipe_record_last_point(phone):
     assert s.last_point == (30.0, 40.0)
     asyncio.run(s.swipe(5.0, 6.0, 5.0, 200.0))
     assert s.last_point == (5.0, 6.0)
+
+
+SETTINGS_TREE = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" label="Settings" '
+                 'enabled="true" x="0" y="0" width="430" height="932">'
+                 '<XCUIElementTypeButton type="XCUIElementTypeButton" name="wifi" label="Wi-Fi" enabled="true" '
+                 'x="16" y="215" width="398" height="52"/></XCUIElementTypeApplication></AppiumAUT>')
+
+
+def test_look_reads_the_tree_the_app_and_the_scale(phone):
+    answers = {ui_module.SOURCE_PATH: {"value": SETTINGS_TREE},
+               "/wda/activeAppInfo": {"value": {"bundleId": "com.apple.Preferences", "name": "Settings", "pid": 12}},
+               "/session/S/wda/screen": {"value": {"scale": 3, "statusBarSize": {"width": 430, "height": 59}}}}
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path in answers:
+            phone.requests.append((method, path, payload))
+            return answers[path]
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    text, image = asyncio.run(s.look(screenshot=False))
+    assert image is None and s.scale == 3.0
+    assert text.splitlines() == ["Screen 430x932 pt @3x · 1 elements", "App: Settings (com.apple.Preferences)",
+                                 'e1 button "Wi-Fi" id=wifi @16,215 398x52 [tap]']
+    assert [e.ref for e in s.items] == ["e1"]
+    asyncio.run(s.look(screenshot=False))
+    assert [p for _, p, _ in phone.requests].count("/session/S/wda/screen") == 1  # the scale is read once
+
+
+def test_look_without_app_or_scale_still_works(phone):
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == ui_module.SOURCE_PATH:
+            return {"value": SETTINGS_TREE}
+        if path.endswith("/wda/activeAppInfo") or path.endswith("/wda/screen"):
+            raise DeviceError("HTTP 404: unknown command")
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    text, _ = asyncio.run(Session(phone).look(screenshot=False))
+    assert text.splitlines()[0] == "Screen 430x932 pt · 1 elements" and "App:" not in text
+
+
+def test_a_dead_line_during_look_is_not_swallowed(phone):
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == "/wda/activeAppInfo":
+            raise ConnectionLost("gone")
+        if path == ui_module.SOURCE_PATH:
+            return {"value": SETTINGS_TREE}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    with pytest.raises(ConnectionLost):
+        asyncio.run(Session(phone).look(screenshot=False))

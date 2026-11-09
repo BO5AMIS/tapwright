@@ -69,7 +69,7 @@ def test_serve_runs_is_found_and_stops(home):
         assert client.healthy(info)["protocol"] == 1 and len(info["token"]) >= 32
         assert run(lambda: server.serve(port=0, make_daemon=make_factory(made))) == 0  # found, not doubled
         assert len(made) == 1
-        assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("screen")
+        assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         made[0].control.set_paused(True)
         with pytest.raises(client.DaemonError) as e:
             client.call("tap", {"x": 1, "y": 1}, "agent-1")

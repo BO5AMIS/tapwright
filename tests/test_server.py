@@ -110,7 +110,7 @@ def test_agent_api():
     app, d = app_and_daemon()
     with TestClient(app) as c:
         look = c.post("/api/look", headers=AUTH, json={"screenshot": False})
-        assert look.status_code == 200 and look.json()["text"].startswith("screen")
+        assert look.status_code == 200 and look.json()["text"].startswith("Screen")
         tap = c.post("/api/tap", headers=AUTH, json={"ref": "e1", "look": False})
         assert tap.json()["text"].startswith("tapped e1")
         d.control.set_paused(True)

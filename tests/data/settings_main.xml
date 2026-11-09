@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Settings" label="Settings" enabled="true" x="0" y="0" width="430" height="932" index="0">
+    <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="0">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0">
+        <XCUIElementTypeNavigationBar type="XCUIElementTypeNavigationBar" name="Settings" enabled="true" x="0" y="59" width="430" height="96" index="0">
+          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Settings" label="Settings" value="Settings" enabled="true" x="16" y="103" width="200" height="40" index="0" traits="StaticText,Header"/>
+        </XCUIElementTypeNavigationBar>
+        <XCUIElementTypeTable type="XCUIElementTypeTable" name="com.apple.settings.root" enabled="true" x="0" y="155" width="430" height="777" index="1">
+          <XCUIElementTypeSearchField type="XCUIElementTypeSearchField" name="Search" label="Search" value="" placeholderValue="Search" enabled="true" x="16" y="163" width="398" height="36" index="0" traits="SearchField"/>
+          <XCUIElementTypeCell type="XCUIElementTypeCell" name="airplane-mode-cell" label="Airplane Mode" enabled="true" x="16" y="215" width="398" height="52" index="1">
+            <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Airplane Mode" label="Airplane Mode" value="Airplane Mode" enabled="true" x="60" y="229" width="200" height="24" index="0" traits="StaticText"/>
+            <XCUIElementTypeSwitch type="XCUIElementTypeSwitch" name="Airplane Mode" label="Airplane Mode" value="0" enabled="true" x="349" y="224" width="51" height="31" index="1" traits="Button,ToggleButton"/>
+          </XCUIElementTypeCell>
+          <XCUIElementTypeCell type="XCUIElementTypeCell" name="Wi-Fi" label="Wi-Fi, Home" value="Home" enabled="true" x="16" y="268" width="398" height="52" index="2"/>
+          <XCUIElementTypeCell type="XCUIElementTypeCell" name="Bluetooth" label="Bluetooth" value="On" enabled="true" x="16" y="321" width="398" height="52" index="3"/>
+          <XCUIElementTypeCell type="XCUIElementTypeCell" name="Notifications" label="Notifications" enabled="false" x="16" y="400" width="398" height="52" index="4" traits="NotEnabled"/>
+          <XCUIElementTypeCell type="XCUIElementTypeCell" name="Accessibility" label="Accessibility" enabled="true" x="16" y="1000" width="398" height="52" index="5"/>
+        </XCUIElementTypeTable>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>

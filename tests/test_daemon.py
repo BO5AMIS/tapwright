@@ -56,14 +56,14 @@ def test_look_then_act_by_ref():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "look", {})
-        assert r["text"].startswith("screen 400x800") and r["image"] == base64.b64encode(b"JPEG").decode()
+        assert r["text"].startswith("Screen 400x800") and r["image"] == base64.b64encode(b"JPEG").decode()
         assert r["image_size"] is None  # b"JPEG" isn't a picture
         r = await d.run_tool("a", "tap", {"ref": "e1", "look": False})
-        assert r == {"text": 'tapped e1 Button "OK" id=ok-button @10,10 100x40', "image": None, "image_size": None}
+        assert r == {"text": 'tapped e1 button "OK" id=ok-button @10,10 100x40 [tap]', "image": None, "image_size": None}
         r = await d.run_tool("a", "tap", {"ref": "e1", "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("tapped e1")
         r = await d.run_tool("a", "tap", {"ref": "e1"})  # with the look after it
-        assert r["text"].splitlines()[1].startswith("screen") and r["image"]
+        assert r["text"].splitlines()[1].startswith("Screen") and r["image"]
         await finish(stop, task)
     run(go)
 
@@ -123,7 +123,7 @@ def test_a_read_is_retried_once_after_reconnecting():
         stop, task = await started(d)
         d.session.fail["look"] = ConnectionLost("gone")
         r = await d.run_tool("a", "look", {"screenshot": False})
-        assert r["text"].startswith("screen") and d.session.calls.count("look") == 2
+        assert r["text"].startswith("Screen") and d.session.calls.count("look") == 2
         await finish(stop, task)
     run(go)
 
@@ -152,7 +152,7 @@ def test_locked_phone():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"x": 1, "y": 1})
         assert e.value.code == "locked"
-        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("screen")
+        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "locked"
         await finish(stop, task)
     run(go)
@@ -240,7 +240,7 @@ def test_an_agent_look_during_a_reconnect_waits_for_it():
         d.lost("gone")
         await asyncio.sleep(0.03)
         r = await d.run_tool("a", "look", {"screenshot": False})
-        assert r["text"].startswith("screen")
+        assert r["text"].startswith("Screen")
         calls = s.calls
         assert max(i for i, c in enumerate(calls) if c == "ensure") < max(i for i, c in enumerate(calls) if c == "look")
         await finish(stop, task)
@@ -426,7 +426,7 @@ def test_a_crash_inside_a_tool_is_internal_and_logged():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "look", {})
         assert e.value.code == "internal" and "bang" in str(e.value)
-        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("screen")  # still up
+        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")  # still up
         await finish(stop, task)
     run(go)
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Settings" label="Settings" enabled="true" x="0" y="0" width="430" height="932" index="0">
+    <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="0">
+      <XCUIElementTypeSearchField type="XCUIElementTypeSearchField" name="Search" label="Search" value="wifi" enabled="true" x="16" y="163" width="398" height="36" index="0"/>
+      <XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="true" x="0" y="640" width="430" height="292" index="1">
+        <XCUIElementTypeKey type="XCUIElementTypeKey" name="q" label="q" enabled="true" x="3" y="650" width="38" height="46" index="0"/>
+        <XCUIElementTypeKey type="XCUIElementTypeKey" name="w" label="w" enabled="true" x="44" y="650" width="38" height="46" index="1"/>
+      </XCUIElementTypeKeyboard>
+      <XCUIElementTypeAlert type="XCUIElementTypeAlert" name="Reset All Settings?" label="Reset All Settings?" enabled="true" x="78" y="360" width="274" height="180" index="2">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="78" y="360" width="274" height="180" index="0">
+          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Reset All Settings?" label="Reset All Settings?" value="Reset All Settings?" enabled="true" x="94" y="376" width="242" height="22" index="0"/>
+          <XCUIElementTypeButton type="XCUIElementTypeButton" name="Cancel" label="Cancel" enabled="true" x="78" y="490" width="137" height="50" index="1"/>
+          <XCUIElementTypeButton type="XCUIElementTypeButton" name="Reset" label="Reset" enabled="true" x="215" y="490" width="137" height="50" index="2"/>
+        </XCUIElementTypeOther>
+      </XCUIElementTypeAlert>
+    </XCUIElementTypeWindow>
+  </XCUIElementTypeApplication>
+</AppiumAUT>

@@ -30,7 +30,7 @@ class FakeDevice:
 
 class FakeSession:
     """Session's interface, no phone. `fail[name] = exc` makes the next call of that name raise."""
-    SCREEN_TEXT = 'screen 400x800 pt, 1 elements\ne1 Button "OK" id=ok-button @10,10 100x40'
+    SCREEN_TEXT = 'Screen 400x800 pt · 1 elements\ne1 button "OK" id=ok-button @10,10 100x40 [tap]'
 
     def __init__(self) -> None:
         self.device = FakeDevice()
@@ -79,7 +79,8 @@ class FakeSession:
 
     async def look(self, screenshot=True):
         self._record("look")
-        self.items = [ui.Element("e1", "Button", "OK", "ok-button", "", 10, 10, 100, 40)]
+        self.items = [ui.Element("e1", "button", "OK", "ok-button", rect=(10, 10, 100, 40), actions=("tap",),
+                                 type="Button")]
         return self.SCREEN_TEXT, (b"JPEG" if screenshot else None)
 
     async def apps(self):

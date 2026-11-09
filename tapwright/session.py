@@ -16,6 +16,7 @@ class Session:
         self.device = device
         self.sid = None
         self.screen = (390.0, 844.0)
+        self.scale: float | None = None  # pixels per point, read once; None until known
         self.items: list[ui.Element] = []
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
 
@@ -44,6 +45,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
+        self.scale = None
         self.items = []
         self.last_point = None
 
@@ -61,10 +63,34 @@ class Session:
             raise
 
     # ---- seeing ----
+    async def _app(self) -> tuple[str, str] | None:
+        """(name, bundle id) of the foreground app, or None when WebDriverAgent can't say."""
+        try:
+            info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return None
+        bundle = str(info.get("bundleId") or "")
+        return (str(info.get("name") or bundle), bundle) if bundle else None
+
+    async def _scale(self) -> float | None:
+        if self.scale is None:
+            try:
+                value = (await self._call("GET", "/session/{sid}/wda/screen")).get("value") or {}
+                self.scale = float(value["scale"])
+            except ConnectionLost:
+                raise
+            except (DeviceError, KeyError, TypeError, ValueError):
+                pass  # the header just leaves out "@3x"
+        return self.scale
+
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
         """(text, jpeg bytes or None): the screen as elements, and as a picture."""
-        source = (await self._call("GET", "/source?format=json", timeout=60))["value"]
-        self.items = ui.elements(source, self.screen, keyboard=keyboard)
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+        tree = ui.read(source, self.screen, keyboard=keyboard)
+        self.items = tree.items
+        app, scale = await self._app(), await self._scale()
         image = None
         if screenshot:
             png = base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
@@ -75,7 +101,7 @@ class Session:
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=80)
             image = buf.getvalue()
-        return ui.describe(self.items, self.screen), image
+        return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more), image
 
     def _target(self, ref=None, label=None, id=None, x=None, y=None, index=0):
         if x is not None and y is not None:
