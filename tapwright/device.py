@@ -103,9 +103,18 @@ class Device:
 
     # ---- WebDriverAgent ----
     async def start_wda(self, runner_id: str, wait: float = 60.0) -> None:
+        """Start our own WebDriverAgent. One left by a process that didn't shut down cleanly
+        answers for about 15 s and then hangs (measured), so it's stopped, not reused."""
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
-        if await self.wda_alive():
+        if self.runner and not self.runner.done() and await self.wda_alive():
             return
+        async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
+            for p in await info.proclist():
+                if p.get("bundleIdentifier") == runner_id:
+                    await control.kill(p["pid"])
         cfg = await TestConfig.create_for(self.rsd, runner_bundle_id=runner_id)
         self.runner = asyncio.create_task(XCUITestService(self.rsd).run(cfg), name="webdriveragent")
         deadline = time.monotonic() + wait
