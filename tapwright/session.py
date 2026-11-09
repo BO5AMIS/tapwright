@@ -89,7 +89,10 @@ class Session:
         return f"scrolled {direction}"
 
     async def press_button(self, name: str) -> str:
-        await self._call("POST", "/session/{sid}/wda/pressButton", {"name": name})
+        if name == "home":  # pressButton "home" does nothing on iOS 26 (measured); this one waits for the home screen
+            await self._call("POST", "/wda/homescreen", {})
+        else:
+            await self._call("POST", "/session/{sid}/wda/pressButton", {"name": name})
         return f"pressed {name}"
 
     async def alert(self, action: str) -> str:
