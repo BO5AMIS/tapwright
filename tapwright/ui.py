@@ -431,9 +431,12 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
     """The places a later sibling hides in the earlier ones (empty when it is no layer; see LAYER_MAX_DEPTH, the
     caller checks the depth), and whether it is a presentation. With a backdrop and something to act on: its whole
     rect, and bars are hidden too (a sheet dims them). With no backdrop: the rects of what it lists, when they
-    fill half the screen, and bars stay."""
+    fill half the screen, and bars stay. The keyboard's window is no layer: it starts with an empty full-screen
+    view and has keys outside the keyboard ("Next keyboard"), yet it hides nothing but the keys' own area."""
     area = screen[2] * screen[3]
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
+        return [], False
+    if any(_kind(n) == "Keyboard" for n in child.iter()):
         return [], False
     # what the layer lists below itself, and itself when it is a scroll view (a scroll view is content)
     inner = [e for e, number, _ in found if (span[0] < number < span[1] or (number == span[0] and e.role == "scroll"))

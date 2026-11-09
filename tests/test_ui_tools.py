@@ -383,6 +383,18 @@ def test_a_bottom_sheet_with_a_backdrop_hides_the_base_screen_it_covers():
         assert e.value.code == "not_found"
 
 
+def test_the_keyboard_window_is_no_layer_and_hides_nothing():
+    """On the phone the keyboard's own full-screen window starts with an empty full-screen view and has a key
+    to act on ("Next keyboard"): it looked like a sheet with a backdrop and hid the whole app (2026-11-09)."""
+    # as the phone lists it: an empty full-screen view, the strip below the keys with "Next keyboard", the keys
+    strip = node("Other", 0, 832, 430, 100, children=[node("Button", 2, 864, 81, 69, "Next keyboard")])
+    keys = node("Other", 0, 589, 430, 243, children=[
+        node("Keyboard", 0, 589, 430, 243, children=[node("Key", 4, 596, 43, 56, "q")])])
+    window = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), strip, keys])
+    shown = labels(ui.elements(under_window(lab_base(), window), PHONE))
+    assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
+
+
 def test_a_layer_with_a_backdrop_but_nothing_to_act_on_hides_nothing():
     inner = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), node("StaticText", 20, 747, 390, 26, "Loading")])
     items = ui.elements(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[inner])), PHONE)
