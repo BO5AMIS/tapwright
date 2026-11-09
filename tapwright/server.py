@@ -9,7 +9,7 @@ from importlib.resources import files
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocket
 
 from .control import Refused
 
@@ -23,11 +23,24 @@ def _host_ok(conn, hosts) -> bool:
     return conn.headers.get("host", "").split(":")[0] in hosts
 
 
-def _token_ok(conn, token: str) -> bool:
+def _same(given: str, token: str) -> bool:
+    return bool(given) and secrets.compare_digest(given.encode(), token.encode())
+
+
+def _bearer_ok(conn, token: str) -> bool:
     bearer = conn.headers.get("authorization", "")
-    given = [bearer[7:] if bearer.startswith("Bearer ") else "", conn.cookies.get(COOKIE, ""),
-             conn.query_params.get("token", "")]
-    return any(g and secrets.compare_digest(g.encode(), token.encode()) for g in given)
+    return _same(bearer[7:] if bearer.startswith("Bearer ") else "", token)
+
+
+def _cookie_ok(conn, token: str) -> bool:
+    """The cookie is shared across ports and sent by any page on this host, so a request that
+    only has the cookie must also come from this page itself (Fetch Metadata)."""
+    return _same(conn.cookies.get(COOKIE, ""), token) and conn.headers.get("sec-fetch-site") in (
+        None, "same-origin", "none")
+
+
+def _cookie_present(conn, token: str) -> bool:
+    return _same(conn.cookies.get(COOKIE, ""), token)
 
 
 def _error(code: str, message: str, status: int) -> JSONResponse:
@@ -37,23 +50,29 @@ def _error(code: str, message: str, status: int) -> JSONResponse:
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette:
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
 
-    def denied(conn) -> Response | None:
+    def denied(conn, cookie: bool = False) -> Response | None:
+        """/api takes only the Authorization header; the page and its stream may use the cookie."""
         if not _host_ok(conn, hosts):
             return _error("unauthorized", "unknown host", 403)
-        if not _token_ok(conn, token):
-            return _error("unauthorized", "missing or wrong token: open the link `tapwright view` prints", 401)
-        return None
+        if _bearer_ok(conn, token):
+            return None
+        if cookie and _cookie_present(conn, token):
+            if _cookie_ok(conn, token):
+                return None
+            return _error("unauthorized", "cross-site request refused", 403)
+        return _error("unauthorized", "missing or wrong token: open the link `tapwright view` prints", 401)
 
     async def index(request):
         if not _host_ok(request, hosts):
             return Response("unknown host", status_code=403)
-        given = request.query_params.get("token", "")
-        if given and secrets.compare_digest(given.encode(), token.encode()):
+        if _same(request.query_params.get("token", ""), token):
             response = RedirectResponse("/", status_code=303)  # the token leaves the address bar and history
             response.set_cookie(COOKIE, token, httponly=True, samesite="strict")
             return response
-        if not _token_ok(request, token):
+        if not (_bearer_ok(request, token) or _cookie_present(request, token)):
             return HTMLResponse("<p>Open the link that <code>tapwright view</code> prints.</p>", status_code=401)
+        if not _bearer_ok(request, token) and not _cookie_ok(request, token):
+            return HTMLResponse("cross-site request refused", status_code=403)
         return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
     async def health(request):
@@ -66,7 +85,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         try:
             body = await request.body()
             args = json.loads(body) if body else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             return _error("unsupported", "the body must be JSON", 400)
         if not isinstance(args, dict):
             return _error("unsupported", "the body must be a JSON object", 400)
@@ -75,6 +94,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
+        except (ValueError, TypeError) as e:
+            return _error("unsupported", f"bad arguments: {e}", 400)
 
     async def shutdown(request):
         problem = denied(request)
@@ -85,7 +106,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         return JSONResponse({"ok": True})
 
     async def stream(request):
-        problem = denied(request)
+        problem = denied(request, cookie=True)
         if problem is not None:
             return problem
 
@@ -111,8 +132,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
     async def ws(websocket: WebSocket):
         host = websocket.headers.get("host", "")
         origin = websocket.headers.get("origin")
-        if (not _host_ok(websocket, hosts) or not _token_ok(websocket, token)
-                or origin not in (None, f"http://{host}", f"https://{host}")):
+        if denied(websocket, cookie=True) is not None or origin not in (None, f"http://{host}", f"https://{host}"):
             await websocket.close(code=4403)
             return
         await websocket.accept()
@@ -130,24 +150,36 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                 if not queue.full():
                     queue.put_nowait(daemon.status())
 
-        tasks = [asyncio.create_task(send_all()), asyncio.create_task(tick())]
-        try:
+        async def receive_all():
             while True:
+                event = await websocket.receive()
+                if event["type"] == "websocket.disconnect":
+                    return
+                text = event.get("text")
+                if text is None:
+                    continue
                 try:
-                    message = json.loads(await websocket.receive_text())
-                except ValueError:
+                    message = json.loads(text)
+                except (ValueError, RecursionError):
                     continue
                 if isinstance(message, dict):
                     error = await daemon.viewer_message(message)
                     if error is not None and not queue.full():
                         queue.put_nowait(error)
-        except WebSocketDisconnect:
-            pass
-        finally:
+
+        tasks = [asyncio.create_task(receive_all()), asyncio.create_task(send_all()),
+                 asyncio.create_task(tick())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:  # whichever ends first, the rest stop
+            daemon.ws_clients -= 1  # first: nothing below may skip it, even if this handler is cancelled
+            daemon.unsubscribe(queue)
             for task in tasks:
                 task.cancel()
-            daemon.ws_clients -= 1
-            daemon.unsubscribe(queue)
+            await asyncio.wait(tasks)  # not gather: under TestClient's cancel scope it re-raises CancelledError
+            for task in tasks:
+                if not task.cancelled():
+                    task.exception()  # mark a failure as seen
 
     return Starlette(routes=[
         Route("/", index),
