@@ -107,6 +107,7 @@ class FakeSession:
         self.read_timeouts: list = []  # the per-read timeout each refresh() was given
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
         self.typed: list = []  # (text, replace, submit, target) of each type_text
+        self.holds: list = []  # the hold at the end of each swipe, in ms
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -199,8 +200,9 @@ class FakeSession:
         self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"
 
-    async def swipe(self, x0, y0, x1, y1, duration_ms=350):
+    async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
         self._record("swipe")
+        self.holds.append(hold_ms)
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 

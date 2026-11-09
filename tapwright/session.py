@@ -9,7 +9,7 @@ from . import store, ui
 from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
-KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for the keyboard
+KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
@@ -225,9 +225,7 @@ class Session:
         if target is not None:
             what = self._target(target)[2]
             await self.tap(target)
-            if not await self._keyboard_comes_up():
-                raise Refused("not_actionable", f"no_action: {what} didn't take focus (no keyboard came up).")
-            hit = ui.resolve(self.items, target)
+            hit = ui.resolve(self.items, target)  # focus is what counts: with a hardware keyboard no software one shows
             if not isinstance(hit, tuple) and not await self._has_focus(hit.rect):
                 raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
         note = ""
@@ -260,20 +258,8 @@ class Session:
                 return False
             await asyncio.sleep(KEYBOARD_POLL)
 
-    async def _keyboard_comes_up(self) -> bool:
-        """Poll the tree (fast XML) until it shows the keyboard, for at most KEYBOARD_WAIT seconds."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + KEYBOARD_WAIT
-        while True:
-            source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
-            if ui.read(source, self.screen).keyboard:
-                return True
-            if loop.time() >= deadline:
-                return False
-            await asyncio.sleep(KEYBOARD_POLL)
-
-    async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350) -> str:
-        await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms))
+    async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
+        await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -306,9 +292,14 @@ class Session:
 
     async def alert(self, action: str) -> str:
         """accept, dismiss, or text: the system alert on screen (permission prompts and the like)."""
-        if action == "text":
-            return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
-        await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
+        try:
+            if action == "text":
+                return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
+            await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
+        except DeviceError as e:
+            if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
+                raise Refused("not_found", "no alert on screen.") from e
+            raise
         return f"alert {action}ed"
 
     # ---- apps ----

@@ -3,6 +3,7 @@ import pytest
 from fakes import el
 
 from tapwright import ui
+from tapwright.control import Refused
 
 SCREEN = (400.0, 800.0)
 
@@ -196,11 +197,11 @@ def test_a_layer_before_the_content_hides_nothing():
     assert {"Add", "Card", "Dismiss"} <= set(labels(items))  # the base screen is in front here
 
 
-def test_a_full_screen_scroll_after_a_bar_does_not_hide_the_bar():
+def test_a_full_screen_scroll_drawn_after_a_bar_hides_what_is_under_it():
     rows = [node("Cell", 0, 100 + 60 * i, 430, 60, f"Row {i}") for i in range(12)]
     items = ui.elements(phone(node("NavigationBar", 0, 59, 430, 44, children=[node("Button", 8, 59, 60, 44, "Back")]),
                               node("ScrollView", 0, 0, 430, 932, children=rows)), PHONE)
-    assert "Back" in labels(items)
+    assert "Back" not in labels(items)  # drawn over the bar, so a finger can't reach it
 
 
 def test_the_visible_part_of_an_element_is_its_rect_minus_the_bars():
@@ -227,15 +228,15 @@ def cards(top=0, count=4, height=233):
 def test_deep_app_content_hides_nothing_even_when_a_later_body_fills_the_screen():
     header = node("Other", 0, 0, 430, 120, children=[node("Button", 20, 50, 100, 44, "Menu")])
     body = node("Other", 0, 0, 430, 932, children=cards())
-    items = ui.elements(phone(nested(5, header, body)), PHONE)  # the body sits 6 levels below the application
+    items = ui.elements(phone(nested(10, header, body)), PHONE)  # React Native: the body sits 11 levels below the application
     assert labels(items) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
 
 
-def test_a_layer_wrapping_a_main_scroll_view_is_a_screen_not_a_sheet():
+def test_a_full_screen_page_with_a_scroll_view_hides_the_screen_under_it():
     rows = [node("Cell", 0, 60 * i, 430, 60, f"Row {i}") for i in range(15)]
     page = node("Other", 0, 0, 430, 932, children=[node("ScrollView", 0, 0, 430, 900, children=rows)])
     items = ui.elements(phone(base_screen(), page), PHONE)
-    assert {"Add", "Card", "Home", "Row 0"} <= set(labels(items))
+    assert labels(items) == [f"Row {i}" for i in range(15)]  # no scroll exemption: it is opaque content on top
 
 
 def test_a_sheet_three_levels_down_hides_the_base_screen():
@@ -252,7 +253,7 @@ def test_a_layer_hides_only_what_is_inside_its_rect():
 
 
 def test_the_layer_depth_and_thresholds_are_named_constants():
-    assert (ui.LAYER_MAX_DEPTH, ui.LAYER_COVER, ui.LAYER_FILL, ui.LAYER_SCROLL) == (4, 0.95, 0.5, 0.9)
+    assert (ui.LAYER_MAX_DEPTH, ui.LAYER_COVER, ui.LAYER_FILL) == (6, 0.95, 0.5)
 
 
 def test_every_bar_over_an_element_is_listed_and_a_bar_beside_it_is_not():
@@ -263,7 +264,8 @@ def test_every_bar_over_an_element_is_listed_and_a_bar_beside_it_is_not():
     short = node("Cell", 20, 150, 390, 100, "Short")
     items = ui.elements(phone(nested(1, tall, short, nav, tool, tab)), PHONE)
     by = {e.label: e for e in items}
-    assert [b.kind for b in by["Tall"].covered_by] == ["NavigationBar", "Toolbar", "TabBar"]  # its centre is in none of them
+    # its centre is in none of the bars; the later cell over it counts as a cover too (Task 8c)
+    assert [b.kind for b in by["Tall"].covered_by] == ["NavigationBar", "Toolbar", "TabBar", "Cell"]
     assert by["Short"].covered_by == () and by["Home"].covered_by == ()
 
 
@@ -283,10 +285,10 @@ def test_the_visible_part_is_cut_by_every_bar_and_keeps_the_strip_nearest_the_ce
 
 
 # ---- a layer needs a backdrop (Task 8a, follow-up 2) ----
-def test_a_header_and_a_full_height_body_three_levels_down_hide_nothing():
+def test_a_header_and_a_full_height_body_twelve_levels_down_hide_nothing():
     header = node("Other", 0, 0, 430, 120, children=[node("Button", 20, 50, 100, 44, "Menu")])
     body = node("Other", 0, 0, 430, 932, children=cards())
-    assert labels(ui.elements(phone(nested(2, header, body)), PHONE)) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
+    assert labels(ui.elements(phone(nested(12, header, body)), PHONE)) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
 
 
 def test_a_dimming_view_then_a_dialog_hides_the_base_screen():
@@ -299,13 +301,13 @@ def test_a_dimming_view_then_a_dialog_hides_the_base_screen():
 def test_a_first_child_with_listed_children_is_content_not_a_backdrop():
     top = node("Other", 0, 0, 430, 500, children=[node("Cell", 0, 0, 430, 500, "Top")])
     layer = node("Other", 0, 0, 430, 932, children=[top, node("Cell", 0, 500, 430, 432, "Bottom")])
-    assert {"Add", "Card", "Top", "Bottom"} <= set(labels(ui.elements(phone(nested(1, base_screen(), layer)), PHONE)))
+    assert {"Add", "Card", "Top", "Bottom"} <= set(labels(ui.elements(phone(nested(10, base_screen(), layer)), PHONE)))
 
 
 def test_a_backdrop_after_the_layers_content_does_not_count():
     layer = node("Other", 0, 0, 430, 932, children=[node("Cell", 0, 500, 430, 432, "Content"),
                                                     node("Button", 0, 0, 430, 510, "Late backdrop")])
-    assert "Add" in labels(ui.elements(phone(nested(1, base_screen(), layer)), PHONE))
+    assert "Add" in labels(ui.elements(phone(nested(10, base_screen(), layer)), PHONE))
 
 
 def test_the_backdrop_thresholds_are_named_constants():
@@ -319,3 +321,124 @@ def test_a_translucent_large_title_bar_over_a_scrolling_list_leaves_the_part_bel
     row = next(e for e in items if e.label == "Row 0")  # y 40-140: its centre, 90, is under the bar
     assert [b.kind for b in row.covered_by] == ["NavigationBar"]
     assert ui.visible_part(row.rect, row.covered_by, PHONE) == (0, 100, 430, 40)
+
+
+# ---- layers: the rule with a presentation path and an opaque-content path (Task 8c) ----
+def under_window(*screens, depth=1):
+    """`screens` as children of a node `depth` levels below the Window, inside Application > Window."""
+    inner = "".join(screens)
+    for _ in range(depth - 1):
+        inner = node("Other", 0, 0, 430, 932, children=[inner])
+    return phone(node("Window", 0, 0, 430, 932, children=[inner]))
+
+
+def test_a_stale_screen_under_the_roots_later_child_is_hidden():
+    stale = node("Other", 0, 0, 430, 932, children=[
+        node("StaticText", 20, 79, 348, 63, "Something went wrong"), node("StaticText", 20, 154, 360, 52, "Try again later"),
+        node("ScrollView", 0, 205, 430, 533, "Old list")])
+    body = node("Other", 0, 0, 430, 932, children=[
+        node("NavigationBar", 0, 59, 430, 54, "Orders", name="orders-bar"),
+        node("Button", 330, 66, 90, 40, "Filter"), node("StaticText", 20, 130, 300, 30, "Recent orders"),
+        node("ScrollView", 0, 0, 430, 932, "Orders list", children=[node("Cell", 0, 170, 430, 100, "Order 1")])])
+    real = node("Other", 0, 0, 430, 932, children=[body])  # the bar and the scroll sit deeper than a layer can
+    # Application 0, Window 1, then 2 and 3: the container sits at depth 4 and its children at depth 5
+    items = ui.elements(under_window(node("Other", 0, 0, 430, 932, children=[stale, real]), depth=3), PHONE)
+    shown = labels(items)
+    assert "Order 1" in shown and "Filter" in shown
+    assert not {"Something went wrong", "Try again later", "Old list"} & set(shown)
+    assert [e.label for e in items if e.role == "scroll"] == ["Orders list"]
+
+
+def bottom_sheet(base):
+    backdrop = node("Other", 0, 0, 430, 932)  # childless, unnamed: the dimming view
+    shell = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 727, 430, 205)])
+    sheet = node("Other", 0, 727, 430, 205, "", name="lab-sheet")
+    inner = node("Other", 0, 0, 430, 932, children=[
+        backdrop, shell, sheet, node("StaticText", 20, 747, 390, 26, "Sheet title"),
+        node("Button", 20, 784, 390, 49, "Confirm"), node("Button", 20, 844, 390, 49, "Dismiss sheet")])
+    layer = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932, children=[inner])])
+    return under_window(base, layer)
+
+
+def lab_base():
+    return node("Other", 0, 0, 430, 932, children=[node("Button", 20, 100, 390, 49, "Base action", name="lab-base"),
+                                                    node("Cell", 20, 400, 390, 80, "Base row"),
+                                                    node("Button", 20, 800, 390, 49, "Base footer")])
+
+
+def test_a_bottom_sheet_with_a_backdrop_hides_the_base_screen_it_covers():
+    items = ui.elements(bottom_sheet(lab_base()), PHONE)
+    assert [e.label for e in items] == ["", "Sheet title", "Confirm", "Dismiss sheet"]
+    assert items[0].identifier == "lab-sheet"
+    for target in (ui.Target(label="Base action"), ui.Target(id="lab-base"), ui.Target(text="Base row")):
+        with pytest.raises(Refused) as e:
+            ui.resolve(items, target)
+        assert e.value.code == "not_found"
+
+
+def test_a_layer_with_a_backdrop_but_nothing_to_act_on_hides_nothing():
+    inner = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), node("StaticText", 20, 747, 390, 26, "Loading")])
+    items = ui.elements(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[inner])), PHONE)
+    assert {"Base action", "Base row", "Loading"} <= set(labels(items))
+
+
+def test_react_native_header_and_full_height_body_deep_in_the_tree_hide_nothing():
+    header = node("Other", 0, 0, 430, 120, children=[node("Button", 20, 50, 100, 44, "Menu")])
+    body = node("Other", 0, 0, 430, 932, children=cards())
+    assert labels(ui.elements(under_window(header, body, depth=10), PHONE)) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
+
+
+def test_a_uikit_navigation_controller_hides_nothing():
+    transition = node("Other", 0, 0, 430, 932, children=[node("StaticText", 20, 130, 300, 30, "Title"),
+                                                         node("Cell", 0, 170, 430, 100, "Row")])
+    nav = node("NavigationBar", 0, 59, 430, 54, "Settings", children=[node("Button", 8, 62, 80, 44, "Back")])
+    assert {"Title", "Row", "Back"} <= set(labels(ui.elements(under_window(transition, nav, depth=3), PHONE)))
+
+
+def test_a_toast_layer_hides_nothing():
+    toast = node("Other", 0, 0, 430, 932, children=[node("Other", 20, 800, 390, 60, children=[node("StaticText", 30, 810, 300, 30, "Saved")])])
+    assert {"Add", "Card", "Saved"} <= set(labels(ui.elements(under_window(base_screen(), toast), PHONE)))
+
+
+# ---- later elements cover like bars (Task 8c) ----
+def test_a_later_element_over_a_button_is_listed_as_its_cover():
+    button = node("Button", 20, 100, 390, 60, "Covered", name="lab-covered")
+    overlay = node("Other", 10, 90, 410, 80, "", name="lab-overlay")
+    by = {e.identifier or e.label: e for e in ui.elements(phone(button, overlay), PHONE)}
+    cover = by["lab-covered"].covered_by
+    assert [(b.kind, b.rect, b.line) for b in cover] == [("Other", (10.0, 90.0, 410.0, 80.0), "other id=lab-overlay @10,90 410x80")]
+    assert by["lab-overlay"].covered_by == ()  # nothing is later than it
+
+
+def test_an_ancestor_a_descendant_an_earlier_element_and_a_big_container_do_not_cover():
+    row = node("Cell", 0, 200, 430, 100, "Row", name="row-id", children=[node("Button", 300, 210, 100, 40, "Inner")])
+    earlier = node("Other", 20, 400, 100, 40, "", name="earlier")
+    target = node("Button", 20, 400, 100, 40, "Target")
+    big = node("Other", 0, 0, 430, 932, "", name="big-container")  # over 90% of the screen: a layer, not a cover
+    by = {e.identifier or e.label: e for e in ui.elements(phone(row, earlier, target, big), PHONE)}
+    assert by["row-id"].covered_by == () and by["Inner"].covered_by == ()
+    assert by["Target"].covered_by == ()  # `earlier` is before it; `big` is a layer
+
+
+def test_a_badge_in_a_corner_is_a_cover_that_misses_the_centre():
+    button = node("Button", 20, 100, 390, 60, "Covered")
+    badge = node("Other", 390, 100, 20, 20, "", name="badge")
+    (cover,) = {e.label: e for e in ui.elements(phone(button, badge), PHONE)}["Covered"].covered_by
+    assert cover.rect == (390.0, 100.0, 20.0, 20.0)
+
+
+# ---- the keyboard, and the raw swipe (Task 8c) ----
+def test_the_header_shows_the_keyboard_only_when_it_meets_the_screen():
+    parked = node("Keyboard", 0, 932, 430, 243, children=[node("Key", 10, 940, 40, 50, "q")])  # a hardware keyboard
+    assert ui.read(phone(parked), PHONE).keyboard is False
+    up = node("Keyboard", 0, 700, 430, 232)
+    assert ui.read(phone(up), PHONE).keyboard is True
+    rising = node("Keyboard", 0, 900, 430, 243)  # its centre is still below the screen
+    assert ui.read(phone(rising), PHONE).keyboard is True
+
+
+def test_a_swipe_can_hold_before_the_finger_lifts():
+    held = ui.swipe(5, 400, 5, 100, 600, hold_ms=150)["actions"][0]["actions"]
+    assert [s["type"] for s in held[-3:]] == ["pointerMove", "pause", "pointerUp"] and held[-2]["duration"] == 150
+    plain = ui.swipe(5, 400, 5, 100, 600)["actions"][0]["actions"]
+    assert [s["type"] for s in plain[-2:]] == ["pointerMove", "pointerUp"]

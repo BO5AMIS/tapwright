@@ -727,7 +727,7 @@ class Daemon:
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
             seq, since = self._mark()
-            await s.swipe(x0, y0, x1, y1, 600)
+            await s.swipe(x0, y0, x1, y1, 600, ui.SCROLL_HOLD_MS)
             if not to or swipes == MAX_SCROLL_SWIPES:
                 break
             await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
@@ -752,11 +752,14 @@ class Daemon:
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
 
+    @staticmethod
+    def _refuse_disabled(element: ui.Element) -> None:
+        if not element.enabled:
+            raise Refused("not_actionable", f"disabled: {element.line(actions=False)} is disabled.")
+
     def _guard(self, view, element: ui.Element) -> None:
         """A9: refuse what a real touch couldn't do. The reason word comes first in the message."""
-        if not element.enabled:
-            raise Refused("not_actionable", f"disabled: {element.line(actions=False)} is disabled; "
-                                            "pass force: true to touch it anyway.")
+        self._refuse_disabled(element)
         if not element.in_alert:
             self._refuse_behind_alert(view)
 
@@ -775,7 +778,9 @@ class Daemon:
         line = element.line(actions=False)
         if over[0].kind == "TabBar":
             raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; scroll it up first.")
-        raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; scroll it into view first.")
+        if over[0].kind in ui.COVERING_BARS:
+            raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; scroll it into view first.")
+        raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
@@ -785,6 +790,7 @@ class Daemon:
         found = ui.resolve(s.items, target)
         if isinstance(found, tuple):
             return await s.tap(target, hold_ms=hold_ms)
+        self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             return await s.tap(target, hold_ms=hold_ms)
         self._guard(view, found)
@@ -811,6 +817,7 @@ class Daemon:
         line = found.line(actions=False)
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
+        self._refuse_disabled(found)
         if not a.get("force"):
             self._guard(view, found)
         want = a.get("value")

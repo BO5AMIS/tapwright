@@ -143,6 +143,30 @@ def test_reset_clears_everything_even_when_close_fails(phone):
     assert s.sid is None and s.items == [] and s.last_point is None
 
 
+def test_an_alert_answer_with_no_alert_is_not_found(phone):
+    s = Session(phone)
+    for action in ("accept", "dismiss"):
+        phone.fail[f"/alert/{action}"] = DeviceError("WebDriverAgent: no such alert: An attempt was made to operate "
+                                                     "on a modal dialog when one was not open.")
+        with pytest.raises(Refused) as e:
+            asyncio.run(s.alert(action))
+        assert e.value.code == "not_found" and str(e.value) == "no alert on screen."
+    phone.fail["/alert/text"] = DeviceError("WebDriverAgent: no such alert: none")
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.alert("text"))
+    assert e.value.code == "not_found"
+    phone.fail["/alert/accept"] = DeviceError("WebDriverAgent: unknown error: boom")
+    with pytest.raises(DeviceError):  # any other failure stays the phone side's
+        asyncio.run(s.alert("accept"))
+
+
+def test_a_scroll_swipe_holds_still_before_the_finger_lifts(phone):
+    s = Session(phone)
+    asyncio.run(s.swipe(5.0, 400.0, 5.0, 100.0, 600, hold_ms=150))
+    steps = [r for r in phone.requests if r[1].endswith("/actions")][-1][2]["actions"][0]["actions"]
+    assert [t["type"] for t in steps[-3:]] == ["pointerMove", "pause", "pointerUp"] and steps[-2]["duration"] == 150
+
+
 def test_tap_and_swipe_record_last_point(phone):
     s = Session(phone)
     asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
@@ -265,27 +289,27 @@ def _focus(phone, rects):
 FIELD = [ui_module.Element("e1", "input", "Email", rect=(10, 10, 200, 40), actions=("tap", "type"))]
 
 
-def test_typing_waits_for_the_keyboard_to_come_up(phone, monkeypatch):
+def test_typing_needs_focus_not_a_keyboard_on_screen(phone, monkeypatch):
+    """With a hardware keyboard iOS parks the software one below the screen: the field has focus all the same."""
     monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
-    reads = _keyboard_after(phone, 2)  # the second read shows it
+    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    reads = _keyboard_after(phone, 10 ** 9)  # no keyboard in the tree
     _focus(phone, [FIELD_RECT])
     s = Session(phone)
     s.items = list(FIELD)
     assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
-    assert len(reads) == 2 and phone.requests[-1][1].endswith("/wda/keys")
+    assert reads == [] and phone.requests[-1][1].endswith("/wda/keys")  # the tree isn't polled for a keyboard
 
 
-def test_typing_into_a_field_that_never_gets_the_keyboard_is_refused(phone, monkeypatch):
+def test_typing_into_a_field_that_never_gets_focus_is_refused(phone, monkeypatch):
     monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
     monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
-    _keyboard_after(phone, 10 ** 9)
-    _focus(phone, [FIELD_RECT])
-    s = Session(phone)
+    s = Session(phone)  # element/active answers nothing
     s.items = list(FIELD)
     with pytest.raises(Refused) as e:
         asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
     assert e.value.code == "not_actionable"
-    assert str(e.value) == "no_action: e1 input \"Email\" @10,10 200x40 didn't take focus (no keyboard came up)."
+    assert str(e.value) == "no_action: e1 input \"Email\" @10,10 200x40 didn't take focus."
     assert not any(r[1].endswith("/wda/keys") for r in phone.requests)
 
 

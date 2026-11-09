@@ -159,15 +159,22 @@ class Tree:
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
 COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar", "Keyboard"}  # what a touch at an element's centre can land on instead
-# A later sibling hides the earlier ones (a presented sheet or modal) only when all of these hold:
-LAYER_MAX_DEPTH = 4  # it sits at most this many levels below the Application: where UIKit and React Native put presented views
-LAYER_COVER = 0.95  # it covers this share of the screen...
-LAYER_FILL = 0.5  # ...and what it lists fills this share (not a toast or a floating button)...
-LAYER_SCROLL = 0.9  # ...and it holds no scroll view covering this share (that is a main screen, not a sheet)
-# ...and it starts with a backdrop: an empty Button or Other at its top-left, this share of the screen's width
-# and height (UIKit's dimming view, an RN Modal's backdrop Pressable), before any other listed content.
+# A layer is a later child of some node, at most LAYER_MAX_DEPTH levels below the Application (deeper is React
+# Native's own nesting, where a header and a body both fill the screen), covering LAYER_COVER of the screen.
+# It hides what is under it in its earlier siblings by one of two paths:
+#   presentation: it has a backdrop before its other listed content (an empty Button or Other at its top-left,
+#     BACKDROP_WIDTH of the screen's width and BACKDROP_HEIGHT of its height: UIKit's dimming view, an RN Modal's
+#     backdrop) and something with actions in it: what is inside its rect is hidden;
+#   opaque content: no backdrop, and what it lists fills LAYER_FILL of the screen: what is inside those
+#     listed rects is hidden.
+LAYER_MAX_DEPTH = 6
+LAYER_COVER = 0.95
+LAYER_FILL = 0.5
 BACKDROP_WIDTH = 0.95
 BACKDROP_HEIGHT = 0.4
+PASSIVE = {"text", "header", "image"}  # a label or picture drawn over a button (React Native) lets the touch through
+OVERLAY_MAX = 0.9 # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
+SCROLL_HOLD_MS = 150  # a scroll's finger rests this long at the end, so the content stops instead of flinging
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -294,8 +301,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         visible = w > 0 and h > 0 and left <= cx < right and top <= cy < bottom
         if kind == "Alert" and visible and tree.alert is None:
             tree.alert = _alert(node)
-        if kind == "Keyboard" and visible:
-            tree.keyboard = True
+        if kind == "Keyboard" and w > 0 and h > 0:
+            tree.keyboard = True  # it meets the screen (a node wholly off it returned above): a parked one doesn't
         if kind in BARS and visible and screen:
             if y < screen[1] * BAR_EDGE:
                 bars.append((True, y + h))
@@ -343,8 +350,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         ends[number] = visits[0]
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
             for k, child in enumerate(node):
-                if k and spans[k][1] > spans[k][0] and _layer(child, spans[k], found, screen_rect, numbered, ends):
-                    hidden.append((spans[0][0], spans[k][0], _rect(child)))  # the earlier children, under its rect
+                if k and spans[k][1] > spans[k][0]:  # the earlier children, under what the layer hides
+                    hidden.extend((spans[0][0], spans[k][0], r)
+                                  for r in _layer(child, spans[k], found, screen_rect, numbered, ends))
 
     inf = math.inf
     try:
@@ -357,9 +365,16 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         return any(a <= number < b and _holds(rect, point) for a, b, rect in hidden)
     shown = [(e, number, inside) for e, number, inside in found if not behind(number, e.center)]
     live = [(n, bar) for n, bar in covering if not behind(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2))]
-    for e, number, inside in shown:
-        e.covered_by = tuple(bar for n, bar in live if n not in inside
-                             and (lambda o: o[2] > 0 and o[3] > 0)(_overlap(e.rect, bar.rect)))
+    bar_numbers = {n for n, _ in covering}
+    area = screen[0] * screen[1] if screen else math.inf
+    for e, number, inside in shown[:MAX_ELEMENTS]:
+        bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)]
+        over = {n for n, _ in bars_over}
+        # then every later listed element that is neither its descendant nor a layer, nor part of a bar over it
+        later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in shown
+                      if m >= ends[number] and m not in bar_numbers and not over & set(within)
+                      and o.role not in PASSIVE and o.width * o.height < OVERLAY_MAX * area and _meets(e.rect, o.rect))
+        e.covered_by = tuple(bar for _, bar in bars_over) + later
     tree.items = [e for e, _, _ in shown[:MAX_ELEMENTS]]
     tree.more = max(0, len(shown) - MAX_ELEMENTS)
     for i, e in enumerate(tree.items, 1):
@@ -376,36 +391,45 @@ def _holds(rect: tuple[float, float, float, float], point: tuple[float, float]) 
     return rect[0] <= point[0] < rect[0] + rect[2] and rect[1] <= point[1] < rect[1] + rect[3]
 
 
+def _meets(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    """Do two rects share some area?"""
+    o = _overlap(a, b)
+    return o[2] > 0 and o[3] > 0
+
+
 def _backdrop(span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
-              screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]) -> bool:
-    """Does the layer (its nodes numbered `span`) hold a backdrop before its other listed content? An empty
-    Button or Other (it may itself be listed, but has no listed descendants) at the top-left, nearly as wide
-    as the screen and a good part as tall."""
+              screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]) -> int | None:
+    """The number of the backdrop the layer (its nodes numbered `span`) holds before its other listed content,
+    else None. A childless Button or Other (it may itself be listed) at the top-left, nearly as wide as the
+    screen and a good part as tall. Listed content that wraps it doesn't come before it."""
     listed = [number for _, number, _ in found if span[0] <= number < span[1]]
     for n in range(span[0], span[1]):
         node = numbered.get(n)
-        if node is None or _kind(node) not in ("Button", "Other") or n not in ends:
+        if node is None or _kind(node) not in ("Button", "Other") or len(node):
             continue
         x, y, w, h = _rect(node)
         if (x <= 1 and y <= 1 and w >= BACKDROP_WIDTH * screen[2] and h >= BACKDROP_HEIGHT * screen[3]
-                and not any(n < m < ends[n] for m in listed) and not any(m < n for m in listed)):
-            return True
-    return False
+                and not any(m < n and ends[m] <= n for m in listed)):
+            return n
+    return None
 
 
 def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
-           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]) -> bool:
-    """Is this node a layer in front of its earlier siblings (a sheet or modal)? It covers nearly the whole
-    screen and what it lists fills half of it, it isn't a main screen (no scroll view in it, or itself,
-    covers nine tenths of the screen), and it has a backdrop. (Its depth is checked by the caller.)"""
+           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]
+           ) -> list[tuple[float, float, float, float]]:
+    """The places a later sibling hides in the earlier ones, empty when it is no layer (see LAYER_MAX_DEPTH;
+    the caller checks the depth). With a backdrop and something to act on, its whole rect; with no backdrop,
+    the rects of what it lists, when they fill half the screen."""
     area = screen[2] * screen[3]
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
-        return False
-    for n in child.iter():
-        if _kind(n) in CLIPPING and (o := _overlap(_rect(n), screen))[2] * o[3] >= LAYER_SCROLL * area:
-            return False
-    inner = [_overlap(e.rect, screen) for e, number, _ in found if span[0] < number < span[1]]
-    return _union_area(inner) >= LAYER_FILL * area and _backdrop(span, found, screen, numbered, ends)
+        return []
+    # what the layer lists below itself, and itself when it is a scroll view (a scroll view is content)
+    inner = [e for e, number, _ in found if span[0] < number < span[1] or (number == span[0] and e.role == "scroll")]
+    if (dim := _backdrop(span, found, screen, numbered, ends)) is not None:
+        return [_rect(child)] if any(e.actions for e, number, _ in found if span[0] < number < span[1] and number != dim) else []
+    if _union_area([_overlap(e.rect, screen) for e in inner]) >= LAYER_FILL * area:
+        return [e.rect for e in inner]
+    return []
 
 
 def elements(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:
@@ -645,12 +669,14 @@ def tap(x: float, y: float, hold_ms: int = 60) -> dict:
                      {"type": "pointerUp", "button": 0}])
 
 
-def swipe(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350) -> dict:
-    """W3C actions for a drag from one point to another."""
+def swipe(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> dict:
+    """W3C actions for a drag from one point to another. With `hold_ms` the finger rests at the end before it
+    lifts, so a scroll stops where the finger does instead of flinging."""
     return _pointer([{"type": "pointerMove", "duration": 0, "x": round(x0), "y": round(y0)},
                      {"type": "pointerDown", "button": 0},
                      {"type": "pause", "duration": 50},
                      {"type": "pointerMove", "duration": duration_ms, "x": round(x1), "y": round(y1)},
+                     *([{"type": "pause", "duration": hold_ms}] if hold_ms else []),
                      {"type": "pointerUp", "button": 0}])
 
 

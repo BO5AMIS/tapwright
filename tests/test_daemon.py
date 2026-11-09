@@ -1895,15 +1895,15 @@ def test_toggle_that_did_not_flip_says_so_and_a_wanted_value_not_reached_is_refu
     async def go():
         d = make()
         stop, task = await started(d)
-        off = ui.Element("e1", "switch", "Wi-Fi", value="0", rect=(300, 100, 60, 30), enabled=False, checked=False,
+        off = ui.Element("e1", "switch", "Wi-Fi", value="0", rect=(300, 100, 60, 30), checked=False,
                          actions=("toggle",), type="Switch")
-        await looked(d, [off])  # a disabled switch: the tap changes nothing
-        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "force": True})
-        assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" disabled checked=false @300,100 60x30, but it is still checked=false.'
+        await looked(d, [off])  # a switch whose tap changes nothing
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" checked=false @300,100 60x30, but it is still checked=false.'
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True, "force": True})
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
         assert e.value.code == "not_actionable"
-        assert str(e.value) == 'no_action: e1 switch "Wi-Fi" disabled checked=false @300,100 60x30 didn\'t change'
+        assert str(e.value) == 'no_action: e1 switch "Wi-Fi" checked=false @300,100 60x30 didn\'t change'
         await finish(stop, task)
     run(go)
 
@@ -2437,9 +2437,9 @@ def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_en
         ends = []
         original = d.session.swipe
 
-        async def swipe(x0, y0, x1, y1, duration_ms=350):
+        async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
             ends.append((y0, y1))
-            return await original(x0, y0, x1, y1, duration_ms)
+            return await original(x0, y0, x1, y1, duration_ms, hold_ms)
         d.session.swipe = swipe
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
         assert 1 <= picture.swipes < 15 and ends[0][0] < ends[0][1]  # the finger moves down: content moves up
@@ -2530,6 +2530,19 @@ def test_a_direction_that_contradicts_to_is_bad_params():
     run(go)
 
 
+def test_a_scroll_swipe_ends_with_a_hold_so_the_content_does_not_fling():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "scroll", "Page", rect=(0, 0, 400, 800))])
+        await d.run_tool("a", "scroll", {"direction": "down", "look": False})
+        assert d.session.holds == [150]
+        await d.run_tool("a", "swipe", {"x0": 10, "y0": 300, "x1": 10, "y1": 100, "look": False})
+        assert d.session.holds == [150, 0]  # the raw swipe tool keeps its fling
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_swipe_stays_between_the_bars_read_from_the_tree():
     async def go():
         d = make()
@@ -2541,9 +2554,9 @@ def test_the_swipe_stays_between_the_bars_read_from_the_tree():
             seen = []
             original = d.session.swipe
 
-            async def swipe(x0, y0, x1, y1, duration_ms=350):
+            async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
                 seen.append((y0, y1))
-                return await original(x0, y0, x1, y1, duration_ms)
+                return await original(x0, y0, x1, y1, duration_ms, hold_ms)
             d.session.swipe = swipe
             await d.run_tool("a", "scroll", {"direction": direction, "amount": 1.0, "look": False})
             d.session.swipe = original
@@ -2770,20 +2783,24 @@ def test_a_disabled_element_is_refused_before_the_touch():
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, {"target": {"ref": "e1"}})
             assert e.value.code == "not_actionable"
-            assert str(e.value) == ('disabled: e1 button "Save" disabled @10,10 100x40 is disabled; '
-                                    'pass force: true to touch it anyway.')
+            assert str(e.value) == 'disabled: e1 button "Save" disabled @10,10 100x40 is disabled.'
         assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
 
 
-def test_force_overrides_disabled():
+def test_force_never_overrides_disabled():
     async def go():
         d = make()
         stop, task = await started(d)
-        await looked(d, [el("e1", "button", "Save", enabled=False)])
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
-        assert "tap" in d.session.calls
+        await looked(d, [el("e1", "button", "Save", enabled=False),
+                         el("e2", "switch", "Wi-Fi", checked=False, enabled=False, rect=(300, 100, 60, 30))])
+        for tool, ref in (("tap", "e1"), ("long_press", "e1"), ("toggle", "e2")):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, {"target": {"ref": ref}, "force": True, "look": False})
+            assert e.value.code == "not_actionable" and str(e.value).endswith(" is disabled.")
+            assert "force" not in str(e.value)
+        assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
 
@@ -2946,6 +2963,55 @@ def test_an_element_with_too_little_showing_is_refused():
         assert "tap" not in d.session.calls
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (215.0, 875.0)
+        await finish(stop, task)
+    run(go)
+
+
+# ---- later overlapping elements cover like bars (Task 8c) ----
+def covered_card(cover_rect):
+    x, y, w, h = (round(v) for v in cover_rect)
+    cover = ui.Bar("Other", cover_rect, f"other id=lab-overlay @{x},{y} {w}x{h}")
+    return el("e1", "button", "Covered", "lab-covered", rect=(20, 100, 390, 60), covered_by=(cover,))
+
+
+def test_a_button_fully_under_a_later_element_is_refused():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [covered_card((10.0, 90.0, 410.0, 80.0))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == ('covered: e1 button "Covered" id=lab-covered @20,100 390x60 is covered by '
+                                'other id=lab-overlay @10,90 410x80; move or close it first.')
+        assert "tap" not in d.session.calls
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert d.session.last_point == (215.0, 130.0)  # forced: its own centre
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_button_partly_under_a_later_element_is_touched_where_it_shows():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [covered_card((20.0, 100.0, 390.0, 40.0))])  # the top 40 of 60 points
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 150.0) and "at its visible part (215, 150)" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [covered_card((390.0, 100.0, 20.0, 20.0))])
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 130.0) and "visible part" not in r["text"]
         await finish(stop, task)
     run(go)
 
