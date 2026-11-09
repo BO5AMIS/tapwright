@@ -450,12 +450,17 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
     caller checks the depth), and whether it is a presentation. With a backdrop and something to act on: its whole
     rect, and bars are hidden too (a sheet dims them). With no backdrop: the rects of what it lists, when they
     fill half the screen, and bars stay. The keyboard's window is no layer: it starts with an empty full-screen
-    view and has keys outside the keyboard ("Next keyboard"), yet it hides nothing but the keys' own area."""
+    view and has keys outside the keyboard ("Next keyboard"), yet it hides nothing but the keys' own area.
+    One holding a Popover (the share sheet) is a presentation even with nothing listed to act on: its share
+    targets list as text."""
     area = screen[2] * screen[3]
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
         return [], False
-    if any(_kind(n) == "Keyboard" for n in child.iter()):
+    kinds = {_kind(n) for n in child.iter()}
+    if "Keyboard" in kinds:
         return [], False
+    if "Popover" in kinds:  # a share sheet or popover: a touch outside it closes it, never reaches the app
+        return [_rect(child)], True
     # what the layer lists below itself, and itself when it is a scroll view (a scroll view is content)
     inner = [e for e, number, _ in found if (span[0] < number < span[1] or (number == span[0] and e.role == "scroll"))
              and (e.role == "scroll" or (o := _overlap(e.rect, screen))[2] * o[3] < WRAPPER * area)]

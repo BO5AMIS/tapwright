@@ -395,6 +395,19 @@ def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
 
 
+def test_a_share_sheet_hides_the_app_behind_it_even_with_nothing_listed_to_act_on():
+    """The share sheet is a Popover behind a dimming view; its share targets list as text, not as buttons, so the
+    backdrop rule saw nothing to act on and left the app's buttons listed: a touch on one reached the sheet,
+    and a share target opened another app on the phone (2026-11-09)."""
+    pop = node("Popover", 9, 510, 412, 414, children=[
+        node("Image", -141, 360, 712, 714),
+        node("Other", 9, 510, 412, 414, children=[node("StaticText", 22, 600, 83, 20, "Target", name="cellTitleLabel")])])
+    shown = labels(ui.elements(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932), pop])), PHONE))
+    assert not {"Base action", "Base row", "Base footer"} & set(shown)
+    assert "Target" in shown
+
+
 def test_the_keyboard_covers_its_whole_view_not_just_its_keys():
     """On the phone the keys start at y 631, but the keyboard's view (its suggestions strip, the globe and dictation
     keys below) runs from 614 to the bottom: a switch at 612-640 was touched at 626, on the keyboard (2026-11-09)."""
