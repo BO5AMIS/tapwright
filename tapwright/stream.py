@@ -58,18 +58,18 @@ class MjpegParser:
 class FrameHub:
     """The newest frame, and a way to wait for a newer one."""
 
-    def __init__(self, clock=time.time) -> None:
+    def __init__(self, clock=time.time, mono=time.monotonic) -> None:
         self.latest: Frame | None = None
         self.closed = False
-        self._clock = clock
+        self._clock, self._mono = clock, mono
         self._seq = 0
         self._new = asyncio.Event()
         self._arrivals: deque[float] = deque(maxlen=120)
 
     def publish(self, jpeg: bytes) -> Frame:
         self._seq += 1
-        self.latest = Frame(self._seq, int(self._clock() * 1000), jpeg)
-        self._arrivals.append(time.monotonic())
+        self.latest = Frame(self._seq, self.now_ms(), jpeg)
+        self._arrivals.append(self._mono())
         self._new.set()
         self._new = asyncio.Event()
         return self.latest
@@ -91,8 +91,19 @@ class FrameHub:
             except asyncio.TimeoutError:
                 return None
 
+    def now_ms(self) -> int:
+        """Epoch ms on the clock that stamps `Frame.at`."""
+        return int(self._clock() * 1000)
+
+    def gap(self, recent: int = 20) -> float | None:
+        """The median seconds between the last `recent` frames; None until there are a few.
+        The phone sends frames continuously even when nothing changes, so a longer silence is a stall."""
+        arrivals = list(self._arrivals)[-recent:]
+        gaps = sorted(b - a for a, b in zip(arrivals, arrivals[1:]))
+        return gaps[len(gaps) // 2] if len(gaps) >= 3 else None
+
     def fps(self, window: float = 2.0) -> float:
-        now = time.monotonic()
+        now = self._mono()
         return round(sum(1 for t in self._arrivals if now - t <= window) / window, 1)
 
 

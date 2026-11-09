@@ -25,7 +25,7 @@ def make(session=None, **options) -> Daemon:
     clock = Clock()
     settings = dict(control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None, heartbeat=0.02,
                     backoff=(0.01,), ready_wait=2.0, stream_linger=0, stream_retry=0.01,
-                    settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0)
+                    settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0, settle_quiet=0.03)
     settings.update(options)
     return Daemon(session or FakeSession(), **settings)
 
@@ -1312,3 +1312,141 @@ def test_at_the_real_default_the_screen_is_still_100_ms_after_the_last_change():
         await feeder.stop()
         assert not changed and seconds == pytest.approx(0.1, abs=0.005)
     run_virtual(go)
+
+
+def on_loop_clock(d: Daemon) -> None:
+    """The hub's arrival times and frame times follow the (virtual) loop clock."""
+    loop = asyncio.get_running_loop()
+    d.hub._mono = d.hub._clock = loop.time
+
+
+def sha(frame: bytes) -> bytes:
+    return hashlib.sha1(frame).digest()
+
+
+def test_frames_from_before_the_call_returned_do_not_count():
+    async def go():
+        d = make()
+        on_loop_clock(d)
+        for _ in range(6):
+            d.hub.publish(b"A")  # the stream's lag: the old picture, all before the call returned
+        seq = d._mark()[0]
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert changed  # no frame since the return, so nothing says the screen is unchanged
+    run_virtual(go)
+
+
+def test_a_stall_after_the_call_returned_is_not_stillness():
+    async def go():
+        d = make()
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        seq = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start([b"A"] * 5)  # five frames, then the stream goes quiet
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert changed and seconds < 0.3
+        await feeder.stop()
+    run_virtual(go)
+
+
+def test_a_change_arriving_200_ms_after_the_return_is_not_missed():
+    async def go():
+        d = make(settle_quiet=daemon_module.MIN_QUIET)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        seq = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start([b"A"] * 50, then=b"B")  # 50 frames x 4 ms, then the new screen
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert changed
+        await feeder.stop()
+    run_virtual(go)
+
+
+def test_no_change_needs_three_identical_frames_and_300_ms_after_the_return():
+    async def go():
+        d = make(settle_quiet=daemon_module.MIN_QUIET)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        seq = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert not changed and seconds == pytest.approx(0.3, abs=0.01)
+        await feeder.stop()
+        d.hub.publish(b"A")  # one lone frame is not enough
+        seq = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start([b"A", b"A"])
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert changed
+        await feeder.stop()
+    run_virtual(go)
+
+
+def test_the_still_period_adapts_to_a_slow_stream():
+    async def go():
+        d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
+        on_loop_clock(d)
+        feeder = FrameFeeder(d.hub, every=0.1).start([b"A"] * 5, then=b"B")  # 10 fps
+        await asyncio.sleep(0.55)
+        seq = d._mark()[0]
+        start = asyncio.get_running_loop().time()
+        seconds, changed = await d.settle(seq, cap=2.0, since=sha(b"A"))
+        assert changed and seconds == pytest.approx(0.35, abs=0.02)  # 2.5 gaps = 0.25 s of B, not 0.1 s
+        await feeder.stop()
+        assert start == pytest.approx(0.55)
+    run_virtual(go)
+
+
+def test_hub_gap_is_the_median_arrival_gap():
+    async def go():
+        d = make()
+        on_loop_clock(d)
+        assert d.hub.gap() is None
+        feeder = FrameFeeder(d.hub, every=0.05).start(then=b"A")
+        await asyncio.sleep(1.0)
+        assert d.hub.gap() == pytest.approx(0.05, abs=0.001)
+        await feeder.stop()
+    run_virtual(go)
+
+
+def test_a_settle_that_hits_the_cap_says_so(monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(churn=True)
+        r = await d.run_tool("a", "tap", TAP)
+        text = r["text"].splitlines()
+        assert text[-1] == ("Note: the screen was still changing after 0.2 s (an animation or video); "
+                            "positions may be mid-change.")
+        await feeder.stop()
+        await finish(stop, task)
+    monkeypatch.setitem(daemon_module.ACTIONS, "tap", (daemon_module.ACTIONS["tap"][0], 0.2))
+    run(go)
+
+
+def test_a_call_with_no_phone_does_not_hold_the_stream_open():
+    async def go():
+        s = FakeSession()
+        s.not_set_up = True
+        d = make(s, stream_linger=5.0)
+        stop, task = await started(d)
+        assert d.state == "no-device"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {})
+        assert e.value.code == "not_connected" and d.pump._task is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_list_is_current_by_the_hubs_clock_not_the_wall_clock():
+    async def go():
+        d = make()
+        d.hub._clock = lambda: 5000.0  # not the wall clock
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clock.t += 5.0
+        assert d._current(d.control.client("a"))
+        await finish(stop, task)
+    run(go)

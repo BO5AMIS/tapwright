@@ -8,6 +8,8 @@ import io
 import math
 import time
 import traceback
+from contextlib import nullcontext
+from typing import NamedTuple
 
 from PIL import Image, UnidentifiedImageError
 
@@ -24,6 +26,15 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
+MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
+NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
+               "positions may be mid-change.")
+
+
+class Settled(NamedTuple):
+    seconds: float
+    changed: bool  # False only when the stream showed the screen unchanged for certain
+    capped: bool  # the cap ended the wait with frames still changing
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -138,11 +149,13 @@ class Daemon:
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
-                 settle_first_frame: float = 1.0, settle_fallback: float = 0.6) -> None:
+                 settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
+                 settle_quiet: float = MIN_QUIET) -> None:
         self.session = session
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
+        self.settle_quiet = settle_quiet
         self.control = control or Controller()
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log)
@@ -324,7 +337,8 @@ class Daemon:
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
-            async with self.pump.watching():
+            # Not when there is no phone: the pump would only retry opening it.
+            async with self.pump.watching() if self._connected.is_set() else nullcontext():
                 return await self._run_tool(client_id, name, args)
         except Refused:
             raise
@@ -408,50 +422,62 @@ class Daemon:
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
             return _answer([str(result)], notes)
-        mark = box["mark"]
-        seconds, changed = await self.settle(mark[0], cap=settle, since=mark[1])
-        if not changed and not (full[0] or view.moved) and mark[1] == view.read_mark[1]:
-            # no frame changed during the action, and the picture at its start is the one the agent's
+        mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
+        done = await self._settle(self._mark()[0], cap=settle, since=mark[1])
+        if done.capped:
+            notes = [*notes, NOTE_CAPPED.format(cap=settle)]
+        if not done.changed and not (full[0] or view.moved) and mark[1] == view.read_mark[1]:
+            # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
-            return _answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE, settled_line(seconds)], notes)
-        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, seconds)
+            return _answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE, settled_line(done.seconds)], notes)
+        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: bytes | None = None) -> tuple[float, bool]:
-        """Wait until the screen is still, as the stream shows it: `still` seconds without a frame whose
-        bytes differ from the one before, but at most `cap`. Returns (seconds waited, changed).
-        `changed` means a frame differs from the one at `after_seq` (`since`, its SHA-1 from _mark;
-        None means there was no frame then, so any frame counts). With no frames at all (the stream
-        is down or still opening) it sleeps `settle_fallback` and reports changed=True."""
-        still = self.settle_still if still is None else still
+        """(seconds waited, changed): see _settle."""
+        done = await self._settle(after_seq, still, cap, since)
+        return done.seconds, done.changed
+
+    async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
+                      since: bytes | None = None) -> Settled:
+        """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
+        phone call returned: only later frames count, since earlier ones may predate the effect. WebDriverAgent
+        streams continuously even when nothing changes, so a silence is a stall, not stillness.
+
+        Still: at least 2 frames with one digest spanning `still` seconds (at least 2.5 median frame gaps,
+        so a slow stream isn't called still too soon). `changed`: a frame differs from the one at the start
+        of the action (`since`, its SHA-1 from _mark; None means there was no frame, so any frame counts).
+        `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
+        A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
+        few frames, or the cap all report changed=True, so the tree gets read."""
+        gap = self.hub.gap()
+        still = max(self.settle_still if still is None else still, 2.5 * gap if gap else 0.0)
+        stall = max(3 * gap if gap else 0.0, still)
         loop = asyncio.get_running_loop()
-        started = loop.time()
-        deadline, last_change = started + cap, started
-        seq, previous, changed, seen = after_seq, since, False, False
-        while True:
-            now = loop.time()
-            left = deadline - now
-            if left <= 0:
-                break
-            if seen:
-                wait = min(left, still - (now - last_change))
-                if wait <= 0:
-                    break
-            else:
-                wait = min(left, self.settle_first_frame)
+        began = loop.time()
+        deadline = began + cap
+        seq, differs, run, run_start, previous = after_seq, False, 0, began, None
+        while (left := deadline - loop.time()) > 0:
+            first = seq == after_seq
+            wait = min(left, self.settle_first_frame if first else stall)
             frame = await self.hub.next_after(seq, timeout=wait)
+            now = loop.time()
             if frame is None:
-                if not seen:
-                    # the wait for a first frame already counts towards the fallback: never both
-                    await asyncio.sleep(max(0.0, self.settle_fallback - (loop.time() - started)))
-                    return loop.time() - started, True
-                break  # the stream went quiet: the picture is still
-            seen, seq = True, frame.seq
+                if not first and wait == left:
+                    break  # the cap came before the stall did
+                if first:  # no frames at all: the stream is down or still opening
+                    await asyncio.sleep(max(0.0, self.settle_fallback - (now - began)))
+                return Settled(loop.time() - began, True, False)  # or a stall
+            seq = frame.seq
             digest = hashlib.sha1(frame.jpeg).digest()
-            if digest != previous:
-                changed, previous, last_change = True, digest, loop.time()
-        return loop.time() - started, changed
+            differs = differs or digest != since
+            run, run_start = (run + 1, run_start) if digest == previous else (1, now)
+            previous = digest
+            if run >= 2 and now - run_start >= still:
+                if differs or (seq - after_seq >= 3 and now - began >= self.settle_quiet):
+                    return Settled(now - began, differs, False)
+        return Settled(loop.time() - began, True, differs)
 
     def _mark(self) -> tuple[int, bytes | None]:
         """(seq, SHA-1 of the newest frame): where the stream stood at this moment."""
@@ -521,7 +547,7 @@ class Daemon:
         """Does the stream show the picture the list was read against? Only a fresh newest frame that
         matches the one at read time says so; with no stream the answer is no, and the list is read again."""
         frame, (_, was) = self.hub.latest, view.read_mark
-        if frame is None or was is None or time.time() * 1000 - frame.at > FRESH_FRAME * 1000:
+        if frame is None or was is None or self.hub.now_ms() - frame.at > FRESH_FRAME * 1000:
             return False
         return hashlib.sha1(frame.jpeg).digest() == was
 
