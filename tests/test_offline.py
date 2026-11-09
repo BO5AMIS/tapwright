@@ -96,6 +96,12 @@ def test_path_and_wheel_scroll():
     x0, y0, x1, y1 = ui.scroll_swipe(0.5, 0.5, 0.0, 0.25, SCREEN)
     assert (x0, y0) == (201.0, 437.0) and x1 == x0 and y1 == y0 - 0.25 * 874  # dy > 0: the finger moves up
     assert ui.scroll_swipe(0.5, 0.99, 0.0, -0.8, SCREEN)[3] == 873.0  # kept inside the screen
+    _, y0, _, y1 = ui.scroll_swipe(0.5, 0.99, 0.0, -0.8, SCREEN)
+    assert y1 - y0 == pytest.approx(0.8 * 874)  # the start moved inward: full distance kept
+    sx0, sy0, sx1, sy1 = ui.scroll_swipe(0.5, 0.5, 0.0, 0.001, SCREEN)
+    assert sx0 == sx1 and abs(sy1 - sy0) == pytest.approx(20.0)  # never short enough to be a tap
+    with pytest.raises(ValueError):
+        ui.scroll_swipe(0.5, 0.5, 0, 0, SCREEN)
 
 
 def _profile(app_id="TEAM123456.com.example.tapwright.*", devices=("UDID1",)):

@@ -251,5 +251,6 @@ class Device:
     async def close(self) -> None:
         if self.runner:
             self.runner.cancel()
+            await asyncio.gather(self.runner, return_exceptions=True)
         if self.tunnel:
             await self.tunnel.aclose()

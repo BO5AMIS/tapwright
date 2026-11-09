@@ -5,7 +5,7 @@ import base64
 import io
 
 from . import store, ui
-from .device import Device, DeviceError, NotSetUp
+from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
@@ -30,22 +30,29 @@ class Session:
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
-        self.sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
-        size = (await self.device.http("GET", f"/session/{self.sid}/window/size"))["value"]
+        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
+        size = (await self.device.http("GET", f"/session/{sid}/window/size"))["value"]
         self.screen = (float(size["width"]), float(size["height"]))
+        self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def reset(self) -> None:
         """Drop the connection; the next request reconnects and starts WebDriverAgent again."""
         try:
-            await self.device.close()
+            await asyncio.wait_for(self.device.close(), 10)
         except Exception:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
+        self.items = []
+        self.last_point = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30) -> dict:
         await self.ensure()
-        return await self.device.http(method, path.replace("{sid}", self.sid), payload, timeout)
+        try:
+            return await self.device.http(method, path.replace("{sid}", self.sid), payload, timeout)
+        except ConnectionLost:
+            self.sid = None  # the next call starts WebDriverAgent again
+            raise
 
     # ---- seeing ----
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):

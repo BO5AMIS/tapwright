@@ -6,6 +6,7 @@ An element line looks like:
     e12 Button "Log in" id=login-button @24,610 354x48
 Positions and sizes are in points (the phone's coordinate space, what taps use).
 """
+import math
 from dataclasses import dataclass
 
 # Element types worth listing even without a label (things an agent can act on).
@@ -179,13 +180,35 @@ def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0
     raise ValueError(f"direction must be up, down, left or right, not {direction!r}")
 
 
-def scroll_swipe(x: float, y: float, dx: float, dy: float, screen: tuple[float, float]) -> tuple[float, ...]:
+def scroll_swipe(x: float, y: float, dx: float, dy: float, screen: tuple[float, float],
+                 minimum: float = 20.0) -> tuple[float, ...]:
     """Swipe endpoints, in points, for a wheel scroll at x, y (0..1) by dx, dy (fractions of the
-    screen, each at most 0.8). dy > 0 shows content further down, so the finger moves up."""
+    screen, each at most 0.8). dy > 0 shows content further down, so the finger moves up.
+    The finger keeps the full distance: near an edge the start moves inward instead of the
+    end being cut short. A scroll shorter than `minimum` points is stretched to it, so it
+    never lands as a tap."""
     w, h = screen
 
     def inside(v: float, size: float) -> float:
         return min(max(v, 1.0), size - 1.0)
+
+    def place(start: float, move: float, size: float) -> tuple[float, float]:
+        start = inside(start, size)
+        end = start + move
+        if end > size - 1.0:
+            end = size - 1.0
+            start = end - move
+        elif end < 1.0:
+            end = 1.0
+            start = end - move
+        return inside(start, size), inside(end, size)
     dx, dy = max(min(dx, 0.8), -0.8), max(min(dy, 0.8), -0.8)
-    x0, y0 = inside(x * w, w), inside(y * h, h)
-    return x0, y0, inside(x0 - dx * w, w), inside(y0 - dy * h, h)
+    mx, my = -dx * w, -dy * h
+    length = math.hypot(mx, my)
+    if length == 0:
+        raise ValueError("a scroll needs dx or dy")
+    if length < minimum:
+        mx, my = mx * minimum / length, my * minimum / length
+    x0, x1 = place(x * w, mx, w)
+    y0, y1 = place(y * h, my, h)
+    return x0, y0, x1, y1

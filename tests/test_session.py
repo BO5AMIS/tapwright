@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from tapwright import session as session_module
-from tapwright.device import NotSetUp
+from tapwright.device import ConnectionLost, NotSetUp
 from tapwright.session import Session
 
 
@@ -12,6 +12,8 @@ class Recorder:
     def __init__(self):
         self.rsd, self.tunnel, self.runner, self.via = "tunnel", None, None, "USB"
         self.requests, self.started, self.closed = [], [], False
+        self.fail = {}  # path suffix -> exception to raise once
+        self.close_error = None
 
     async def connect(self):
         self.rsd = "tunnel"
@@ -24,9 +26,14 @@ class Recorder:
 
     async def close(self):
         self.closed = True
+        if self.close_error:
+            raise self.close_error
 
     async def http(self, method, path, payload=None, timeout=30.0):
         self.requests.append((method, path, payload))
+        for suffix in list(self.fail):
+            if path.endswith(suffix):
+                raise self.fail.pop(suffix)
         if path == "/session":
             return {"sessionId": "S"}
         if path.endswith("/window/size"):
@@ -84,3 +91,43 @@ def test_reset_forgets_the_connection(phone):
     asyncio.run(s.ensure())
     asyncio.run(s.reset())
     assert phone.closed and phone.rsd is None and s.sid is None
+
+
+def test_dead_line_starts_a_new_session_on_the_next_call(phone):
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.fail["/wda/locked"] = ConnectionLost("line is dead")
+    with pytest.raises(ConnectionLost):
+        asyncio.run(s.locked())
+    assert s.sid is None
+    assert asyncio.run(s.locked()) is True
+    assert phone.started == ["runner", "runner"] and s.sid == "S"
+
+
+def test_failed_window_size_leaves_no_session(phone):
+    s = Session(phone)
+    phone.fail["/window/size"] = ConnectionLost("gone")
+    with pytest.raises(ConnectionLost):
+        asyncio.run(s.ensure())
+    assert s.sid is None
+    asyncio.run(s.ensure())
+    assert s.sid == "S"
+
+
+def test_reset_clears_everything_even_when_close_fails(phone):
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.tunnel, phone.runner = object(), object()
+    phone.close_error = RuntimeError("boom")
+    s.items, s.last_point = [object()], (1.0, 2.0)
+    asyncio.run(s.reset())
+    assert phone.rsd is None and phone.tunnel is None and phone.runner is None
+    assert s.sid is None and s.items == [] and s.last_point is None
+
+
+def test_tap_and_swipe_record_last_point(phone):
+    s = Session(phone)
+    asyncio.run(s.tap(x=30, y=40))
+    assert s.last_point == (30.0, 40.0)
+    asyncio.run(s.swipe(5.0, 6.0, 5.0, 200.0))
+    assert s.last_point == (5.0, 6.0)
