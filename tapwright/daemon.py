@@ -435,7 +435,7 @@ class Daemon:
             # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
-                                                 settled_line(done.seconds)], notes), view, shot)
+                                                 settled_line(done.seconds)], notes), view, shot, at_read=False)
         answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
         return await self._add_shot(answer, view, shot)
 
@@ -485,6 +485,14 @@ class Daemon:
                     return Settled(now - began, differs, False)
         return Settled(loop.time() - began, True, differs)
 
+    def _mark_read(self, view) -> None:
+        """A tree read starts: note the stream's picture (its SHA-1 and, if it's recent, its bytes), so a
+        screenshot shows the moment the list is of, not a later one."""
+        view.read_mark = self._mark()
+        frame = self.hub.latest
+        fresh = frame is not None and self.hub.now_ms() - frame.at <= self.shot_fresh * 1000
+        view.read_frame = frame.jpeg if fresh else None
+
     def _mark(self) -> tuple[int, bytes | None]:
         """(seq, SHA-1 of the newest frame): where the stream stood at this moment."""
         frame = self.hub.latest
@@ -512,28 +520,31 @@ class Daemon:
         frame = await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
         return frame.jpeg if frame else None
 
-    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None) -> dict:
+    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True) -> dict:
         """Add the picture to an answer: from the stream (full resolution), else the phone's /screenshot.
         A picture that can't be had is a Note line, never an error. Decoding and resizing happen only here,
-        so only when a picture was asked for."""
+        so only when a picture was asked for. The picture is the frame from when the tree was read (`at_read`),
+        else the newest one (the no-change shortcut read no tree); /screenshot only when there is no frame."""
         if shot is None:
             return answer
         width, labels = shot
         try:
-            source = await self._newest_frame()
+            source = view.read_frame if at_read else await self._newest_frame()
             if source is None:
                 source = await self._read(self.session.screenshot_png)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
-            jpeg, size = await asyncio.to_thread(shotlib.render, source, self.session.screen, width, boxes)
+            jpeg, size, skipped = await asyncio.to_thread(shotlib.render, source, self.session.screen, width, boxes)
         except Exception as e:
-            answer["text"] += f"\nNote: no screenshot: {e}"
+            answer["text"] += f"\nNote: no screenshot: {str(e) or type(e).__name__}"
             return answer
+        if skipped:
+            answer["text"] += "\nNote: labels skipped: the screen orientation changed."
         answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
         return answer
 
     async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list) -> dict:
         async def read():
-            view.read_mark = self._mark()
+            self._mark_read(view)
             text, image = await self.session.look(screenshot=False)
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -558,7 +569,7 @@ class Daemon:
         tail = [] if seconds is None else [settled_line(seconds)]
 
         async def read():
-            view.read_mark = self._mark()
+            self._mark_read(view)
             snap = await s.snapshot()
             app_changed = snap.app is not None and view.app is not None and snap.app != view.app
             head = _furniture(view, snap.tree.alert, snap.tree.keyboard)

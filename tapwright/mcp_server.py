@@ -11,9 +11,11 @@ may be watching or driving in its live view at the same time.
 import asyncio
 import base64
 import logging
+import os
 import re
+import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -40,16 +42,31 @@ INSTRUCTIONS = (
 
 SHOTS_DIR: Path | None = None  # set by `tapwright mcp --screenshots DIR`
 KEEP_SHOTS = 50
-_SHOT_NAME = re.compile(r"^\d{8}-\d{6}-\d{3}-[a-z_]+\.jpg$")
+_SHOT_NAME = re.compile(r"^\d{8}-\d{6}-\d{3}-[0-9a-f]{4}-[a-z_]+\.jpg$")
+
+
+def check_screenshots_dir(directory: Path) -> None:
+    """Fail at startup, with a clear message, when `--screenshots DIR` can't be written to."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".tapwright-{secrets.token_hex(4)}.tmp"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as e:
+        raise SystemExit(f"tapwright mcp: can't write screenshots to --screenshots {directory}: {e.strerror or e}") from e
 
 
 def save_screenshot(directory: Path, tool: str, jpeg: bytes, size, now: datetime | None = None) -> str:
-    """Write the picture to DIR/<time>-<tool>.jpg, keep the newest 50 of ours, and return the answer line."""
+    """Write the picture to DIR/<UTC time>-<tool>.jpg (a short random part keeps two in one millisecond apart),
+    keep the newest 50 of ours, and return the answer line. Written under a temporary name first, so
+    nothing ever reads half a picture."""
     directory.mkdir(parents=True, exist_ok=True)
-    now = now or datetime.now()
-    path = directory / f"{now:%Y%m%d-%H%M%S}-{now.microsecond // 1000:03d}-{tool}.jpg"
-    path.write_bytes(jpeg)
-    ours = sorted(p for p in directory.iterdir() if _SHOT_NAME.match(p.name))
+    now = now or datetime.now(timezone.utc)
+    stem = f"{now:%Y%m%d-%H%M%S}-{now.microsecond // 1000:03d}-{secrets.token_hex(2)}-{tool}"
+    path, temporary = directory / f"{stem}.jpg", directory / f".{stem}.tmp"
+    temporary.write_bytes(jpeg)
+    os.replace(temporary, path)
+    ours = sorted(p for p in directory.iterdir() if _SHOT_NAME.match(p.name))  # UTC names sort by time
     for old in ours[:-KEEP_SHOTS]:
         try:
             old.unlink()
@@ -124,7 +141,10 @@ async def _tool(name: str, **args) -> CallToolResult:
         return _error("internal", f"{name} failed unexpectedly. This is a bug; report it.")
     text, image = answer.get("text") or "(no answer)", answer.get("image")
     if image and SHOTS_DIR is not None:  # file mode: one text item, the picture on disk
-        text += "\n" + save_screenshot(SHOTS_DIR, name, base64.b64decode(image), answer.get("image_size") or [0, 0])
+        try:
+            text += "\n" + save_screenshot(SHOTS_DIR, name, base64.b64decode(image), answer.get("image_size") or [0, 0])
+        except OSError as e:  # the user chose file mode: no inline picture instead, but the answer stays
+            text += f"\nNote: no screenshot: couldn't save to {SHOTS_DIR}: {e.strerror or e}"
         image = None
     return _result(text, image)
 
@@ -217,4 +237,6 @@ async def wait(seconds: float = 1.0) -> CallToolResult:
 def run(screenshots: str | None = None) -> None:
     global SHOTS_DIR
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
+    if SHOTS_DIR is not None:
+        check_screenshots_dir(SHOTS_DIR)
     device.run(server.run_stdio_async)

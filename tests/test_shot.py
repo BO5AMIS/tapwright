@@ -29,7 +29,7 @@ def grey(p) -> bool:
 
 
 def test_resizes_to_the_width_and_reports_the_size():
-    jpeg, size = shot.render(png(), SCREEN, 600, None)
+    jpeg, size, _ = shot.render(png(), SCREEN, 600, None)
     assert size == (600, 1200) and decode(jpeg).size == (600, 1200)
     assert shot.render(png(), SCREEN, 160, None)[1] == (160, 320)
 
@@ -45,7 +45,7 @@ def test_quality_is_75():
 
 
 def test_a_box_is_drawn_at_its_rect():
-    jpeg, _ = shot.render(png(), SCREEN, 400, [("e1", 100, 200, 100, 50)])
+    jpeg, *_ = shot.render(png(), SCREEN, 400, [("e1", 100, 200, 100, 50)])
     img = decode(jpeg)
     assert red(img.getpixel((101, 225)))      # the left edge: x 100..102
     assert red(img.getpixel((198, 225)))      # the right edge: x 197..199
@@ -55,7 +55,7 @@ def test_a_box_is_drawn_at_its_rect():
 
 
 def test_boxes_scale_with_the_width():
-    jpeg, _ = shot.render(png(), SCREEN, 200, [("e1", 100, 200, 100, 50)])
+    jpeg, *_ = shot.render(png(), SCREEN, 200, [("e1", 100, 200, 100, 50)])
     img = decode(jpeg)
     assert red(img.getpixel((51, 112))) and grey(img.getpixel((75, 112))) and grey(img.getpixel((25, 112)))
 
@@ -71,5 +71,18 @@ def test_a_chip_at_the_top_edge_goes_inside_the_box():
 
 
 def test_a_box_partly_off_screen_is_clipped():
-    jpeg, size = shot.render(png(), SCREEN, 400, [("e2", 350, 780, 100, 60)])
+    jpeg, size, _ = shot.render(png(), SCREEN, 400, [("e2", 350, 780, 100, 60)])
     assert size == (400, 800) and red(decode(jpeg).getpixel((351, 790)))
+
+
+def test_a_big_jpeg_still_comes_out_at_the_width_and_the_flag_is_false():
+    jpeg, size, skipped = shot.render(png(size=(1600, 3200), fmt="JPEG"), SCREEN, 300, [("e1", 100, 200, 100, 50)])
+    assert size == (300, 600) and decode(jpeg).size == (300, 600) and skipped is False
+
+
+def test_boxes_are_skipped_when_the_orientation_does_not_match():
+    jpeg, size, skipped = shot.render(png(size=(1600, 800)), SCREEN, 400, [("e1", 100, 200, 100, 50)])
+    assert skipped is True and size == (400, 200)
+    img = decode(jpeg)
+    assert all(grey(img.getpixel(p)) for p in [(101, 100), (50, 100), (150, 100)])
+    assert shot.render(png(size=(1600, 800)), SCREEN, 400, None)[2] is False  # nothing to skip

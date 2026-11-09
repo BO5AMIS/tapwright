@@ -62,9 +62,9 @@ def test_save_screenshot_names_prunes_and_answers_with_the_path(tmp_path):
         line = mcp_server.save_screenshot(tmp_path, "look", b"jpeg%d" % i, (600, 1200),
                                           now=start + timedelta(milliseconds=i))
         paths.append(line)
-    ours = sorted(p.name for p in tmp_path.iterdir() if re.fullmatch(r"\d{8}-\d{6}-\d{3}-look\.jpg", p.name))
+    ours = sorted(p.name for p in tmp_path.iterdir() if re.fullmatch(r"\d{8}-\d{6}-\d{3}-[0-9a-f]{4}-look\.jpg", p.name))
     assert len(ours) == 50 and (tmp_path / "keep-me.jpg").exists()       # newest 50; others left alone
-    assert ours[-1] == "20261109-120000-054-look.jpg" and ours[0] == "20261109-120000-005-look.jpg"
+    assert ours[-1].startswith("20261109-120000-054-") and ours[0].startswith("20261109-120000-005-")
     assert paths[-1] == f"Screenshot: {tmp_path / ours[-1]} (600x1200)"
     assert (tmp_path / ours[-1]).read_bytes() == b"jpeg54"
 
@@ -145,3 +145,36 @@ def test_a_target_error_is_one_line_with_an_example(monkeypatch):
         text = asyncio.run(mcp_server.server.call_tool("tap", arguments)).content[0].text
         assert text.startswith("Error bad_params: ") and '{"ref": "e3"}' in text, text
         assert "\n" not in text.removeprefix("Error bad_params: ").split("; a target is")[0], text
+
+
+def test_two_saves_in_the_same_millisecond_keep_both(tmp_path):
+    when = datetime(2026, 11, 9, 12, 0, 0)
+    for i in range(2):
+        mcp_server.save_screenshot(tmp_path, "look", b"%d" % i, (1, 1), now=when)
+    assert len(list(tmp_path.iterdir())) == 2
+
+
+def test_a_save_leaves_no_temporary_file(tmp_path):
+    mcp_server.save_screenshot(tmp_path, "look", b"x", (1, 1))
+    assert [p.suffix for p in tmp_path.iterdir()] == [".jpg"]
+
+
+def test_a_directory_that_cannot_be_written_keeps_the_answer_and_sends_no_image(monkeypatch, tmp_path):
+    (tmp_path / "file").write_text("not a directory")
+    bad = tmp_path / "file" / "shots"
+    monkeypatch.setattr(client, "call", lambda *a, **k: {
+        "text": "Screen", "image": base64.b64encode(b"JPEG").decode(), "image_size": [6, 12]})
+    monkeypatch.setattr(mcp_server, "SHOTS_DIR", bad)
+    out = asyncio.run(mcp_server._tool("look", screenshot=True))
+    assert not out.is_error and [c.type for c in out.content] == ["text"]
+    last = out.content[0].text.splitlines()[-1]
+    assert last.startswith(f"Note: no screenshot: couldn't save to {bad}: ") and out.content[0].text.startswith("Screen")
+
+
+def test_the_directory_is_checked_at_startup(tmp_path):
+    (tmp_path / "file").write_text("x")
+    mcp_server.check_screenshots_dir(tmp_path / "ok")  # made on the way
+    assert (tmp_path / "ok").is_dir()
+    with pytest.raises(SystemExit) as e:
+        mcp_server.check_screenshots_dir(tmp_path / "file" / "shots")
+    assert "--screenshots" in str(e.value) and "shots" in str(e.value)

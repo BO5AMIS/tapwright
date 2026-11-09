@@ -36,6 +36,7 @@ class ClientView:
     app: tuple[str, str] | None = None  # (name, bundle id) of the foreground app at the last read
     alert: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert at the last answer
     keyboard: bool = False  # whether the keyboard was shown at the last answer
+    read_frame: bytes | None = None  # the stream frame at that moment: the picture that matches the list
     read_mark: tuple[int, bytes | None] = (0, None)  # (seq, SHA-1) of the newest stream frame when `items` was read
 
 

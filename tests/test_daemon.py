@@ -1548,3 +1548,60 @@ def test_a_failed_screenshot_is_a_note_not_an_error():
         assert d.session.SCREEN_TEXT.splitlines()[0] in r["text"]  # the list still came
         await finish(stop, task)
     run(go)
+
+
+def test_the_picture_shows_the_moment_the_list_was_read():
+    async def go():
+        class Moving(FakeSession):
+            async def look(self, screenshot=True):
+                result = await super().look(screenshot)
+                self.hub.publish(image_bytes((800, 1600), (255, 0, 0), "JPEG"))  # the screen changes during the read
+                return result
+        s = Moving()
+        d = make(s)
+        s.hub = d.hub
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        r = await d.run_tool("a", "look", {})
+        b = pixel(r, (300, 600))
+        assert b[2] > 200 and b[0] < 60 and "screenshot" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_no_change_shortcut_uses_the_newest_frame_after_the_settle():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(blue_frame())
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=blue_frame())
+        r = await d.run_tool("a", "tap", {**TAP, "screenshot": True})
+        await feeder.stop()
+        assert "No visible change." in r["text"] and pixel(r, (300, 600))[2] > 200
+        assert "screenshot" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_labels_are_skipped_with_a_note_when_the_orientation_changed():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(image_bytes((1600, 800), BLUE, "JPEG"))  # the phone turned; the list is for portrait
+        r = await d.run_tool("a", "look", {"width": 400, "labels": True})
+        assert r["image_size"] == [400, 200] and pixel(r, (11, 20))[2] > 200
+        assert "Note: labels skipped: the screen orientation changed." in r["text"].splitlines()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_failure_with_no_message_still_says_what_it_was():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.fail["screenshot"] = DeviceError("")
+        r = await d.run_tool("a", "look", {})
+        assert r["text"].splitlines()[-1] == "Note: no screenshot: DeviceError"
+        await finish(stop, task)
+    run(go)
