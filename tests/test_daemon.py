@@ -930,15 +930,15 @@ def test_an_alert_appearing_changing_and_going_heads_the_change_block():
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.last_alert = _alert()
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[1:] == ["Same screen. Changes:", 'Alert: "Allow Notifications?" [Allow] [Don\'t Allow]']
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
         d.session.last_alert = _alert("Allow Location?", ("OK",))
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[2] == 'Alert: "Allow Location?" [OK]'
         d.session.last_alert = None
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[1:] == ["Same screen. Changes:", "Alert: gone"]
         await finish(stop, task)
     run(go)
@@ -967,7 +967,7 @@ def test_a_look_records_the_alert_and_keyboard_so_they_are_not_news_afterwards()
         d.session.last_alert, d.session.last_keyboard = _alert(), True
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
@@ -2819,6 +2819,7 @@ def test_force_overrides_behind_alert_and_a_point_is_never_checked():
     async def go():
         d = make()
         stop, task = await started(d)
+        d.session.last_alert = ALERT
         await looked(d, alerted())
         await d.run_tool("a", "tap", {"target": {"ref": "e2"}, "force": True, "look": False})
         assert d.session.calls.count("tap") == 1
@@ -2837,7 +2838,9 @@ def test_a_target_not_found_while_an_alert_is_up_says_the_alert_hides_it():
         for target in ({"id": "save"}, {"label": "Save"}, {"text": "Sav"}):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "tap", {"target": target})
-            assert e.value.code == "not_actionable" and str(e.value).startswith("behind_alert: an alert covers it:")
+            assert e.value.code == "not_actionable"
+            assert str(e.value) == ('behind_alert: an alert covers it: "Allow notifications?" [Allow] [Don\'t Allow]; '
+                                    'answer it with alert, or ask the user.')  # force can't touch what isn't there
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"ref": "e9"}})
         assert e.value.code == "not_found"  # only id, label and text say so
@@ -2855,6 +2858,7 @@ def test_disabled_comes_before_behind_alert_and_toggle_is_guarded_too():
         d = make()
         stop, task = await started(d)
         off = el("e2", "switch", "Wi-Fi", checked=False, enabled=False, rect=(300, 100, 60, 30))
+        d.session.last_alert = ALERT
         await looked(d, [alerted()[0], off])
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "toggle", {"target": {"ref": "e2"}})
@@ -2910,7 +2914,7 @@ def test_a_card_under_the_tab_bar_is_tapped_where_it_shows():
         for target in ({"ref": "e1"}, {"label": "Card"}, {"text": "Card"}):
             r = await d.run_tool("a", "tap", {"target": target, "look": False})
             assert d.session.last_point == (215.0, 828.5)  # the middle of y 808-849, not of the whole card
-            assert re.fullmatch(r'Tapped e\d cell "Card" @20,808 390x90\.', r["text"])
+            assert re.fullmatch(r'Tapped e\d cell "Card" @20,808 390x90 at its visible part \(215, 828\)\.', r["text"])
         await looked(d, [card])
         r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}, "look": False})
         assert d.session.last_point == (215.0, 828.5) and r["text"].startswith("Long-pressed e")
@@ -2942,5 +2946,64 @@ def test_an_element_with_too_little_showing_is_refused():
         assert "tap" not in d.session.calls
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (215.0, 875.0)
+        await finish(stop, task)
+    run(go)
+
+
+# ---- review fixes (Task 8a, follow-up) ----
+def test_an_alert_with_text_only_still_covers_the_app():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_alert = ui.Alert("Low battery", (), (50.0, 300.0, 300.0, 100.0))  # no button in the list
+        await looked(d, [el("e1", "button", "Save", rect=(10, 100, 100, 44))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert str(e.value) == ('behind_alert: an alert covers it: "Low battery"; '
+                                'answer it with alert, or pass force: true.')
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_alert_that_closed_covers_nothing_even_when_an_element_remembers_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_alert = ALERT
+        await looked(d, alerted())
+        d.session.last_alert = None
+        await looked(d, alerted())  # the alert is gone; the list still has an element flagged in_alert
+        await d.run_tool("a", "tap", {"target": {"ref": "e2"}, "look": False})
+        assert "tap" in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_element_under_several_bars_is_touched_in_the_strip_nearest_its_centre():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        bars = (ui.Bar("NavigationBar", (0.0, 0.0, 430.0, 100.0), "navigationbar @0,0 430x100"),
+                ui.Bar("Toolbar", (0.0, 430.0, 430.0, 100.0), "toolbar @0,430 430x100"),
+                TAB)
+        await looked(d, [el("e1", "cell", "Tall", rect=(20, 80, 390, 830), covered_by=bars),
+                         el("e2", "cell", "Wide", rect=(20, 80, 390, 830), covered_by=bars[::2])])
+        r = await d.run_tool("a", "tap", {"target": {"label": "Tall"}, "look": False})
+        assert d.session.last_point == (215.0, 689.5) and "at its visible part (215, 690)" in r["text"]
+        await d.run_tool("a", "tap", {"target": {"label": "Wide"}, "look": False})
+        assert d.session.last_point == (215.0, 495.0)  # centre 495 is in no bar: the element's own centre
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_tab_inside_the_tab_bar_is_touched_at_its_own_centre():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "tab", "Home", rect=(0, 849, 215, 83))])  # its bar is its ancestor: not covered_by
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (107.5, 890.5) and "visible part" not in r["text"]
         await finish(stop, task)
     run(go)

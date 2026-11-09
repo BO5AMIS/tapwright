@@ -210,3 +210,73 @@ def test_the_visible_part_of_an_element_is_its_rect_minus_the_bars():
     top = ui.Bar("NavigationBar", (0.0, 0.0, 430.0, 100.0), "navigationbar @0,0 430x100")
     assert ui.visible_part((20, 60, 390, 200), (top, tab), PHONE) == (20, 100, 390, 160)
     assert ui.visible_part((20, 900, 390, 100), (), PHONE) == (20, 900, 390, 32)  # the screen's edge counts too
+
+
+# ---- review fixes (Task 8a, follow-up) ----
+def nested(depth, *children):
+    """`children` inside `depth` plain Other wrappers (each a level below the one before)."""
+    for _ in range(depth):
+        children = (node("Other", 0, 0, 430, 932, children=children),)
+    return "".join(children)
+
+
+def cards(top=0, count=4, height=233):
+    return [node("Cell", 0, top + i * height, 430, height, f"Card {i}") for i in range(count)]
+
+
+def test_deep_app_content_hides_nothing_even_when_a_later_body_fills_the_screen():
+    header = node("Other", 0, 0, 430, 120, children=[node("Button", 20, 50, 100, 44, "Menu")])
+    body = node("Other", 0, 0, 430, 932, children=cards())
+    items = ui.elements(phone(nested(5, header, body)), PHONE)  # the body sits 6 levels below the application
+    assert labels(items) == ["Menu", "Card 0", "Card 1", "Card 2", "Card 3"]
+
+
+def test_a_layer_wrapping_a_main_scroll_view_is_a_screen_not_a_sheet():
+    rows = [node("Cell", 0, 60 * i, 430, 60, f"Row {i}") for i in range(15)]
+    page = node("Other", 0, 0, 430, 932, children=[node("ScrollView", 0, 0, 430, 900, children=rows)])
+    items = ui.elements(phone(base_screen(), page), PHONE)
+    assert {"Add", "Card", "Home", "Row 0"} <= set(labels(items))
+
+
+def test_a_sheet_three_levels_down_hides_the_base_screen():
+    items = ui.elements(phone(nested(2, base_screen(), node("Other", 0, 0, 430, 932, children=SHEET))), PHONE)
+    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]
+
+
+def test_a_layer_hides_only_what_is_inside_its_rect():
+    footer = node("Button", 0, 900, 430, 32, "Footer")  # centre y 916: below a 900 pt tall layer
+    layer = node("Other", 0, 0, 430, 900, children=[node("Button", 0, 0, 430, 450, "Dismiss"),
+                                                    node("Button", 0, 450, 430, 450, "Sheet body")])
+    items = ui.elements(phone(nested(1, node("Button", 20, 100, 100, 44, "Add"), footer, layer)), PHONE)
+    assert labels(items) == ["Footer", "Dismiss", "Sheet body"]
+
+
+def test_the_layer_depth_and_thresholds_are_named_constants():
+    assert (ui.LAYER_MAX_DEPTH, ui.LAYER_COVER, ui.LAYER_FILL, ui.LAYER_SCROLL) == (4, 0.95, 0.5, 0.9)
+
+
+def test_every_bar_over_an_element_is_listed_and_a_bar_beside_it_is_not():
+    nav = node("NavigationBar", 0, 0, 430, 100)
+    tool = node("Toolbar", 0, 300, 430, 40)
+    tab = node("TabBar", 0, 849, 430, 83, children=[node("Button", 0, 849, 215, 83, "Home")])
+    tall = node("Cell", 20, 80, 390, 830, "Tall")
+    short = node("Cell", 20, 150, 390, 100, "Short")
+    items = ui.elements(phone(nested(1, tall, short, nav, tool, tab)), PHONE)
+    by = {e.label: e for e in items}
+    assert [b.kind for b in by["Tall"].covered_by] == ["NavigationBar", "Toolbar", "TabBar"]  # its centre is in none of them
+    assert by["Short"].covered_by == () and by["Home"].covered_by == ()
+
+
+def test_a_shown_keyboard_covers_like_a_bottom_bar():
+    keys = node("Keyboard", 0, 600, 430, 332, children=[node("Key", 10, 610, 40, 50, "q")])
+    items = ui.elements(phone(node("Cell", 20, 560, 390, 100, "Row"), keys), PHONE)
+    assert [b.kind for b in items[0].covered_by] == ["Keyboard"] and items[0].covered_by[0].line.startswith("keyboard @0,600")
+    assert ui.elements(phone(node("Cell", 20, 560, 390, 100, "Row")), PHONE)[0].covered_by == ()
+
+
+def test_the_visible_part_is_cut_by_every_bar_and_keeps_the_strip_nearest_the_centre():
+    nav = ui.Bar("NavigationBar", (0.0, 0.0, 430.0, 100.0), "navigationbar @0,0 430x100")
+    tool = ui.Bar("Toolbar", (0.0, 430.0, 430.0, 100.0), "toolbar @0,430 430x100")
+    tab = ui.Bar("TabBar", (0.0, 849.0, 430.0, 83.0), "tabbar @0,849 430x83")
+    # y 80-910, centre 495 (inside the toolbar): the strip 530-849 is nearer than the larger 100-430
+    assert ui.visible_part((20, 80, 390, 830), (nav, tool, tab), PHONE) == (20, 530, 390, 319)

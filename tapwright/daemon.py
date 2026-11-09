@@ -521,7 +521,7 @@ class Daemon:
                     # the app may have been mid-redraw: one more look, once it is still, before saying so
                     await self._silent_read(view)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
-                self._refuse_behind_alert(view, s.items)  # an alert hides the app's elements: say so, not "not found"
+                self._refuse_behind_alert(view, force=False)  # an alert hides the app's elements: say so, not "not found"
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
@@ -742,41 +742,40 @@ class Daemon:
         done.note = note
         return done
 
-    def _alert_text(self, view, items: list[ui.Element]) -> str | None:
-        """`"<title>" [<button>] ...` when an OS alert is up on this list (some element is inside one), else None."""
-        if not any(e.in_alert for e in items):
-            return None
-        alert = self.session.last_alert
-        title, buttons = (alert.title, alert.buttons) if alert else view.alert or ("", ())
-        buttons = buttons or tuple(e.text for e in items if e.in_alert and e.role == "button")
-        return " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
+    @staticmethod
+    def _refuse_behind_alert(view, force: bool = True) -> None:
+        """When the newest read shows an OS alert: `behind_alert`. `force` says whether passing it could help
+        (it can't touch an element that isn't found)."""
+        if view.alert_now is not None:
+            title, buttons = view.alert_now
+            alert = " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
+            raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
+                                            + ("or pass force: true." if force else "or ask the user."))
 
-    def _refuse_behind_alert(self, view, items: list[ui.Element]) -> None:
-        if (alert := self._alert_text(view, items)) is not None:
-            raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; "
-                                            "answer it with alert, or pass force: true.")
-
-    def _guard(self, view, items: list[ui.Element], element: ui.Element) -> None:
+    def _guard(self, view, element: ui.Element) -> None:
         """A9: refuse what a real touch couldn't do. The reason word comes first in the message."""
         if not element.enabled:
             raise Refused("not_actionable", f"disabled: {element.line(actions=False)} is disabled; "
                                             "pass force: true to touch it anyway.")
         if not element.in_alert:
-            self._refuse_behind_alert(view, items)
+            self._refuse_behind_alert(view)
 
     def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
-        """Where a finger would touch an element a bar is drawn over: the middle of the part that shows.
-        None when a bar covers none of its centre. Refuses when too little shows."""
-        if not element.covered_by:
+        """Where a finger would touch an element a bar (or the keyboard) is drawn over its centre: the middle of
+        the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
+        covers the centre. Refuses when too little shows."""
+        centre = element.center
+        over = [b for b in element.covered_by if b.rect[0] <= centre[0] < b.rect[0] + b.rect[2]
+                and b.rect[1] <= centre[1] < b.rect[1] + b.rect[3]]
+        if not over:
             return None
         x, y, w, h = ui.visible_part(element.rect, element.covered_by, self.session.screen)
         if w >= MIN_VISIBLE and h >= MIN_VISIBLE:
             return x + w / 2, y + h / 2
-        bar = element.covered_by[0]
         line = element.line(actions=False)
-        if bar.kind == "TabBar":
+        if over[0].kind == "TabBar":
             raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; scroll it up first.")
-        raise Refused("not_actionable", f"covered: {line} is covered by {bar.line}; scroll it into view first.")
+        raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; scroll it into view first.")
 
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
@@ -788,11 +787,11 @@ class Daemon:
             return await s.tap(target, hold_ms=hold_ms)
         if a.get("force"):
             return await s.tap(target, hold_ms=hold_ms)
-        self._guard(view, s.items, found)
+        self._guard(view, found)
         if (point := self._touch_point(found)) is None:
             return await s.tap(target, hold_ms=hold_ms)
         await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
-        return f"{verb} {found.line(actions=False)}."
+        return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, 60)
@@ -813,7 +812,7 @@ class Daemon:
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
         if not a.get("force"):
-            self._guard(view, view.items, found)
+            self._guard(view, found)
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
@@ -863,7 +862,8 @@ class Daemon:
         done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
         self.unsettled = False
         mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
-        await s.refresh()
+        tree = await s.refresh()
+        view.alert_now = _alert_key(tree.alert)  # the alert as this read shows it, not as the last answer did
         known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
         held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
         view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
@@ -991,6 +991,7 @@ class Daemon:
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
             view.alert, view.keyboard = _alert_key(self.session.last_alert), self.session.last_keyboard
+            view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             return text, image
         try:
@@ -1028,6 +1029,7 @@ class Daemon:
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
         view.alert, view.keyboard = _alert_key(snap.tree.alert), snap.tree.keyboard
+        view.alert_now = view.alert
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)
         if up.full:
