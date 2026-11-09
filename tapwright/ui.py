@@ -254,36 +254,127 @@ def describe(items: list[Element], screen: tuple[float, float], scale: float | N
     return "\n".join(lines)
 
 
-class NotFound(Exception):
-    pass
+@dataclass(frozen=True)
+class Target:
+    """What a tool acts on (docs/AGENT-TOOLS.md §2): exactly one of `ref`, `id`, `label`, `text`,
+    or the point `x`, `y`; `index` (0-based, reading order) only with id, label or text."""
+    ref: str | None = None
+    id: str | None = None
+    label: str | None = None
+    text: str | None = None
+    x: float | None = None
+    y: float | None = None
+    index: int | None = None
+
+    @property
+    def kind(self) -> str:
+        """"ref", "id", "label", "text" or "point"."""
+        for name in ("ref", "id", "label", "text"):
+            if getattr(self, name) is not None:
+                return name
+        return "point"
+
+    @property
+    def point(self) -> tuple[float, float] | None:
+        return None if self.x is None or self.y is None else (self.x, self.y)
 
 
-def find(items: list[Element], ref: str | None = None, label: str | None = None, id: str | None = None,
-         index: int = 0) -> Element:
-    """An element by ref (from the last look), accessibility id, or label/value text:
-    exact match first, then case-insensitive substring. `index` picks among several."""
-    if ref:
+_TARGET_KEYS = ("ref", "id", "label", "text", "x", "y", "index")
+TARGET_HELP = ('a target is exactly one of {"ref": "e3"}, {"id": "login-button"}, {"label": "Log in"}, '
+               '{"text": "Log in"} or {"x": 120, "y": 300}, plus an optional "index" with id, label or text')
+
+
+def _number(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def parse_target(raw: dict | None) -> Target:
+    """A target from a tool's arguments. Raises Refused("bad_params") for anything else: no target,
+    two kinds, half a point, `index` with a ref or a point, a wrong type, an unknown key."""
+    if not isinstance(raw, dict):
+        raise Refused("bad_params", f"target must be an object; {TARGET_HELP}")
+    given = {k: v for k, v in raw.items() if v is not None}  # a JSON null is the same as absent
+    unknown = sorted(set(given) - set(_TARGET_KEYS))
+    if unknown:
+        raise Refused("bad_params", f"unknown target key {unknown[0]!r}; {TARGET_HELP}")
+    kinds = [k for k in ("ref", "id", "label", "text") if k in given]
+    if ("x" in given) != ("y" in given):
+        raise Refused("bad_params", f"a point needs both x and y; {TARGET_HELP}")
+    if "x" in given:
+        kinds.append("point")
+    if len(kinds) != 1:
+        raise Refused("bad_params", f"a target takes exactly one kind, not {len(kinds)}; {TARGET_HELP}")
+    for k in ("ref", "id", "label", "text"):
+        if k in given and (not isinstance(given[k], str) or not given[k].strip()):
+            raise Refused("bad_params", f"target {k} must be a non-empty string")
+    for k in ("x", "y"):
+        if k in given and not _number(given[k]):
+            raise Refused("bad_params", f"target {k} must be a number in points")
+    index = given.get("index")
+    if index is not None:
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise Refused("bad_params", "target index must be a whole number, 0 or more")
+        if kinds[0] in ("ref", "point"):
+            raise Refused("bad_params", f"target index goes with id, label or text, not with {kinds[0]}")
+    return Target(**{k: (float(v) if k in ("x", "y") else v) for k, v in given.items()})
+
+
+MAX_CANDIDATES = 5
+
+
+def _same(a: str, b: str) -> bool:
+    return a.casefold() == b.casefold()
+
+
+def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
+    """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
+    is there, so a point never becomes an element). Several matches without an `index` are
+    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
+    if target.point is not None:
+        return target.point
+    if target.ref is not None:
         for e in items:
-            if e.ref == ref:
+            if e.ref == target.ref:
                 return e
-        raise NotFound(f"no {ref} on the last screen; look again")
-    if id:
-        hits = [e for e in items if e.identifier == id] or [e for e in items if e.name == id]
-    elif label:
-        want = label.strip().lower()
-        hits = [e for e in items if e.label.lower() == want or e.value.lower() == want]
-        if not hits:
-            hits = [e for e in items if want in e.label.lower() or want in e.value.lower()]
+        hint = "look first" if not items else "look again for the current refs"
+        raise Refused("not_found", f"no {target.ref} on your last list; {hint}")
+    if target.id is not None:
+        # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
+        hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
+        what, hint = f'id "{target.id}"', 'look for its id, or use {"label": …} or {"text": …}'
+    elif target.label is not None:
+        hits = [e for e in items if _same(e.label, target.label.strip())]
+        what, hint = f'label "{target.label}"', 'use {"text": …} for a partial match, or look'
     else:
-        raise Refused("bad_params", "give a ref, an id, or a label")
+        want = target.text.strip()
+        hits = [e for e in items if _same(e.label, want) or _same(e.value, want)]
+        if not hits:
+            hits = [e for e in items if want.casefold() in e.label.casefold() or want.casefold() in e.value.casefold()]
+        what, hint = f'text "{target.text}"', "scroll if it may be off screen, or look"
     if not hits:
-        raise NotFound(f"nothing matches {'id=' + id if id else repr(label)} on the screen")
-    if index >= len(hits):
-        raise NotFound(f"only {len(hits)} match; index {index} is out of range")
-    # Prefer enabled, actionable matches when the agent didn't pick one.
-    if index == 0 and len(hits) > 1:
-        hits.sort(key=lambda e: (not e.enabled, e.type not in INTERACTIVE))
-    return hits[index]
+        raise Refused("not_found", f"nothing on screen has {what}; {hint}")
+    if target.index is not None:
+        if target.index >= len(hits):
+            raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "
+                                       f"element{'s' if len(hits) != 1 else ''} match {what}")
+        return hits[target.index]
+    if len(hits) > 1:
+        shown = hits[:MAX_CANDIDATES]
+        raise Refused("ambiguous", f"{len(hits)} elements match {what}"
+                      + (f", showing {len(shown)}" if len(hits) > len(shown) else "")
+                      + "; use one of their refs, or add index (0 is the first). Candidates:\n"
+                      + "\n".join(e.line() for e in shown))
+    return hits[0]
+
+
+def at_point(items: list[Element], point: tuple[float, float], role: str) -> Element | None:
+    """The front-most listed element of `role` whose rect contains the point (a later element in
+    reading order is drawn over an earlier one), or None. For tools that act on an element, not a touch."""
+    x, y = point
+    for e in reversed(items):
+        if e.role == role and e.x <= x <= e.x + e.width and e.y <= y <= e.y + e.height:
+            return e
+    return None
 
 
 def _pointer(steps: list[dict]) -> dict:

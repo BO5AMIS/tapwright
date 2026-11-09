@@ -54,7 +54,7 @@ def test_direction_marks_are_dropped():
             'value="&#8206;42" x="326" y="294" width="88" height="87"/>')
     items = ui.elements(node, SCREEN)
     assert items[0].line() == 'e1 text "42" @326,294 88x87'
-    assert ui.find(items, label="42") is items[0]
+    assert ui.resolve(items, ui.Target(label="42")) is items[0]
 
 
 def test_describe_is_compact():
@@ -62,18 +62,6 @@ def test_describe_is_compact():
     assert text.splitlines()[0] == "Screen 402x874 pt · 4 elements"
     assert 'e3 button "Log in" id=login-button @24,610 354x48 [tap]' in text
     assert text.splitlines()[4] == 'e4 button "Log in with Apple" id=apple-login disabled @24,670 354x48 [tap]'
-
-
-def test_find_by_id_label_ref_and_index():
-    items = ui.elements(SOURCE, SCREEN)
-    assert ui.find(items, id="login-button").label == "Log in"
-    assert ui.find(items, label="log in").identifier == "login-button"  # exact before substring
-    assert ui.find(items, label="apple").identifier == "apple-login"  # substring
-    assert ui.find(items, ref="e2").identifier == "email-input"
-    with pytest.raises(ui.NotFound):
-        ui.find(items, label="nothing like this")
-    with pytest.raises(ui.NotFound):
-        ui.find(items, ref="e99")
 
 
 def test_gestures():

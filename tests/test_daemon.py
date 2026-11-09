@@ -3,7 +3,7 @@ import asyncio
 import base64
 
 import pytest
-from fakes import Clock, FakeDevice, FakeSession
+from fakes import Clock, FakeDevice, FakeSession, button
 
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
@@ -58,11 +58,11 @@ def test_look_then_act_by_ref():
         r = await d.run_tool("a", "look", {})
         assert r["text"].startswith("Screen 400x800") and r["image"] == base64.b64encode(b"JPEG").decode()
         assert r["image_size"] is None  # b"JPEG" isn't a picture
-        r = await d.run_tool("a", "tap", {"ref": "e1", "look": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert r == {"text": 'tapped e1 button "OK" id=ok-button @10,10 100x40 [tap]', "image": None, "image_size": None}
-        r = await d.run_tool("a", "tap", {"ref": "e1", "look": False})  # its own taps don't make refs stale
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("tapped e1")
-        r = await d.run_tool("a", "tap", {"ref": "e1"})  # with the look after it
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with the look after it
         assert r["text"].splitlines()[1].startswith("Screen") and r["image"]
         await finish(stop, task)
     run(go)
@@ -75,13 +75,12 @@ def test_a_person_makes_refs_stale_and_ids_are_looked_up_again():
         await d.run_tool("a", "look", {})
         assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"ref": "e1", "look": False})
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert e.value.code == "stale"
-        looks = d.session.calls.count("look")
-        r = await d.run_tool("a", "tap", {"id": "ok-button", "look": False})
-        assert r["text"].startswith("tapped e1") and d.session.calls.count("look") == looks + 1
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert r["text"].startswith("tapped e1") and d.session.calls.count("refresh") == 1
         assert r["text"].endswith("\nNote: a person used the phone since your last look.")
-        assert "Note:" not in (await d.run_tool("a", "tap", {"ref": "e1", "look": False}))["text"]
+        assert "Note:" not in (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]
         await finish(stop, task)
     run(go)
 
@@ -92,10 +91,10 @@ def test_pause_refuses_agents():
         stop, task = await started(d)
         await d.viewer_message({"type": "pause", "on": True})
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "paused" and d.status()["paused"] is True
         await d.viewer_message({"type": "pause", "on": False})
-        assert (await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False}))["text"] == "tapped (5, 5)"
+        assert (await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False}))["text"] == "tapped (5, 5)"
         await finish(stop, task)
     run(go)
 
@@ -106,7 +105,7 @@ def test_a_dropped_action_is_reported_not_retried():
         stop, task = await started(d)
         d.session.fail["tap"] = ConnectionLost("reset by peer")
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "reconnecting" and d.session.calls.count("tap") == 1
         for _ in range(300):
             if d.state == "live":
@@ -150,7 +149,7 @@ def test_locked_phone():
         stop, task = await started(d, until=("locked",))
         assert d.state == "locked" and d.detail == "unlock the phone"
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 1, "y": 1})
+            await d.run_tool("a", "tap", {"target": {"x": 1, "y": 1}})
         assert e.value.code == "locked"
         assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "locked"
@@ -269,10 +268,10 @@ def test_a_coordinate_action_does_not_refresh_stale_refs():
         stop, task = await started(d)
         await d.run_tool("a", "look", {})
         await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
-        r = await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert r["text"] == "tapped (5, 5)\nNote: a person used the phone since your last look."
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"ref": "e1", "look": False})
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert e.value.code == "stale"
         await finish(stop, task)
     run(go)
@@ -284,7 +283,7 @@ def test_busy_while_a_person_drives():
         stop, task = await started(d)
         d.control.person_active = lambda: True
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "busy"
         await finish(stop, task)
     run(go)
@@ -384,10 +383,10 @@ def test_a_target_that_is_not_there_is_an_error_and_keeps_refs_current():
         await d.run_tool("a", "look", {})
         generation = d.control.generation
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"ref": "e9", "look": False})
+            await d.run_tool("a", "tap", {"target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
         assert d.control.generation == generation  # nothing happened on the phone
-        assert (await d.run_tool("a", "tap", {"ref": "e1", "look": False}))["text"].startswith("tapped e1")
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"].startswith("tapped e1")
         await finish(stop, task)
     run(go)
 
@@ -397,17 +396,17 @@ def test_bad_arguments_are_bad_params():
         d = make()
         stop, task = await started(d)
         generation = d.control.generation
-        for tool, args, field in (("tap", {}, "ref"), ("tap", {"x": 1, "y": 1, "index": "abc"}, "index"),
+        for tool, args, field in (("tap", {}, "target"), ("tap", {"target": {"id": "a", "index": "abc"}}, "index"),
                                   ("swipe", {"x0": "abc", "y0": 0, "x1": 1, "y1": 1}, "x0"),
                                   ("swipe", {"x0": 0, "y0": 0, "x1": 1, "y1": float("nan")}, "y1"),
                                   ("wait", {"seconds": "soon"}, "seconds"),
-                                  ("long_press", {"x": 1, "y": 1, "seconds": "long"}, "seconds"),
+                                  ("long_press", {"target": {"x": 1, "y": 1}, "seconds": "long"}, "seconds"),
                                   ("scroll", {"direction": "sideways"}, "direction"),
                                   ("scroll", {"amount": "lots"}, "amount")):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args)
             assert e.value.code == "bad_params" and field in str(e.value), (tool, args)
-        assert d.control.generation == generation and d.session.actions() == ["tap"]  # only the target-less tap got through, and failed in ui.find
+        assert d.control.generation == generation and d.session.actions() == []  # nothing reached the phone
         await finish(stop, task)
     run(go)
 
@@ -419,7 +418,7 @@ def test_a_crash_inside_a_tool_is_internal_and_logged():
         stop, task = await started(d)
         d.session.fail["tap"] = RuntimeError("boom")
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "internal" and "boom" in str(e.value)
         assert any("Traceback" in m and "boom" in m for m in logs)
         d.session.fail["look"] = RuntimeError("bang")
@@ -442,7 +441,7 @@ def test_a_value_error_from_phone_data_is_internal_not_bad_params():
         assert e.value.code == "internal" and any("Traceback" in m for m in logs)
         d.session.fail["tap"] = ValueError("bad data")
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "internal"
         await finish(stop, task)
     run(go)
@@ -455,7 +454,7 @@ def test_a_phone_side_error_is_internal_but_not_called_a_bug():
         stop, task = await started(d)
         d.session.fail["tap"] = DeviceError("HTTP 500: no such element")
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "internal" and "the phone side failed" in str(e.value)
         assert "HTTP 500" in str(e.value) and "bug" not in str(e.value)
         assert not any("Traceback" in m for m in logs)
@@ -468,7 +467,7 @@ def test_a_look_that_fails_after_an_action_is_a_note():
         d = make()
         stop, task = await started(d)
         d.session.fail["look"] = RuntimeError("boom")
-        r = await d.run_tool("a", "tap", {"x": 5, "y": 5})
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
         assert r["text"] == "tapped (5, 5)\nNote: couldn't look afterwards: boom."
         await finish(stop, task)
     run(go)
@@ -491,5 +490,123 @@ def test_a_real_picture_comes_with_its_size():
         stop, task = await started(d)
         r = await d.run_tool("a", "look", {})
         assert r["image_size"] == [30, 20] and base64.b64decode(r["image"]) == buf.getvalue()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_target_is_checked_before_anything_is_sent():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        generation, calls = d.control.generation, list(d.session.calls)
+        for args in ({"target": {"ref": "e1", "id": "x"}}, {"target": {"x": 1}}, {"target": "e1"},
+                     {"target": {"id": "ok-button", "index": "0"}}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", args)
+            assert e.value.code == "bad_params"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "hi", "target": {"label": "a", "text": "a"}})
+        assert e.value.code == "bad_params"
+        assert d.control.generation == generation and d.session.calls == calls  # nothing queued or sent
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
+    async def go():
+        d = make()
+        d.session.tree = [button("e1", "7"), button("e2", "7", "seven-again", rect=(10, 60, 100, 40)),
+                          button("e3", "8")]
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
+        assert e.value.code == "ambiguous" and str(e.value).endswith('e2 button "7" id=seven-again @10,60 100x40 [tap]')
+        assert "tap" not in d.session.calls
+        r = await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
+        assert r["text"].startswith('tapped e2 button "7" id=seven-again')
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
+        assert e.value.code == "not_found"
+        r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
+        assert r["text"].startswith('tapped e3 button "8"')
+        await finish(stop, task)
+    run(go)
+
+
+def test_id_label_and_text_use_the_agents_list_while_it_is_current():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        for target in ({"id": "ok-button"}, {"label": "ok"}, {"text": "o"}):
+            await d.run_tool("a", "tap", {"target": target})  # with a look after it: the list stays current
+        assert d.session.calls.count("refresh") == 0
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "Done", "done-button")]  # the screen changed behind the agent's back
+        d.control.clock.t += 5.0  # older than LIVE_AGE
+        r = await d.run_tool("a", "tap", {"target": {"id": "done-button"}, "look": False})
+        assert r["text"].startswith('tapped e1 button "Done"') and d.session.calls.count("refresh") == 1
+        # an action that returned no list: the screen has probably changed
+        d.session.tree = [button("e1", "Back", "back-button")]
+        r = await d.run_tool("a", "tap", {"target": {"label": "back"}, "look": False})
+        assert r["text"].startswith('tapped e1 button "Back"') and d.session.calls.count("refresh") == 2
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]  # refs don't re-read
+        assert d.session.calls.count("refresh") == 2
+        await d.run_tool("a", "look", {"screenshot": False})  # a look makes it current again
+        await d.run_tool("a", "tap", {"target": {"id": "back-button"}, "look": False})
+        assert d.session.calls.count("refresh") == 2
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_points_tap_never_reads_the_screen():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.control.clock.t += 10.0
+        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
+        assert d.session.calls.count("refresh") == 0 and "look" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_person_makes_a_ref_stale_but_not_an_id_text_or_label():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "stale"
+        for target in ({"id": "ok-button"}, {"label": "OK"}, {"text": "ok"}):
+            await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+            before = d.session.calls.count("refresh")
+            r = await d.run_tool("a", "tap", {"target": target, "look": False})
+            assert r["text"].startswith("tapped e1") and d.session.calls.count("refresh") == before + 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_takes_the_same_target_or_none():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert (await d.run_tool("a", "type_text", {"text": "hi", "look": False}))["text"] == "typed 2 characters"
+        r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "ok-button"}, "look": False})
+        assert r["text"] == "typed 2 characters"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "hi", "target": {"ref": "e9"}, "look": False})
+        assert e.value.code == "not_found" and "e9" in str(e.value)
         await finish(stop, task)
     run(go)

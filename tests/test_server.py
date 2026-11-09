@@ -47,7 +47,7 @@ def test_api_ignores_the_cookie():
     with TestClient(app) as c:
         c.get(f"/?token={TOKEN}", follow_redirects=False)  # the client now holds the cookie
         assert c.cookies.get(COOKIE) == TOKEN
-        assert c.post("/api/tap", json={"x": 1, "y": 1}).status_code == 401
+        assert c.post("/api/tap", json={"target": {"x": 1, "y": 1}}).status_code == 401
         assert c.post("/api/tap", content=b'{"x": 1}', headers={"content-type": "text/plain"}).status_code == 401
         assert c.get("/api/health").status_code == 401
 
@@ -111,10 +111,10 @@ def test_agent_api():
     with TestClient(app) as c:
         look = c.post("/api/look", headers=AUTH, json={"screenshot": False})
         assert look.status_code == 200 and look.json()["text"].startswith("Screen")
-        tap = c.post("/api/tap", headers=AUTH, json={"ref": "e1", "look": False})
+        tap = c.post("/api/tap", headers=AUTH, json={"target": {"ref": "e1"}, "look": False})
         assert tap.json()["text"].startswith("tapped e1")
         d.control.set_paused(True)
-        refused = c.post("/api/tap", headers=AUTH, json={"x": 1, "y": 1})
+        refused = c.post("/api/tap", headers=AUTH, json={"target": {"x": 1, "y": 1}})
         assert refused.status_code == 409 and refused.json()["error"]["code"] == "paused"
         d.control.set_paused(False)
         assert c.post("/api/format_phone", headers=AUTH, json={}).json()["error"]["code"] == "unsupported"
@@ -207,14 +207,14 @@ def test_failures_come_back_with_a_code_and_a_status():
     app, d = app_and_daemon()
     with TestClient(app) as c:
         c.post("/api/look", headers=AUTH, json={"screenshot": False})
-        gone = c.post("/api/tap", headers=AUTH, json={"ref": "e9", "look": False})
+        gone = c.post("/api/tap", headers=AUTH, json={"target": {"ref": "e9"}, "look": False})
         assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found"
         assert "e9" in gone.json()["error"]["message"]
         bad = c.post("/api/type_text", headers=AUTH, json={})
         assert bad.status_code == 400 and bad.json()["error"]["code"] == "bad_params"
         assert c.post("/api/tap", headers=AUTH, content=b"[]").json()["error"]["code"] == "bad_params"
         d.session.fail["tap"] = RuntimeError("boom")
-        crash = c.post("/api/tap", headers=AUTH, json={"x": 1, "y": 1, "look": False})
+        crash = c.post("/api/tap", headers=AUTH, json={"target": {"x": 1, "y": 1}, "look": False})
         assert crash.status_code == 500 and crash.json()["error"]["code"] == "internal"
         d._set_state("no-device", "needs setup: run `tapwright setup`")
         none = c.post("/api/look", headers=AUTH, json={})

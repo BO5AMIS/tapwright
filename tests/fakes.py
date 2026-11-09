@@ -28,8 +28,14 @@ class FakeDevice:
         raise ConnectionLost("no stream in tests")
 
 
+def button(ref: str, label: str, identifier: str = "", rect=(10, 10, 100, 40), **fields) -> ui.Element:
+    """An element for a fake screen."""
+    return ui.Element(ref, "button", label, identifier, rect=rect, actions=("tap",), type="Button", **fields)
+
+
 class FakeSession:
-    """Session's interface, no phone. `fail[name] = exc` makes the next call of that name raise."""
+    """Session's interface, no phone. `fail[name] = exc` makes the next call of that name raise.
+    `tree` is the screen: what look() and refresh() read into `items`."""
     SCREEN_TEXT = 'Screen 400x800 pt · 1 elements\ne1 button "OK" id=ok-button @10,10 100x40 [tap]'
 
     def __init__(self) -> None:
@@ -44,6 +50,7 @@ class FakeSession:
         self.not_set_up = False
         self.ensure_delay = 0.0
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
+        self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -79,24 +86,30 @@ class FakeSession:
 
     async def look(self, screenshot=True):
         self._record("look")
-        self.items = [ui.Element("e1", "button", "OK", "ok-button", rect=(10, 10, 100, 40), actions=("tap",),
-                                 type="Button")]
+        self.items = list(self.tree)
         return self.SCREEN_TEXT, (b"JPEG" if screenshot else None)
+
+    async def refresh(self):
+        self._record("refresh")
+        self.items = list(self.tree)
+        return ui.Tree(self.items)
 
     async def apps(self):
         self._record("apps")
         return [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
 
-    async def tap(self, hold_ms=60, ref=None, id=None, label=None, x=None, y=None, index=0):
+    async def tap(self, target, hold_ms=60):
+        hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
         self._record("tap")
-        if x is not None and y is not None:
-            self.last_point = (float(x), float(y))
-            return f"tapped ({round(x)}, {round(y)})"
-        e = ui.find(self.items, ref=ref, id=id, label=label, index=index)
-        self.last_point = e.center
-        return f"tapped {e.line()}"
+        if isinstance(hit, tuple):
+            self.last_point = hit
+            return f"tapped ({round(hit[0])}, {round(hit[1])})"
+        self.last_point = hit.center
+        return f"tapped {hit.line()}"
 
-    async def type_text(self, text, replace=False, submit=False, **target):
+    async def type_text(self, text, replace=False, submit=False, target=None):
+        if target is not None:
+            ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
         self._record("type_text")
         return f"typed {len(text)} characters"
 

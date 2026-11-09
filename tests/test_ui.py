@@ -209,8 +209,8 @@ def test_find_by_id_uses_the_raw_name_even_when_it_equals_the_label():
     e = one("Button", "Login", name="Login")
     assert e.identifier == "" and e.name == "Login"  # not shown: it only mirrors the label
     assert e.line() == 'e1 button "Login" @10,10 100x40 [tap]'
-    assert ui.find([e], id="Login") is e
-    assert ui.find([one("Button", "OK", name="ok-button")], id="ok-button").label == "OK"
+    assert ui.resolve([e], ui.Target(id="Login")) is e
+    assert ui.resolve([one("Button", "OK", name="ok-button")], ui.Target(id="ok-button")).label == "OK"
 
 
 def test_control_characters_are_removed_before_parsing():
@@ -243,5 +243,5 @@ def test_traits_are_split_on_commas_and_stripped():
 def test_a_real_identifier_wins_over_a_name_that_mirrors_a_label():
     mirror = one("Button", "Settings", name="Settings")  # id only because the name copies the label
     real = one("StaticText", "Other", name="Settings")
-    assert ui.find([mirror, real], id="Settings") is real
-    assert ui.find([mirror], id="Settings") is mirror  # with no real id, the mirror still matches
+    assert ui.resolve([mirror, real], ui.Target(id="Settings")) is real
+    assert ui.resolve([mirror], ui.Target(id="Settings")) is mirror  # with no real id, the mirror still matches

@@ -19,6 +19,7 @@ PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
 BUTTONS = ("home", "volumeUp", "volumeDown")
 SETTLE = 0.6  # seconds a screen gets to settle after an action, before the look that follows
+LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 NOTE_PERSON = "a person used the phone since your last look."
 
 
@@ -58,38 +59,33 @@ def _checked(name: str, args: dict) -> dict:
     """The agent's arguments with numbers coerced, or Refused(bad_params) naming the one that's wrong.
     This runs before anything reaches the phone, so a ValueError later is never the agent's fault."""
     checked = dict(args)
-    for key in ("x", "y", "x0", "y0", "x1", "y1", "seconds", "amount"):
+    for key in ("x0", "y0", "x1", "y1", "seconds", "amount"):
         if (number := _number(args, key)) is not None:
             checked[key] = number
-    if args.get("index") is not None:
-        try:
-            checked["index"] = int(args["index"])
-        except (TypeError, ValueError):
-            raise Refused("bad_params", f"index must be a whole number, not {args['index']!r}") from None
+    if args.get("target") is not None:
+        ui.parse_target(args["target"])  # bad_params, with an example of a target
     if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
         raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
     return checked
 
 
-def _target(a: dict) -> dict:
-    return {"ref": a.get("ref"), "id": a.get("id"), "label": a.get("label"), "x": a.get("x"), "y": a.get("y"),
-            "index": int(a.get("index") or 0)}
+def _target(a: dict) -> ui.Target:
+    return ui.parse_target(a.get("target"))
 
 
-def _field(a: dict) -> dict:
+def _field(a: dict) -> ui.Target | None:
     """type_text's target: an element to tap first, or none for the field that has focus."""
-    t = {"ref": a.get("ref"), "id": a.get("id"), "label": a.get("label"), "x": None, "y": None, "index": 0}
-    return t if any((t["ref"], t["id"], t["label"])) else {}
+    return None if a.get("target") is None else ui.parse_target(a["target"])
 
 
 # Agent actions: tool -> (what it does on the session, seconds to settle before the look; None: no look)
 ACTIONS = {
     "launch_app": (lambda s, a: s.launch(a["bundle_id"]), 2.0),
     "terminate_app": (lambda s, a: s.terminate(a["bundle_id"]), None),
-    "tap": (lambda s, a: s.tap(**_target(a)), SETTLE),
-    "long_press": (lambda s, a: s.tap(hold_ms=int(float(a.get("seconds", 1.0)) * 1000), **_target(a)), SETTLE),
+    "tap": (lambda s, a: s.tap(_target(a)), SETTLE),
+    "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), SETTLE),
     "type_text": (lambda s, a: s.type_text(a["text"], replace=bool(a.get("replace")), submit=bool(a.get("submit")),
-                                           **_field(a)), SETTLE),
+                                           target=_field(a)), SETTLE),
     "scroll": (lambda s, a: s.scroll(a.get("direction", "down"), float(a.get("amount", 0.5))), SETTLE),
     "swipe": (lambda s, a: s.swipe(float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"]),
                                    int(float(a.get("seconds", 0.35)) * 1000)), SETTLE),
@@ -99,6 +95,7 @@ ACTIONS = {
 }
 READS = ("look", "list_apps", "wait")
 REQUIRED = {"launch_app": ("bundle_id",), "terminate_app": ("bundle_id",), "type_text": ("text",),
+            "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",)}
 
@@ -311,6 +308,9 @@ class Daemon:
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         args = _checked(name, args)
+        # A bad target is refused before anything is queued or sent. Any tool whose arguments carry
+        # `target` goes through here, so the live-read rule in act() below covers it too.
+        target = ui.parse_target(args["target"]) if args.get("target") is not None else None
         view = self.control.client(client_id)
         notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
         await self.wait_connected()
@@ -325,7 +325,8 @@ class Daemon:
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
-        by_ref, by_lookup = bool(args.get("ref")), bool(args.get("id") or args.get("label"))
+        by_ref = target is not None and target.kind == "ref"
+        by_lookup = target is not None and target.kind in ("id", "label", "text")
 
         fresh = [True]
 
@@ -334,18 +335,15 @@ class Daemon:
             s = self.session
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
-            if not fresh[0]:
-                if by_ref:
-                    raise Refused("stale", "the screen changed since your last look (someone else used the "
-                                           "phone); look again")
-                if by_lookup:
-                    await s.look(screenshot=False)
-                    fresh[0] = True
+            if by_ref and not fresh[0]:
+                raise Refused("stale", "the screen changed since your last look (someone else used the "
+                                       "phone); look again")
+            if by_lookup and not self._current(view):
+                await s.refresh()  # id, label and text are looked up on the live screen
+                view.items, view.read_at, view.moved = s.items, self.control.clock(), False
+                fresh[0] = True
             s.last_point = None
-            try:
-                result = await call(s, args)
-            except ui.NotFound as e:  # raised as a refusal: the screen didn't change, so refs stay current
-                raise Refused("not_found", str(e)) from None
+            result = await call(s, args)
             view.items = s.items
             return result
 
@@ -358,9 +356,10 @@ class Daemon:
                                           "happened") from None
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
+        looks = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
+        view.moved = view.moved or not looks
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
-        look = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
-        if not look:
+        if not looks:
             return _answer([str(result)], notes)
         await asyncio.sleep(settle)
         return await self._look(view, True, [str(result)], notes)
@@ -369,6 +368,7 @@ class Daemon:
         async def read():
             text, image = await self.session.look(screenshot=screenshot)
             view.items, view.seen = self.session.items, self.control.generation
+            view.read_at, view.moved = self.control.clock(), False
             return text, image
         try:
             text, image = await self._read(read)
@@ -377,6 +377,18 @@ class Daemon:
                 raise
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return _answer([*lines, text], notes, image)
+
+    def _current(self, view) -> bool:
+        """Is the agent's last list still the screen? Not if a person or another agent acted since
+        (a different generation), if an action returned no list since, or if it is older than
+        LIVE_AGE seconds and the screen may have changed meanwhile."""
+        if view.seen != self.control.generation or view.moved:
+            return False
+        return self.control.clock() - view.read_at < LIVE_AGE or self._screen_unchanged(view)
+
+    def _screen_unchanged(self, view) -> bool:
+        """Task 5 replaces this: true when the stream shows no change since the list was read."""
+        return False
 
     async def _read(self, fn):
         """A read through the queue; after a dropped line, once more when reconnected."""
@@ -430,7 +442,7 @@ class Daemon:
             if g.kind == "drag":
                 return (lambda: s.path(list(g.points))), "drag", g.points[0][1:]
             _, x, y = g.points[0]
-            return (lambda: s.tap(x=x, y=y, hold_ms=g.hold_ms)), g.kind, (x, y)
+            return (lambda: s.tap(ui.Target(x=x, y=y), hold_ms=g.hold_ms)), g.kind, (x, y)
         if kind == "scroll":
             x0, y0, x1, y1 = ui.scroll_swipe(float(m["x"]), float(m["y"]), float(m.get("dx", 0)),
                                              float(m.get("dy", 0)), s.screen)

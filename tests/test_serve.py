@@ -72,7 +72,7 @@ def test_serve_runs_is_found_and_stops(home):
         assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         made[0].control.set_paused(True)
         with pytest.raises(client.DaemonError) as e:
-            client.call("tap", {"x": 1, "y": 1}, "agent-1")
+            client.call("tap", {"target": {"x": 1, "y": 1}}, "agent-1")
         assert e.value.code == "paused"
     finally:
         if client.healthy(info):
@@ -183,7 +183,7 @@ def test_a_timeout_is_not_retried(monkeypatch):
     monkeypatch.setattr(client, "find_or_start", lambda: info)
     try:
         with pytest.raises(client.DaemonError) as e:
-            client.call("tap", {"x": 1, "y": 1}, "agent-1", timeout=0.3)
+            client.call("tap", {"target": {"x": 1, "y": 1}}, "agent-1", timeout=0.3)
         assert e.value.code == "timeout"
         assert Slow.seen == 1
     finally:

@@ -17,8 +17,9 @@ def test_tools_call_the_daemon(monkeypatch):
         seen.update(tool=tool, args=args, client=client_id)
         return {"text": text, "image": base64.b64encode(b"JPEG").decode(), "image_size": [1, 1]}
     monkeypatch.setattr(client, "call", fake_call)
-    out = asyncio.run(mcp_server.tap(ref="e1"))
-    assert seen["tool"] == "tap" and seen["args"]["ref"] == "e1" and seen["client"] == mcp_server.CLIENT_ID
+    out = asyncio.run(mcp_server.tap(target=mcp_server.Target(ref="e1")))
+    assert seen["tool"] == "tap" and seen["args"]["target"] == {"ref": "e1"}  # only what was given
+    assert seen["client"] == mcp_server.CLIENT_ID
     assert out.is_error is False and len(out.content) == 2
     assert isinstance(out.content[0], TextContent) and out.content[0].text == text
     assert isinstance(out.content[1], ImageContent) and out.content[1].mime_type == "image/jpeg"
@@ -54,7 +55,7 @@ def test_a_crash_outside_the_daemon_is_internal_logged_and_not_echoed(monkeypatc
 def test_a_tool_call_passes_text_and_image_end_to_end(monkeypatch):
     monkeypatch.setattr(client, "call", lambda *a, **k: {
         "text": "tapped e1", "image": base64.b64encode(b"JPEG").decode(), "image_size": [1, 1]})
-    out = asyncio.run(mcp_server.server.call_tool("tap", {"ref": "e1"}))
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"target": {"ref": "e1"}}))
     assert out.is_error is False and out.content[0].text == "tapped e1"
     assert isinstance(out.content[1], ImageContent) and base64.b64decode(out.content[1].data) == b"JPEG"
 
@@ -77,7 +78,7 @@ def test_arguments_the_schema_rejects_are_bad_params(monkeypatch):
 
 def test_validation_text_names_fields_without_echoing_input(monkeypatch):
     monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
-    out = asyncio.run(mcp_server.server.call_tool("tap", {"index": "secret-x", "look": "maybe"}))
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"target": {"index": "secret-x"}, "look": "maybe"}))
     text = out.content[0].text
     assert out.is_error is True and text.startswith("Error bad_params: ")
     assert "index" in text and "look" in text

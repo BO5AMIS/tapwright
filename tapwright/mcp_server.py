@@ -1,9 +1,9 @@
 """tapwright as an MCP server (stdio): tools an agent uses to test apps on your iPhone.
 
 Every action returns the screen right after it (elements as text, plus a screenshot),
-so one call is one step. Targets: `ref` from the last look (e.g. "e12"), `id` (the
-accessibility identifier, React Native's testID), `label` (visible text), or `x`,`y`
-in points.
+so one call is one step. A `target` is one object: `{"ref": "e12"}` from the last look,
+`{"id": ...}` (the accessibility identifier, React Native's testID), `{"label": ...}`,
+`{"text": ...}` (visible text), or `{"x": ..., "y": ...}` in points.
 
 The phone belongs to `tapwright serve`, which this server starts when needed; a person
 may be watching or driving in its live view at the same time.
@@ -16,7 +16,7 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import client, device
 
@@ -25,7 +25,7 @@ logger = logging.getLogger("tapwright")
 INSTRUCTIONS = (
     "Test apps on the user's real iPhone. Start with list_apps and launch_app, then look. Every action "
     "returns the new screen, so check it before the next step. Prefer `id` targets (accessibility ids, "
-    "React Native testIDs), then `label`, then `ref`; use x/y only for things with no element. This is "
+    "React Native testIDs), then `label`, then `ref`; use x and y only for things with no element. This is "
     "the user's own phone: don't buy, send, post, delete or change account settings unless the user "
     "asked for exactly that. System alerts (permissions) show up in look; answer them with `alert`. "
     "A person may be watching or driving in the live view. Refusals: `busy` (a person is driving: wait "
@@ -68,12 +68,26 @@ class TapwrightServer(MCPServer):
             return _error("bad_params", str(e).removeprefix(f"Error executing tool {name}: "))
 
 
+class Target(BaseModel):
+    """What to act on: exactly one of ref, id, label, text, or x with y. The daemon checks the rule and
+    answers `bad_params` with an example when it isn't met."""
+    model_config = ConfigDict(extra="forbid")
+    ref: str | None = None
+    id: str | None = None
+    label: str | None = None
+    text: str | None = None
+    x: float | None = None
+    y: float | None = None
+    index: int | None = None
+
+
 server = TapwrightServer("tapwright", instructions=INSTRUCTIONS)
 CLIENT_ID = uuid.uuid4().hex  # this agent's own last look, kept by the daemon
 
 
 async def _tool(name: str, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
+    args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
     try:
         answer = await asyncio.to_thread(client.call, name, args, CLIENT_ID)
     except client.DaemonError as e:
@@ -109,28 +123,25 @@ async def terminate_app(bundle_id: str) -> CallToolResult:
 
 
 @server.tool(structured_output=False)
-async def tap(ref: str | None = None, id: str | None = None, label: str | None = None,
-              x: float | None = None, y: float | None = None, index: int = 0, look: bool = True) -> CallToolResult:
-    """Tap an element: by ref from the last look, accessibility id, visible label, or x/y in points.
-    `index` picks among several matches (0 = first)."""
-    return await _tool("tap", ref=ref, id=id, label=label, x=x, y=y, index=index, look=look)
+async def tap(target: Target, look: bool = True) -> CallToolResult:
+    """Tap an element. `target` is exactly one of {"ref": "e3"} (from the last look), {"id": "login-button"},
+    {"label": "Log in"} (exact, ignoring case), {"text": "Log in"} (exact, then partial) or {"x": 120, "y": 300}
+    (points), plus "index" (0 is the first) with id, label or text when several match."""
+    return await _tool("tap", target=target, look=look)
 
 
 @server.tool(structured_output=False)
-async def long_press(ref: str | None = None, id: str | None = None, label: str | None = None,
-                     x: float | None = None, y: float | None = None, index: int = 0, seconds: float = 1.0,
-                     look: bool = True) -> CallToolResult:
-    """Press and hold an element (context menus, drag handles)."""
-    return await _tool("long_press", ref=ref, id=id, label=label, x=x, y=y, index=index, seconds=seconds, look=look)
+async def long_press(target: Target, seconds: float = 1.0, look: bool = True) -> CallToolResult:
+    """Press and hold an element (context menus, drag handles). `target` is as for tap."""
+    return await _tool("long_press", target=target, seconds=seconds, look=look)
 
 
 @server.tool(structured_output=False)
-async def type_text(text: str, ref: str | None = None, id: str | None = None, label: str | None = None,
-                    replace: bool = False, submit: bool = False, look: bool = True) -> CallToolResult:
-    """Type into a field: the target is tapped first to focus it; without a target, into the focused
-    field. replace clears the field first; submit presses return afterwards."""
-    return await _tool("type_text", text=text, ref=ref, id=id, label=label, replace=replace, submit=submit,
-                       look=look)
+async def type_text(text: str, target: Target | None = None, replace: bool = False, submit: bool = False,
+                    look: bool = True) -> CallToolResult:
+    """Type into a field: the target (as for tap) is tapped first to focus it; without a target, into the
+    focused field. replace clears the field first; submit presses return afterwards."""
+    return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, look=look)
 
 
 @server.tool(structured_output=False)

@@ -143,7 +143,7 @@ def test_reset_clears_everything_even_when_close_fails(phone):
 
 def test_tap_and_swipe_record_last_point(phone):
     s = Session(phone)
-    asyncio.run(s.tap(x=30, y=40))
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
     assert s.last_point == (30.0, 40.0)
     asyncio.run(s.swipe(5.0, 6.0, 5.0, 200.0))
     assert s.last_point == (5.0, 6.0)
@@ -203,3 +203,15 @@ def test_a_dead_line_during_look_is_not_swallowed(phone):
     phone.http = http
     with pytest.raises(ConnectionLost):
         asyncio.run(Session(phone).look(screenshot=False))
+
+
+def test_type_text_at_a_point_needs_an_input_there(phone):
+    s = Session(phone)
+    s.items = [ui_module.Element("e1", "input", "Email", rect=(10, 10, 200, 40), actions=("tap", "type")),
+               ui_module.Element("e2", "button", "Go", rect=(10, 100, 80, 40), actions=("tap",))]
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=120.0)))  # over a button
+    assert e.value.code == "not_actionable" and str(e.value).startswith("no_action: Nothing at (20, 120)")
+    asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=20.0)))
+    taps = [r for r in phone.requests if r[1].endswith("/actions")]
+    assert taps and taps[0][2]["actions"][0]["actions"][0]["x"] == 110  # tapped the input's centre

@@ -103,26 +103,40 @@ class Session:
             image = buf.getvalue()
         return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more), image
 
-    def _target(self, ref=None, label=None, id=None, x=None, y=None, index=0):
-        if x is not None and y is not None:
-            return float(x), float(y), f"({round(x)}, {round(y)})"
-        if not self.items:
-            raise ui.NotFound("look first: targets refer to the elements of the last look")
-        e = ui.find(self.items, ref=ref, label=label, id=id, index=index)
-        cx, cy = e.center
-        return cx, cy, e.line()
+    async def refresh(self) -> ui.Tree:
+        """Read the tree into `items` and nothing else: what resolving a target needs."""
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+        tree = ui.read(source, self.screen)
+        self.items = tree.items
+        return tree
+
+    def _target(self, target: ui.Target) -> tuple[float, float, str]:
+        """(x, y, what to say) for a target, on the elements of the last look."""
+        hit = ui.resolve(self.items, target)
+        if isinstance(hit, tuple):
+            return hit[0], hit[1], f"({round(hit[0])}, {round(hit[1])})"
+        cx, cy = hit.center
+        return cx, cy, hit.line()
 
     # ---- acting ----
-    async def tap(self, hold_ms: int = 60, **target) -> str:
-        x, y, what = self._target(**target)
+    async def tap(self, target: ui.Target, hold_ms: int = 60) -> str:
+        x, y, what = self._target(target)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
         self.last_point = (x, y)
         return f"{'long-pressed' if hold_ms > 300 else 'tapped'} {what}"
 
-    async def type_text(self, text: str, replace: bool = False, submit: bool = False, **target) -> str:
-        """Type into the target (tapped first to focus it), or into whatever has focus."""
-        if any(v is not None for v in target.values()):
-            await self.tap(**target)
+    async def type_text(self, text: str, replace: bool = False, submit: bool = False,
+                        target: ui.Target | None = None) -> str:
+        """Type into the target (tapped first to focus it), or into whatever has focus. A point
+        names the input under it, not a touch: with none there, nothing is typed."""
+        if target is not None and target.point is not None:
+            field = ui.at_point(self.items, target.point, "input")
+            if field is None:
+                x, y = target.point
+                raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
+            target = ui.Target(ref=field.ref)
+        if target is not None:
+            await self.tap(target)
             await asyncio.sleep(0.4)
         if replace:
             focused = await self._call("GET", "/session/{sid}/element/active")

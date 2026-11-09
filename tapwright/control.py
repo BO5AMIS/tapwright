@@ -28,6 +28,8 @@ class ClientView:
     """What one agent client knows: the generation of its last look or own action, and its elements."""
     seen: int = -1
     items: list = field(default_factory=list)
+    read_at: float = float("-inf")  # the clock when `items` was read
+    moved: bool = False  # an action that returned no list ran since: the screen has probably changed
 
 
 class Controller:
