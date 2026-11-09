@@ -9,10 +9,15 @@
   tapwright probe [--host IP] [--watch]
                      does it work over the network? Learns the pairing port on the local
                      Wi-Fi; with --host (e.g. the phone's Tailscale IP) tries that address
-  tapwright mcp [--host IP]
-                     the MCP server for agents (stdio)
+  tapwright serve [--phone ADDRESS] [--port N] [--keep-alive] [--new-token] [--stop]
+                     the background process that owns the phone: the live view in your
+                     browser, the agent tools and an HTTP API. Agent tools start it by
+                     themselves; it stops after 30 minutes unused (--keep-alive: never)
+  tapwright view     open the live view in your browser (starts the daemon if needed)
+  tapwright mcp      the MCP server for agents (stdio); it talks to the daemon
 
-Connection: USB when the phone is plugged in, else the local network; --host dials an address.
+Connection: USB when the phone is plugged in, else the local network; serve --phone dials an
+address such as the phone's Tailscale IP (experimental).
 """
 import argparse
 import asyncio
@@ -35,6 +40,14 @@ def note(msg):
 def fail(msg):
     print(f"  FAIL  {msg}", flush=True)
     return 1
+
+
+def _daemon_owns_phone() -> bool:
+    from . import client
+    return client.healthy(store.read_serve_info()) is not None
+
+
+DAEMON_RUNNING = "tapwright serve is running and owns the phone: stop it first with `tapwright serve --stop`"
 
 
 # ---------- setup ----------
@@ -158,6 +171,8 @@ def _tcp(host: str, port: int, timeout: float = 3.0) -> str:
 
 
 async def probe(a) -> int:
+    if _daemon_owns_phone():
+        return fail(DAEMON_RUNNING)
     from pymobiledevice3.bonjour import browse_remotepairing
 
     from .device import Device
@@ -203,6 +218,8 @@ async def probe(a) -> int:
 # ---------- smoke test ----------
 
 async def smoke(a) -> int:
+    if _daemon_owns_phone():
+        return fail(DAEMON_RUNNING)
     from .device import Device
     from .session import Session
     session = Session(Device(host=a.host))
@@ -221,6 +238,29 @@ async def smoke(a) -> int:
         return 0
     finally:
         await session.close()
+
+
+# ---------- the daemon ----------
+
+def stop_daemon() -> int:
+    from . import client
+    info = store.read_serve_info()
+    if not client.healthy(info):
+        print("tapwright serve isn't running")
+        return 0
+    client.shutdown(info)
+    print("stopped")
+    return 0
+
+
+def view() -> int:
+    import webbrowser
+
+    from . import client
+    url = client.viewer_url(client.find_or_start())
+    print(f"Tapwright live view: {url}")
+    webbrowser.open(url)
+    return 0
 
 
 def main() -> int:
@@ -245,13 +285,28 @@ def main() -> int:
     p = sub.add_parser("probe")
     p.add_argument("--host", help="an address of the phone to try, e.g. its Tailscale IP")
     p.add_argument("--watch", action="store_true")
+    p = sub.add_parser("serve")
+    p.add_argument("--port", type=int, help="default 8417; a free port if that one is taken")
+    p.add_argument("--phone", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
+    p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
+    p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
+    p.add_argument("--stop", action="store_true", help="stop the running daemon")
+    sub.add_parser("view")
     sub.add_parser("mcp")
     a = ap.parse_args()
     if a.cmd == "mcp":
         from . import mcp_server
         mcp_server.run()
         return 0
+    if a.cmd == "view":
+        return view()
+    if a.cmd == "serve" and a.stop:
+        return stop_daemon()
     from .device import run
+    if a.cmd == "serve":
+        from . import server
+        port = a.port if a.port is not None else server.DEFAULT_PORT
+        return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 
 
