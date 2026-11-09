@@ -70,6 +70,11 @@ def button(ref: str, label: str, identifier: str = "", rect=(10, 10, 100, 40), *
     return ui.Element(ref, "button", label, identifier, rect=rect, actions=("tap",), type="Button", **fields)
 
 
+def el(ref: str, role: str, label: str = "", identifier: str = "", rect=(10, 10, 100, 40), **fields) -> ui.Element:
+    """An element of any role, with the actions its role gets."""
+    return ui.Element(ref, role, label, identifier, rect=rect, actions=ui.ROLE_ACTIONS.get(role, ()), **fields)
+
+
 class FakeSession:
     """Session's interface, no phone. `fail[name] = exc` makes the next call of that name raise.
     `tree` is the screen: what look() and refresh() read into `items`."""
@@ -99,6 +104,7 @@ class FakeSession:
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.launched: list = []
         self.closed: list = []
+        self.typed: list = []  # (text, replace, submit, target) of each type_text
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -182,6 +188,7 @@ class FakeSession:
         if target is not None:
             ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
         self._record("type_text")
+        self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"
 
     async def swipe(self, x0, y0, x1, y1, duration_ms=350):
@@ -201,10 +208,6 @@ class FakeSession:
     async def press_button(self, name):
         self._record(f"button:{name}")
         return f"pressed {name}"
-
-    async def scroll(self, direction="down", amount=0.5):
-        self._record("scroll")
-        return f"scrolled {direction}"
 
     async def launch(self, bundle_id):
         self._record("launch")

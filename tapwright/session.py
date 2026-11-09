@@ -275,12 +275,6 @@ class Session:
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"
 
-    async def scroll(self, direction: str = "down", amount: float = 0.5) -> str:
-        await self.ensure()
-        x0, y0, x1, y1 = ui.scroll_points(direction, self.screen, amount)
-        await self.swipe(x0, y0, x1, y1, 600)
-        return f"scrolled {direction}"
-
     async def press_button(self, name: str) -> str:
         if name == "home":  # pressButton "home" does nothing on iOS 26 (measured); this one waits for the home screen
             await self._call("POST", "/wda/homescreen", {})

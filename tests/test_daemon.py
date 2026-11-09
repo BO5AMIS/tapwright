@@ -6,7 +6,7 @@ import io
 import re
 
 import pytest
-from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button, image_bytes
+from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button, el, image_bytes
 from PIL import Image
 
 from tapwright import daemon as daemon_module
@@ -604,10 +604,12 @@ def test_type_text_takes_the_same_target_or_none():
     async def go():
         d = make()
         stop, task = await started(d)
+        d.session.tree = [ui.Element("e1", "input", "Name", "name-field", rect=(10, 10, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
-        assert (await d.run_tool("a", "type_text", {"text": "hi", "look": False}))["text"] == "typed 2 characters"
-        r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "ok-button"}, "look": False})
-        assert r["text"] == "typed 2 characters"
+        r = await d.run_tool("a", "type_text", {"text": "hi", "look": False})  # the only input
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,10 100x40.'
+        r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "name-field"}, "look": False})
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,10 100x40.'
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "hi", "target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
@@ -650,6 +652,7 @@ def test_a_point_for_type_text_is_a_lookup_on_a_current_list():
     async def go():
         d = make()
         stop, task = await started(d)
+        d.session.tree = [ui.Element("e1", "input", "Name", rect=(10, 10, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
         d.control.clock.t += 5.0
         await d.run_tool("a", "type_text", {"text": "hi", "target": {"x": 20, "y": 20}, "look": False})
@@ -2203,5 +2206,350 @@ def test_reading_alert_text_does_not_leave_the_screen_unsettled():
         caps = _recording_settles(d)
         await d.run_tool("a", "look", {"screenshot": False})
         assert caps == []
+        await finish(stop, task)
+    run(go)
+
+
+# ---- type_text, scroll and wait_for (Task 7b) ----
+def inp(ref, label, value="", y=100):
+    return el(ref, "input", label, value=value, rect=(10, y, 300, 44))
+
+
+def test_type_text_into_a_target_replaces_by_default_and_reads_the_value_back():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Name")])
+        d.session.tree = [inp("e1", "Name", value="Ada")]
+        r = await d.run_tool("a", "type_text", {"text": "Ada", "target": {"ref": "e1"}})
+        assert d.session.typed == [("Ada", True, False, ui.Target(ref="e1"))]
+        lines = r["text"].splitlines()
+        assert lines[0] == 'Typed into e1 input "Name" value="Ada" @10,100 300x44. Value is now "Ada".'
+        assert lines[1] == "Same screen. Changes:" and lines[2].startswith('~ e1 input "Name" value="Ada"')
+        assert "(was " in lines[2] and SETTLED.fullmatch(lines[3])
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_passes_replace_false_and_submit_on():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Name")])
+        await d.run_tool("a", "type_text", {"text": "x", "target": {"ref": "e1"}, "replace": False, "submit": True})
+        assert d.session.typed[-1][1:3] == (False, True)
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_without_a_target_uses_the_only_input():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "OK"), inp("e2", "Name", y=160)])
+        r = await d.run_tool("a", "type_text", {"text": "hi", "look": False})
+        ref = d.session.typed[-1][3].ref  # a silent re-read numbers an id-less list afresh; the answer says which
+        assert re.fullmatch(r"e\d+", ref) and r["text"].startswith(f'Typed into {ref} input "Name"')
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_without_a_target_and_several_inputs_is_ambiguous():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Name"), inp("e2", "Email", y=160)])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "x"})
+        message = str(e.value)
+        assert e.value.code == "ambiguous"
+        assert message.startswith("2 inputs on screen; pass a target to pick one:\nCandidates:\n")
+        assert re.search(r'\n  e\d+ input "Name"', message) and re.search(r'\n  e\d+ input "Email"', message)
+        assert not d.session.typed
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_without_any_input_is_not_found():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "OK")])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "x"})
+        assert e.value.code == "not_found" and str(e.value) == "No input on screen" and not d.session.typed
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_at_a_point_uses_the_input_under_it_or_refuses():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Name"), el("e2", "button", "OK", rect=(10, 300, 100, 40))])
+        await d.run_tool("a", "type_text", {"text": "x", "target": {"x": 20, "y": 120}, "look": False})
+        assert d.session.typed[-1][3] == ui.Target(ref="e1")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "x", "target": {"x": 20, "y": 320}, "look": False})
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: Nothing at (20, 320) takes typing."
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_into_something_that_is_not_an_input_is_no_action():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "OK")])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "x", "target": {"ref": "e1"}})
+        assert e.value.code == "not_actionable" and str(e.value) == 'no_action: e1 button "OK" @10,10 100x40 is not an input'
+        assert not d.session.typed
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_checks_its_arguments():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ({"text": 5}, {"text": "a", "replace": "yes"}, {"text": "a", "submit": 1}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "type_text", bad)
+            assert e.value.code == "bad_params", bad
+        await finish(stop, task)
+    run(go)
+
+
+AREA = el("e1", "scroll", "List", rect=(0, 100, 400, 600))
+
+
+def test_scroll_moves_a_share_of_the_screen_by_default():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "scroll", {"look": False})
+        assert d.session.last_point == (200.0, 720.0)  # no scroll element: the screen
+        assert r["text"] == "Scrolled the screen down."
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_stays_inside_the_scroll_area_over_the_screen_centre():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [AREA])
+        r = await d.run_tool("a", "scroll", {"direction": "down", "amount": 0.5, "look": False})
+        assert d.session.last_point == (200.0, 550.0)
+        assert r["text"] == 'Scrolled e1 scroll "List" @0,100 400x600 down.'
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_inside_a_target_and_inside_a_scroll_around_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        carousel = el("e2", "scroll", "Carousel", rect=(0, 600, 400, 100))
+        card = el("e3", "button", "Card", rect=(10, 610, 80, 80))
+        await looked(d, [AREA, carousel, card])
+        await d.run_tool("a", "scroll", {"direction": "left", "amount": 0.5, "target": {"ref": "e2"}, "look": False})
+        assert d.session.last_point == (100.0, 650.0)  # scrolling left: the finger starts on the left
+        r = await d.run_tool("a", "scroll", {"direction": "left", "amount": 0.5, "target": {"ref": "e3"}, "look": False})
+        assert d.session.last_point == (100.0, 650.0) and r["text"].startswith('Scrolled e2 scroll "Carousel"')
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_with_a_target_outside_any_scroll_view_is_no_action():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [AREA, el("e2", "button", "Back", rect=(10, 20, 100, 40))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "scroll", {"target": {"ref": "e2"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == 'no_action: e2 button "Back" @10,20 100x40 is not inside a scroll view'
+        assert "swipe" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_at_a_point_uses_the_scroll_view_under_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [AREA])
+        await d.run_tool("a", "scroll", {"target": {"x": 50, "y": 300}, "amount": 0.5, "look": False})
+        assert d.session.last_point == (200.0, 550.0)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "scroll", {"target": {"x": 50, "y": 50}})
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: Nothing at (50, 50) takes a scroll."
+        await finish(stop, task)
+    run(go)
+
+
+class MovingPicture:
+    """The stream of a list that moves on each swipe, `moves` times. A frame goes out every few ms."""
+
+    def __init__(self, d, moves: int) -> None:
+        self.moves, self.swipes, self.picture = moves, 0, b"P0"
+        d.hub.publish(self.picture)
+        original = d.session.swipe
+
+        async def swipe(*a, **k):
+            self.swipes += 1
+            if self.swipes <= self.moves:
+                self.picture = b"P%d" % self.swipes
+            return await original(*a, **k)
+        d.session.swipe = swipe
+
+        async def feed():
+            while True:
+                d.hub.publish(self.picture)
+                await asyncio.sleep(0.004)
+        self.task = asyncio.create_task(feed())
+
+    async def stop(self) -> None:
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+
+def test_scroll_to_the_end_swipes_until_the_stream_stops_changing():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        picture = MovingPicture(d, moves=3)
+        r = await d.run_tool("a", "scroll", {"to": "end", "look": False})
+        assert picture.swipes == 4 and r["text"] == "Scrolled the screen down."
+        await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_start_goes_up_and_stops_after_15_swipes_if_it_never_ends():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        picture = MovingPicture(d, moves=100)
+        ends = []
+        original = d.session.swipe
+
+        async def swipe(x0, y0, x1, y1, duration_ms=350):
+            ends.append((y0, y1))
+            return await original(x0, y0, x1, y1, duration_ms)
+        d.session.swipe = swipe
+        r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
+        assert picture.swipes == 15 and ends[0][0] < ends[0][1]  # the finger moves down: content moves up
+        assert r["text"] == "Scrolled the screen up."
+        await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_sideways_scroll_to_the_end_goes_right():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        picture = MovingPicture(d, moves=0)
+        r = await d.run_tool("a", "scroll", {"to": "end", "direction": "left", "look": False})
+        assert r["text"] == "Scrolled the screen right." and picture.swipes == 1
+        await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_checks_its_arguments():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ({"direction": "sideways"}, {"amount": 0.05}, {"amount": 1.5}, {"to": "middle"}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "scroll", bad)
+            assert e.value.code == "bad_params", bad
+        assert "swipe" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_scroll_counts_as_moving_content_for_the_refs_it_carries():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "OK")])
+        await d.run_tool("a", "scroll", {"look": False})
+        assert d.control.client("a").moved  # no list came back: the next lookup reads the tree again
+        await finish(stop, task)
+    run(go)
+
+
+def scripted(d, *trees):
+    """The session's refresh() reads these trees in turn; the last one stays."""
+    queue, real = list(trees), type(d.session).refresh.__get__(d.session)
+
+    async def refresh():
+        d.session.tree = queue.pop(0) if len(queue) > 1 else queue[0]
+        return await real()
+    d.session.refresh = refresh
+
+
+def test_wait_for_text_returns_once_it_shows_up():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        loading = [el("e1", "text", "Loading")]
+        done = [el("e1", "text", "Loading"), el("e2", "text", "All done")]
+        await looked(d, loading)
+        scripted(d, loading, loading, loading, done)
+        r = await d.run_tool("a", "wait_for", {"text": "all done", "timeout": 10})
+        lines = r["text"].splitlines()
+        assert lines[0] == "Done after 0.9 s." and lines[1] == "Same screen. Changes:" and lines[2].startswith("+ e2 text")
+        assert not any(line.startswith("Settled") for line in lines)
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_for_gone_by_id_and_by_label():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        spinner = [el("e1", "text", "Loading", identifier="spinner")]
+        await looked(d, spinner)
+        scripted(d, spinner, spinner, [el("e1", "button", "OK")])
+        r = await d.run_tool("a", "wait_for", {"id": "spinner", "gone": True})
+        assert r["text"].splitlines()[0] == "Done after 0.6 s."
+        scripted(d, [el("e1", "button", "Save")])
+        r = await d.run_tool("a", "wait_for", {"label": "SAVE"})  # exact, ignoring case
+        assert r["text"].splitlines()[0] == "Done after 0.0 s."
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_for_times_out_with_the_timeout_code():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"text": "never", "timeout": 1})
+        assert e.value.code == "timeout"
+        assert str(e.value) == "Waited 1 s for text \"never\" to appear; it didn't happen."
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"label": "OK", "gone": True, "timeout": 0.5})
+        assert str(e.value) == "Waited 0.5 s for label \"OK\" to disappear; it didn't happen."
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_for_checks_its_arguments():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ({}, {"text": "a", "id": "b"}, {"text": ""}, {"text": 5}, {"text": "a", "timeout": 0.1},
+                    {"text": "a", "timeout": 31}, {"text": "a", "timeout": "soon"}, {"text": "a", "gone": "yes"}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "wait_for", bad)
+            assert e.value.code == "bad_params", bad
+        assert d.session.calls.count("refresh") == 0
         await finish(stop, task)
     run(go)

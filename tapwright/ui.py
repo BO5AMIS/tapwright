@@ -520,6 +520,45 @@ def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0
     raise Refused("bad_params", f"direction must be up, down, left or right, not {direction!r}")
 
 
+SCROLL_USABLE = 0.84  # a scroll never spans more than this share of its area: the finger stays off the edges
+
+
+def scroll_area_points(direction: str, rect: tuple[float, float, float, float],
+                       amount: float = 0.8) -> tuple[float, ...]:
+    """Swipe endpoints that scroll the content of `rect` (x, y, w, h in points) by `amount` of it,
+    centred in it and at most SCROLL_USABLE of it. "down" shows what is below (the finger moves up)."""
+    x, y, w, h = rect
+    cx, cy = x + w / 2, y + h / 2
+    length = w if direction in ("left", "right") else h
+    half = min(max(amount, 0.1) * length, length * SCROLL_USABLE) / 2
+    if direction == "down":
+        return cx, cy + half, cx, cy - half
+    if direction == "up":
+        return cx, cy - half, cx, cy + half
+    if direction == "right":
+        return cx + half, cy, cx - half, cy
+    if direction == "left":
+        return cx - half, cy, cx + half, cy
+    raise ValueError(f"direction must be up, down, left or right, not {direction!r}")
+
+
+def scroll_container(items: list[Element], screen: tuple[float, float]) -> Element | None:
+    """The first `scroll` element whose rect holds the centre of the screen, else None."""
+    cx, cy = screen[0] / 2, screen[1] / 2
+    for e in items:
+        if e.role == "scroll" and e.x <= cx <= e.x + e.width and e.y <= cy <= e.y + e.height:
+            return e
+    return None
+
+
+def scroll_of(items: list[Element], element: Element) -> Element | None:
+    """The scroll view an element is, or else the smallest one around it; None when it isn't in any."""
+    if element.role == "scroll":
+        return element
+    around = [e for e in items if e.role == "scroll" and _inside(element, e)]
+    return min(around, key=lambda e: e.width * e.height, default=None)
+
+
 def scroll_swipe(x: float, y: float, dx: float, dy: float, screen: tuple[float, float],
                  minimum: float = 20.0) -> tuple[float, ...]:
     """Swipe endpoints, in points, for a wheel scroll at x, y (0..1) by dx, dy (fractions of the

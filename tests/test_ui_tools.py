@@ -1,4 +1,7 @@
-"""The tree-reading helpers the tools use: the navigation bar's back button."""
+"""The tree-reading helpers the tools use: the navigation bar's back button, and scroll areas."""
+import pytest
+from fakes import el
+
 from tapwright import ui
 
 SCREEN = (400.0, 800.0)
@@ -51,3 +54,36 @@ def test_the_top_bar_wins_and_bars_off_screen_are_ignored():
     hidden = node("NavigationBar", 0, -200, 400, 44, children=[node("Button", 8, -200, 80, 44, "Ghost")])
     assert ui.back_button(screen(sheet, top, hidden), SCREEN).point == (48.0, 81.0)
     assert ui.back_button(screen(hidden), SCREEN) == ui.Back(False, None)
+
+
+def test_scroll_area_points_are_a_share_of_the_area():
+    assert ui.scroll_area_points("down", (0, 100, 400, 600), 0.5) == (200.0, 550.0, 200.0, 250.0)
+    assert ui.scroll_area_points("up", (0, 100, 400, 600), 0.5) == (200.0, 250.0, 200.0, 550.0)
+    assert ui.scroll_area_points("left", (0, 100, 400, 600), 0.5) == (100.0, 400.0, 300.0, 400.0)
+    assert ui.scroll_area_points("right", (0, 100, 400, 600), 0.5) == (300.0, 400.0, 100.0, 400.0)
+
+
+def test_scroll_never_touches_the_edge_of_its_area():
+    x0, y0, x1, y1 = ui.scroll_area_points("down", (0, 100, 400, 600), 1.0)
+    assert (y0, y1) == (652.0, 148.0) and 100 < y1 < y0 < 700  # amount 1.0 is held 8% inside each edge
+    with pytest.raises(ValueError):
+        ui.scroll_area_points("sideways", (0, 0, 10, 10))
+
+
+def test_the_scroll_area_is_the_first_scroll_element_over_the_screen_centre():
+    corner = el("e1", "scroll", "Corner", rect=(0, 0, 100, 100))
+    middle = el("e2", "scroll", "Middle", rect=(0, 100, 400, 600))
+    button = el("e3", "button", "OK", rect=(100, 300, 200, 200))
+    assert ui.scroll_container([corner, button, middle], SCREEN) is middle
+    assert ui.scroll_container([corner, button], SCREEN) is None
+
+
+def test_the_scroll_view_of_an_element_is_itself_or_the_smallest_one_around_it():
+    page = el("e1", "scroll", "Page", rect=(0, 100, 400, 600))
+    row = el("e2", "scroll", "Row", rect=(0, 200, 400, 100))
+    inside = el("e3", "button", "OK", rect=(10, 210, 100, 40))
+    outside = el("e4", "button", "Back", rect=(10, 20, 100, 40))
+    items = [page, row, inside, outside]
+    assert ui.scroll_of(items, page) is page
+    assert ui.scroll_of(items, inside) is row
+    assert ui.scroll_of(items, outside) is None

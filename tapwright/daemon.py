@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
 import dataclasses
 import math
 import re
@@ -40,6 +41,11 @@ class Settled(NamedTuple):
     changed: bool  # False only when the stream showed the screen unchanged for certain
     capped: bool  # the cap ended the wait with frames still changing
 WAIT_MIN, WAIT_MAX = 0.1, 30.0  # seconds, for `wait`
+WAIT_FOR_MIN, WAIT_FOR_DEFAULT = 0.5, 10.0  # `wait_for`'s timeout in seconds (its upper end is WAIT_MAX)
+WAIT_FOR_KINDS = ("text", "id", "label")
+WAIT_FOR_POLL = 0.3  # seconds between tree reads while waiting
+SCROLL_MIN, SCROLL_MAX = 0.1, 1.0  # `scroll`'s amount: a share of the scroll area
+MAX_SCROLL_SWIPES = 15  # `scroll to start|end` gives up after this many swipes
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -103,8 +109,30 @@ def _checked(name: str, args: dict) -> dict:
             checked[key] = number
     if args.get("target") is not None:
         checked["target"] = ui.parse_target(args["target"])  # bad_params, with an example of a target
-    if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
-        raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
+    if name == "scroll":
+        if checked.get("direction", "down") not in ("up", "down", "left", "right"):
+            raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
+        if args.get("to") not in (None, "start", "end"):
+            raise Refused("bad_params", f"to must be start or end, not {args['to']!r}")
+        if "amount" in checked and not SCROLL_MIN <= checked["amount"] <= SCROLL_MAX:
+            raise Refused("bad_params", f"amount must be from {SCROLL_MIN:g} to {SCROLL_MAX:g}, not {args['amount']!r}")
+    if name == "type_text":
+        if not isinstance(args.get("text"), str):
+            raise Refused("bad_params", f"text must be a string, not {args.get('text')!r}")
+        for key in ("replace", "submit"):
+            if key in args and not isinstance(args[key], bool):
+                raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if name == "wait_for":
+        given = [k for k in WAIT_FOR_KINDS if args.get(k) is not None]
+        if len(given) != 1:
+            raise Refused("bad_params", "wait_for needs exactly one of text, id or label")
+        if not isinstance(args[given[0]], str) or not args[given[0]]:
+            raise Refused("bad_params", f"{given[0]} must be a non-empty string, not {args[given[0]]!r}")
+        if "gone" in args and not isinstance(args["gone"], bool):
+            raise Refused("bad_params", f"gone must be true or false, not {args['gone']!r}")
+        timeout = args.get("timeout", WAIT_FOR_DEFAULT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not WAIT_FOR_MIN <= timeout <= WAIT_MAX:
+            raise Refused("bad_params", f"timeout must be a number from {WAIT_FOR_MIN:g} to {WAIT_MAX:g}, not {timeout!r}")
     for key in ("look", "screenshot", "labels"):
         if key in args and not isinstance(args[key], bool):
             raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
@@ -142,6 +170,14 @@ class Toggled(str):
         return f"Tapped {line}, but it is still checked={'true' if now.checked else 'false'}."
 
 
+class Typed(str):
+    """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
+    ref: str = ""
+
+    def verdict(self, now: ui.Element) -> str:
+        return f"Typed into {now.line(actions=False)}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
+
+
 # What `open_app "Settings"` means: the built-in apps aren't in the installed list.
 SYSTEM_APPS = {"Settings": "com.apple.Preferences", "Safari": "com.apple.mobilesafari",
                "Calculator": "com.apple.calculator", "Camera": "com.apple.camera",
@@ -158,11 +194,6 @@ def _target(a: dict) -> ui.Target:
     return a["target"]  # parsed by _checked; tap and long_press require it
 
 
-def _field(a: dict) -> ui.Target | None:
-    """type_text's target: an element to tap first, or none for the field that has focus."""
-    return a.get("target")
-
-
 # Agent actions: tool -> (what it does on the session, seconds to settle before the look; None: no look)
 ACTIONS = {
     "open_app": (None, LONG_CAP),  # None: the handler is a Daemon method (Daemon._handlers), which needs the agent's list
@@ -171,9 +202,8 @@ ACTIONS = {
     "back": (None, CAP),
     "tap": (lambda s, a: s.tap(_target(a)), CAP),
     "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), CAP),
-    "type_text": (lambda s, a: s.type_text(a["text"], replace=bool(a.get("replace")), submit=bool(a.get("submit")),
-                                           target=_field(a)), CAP),
-    "scroll": (lambda s, a: s.scroll(a.get("direction", "down"), float(a.get("amount", 0.5))), CAP),
+    "type_text": (None, CAP),
+    "scroll": (None, CAP),
     "swipe": (lambda s, a: s.swipe(float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"]),
                                    int(float(a.get("seconds", 0.35)) * 1000)), CAP),
     "press_button": (lambda s, a: s.press_button(a["name"]), CAP),
@@ -183,7 +213,7 @@ ACTIONS = {
 MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "open_url", "press_button")  # identical elements can't be told apart after these
 READS = ("look", "apps")
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-SPECIAL = ("wait",)  # sleep before they answer, so they don't hold the phone's queue meanwhile
+SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
 REQUIRED = {"open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
@@ -228,7 +258,7 @@ class Daemon:
         self._lost = asyncio.Event()
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
-                          "back": self._back}
+                          "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -429,6 +459,8 @@ class Daemon:
             return await self._apps(notes)
         if name == "wait":
             return await self._wait(view, args, notes, shot)
+        if name == "wait_for":
+            return await self._wait_for(view, args, notes, shot)
         if name == "look":
             await self._settle_pending()
             return await self._look(view, shot, [], notes)
@@ -436,9 +468,9 @@ class Daemon:
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
         by_ref = target is not None and target.kind == "ref"
-        # type_text at a point acts on the input under it, so it needs a current list too
+        # these tools at a point act on the element under it, so they need a current list too
         by_lookup = target is not None and (target.kind in ("id", "label", "text")
-                                            or (name in ("type_text", "toggle") and target.kind == "point"))
+                                            or (name in ("type_text", "toggle", "scroll") and target.kind == "point"))
 
         fresh, full, box = [True], [False], {}
 
@@ -509,6 +541,10 @@ class Daemon:
                         == (old.role, old.label, old.identifier)), None)
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now, bool(view.alert)), 1)
+        if isinstance(result, Typed):  # the value as the new list shows it, not as it was typed
+            now = next((e for e in view.items if e.ref == result.ref and e.role == "input"), None)
+            if now is not None:
+                answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         return await self._add_shot(answer, view, shot)
 
     async def _apps(self, notes: list) -> dict:
@@ -575,6 +611,91 @@ class Daemon:
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
         return await self._add_shot(answer, view, shot)
+
+    async def _wait_for(self, view, args: dict, notes: list, shot) -> dict:
+        """Poll the fast tree (outside the phone's queue between reads) until the text, id or label is
+        on the screen (or, with `gone`, no longer is), then answer with what changed. No `Settled in`."""
+        kind = next(k for k in WAIT_FOR_KINDS if args.get(k) is not None)
+        target = ui.parse_target({kind: args[kind]})
+        gone, timeout = bool(args.get("gone", False)), float(args.get("timeout", WAIT_FOR_DEFAULT))
+        clock = self.control.clock
+        began = clock()
+        while True:
+            tree = await self._read(self.session.refresh)
+            present = not self._missing(tree.items, target)
+            if present != gone:
+                break
+            left = timeout - (clock() - began)
+            if left <= 0:
+                raise Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
+                                         f"{'disappear' if gone else 'appear'}; it didn't happen.")
+            await self.control.sleep(min(WAIT_FOR_POLL, left))
+        result = f"Done after {clock() - began:.1f} s."
+        if not args.get("look", True):
+            return _answer([result], notes)
+        full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
+        return await self._add_shot(await self._after(view, result, notes, full), view, shot)
+
+    async def _type_text(self, view, a: dict) -> Typed:
+        """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
+        The target is tapped first by the session, which waits for the keyboard and for focus to arrive."""
+        target = a.get("target")
+        if target is None:
+            await self._silent_read(view)  # which inputs there are must be read now
+            inputs = [e for e in view.items if e.role == "input"]
+            if not inputs:
+                raise Refused("not_found", "No input on screen")
+            if len(inputs) > 1:
+                shown = "\n".join(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES])
+                raise Refused("ambiguous", f"{len(inputs)} inputs on screen; pass a target to pick one:\n"
+                                           f"Candidates:\n{shown}")
+            field = inputs[0]
+        elif target.point is not None:
+            x, y = target.point
+            field = ui.at_point(view.items, target.point, "input")
+            if field is None:
+                raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
+        else:
+            field = ui.resolve(view.items, target)
+            if field.role != "input":
+                raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
+        await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
+                                     target=ui.Target(ref=field.ref))
+        done = Typed(f"Typed into {field.line(actions=False)}.")
+        done.ref = field.ref
+        return done
+
+    async def _scroll(self, view, a: dict) -> str:
+        """Swipe through the centre of the scroll area, `amount` of its height (or width). `to` repeats
+        that until the stream shows no change after a swipe, at most MAX_SCROLL_SWIPES times."""
+        s = self.session
+        target, to = a.get("target"), a.get("to")
+        if target is None:
+            area = ui.scroll_container(view.items, s.screen)
+        elif target.point is not None:
+            x, y = target.point
+            area = ui.at_point(view.items, target.point, "scroll")
+            if area is None:
+                raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes a scroll.")
+        else:
+            hit = ui.resolve(view.items, target)
+            area = ui.scroll_of(view.items, hit)
+            if area is None:
+                raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
+        direction = a.get("direction", "down")
+        if to:
+            sideways = direction in ("left", "right")
+            direction = ("right" if sideways else "down") if to == "end" else ("left" if sideways else "up")
+        x0, y0, x1, y1 = ui.scroll_area_points(direction, area.rect if area else (0.0, 0.0, *s.screen),
+                                               a.get("amount", 0.8))
+        for swipes in range(1, MAX_SCROLL_SWIPES + 1):
+            seq, since = self._mark()
+            await s.swipe(x0, y0, x1, y1, 600)
+            if not to or swipes == MAX_SCROLL_SWIPES:
+                break
+            if not (await self._settle(seq, cap=RESOLVE_SETTLE, since=since)).changed:
+                break  # the picture didn't move: the end of the list (with no stream, every swipe is made)
+        return f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}."
 
     async def _toggle(self, view, a: dict) -> str:
         target = _target(a)
