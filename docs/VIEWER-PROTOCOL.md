@@ -96,7 +96,7 @@ is looked up again.
 | | Tapwright | Tapline |
 |---|---|---|
 | `X-Source` / `X-Coverage` | `wda` / `screen` | `viewshot` / `app-window` |
-| Frames | 10 per second by default, about 25 at the balanced preset, over USB (measured) | on change, for about a second after each action, and once a second otherwise; at most about 3 per second (a capture takes about 30-40 ms on an iPhone, measured) |
+| Frames | about 22 per second (10 on the light preset), full size, over USB (measured) | on change, for about a second after each action, and once a second otherwise; at most about 3 per second (a capture takes about 30-40 ms on an iPhone, measured) |
 | `locked` | the phone is locked | also while the app is in the background (iOS pauses it; only the person can bring it back) |
 | `X-Tree-Rev` | none | yes (React commits) |
 | Overlay | slow to read (1.5 to 7 s on busy screens, measured), so only on request | quick, on request |
