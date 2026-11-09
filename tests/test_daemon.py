@@ -5,7 +5,7 @@ import hashlib
 import re
 
 import pytest
-from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, button
+from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button
 
 from tapwright import daemon as daemon_module
 from tapwright.control import Controller, Refused
@@ -1102,7 +1102,7 @@ def test_settle_without_frames_falls_back_to_a_short_sleep():
     async def go():
         d = make(settle_first_frame=0.02, settle_fallback=0.03)
         seconds, changed = await d.settle(0, cap=2.0)
-        assert changed and 0.04 <= seconds < 0.5
+        assert changed and 0.03 <= seconds < 0.5  # the first-frame wait counts towards the sleep
     run(go)
 
 
@@ -1110,8 +1110,8 @@ def test_an_unchanged_screen_is_answered_without_reading_the_tree():
     async def go():
         d = make()
         stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
         d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
         feeder = FrameFeeder(d.hub).start(then=b"A")
         reads = d.session.calls.count("snapshot")
         r = await d.run_tool("a", "tap", TAP)
@@ -1260,3 +1260,55 @@ def test_the_list_is_not_current_without_a_stream_to_say_so():
         assert not d._current(d.control.client("a"))
         await finish(stop, task)
     run(go)
+
+
+def run_virtual(scenario):
+    asyncio.run(scenario(), loop_factory=VirtualLoop)
+
+
+def test_a_silent_change_before_the_action_is_not_reported_as_no_visible_change():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})  # the list is read against picture A
+        d.hub.publish(b"B")  # a spinner finished: the screen changed with no action
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Loaded", "loaded", rect=(10, 60, 100, 40))]
+        feeder = FrameFeeder(d.hub).start(then=b"B")  # the tap itself changes nothing
+        r = await d.run_tool("a", "tap", TAP)
+        assert "No visible change." not in r["text"]
+        assert any(line.startswith('+ e2 button "Loaded"') for line in r["text"].splitlines())
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_fallback_never_adds_to_the_wait_for_a_first_frame():
+    async def go():
+        d = make(settle_first_frame=1.0, settle_fallback=0.6)
+        seconds, changed = await d.settle(0, cap=2.0)
+        assert changed and seconds == pytest.approx(1.0, abs=0.01)  # max(0.6, 1.0), not 1.6
+        d = make(settle_first_frame=0.2, settle_fallback=0.6)
+        seconds, changed = await d.settle(0, cap=2.0)
+        assert changed and seconds == pytest.approx(0.6, abs=0.01)  # the sleep tops up to 0.6, not 0.8
+    run_virtual(go)
+
+
+def test_at_the_real_default_the_screen_is_still_100_ms_after_the_last_change():
+    async def go():
+        d = make(settle_still=daemon_module.STILL, settle_first_frame=1.0)
+        d.hub.publish(b"A")
+        seq, since = d._mark()
+
+        async def late():
+            await asyncio.sleep(0.09)
+            d.hub.publish(b"B")
+        asyncio.create_task(late())
+        seconds, changed = await d.settle(seq, cap=2.0, since=since)
+        assert changed and seconds == pytest.approx(0.19, abs=0.005)  # 90 ms of nothing is not yet still
+        seq, since = d._mark()
+        feeder = FrameFeeder(d.hub).start(then=b"B")  # the same picture, over and over
+        seconds, changed = await d.settle(seq, cap=2.0, since=since)
+        await feeder.stop()
+        assert not changed and seconds == pytest.approx(0.1, abs=0.005)
+    run_virtual(go)

@@ -193,3 +193,30 @@ class FakeSession:
 
     async def close(self):
         self.calls.append("close")
+
+
+class _VirtualSelector:
+    """Selector whose waits advance the loop's clock instead of sleeping."""
+
+    def __init__(self, inner, loop) -> None:
+        self._inner, self._loop = inner, loop
+
+    def select(self, timeout=None):
+        if timeout:
+            self._loop.t += timeout
+        return self._inner.select(0)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class VirtualLoop(asyncio.SelectorEventLoop):
+    """An event loop on fake time: timers fire in order, instantly. Pass as asyncio.run's loop_factory."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.t = 0.0
+        self._selector = _VirtualSelector(self._selector, self)
+
+    def time(self) -> float:
+        return self.t

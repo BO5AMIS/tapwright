@@ -410,9 +410,9 @@ class Daemon:
             return _answer([str(result)], notes)
         mark = box["mark"]
         seconds, changed = await self.settle(mark[0], cap=settle, since=mark[1])
-        if not changed and not (full[0] or view.moved):
-            # nothing on screen differs from the start of the action, and the agent's list is current:
-            # no tree read, and the list stays as it is
+        if not changed and not (full[0] or view.moved) and mark[1] == view.read_mark[1]:
+            # no frame changed during the action, and the picture at its start is the one the agent's
+            # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             return _answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE, settled_line(seconds)], notes)
         return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, seconds)
@@ -443,7 +443,8 @@ class Daemon:
             frame = await self.hub.next_after(seq, timeout=wait)
             if frame is None:
                 if not seen:
-                    await asyncio.sleep(self.settle_fallback)
+                    # the wait for a first frame already counts towards the fallback: never both
+                    await asyncio.sleep(max(0.0, self.settle_fallback - (loop.time() - started)))
                     return loop.time() - started, True
                 break  # the stream went quiet: the picture is still
             seen, seq = True, frame.seq
