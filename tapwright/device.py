@@ -176,16 +176,18 @@ class Device:
             raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
         try:
             status, rest = await self._exchange(conn, ("\r\n".join(head) + "\r\n\r\n").encode() + body)
-            data = json.loads(rest or b"{}")
         except DeviceError:
             raise
         except Exception as e:  # reset, closed, or cut off mid-answer
             raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
         finally:
-            try:
-                await conn.close()
-            except Exception:
-                pass
+            await self._close(conn)
+        try:
+            data = json.loads(rest or b"{}")
+        except ValueError:
+            if status >= 400:
+                raise DeviceError(f"WebDriverAgent: HTTP {status}") from None
+            raise ConnectionLost("WebDriverAgent sent an answer that isn't JSON") from None
         if status >= 400 or (isinstance(data.get("value"), dict) and data["value"].get("error")):
             err = data.get("value", {}) if isinstance(data.get("value"), dict) else {}
             raise DeviceError(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
@@ -210,6 +212,8 @@ class Device:
         if length is not None:
             if length > len(rest):
                 rest += await conn.recvall(length - len(rest))
+                if len(rest) < length:
+                    raise ConnectionLost("WebDriverAgent cut the answer short")
         else:
             while chunk := await conn.recv_any(65536):
                 rest += chunk
@@ -218,8 +222,20 @@ class Device:
     async def open_stream(self):
         """A connection to WebDriverAgent's screen stream, request sent; read it with recv_any."""
         conn = await self.rsd.create_service_connection(MJPEG_PORT)
-        await conn.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        try:
+            await conn.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        except BaseException:
+            await self._close(conn)
+            raise
         return conn
+
+    @staticmethod
+    async def _close(conn) -> None:
+        """Close a connection, but never let a dead line hang the close."""
+        try:
+            await asyncio.wait_for(conn.close(), 2)
+        except Exception:
+            pass
 
     # ---- apps ----
     async def user_apps(self) -> list[dict]:
