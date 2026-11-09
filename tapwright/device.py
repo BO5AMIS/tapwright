@@ -134,6 +134,7 @@ class Device:
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
         if self.runner and not self.runner.done() and await self.wda_alive():
             return
+        await self._stop_runner()  # iOS may have killed it before its task noticed (measured)
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
             for p in await info.proclist():
                 if p.get("bundleIdentifier") == runner_id:
@@ -248,9 +249,14 @@ class Device:
                         "build": info.get("CFBundleVersion", "")} for bid, info in apps.items()),
                       key=lambda a: a["name"].lower())
 
+    async def _stop_runner(self) -> None:
+        """Stop the task that ran WebDriverAgent and collect how it ended."""
+        runner, self.runner = self.runner, None
+        if runner:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
     async def close(self) -> None:
-        if self.runner:
-            self.runner.cancel()
-            await asyncio.gather(self.runner, return_exceptions=True)
+        await self._stop_runner()
         if self.tunnel:
             await self.tunnel.aclose()

@@ -107,6 +107,71 @@ def test_open_stream_closes_the_connection_when_the_request_fails():
     assert conn.closed
 
 
+class _Ctx:
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _Info(_Ctx):
+    async def proclist(self):
+        return []
+
+
+class _Control(_Ctx):
+    async def kill(self, pid):
+        pass
+
+
+class _Config:
+    @staticmethod
+    async def create_for(rsd, runner_bundle_id):
+        return None
+
+
+class _Service:
+    def __init__(self, rsd):
+        pass
+
+    async def run(self, cfg):
+        await asyncio.sleep(3600)
+
+
+def test_a_new_runner_replaces_the_old_one_cleanly(monkeypatch):
+    """iOS can kill the runner (measured: too much CPU) before its test-plan task notices; the
+    restart must stop that task, not leave it to fail later with nobody listening."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
+    import pymobiledevice3.services.dvt.instruments.process_control as process_control
+    import pymobiledevice3.services.dvt.testmanaged.xcuitest as xcuitest
+    monkeypatch.setattr(dvt_provider, "DvtProvider", _Ctx)
+    monkeypatch.setattr(device_info, "DeviceInfo", _Info)
+    monkeypatch.setattr(process_control, "ProcessControl", _Control)
+    monkeypatch.setattr(xcuitest, "TestConfig", _Config)
+    monkeypatch.setattr(xcuitest, "XCUITestService", _Service)
+
+    async def scenario():
+        d = Device(log=lambda *a: None)
+        d.rsd = object()
+        answers = iter([False, True])  # the old WebDriverAgent is gone; the new one answers
+
+        async def wda_alive():
+            return next(answers)
+        d.wda_alive = wda_alive
+        old = asyncio.create_task(asyncio.sleep(3600))  # its task hasn't noticed yet
+        d.runner = old
+        await d.start_wda("runner.id", wait=5)
+        assert old.done() and d.runner is not old and not d.runner.done()
+        await d.close()
+
+    asyncio.run(scenario())
+
+
 def test_no_phone_anywhere(monkeypatch):
     async def none(*a, **k):
         return []
