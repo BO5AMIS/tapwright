@@ -86,18 +86,23 @@ phone, sign up with a test email, and tell me if anything looks broken."*
 
 | Tool | What it does |
 |---|---|
-| `list_apps` | the apps you installed (TestFlight and development builds included), with bundle ids |
-| `launch_app`, `terminate_app` | open an app fresh, or close it |
-| `look` | the screen: every visible element (type, label, id, position in points) and a screenshot |
-| `tap`, `long_press` | by element id (`testID`/accessibility identifier), label, ref from the last look, or x/y |
-| `type_text` | into a field (optionally clearing it first, or pressing return after) |
-| `scroll`, `swipe` | lists and pages; drags between points |
+| `apps`, `open_app`, `close_app` | the apps you installed (TestFlight and development builds included); open one by bundle id or name, or close it |
+| `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot |
+| `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}` |
+| `type_text` | into a field (clearing it first by default, or pressing return after) |
+| `scroll`, `swipe`, `back` | lists and pages; drags between points; up one screen |
+| `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
 | `alert` | accept, dismiss or read system alerts (permission prompts) |
 | `press_button` | home, volume |
 | `open_url` | deep links |
-| `wait` | let something load, then look |
+| `viewer` | the link to the live view |
 
-Every action returns the screen right after it, so each step is one call.
+Every action answers with what changed on the screen, not the whole list, and says how long the
+screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`
+saves the pictures as files instead of sending them. Errors are `Error <code>: <message>`; for
+`not_actionable` the first word says why (`disabled`, `off_screen`, `covered`, `under_tab_bar`,
+`behind_alert`, `no_action`). The tools and their errors are the same as Tapline's:
+[docs/AGENT-TOOLS.md](docs/AGENT-TOOLS.md).
 
 ## Live view
 

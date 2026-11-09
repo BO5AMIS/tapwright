@@ -23,26 +23,34 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 
 ## Testing an app
 
-1. `list_apps` to find the bundle id; `launch_app` (it returns the first screen).
-2. Every action returns the screen after it. **Read it before the next step**: check
-   that the action did what you meant, not just that it didn't fail.
-3. Target elements by `id` (accessibility identifier, React Native `testID`) when there
-   is one, else by `label`, else by `ref` from the latest look. Use `x`/`y` only for
-   things with no element (a canvas, a map); positions are in points.
-4. Screens load and animate. If the screen looks mid-transition or a spinner shows,
-   `wait` (0.5-3 s) instead of acting on it.
-5. Lists: `scroll` until the element you need appears. `down` shows what is below.
-6. Text: `type_text` with the field as target. `replace: true` clears what's there;
-   `submit: true` presses return.
-7. System alerts (notifications, location, tracking) appear in `look`. Answer them with
-   `alert` the way the test needs, usually as a new user would.
-8. Start a fresh run with `terminate_app` then `launch_app`.
-9. A person may be watching the live view, or driving. Their input goes first. Refusals say
-   what to do: `busy` (a person is using the phone: wait a few seconds, retry), `paused` (the
-   user paused you: ask them to resume), `stale` (the screen changed since your last look:
-   look again), `locked` (ask the user to unlock the phone), `reconnecting` (wait, then look),
-   `timeout` (no answer in time: look at the screen before retrying, because the action may
-   have happened).
+1. `apps` lists the installed apps; `open_app` starts one (a bundle id, or a name) and `look`
+   shows the first screen.
+2. Every action (`tap`, `toggle`, `scroll`, ...) answers with what changed (`+` new, `-` gone,
+   `~` changed, `No visible change.`), or the whole list when most of the screen changed.
+   **Read it before the next step**: check that the action did what you meant, not just that it
+   didn't fail. `Settled in N s.` is how long the screen took to stop moving.
+3. Target with one object: `{id}` (accessibility identifier, React Native `testID`) when there
+   is one, else `{label}` or `{text}`, else `{ref}` from the latest list. `{x, y}` (points) only
+   for things with no element: a canvas, a map. `index` picks among several matches.
+4. Actions send no screenshot unless you pass `screenshot: true`; `look` has `labels: true` to
+   draw each element's ref on the picture. `look: false` on an action returns only its first line.
+5. A screen may still be loading: `wait_for` text, an id or a label (or `gone`), instead of
+   guessing a delay with `wait`.
+6. Lists: `scroll` until the element you need appears, or `scroll` with `to: "end"`. `down`
+   shows what is below.
+7. Text: `type_text` into a target; without one it types into the only field. `replace` clears
+   first (the default); `submit` presses return. Switches: `toggle`. `back` goes up one screen.
+8. System alerts (notifications, location, tracking) show as `Alert:` in the list. Answer them
+   with `alert` the way the test needs, usually as a new user would.
+9. Start a fresh run with `close_app` then `open_app`.
+10. A person may be watching the live view (`viewer` gives the link), or driving. Their input
+    goes first. Errors say what to do: `not_found` (look, then pick another target), `ambiguous`
+    (use a candidate's ref, or `index`), `not_actionable` (the first word says why: `disabled`,
+    `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass
+    `force` where it can help), `stale` (look again), `busy` (a person is using the phone: wait a
+    few seconds, retry), `paused` (ask the user to resume), `locked` (ask the user to unlock the
+    phone), `reconnecting` (wait, then look), `timeout` (look at the screen before retrying,
+    because the action may have happened).
 
 ## Reporting
 
@@ -63,4 +71,4 @@ ID). Note slow screens if they took more than a few seconds.
 - You can't pass Face ID, Touch ID or the passcode. If the phone is locked, ask the user
   to unlock it.
 - Stay in the app under test. If something takes you elsewhere (a link opens Safari),
-  go back with `launch_app`.
+  go back with `open_app`.

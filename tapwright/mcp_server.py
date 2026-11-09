@@ -1,9 +1,6 @@
 """tapwright as an MCP server (stdio): tools an agent uses to test apps on your iPhone.
 
-Every action returns the screen right after it (elements as text, plus a screenshot),
-so one call is one step. A `target` is one object: `{"ref": "e12"}` from the last look,
-`{"id": ...}` (the accessibility identifier, React Native's testID), `{"label": ...}`,
-`{"text": ...}` (visible text), or `{"x": ..., "y": ...}` in points.
+The tools, targets and error codes are described in descriptions.py (and docs/AGENT-TOOLS.md).
 
 The phone belongs to `tapwright serve`, which this server starts when needed; a person
 may be watching or driving in its live view at the same time.
@@ -25,20 +22,9 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import client, device, ui
+from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
-
-INSTRUCTIONS = (
-    "Test apps on the user's real iPhone. Start with apps and open_app, then look. Every action "
-    "returns the new screen, so check it before the next step. Prefer `id` targets (accessibility ids, "
-    "React Native testIDs), then `label`, then `ref`; use x and y only for things with no element. This is "
-    "the user's own phone: don't buy, send, post, delete or change account settings unless the user "
-    "asked for exactly that. System alerts (permissions) show up in look; answer them with `alert`. "
-    "A person may be watching or driving in the live view. Refusals: `busy` (a person is driving: wait "
-    "and retry), `paused` (ask the user to resume), `stale` (look again), `locked` (ask the user to "
-    "unlock the phone), `reconnecting` (wait, then look)."
-)
-
 
 SHOTS_DIR: Path | None = None  # set by `tapwright mcp --screenshots DIR`
 KEEP_SHOTS = 50
@@ -162,97 +148,77 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
     return _result(text, image)
 
 
-@server.tool(annotations=READ_ONLY, structured_output=False)
+@server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)
 async def look(screenshot: bool = True, width: int = 600, labels: bool = False) -> CallToolResult:
-    """The current screen: every visible element (type, label, id, position) and a screenshot `width` pixels
-    wide (160-1320). labels draws each element that has actions, with its ref, on the picture."""
     return await _tool("look", screenshot=screenshot, width=width, labels=labels)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("tap"), structured_output=False)
 async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Tap an element. `target` is exactly one of {"ref": "e3"} (from the last look), {"id": "login-button"},
-    {"label": "Log in"} (exact, ignoring case), {"text": "Log in"} (exact, then partial) or {"x": 120, "y": 300}
-    (points), plus "index" (0 is the first) with id, label or text when several match. force skips the
-    disabled and behind-an-alert checks."""
     return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("long_press"), structured_output=False)
 async def long_press(target: Target, seconds: float = 1.0, force: bool = False, look: bool = True,
                      screenshot: bool = False) -> CallToolResult:
-    """Press and hold an element (context menus, drag handles). `target` is as for tap."""
     return await _tool("long_press", target=target, seconds=seconds, force=force, look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("type_text"), structured_output=False)
 async def type_text(text: str, target: Target | None = None, replace: bool = True, submit: bool = False,
                     look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Type into a field: the target (as for tap) is tapped first to focus it; without a target, into the
-    only input on screen. replace clears the field first; submit presses return afterwards."""
     return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, look=look,
                        screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("scroll"), structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
                  to: Literal["start", "end"] | None = None, target: Target | None = None, look: bool = True,
                  screenshot: bool = False) -> CallToolResult:
-    """Scroll the content: "down" shows what is below (the default, or the way `to` goes). amount is a share
-    of the scroll area; `to` keeps scrolling to the start or end; `target` picks the scroll view."""
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
                        screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("toggle"), structured_output=False)
 async def toggle(target: Target, value: bool | None = None, force: bool = False, look: bool = True,
                  screenshot: bool = False) -> CallToolResult:
-    """Switch a toggle: to `value` if given (nothing happens if it's already there), else flip it."""
     return await _tool("toggle", target=target, value=value, force=force, look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("back"), structured_output=False)
 async def back(look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Go back one screen: the navigation bar's back button, else the edge swipe."""
     return await _tool("back", look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("open_url"), structured_output=False)
 async def open_url(url: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Open a URL or deep link (myapp://screen) on the phone."""
     return await _tool("open_url", url=url, look=look, screenshot=screenshot)
 
 
-@server.tool(annotations=READ_ONLY, structured_output=False)
+@server.tool(annotations=READ_ONLY, description=describe("wait"), structured_output=False)
 async def wait(seconds: float, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Wait (0.1-30 s) for something to load or animate, then say what changed."""
     return await _tool("wait", seconds=seconds, look=look, screenshot=screenshot)
 
 
-@server.tool(annotations=READ_ONLY, structured_output=False)
+@server.tool(annotations=READ_ONLY, description=describe("wait_for"), structured_output=False)
 async def wait_for(text: str | None = None, id: str | None = None, label: str | None = None, gone: bool = False,
                    timeout: float = 10.0, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Wait until exactly one of text, id or label shows up (or, with gone, disappears); timeout is 0.5-30 s."""
     return await _tool("wait_for", text=text, id=id, label=label, gone=gone, timeout=timeout, look=look,
                        screenshot=screenshot)
 
 
-@server.tool(annotations=READ_ONLY, structured_output=False)
+@server.tool(annotations=READ_ONLY, description=describe("apps"), structured_output=False)
 async def apps() -> CallToolResult:
-    """Apps installed on the phone by you (App Store, TestFlight, development builds), with bundle ids;
-    the foreground app is marked."""
     return await _tool("apps")
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("open_app"), structured_output=False)
 async def open_app(app: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    """Open an app by bundle id or name (from apps), bringing it to the front."""
     return await _tool("open_app", app=app, look=look, screenshot=screenshot)
 
 
-@server.tool(annotations=READ_ONLY, structured_output=False)
+@server.tool(annotations=READ_ONLY, description=describe("viewer"), structured_output=False)
 async def viewer() -> CallToolResult:
-    """The link to the live view, where the user can watch or take over the phone."""
     # Unlike the other tools this one may start the daemon (find_or_start), since only this side knows its port and key.
     try:
         info = await asyncio.to_thread(client.find_or_start)
@@ -262,31 +228,26 @@ async def viewer() -> CallToolResult:
                    "The link carries a key and is for the user only: give it to no one else, and don't repeat it.")
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("close_app"), structured_output=False)
 async def close_app(app: str) -> CallToolResult:
-    """Close an app (to start it fresh next time)."""
     return await _tool("close_app", app=app)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("alert"), structured_output=False)
 async def alert(action: Literal["accept", "dismiss", "text"], look: bool = True,
                 screenshot: bool = False) -> CallToolResult:
-    """Answer the system alert on screen (accept = the default/allow button, dismiss = cancel/don't
-    allow), or read its text."""
     return await _tool("alert", action=action, look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("press_button"), structured_output=False)
 async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bool = True,
                        screenshot: bool = False) -> CallToolResult:
-    """Press a hardware button. home leaves the app (it keeps running)."""
     return await _tool("press_button", name=name, look=look, screenshot=screenshot)
 
 
-@server.tool(structured_output=False)
+@server.tool(description=describe("swipe"), structured_output=False)
 async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True,
                 screenshot: bool = False) -> CallToolResult:
-    """Drag from one point to another, in points (sliders, carousels, swipe actions, edge gestures)."""
     return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot)
 
 
