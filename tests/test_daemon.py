@@ -1004,3 +1004,24 @@ def test_a_silent_re_read_gives_an_element_that_came_back_its_old_ref():
         assert [(e.ref, e.label) for e in view.items] == [("e1", "OK"), ("e2", "Other")]
         await finish(stop, task)
     run(go)
+
+
+def test_after_a_scroll_the_old_refs_of_identical_buttons_are_not_found():
+    async def go():
+        def rows(labels):
+            out = [button(f"e{i + 1}", f"Row {c}", rect=(0, 90 + 100 * i, 100, 40)) for i, c in enumerate(labels)]
+            out += [button(f"e{i + 4}", "Edit", "", rect=(200, 100 + 100 * i, 100, 40)) for i in range(3)]
+            return out + [button(f"e{i + 7}", f"Fixed {i}", "", rect=(300, 700 + i, 50, 5)) for i in range(20)]
+        d = make()
+        d.session.tree = rows("ABC")
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = rows("BCD")  # one row up: the buttons sit where they sat
+        await d.run_tool("a", "scroll", {"direction": "down"})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e4"}, "look": False})  # "Edit A" would press B's button
+        assert e.value.code == "not_found" and "no longer on the screen; look again" in str(e.value)
+        view = d.control.client("a")
+        assert [x.ref for x in view.items if x.label == "Edit"] == ["e28", "e29", "e30"]
+        await finish(stop, task)
+    run(go)

@@ -108,6 +108,7 @@ ACTIONS = {
     "alert": (lambda s, a: s.alert(a["action"]), SETTLE),
     "open_url": (lambda s, a: s.open_url(a["url"]), 1.5),
 }
+MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "launch_app", "open_url", "press_button")  # identical elements can't be told apart after these
 READS = ("look", "list_apps", "wait")
 REQUIRED = {"launch_app": ("bundle_id",), "terminate_app": ("bundle_id",), "type_text": ("text",),
             "tap": ("target",), "long_press": ("target",),
@@ -391,7 +392,7 @@ class Daemon:
         if not looks:
             return _answer([str(result)], notes)
         await asyncio.sleep(settle)
-        return await self._after(view, str(result), notes, full=full[0])
+        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT)
 
     async def _look(self, view, screenshot: bool, lines: list, notes: list) -> dict:
         async def read():
@@ -410,7 +411,7 @@ class Daemon:
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return _answer([*lines, text], notes, image)
 
-    async def _after(self, view, result: str, notes: list, full: bool) -> dict:
+    async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`. Refs follow their elements."""
         s = self.session
@@ -419,7 +420,8 @@ class Daemon:
             snap = await s.snapshot()
             app_changed = snap.app is not None and view.app is not None and snap.app != view.app
             head = _furniture(view, snap.tree.alert, snap.tree.keyboard)
-            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full, head)
+            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full, head,
+                                moves_content)
             return snap, up
         try:
             snap, up = await self._read(read)

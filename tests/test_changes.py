@@ -247,3 +247,33 @@ def test_a_forced_full_list_does_not_diff():
     old = [el("e1", label="A")]
     up = changes.update(old, [el("e1", label="A"), el("e2", label="B", y=50)], full=True)
     assert up.full and refs(up.items) == ["e1", "e2"] and up.lines == []
+
+
+def _rows(labels):
+    """A list with a unique text row above and a "Edit" button beside each of three rows, as the screen lists it."""
+    out = [el(f"e{i + 1}", role="text", label=f"Row {c}", x=0, y=90 + 100 * i) for i, c in enumerate(labels)]
+    out += [el(f"e{i + 4}", label="Edit", x=200, y=100 + 100 * i) for i in range(3)]
+    return out
+
+
+def test_a_one_row_scroll_refreshes_the_duplicates_because_the_unique_rows_moved():
+    old = _rows("ABC")
+    new = [el(f"e{i + 1}", role="text", label=f"Row {c}", x=0, y=90 + 100 * i) for i, c in enumerate("BCD")]
+    new += [el(f"e{i + 4}", label="Edit", x=200, y=100 + 100 * i) for i in range(3)]  # the buttons sit where they sat
+    carried = changes.carry_refs(old, new)  # even a plain action: rows B, C and D moved, so the buttons did
+    assert refs(carried)[:3] == ["e2", "e3", "e7"] and not {"e4", "e5", "e6"} & set(refs(carried))
+    assert refs(carried)[3:] == ["e8", "e9", "e10"]
+
+
+def test_the_same_layout_after_an_action_that_moved_nothing_keeps_the_duplicate_refs():
+    old = _rows("ABC")
+    assert refs(changes.carry_refs(old, _rows("ABC"), moves_content=False)) == refs(old)
+
+
+def test_a_scroll_refreshes_duplicates_even_when_nothing_seems_to_have_moved():
+    old = _rows("ABC")
+    carried = changes.carry_refs(old, _rows("ABC"), moves_content=True)
+    assert refs(carried)[:3] == ["e1", "e2", "e3"]  # unique rows keep theirs
+    assert refs(carried)[3:] == ["e7", "e8", "e9"]  # the Edit buttons are all new
+    up = changes.update(old, _rows("ABC"), moves_content=True)
+    assert refs(up.items)[3:] == ["e7", "e8", "e9"]

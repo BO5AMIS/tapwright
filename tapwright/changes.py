@@ -28,16 +28,17 @@ def _stayed(a: Element, b: Element) -> bool:
     return math.hypot(a.center[0] - b.center[0], a.center[1] - b.center[1]) <= MOVE_PT
 
 
-def carry_refs(old: list[Element], new: list[Element], used: int = 0) -> list[Element]:
+def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_content: bool = False) -> list[Element]:
     """`new` (a fresh read, in reading order) with the refs of the elements still on screen, and new
     numbers for the others, counted on from the highest ref in use. `used` is the highest number this
     agent was ever given, so a ref that went away is never handed to another element.
 
     A key (see _key) that is unique in both lists keeps its ref however far the element moved, except
     an element with neither identifier nor text, which keeps it only if it stayed put. A key shared by
-    several elements keeps its refs only if the group is the same size in both lists and every member
-    stayed put; else every member is new. Guessing which of several identical buttons moved where would
-    one day press the wrong row."""
+    several elements keeps its refs only if the group is the same size in both lists, every member
+    stayed put, the action wasn't one that moves content (`moves_content`: scroll, swipe, back, open_app,
+    open_url) and no unique element moved: positions alone can't tell "Edit" of row A from "Edit" of row B
+    after a scroll by one row, and a wrong guess presses the wrong row. Else every member is new."""
     before: dict[tuple[str, str, str], list[Element]] = {}
     after: dict[tuple[str, str, str], list[Element]] = {}
     for e in old:
@@ -45,12 +46,17 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0) -> list[El
     for e in new:
         after.setdefault(_key(e), []).append(e)
     kept: dict[int, str] = {}  # id(new element) -> the ref it keeps
+    content_moved = moves_content
     for key, group in after.items():
         was = before.get(key, [])
         if len(was) == 1 and len(group) == 1:
             if key[1] == "id" or key[2] or _stayed(was[0], group[0]):
                 kept[id(group[0])] = was[0].ref
-        elif len(was) == len(group) and all(_stayed(o, n) for o, n in zip(was, group)):
+                content_moved = content_moved or not _stayed(was[0], group[0])
+    for key, group in after.items():
+        was = before.get(key, [])
+        if (not content_moved and not (len(was) == 1 and len(group) == 1) and len(was) == len(group)
+                and all(_stayed(o, n) for o, n in zip(was, group))):
             kept.update((id(n), o.ref) for o, n in zip(was, group))
     last = max(highest(old), used)
     out: list[Element] = []
@@ -138,7 +144,8 @@ class Update:
 
 
 def update(old: list[Element], new: list[Element], app_changed: bool = False, used: int = 0,
-           shown: list[Element] | None = None, full: bool = False, header: list[str] | None = None) -> Update:
+           shown: list[Element] | None = None, full: bool = False, header: list[str] | None = None,
+           moves_content: bool = False) -> Update:
     """After an action: carry the refs over, and say what changed. The full list instead (renumbered from
     e1, so every older ref is invalid) when the app changed, when there was no list before, or when more
     than max(8, half the new list) of the elements changed, or when nothing is left of a list that had
@@ -150,7 +157,7 @@ def update(old: list[Element], new: list[Element], app_changed: bool = False, us
     base = old if shown is None else shown
     if full or app_changed or (not base and bool(new)) or (bool(base) and not new):
         return Update(list(new), True, [], highest(new))
-    carried = carry_refs(old, new, used)
+    carried = carry_refs(old, new, used, moves_content)
     lines, count = _changes(base, carried)
     if count > max(FULL_MIN, len(new) / 2):
         return Update(list(new), True, [], highest(new))
