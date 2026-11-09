@@ -503,7 +503,10 @@ class Daemon:
         async def act():
             self._require_connected()
             s = self.session
-            if not (by_lookup and not self._current(view)):  # a silent re-read settles for itself
+            # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
+            # from it is read for again before it is not_found
+            live = by_lookup and (not self._current(view) or (target.kind != "point" and self._missing(view.items, target)))
+            if not live:  # a silent re-read settles for itself
                 await self._settle_pending()
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
@@ -514,7 +517,7 @@ class Daemon:
             if by_ref and not fresh[0]:
                 raise Refused("stale", "the screen changed since your last look (someone else used the "
                                        "phone); look again")
-            if by_lookup and not self._current(view):
+            if live:
                 # Resolve on the live tree. The agent's refs follow their elements onto it, so `e3` still
                 # means the same element when it moved. The view's freshness doesn't change: a person's
                 # action still makes refs stale, and `view.shown` (what the agent was told) stays put.

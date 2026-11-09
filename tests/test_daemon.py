@@ -548,6 +548,25 @@ def test_id_label_and_text_use_the_agents_list_while_it_is_current():
     run(go)
 
 
+def test_a_target_missing_from_a_current_list_is_read_again_before_not_found():
+    """A list read mid-redraw can miss elements while the stream says nothing changed since; trusted as it was,
+    every later id target was not_found until the screen moved: 43 calls in a row on the lab (2026-11-09)."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = []  # a read that caught nothing
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "OK", "ok-button")]  # what the screen shows
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert r["text"].startswith('Tapped e1 button "OK"') and d.session.calls.count("refresh") == 1
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:  # what truly isn't there is still not_found, after one read
+            await d.run_tool("a", "tap", {"target": {"id": "gone"}, "look": False})
+        assert e.value.code == "not_found" and d.session.calls.count("refresh") > 1  # read again first
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
     async def go():
         d = make()
