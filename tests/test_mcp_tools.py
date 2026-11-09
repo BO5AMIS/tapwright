@@ -168,3 +168,24 @@ def test_viewer_when_the_daemon_cannot_start(monkeypatch):
     monkeypatch.setattr(client, "find_or_start", broken)
     out = asyncio.run(mcp_server.viewer())
     assert out.is_error and out.content[0].text.startswith("Error not_connected: ")
+
+
+def test_the_target_schema_has_no_nullable_members_and_validates_strictly():
+    import jsonschema
+    target = listed()["tap"].input_schema["$defs"]["Target"]
+    for name, prop in target["properties"].items():
+        assert "anyOf" not in prop and prop.get("type") != "null" and "default" not in prop, name
+    validator = jsonschema.Draft202012Validator(target)
+    assert validator.is_valid({"id": "a"}) and validator.is_valid({"x": 1, "y": 2})
+    assert validator.is_valid({"label": "Row", "index": 1})
+    assert not validator.is_valid({"id": "a", "ref": "e1"})
+    assert not validator.is_valid({"id": "a", "ref": None})  # an unset key must be absent
+
+
+def test_a_target_filled_with_nulls_is_still_accepted(monkeypatch):
+    seen = []
+    monkeypatch.setattr(client, "call", lambda tool, args, cid, timeout=120.0: seen.append(args) or
+                        {"text": "ok", "image": None, "image_size": None})
+    nulls = {"id": "a", "ref": None, "label": None, "text": None, "x": None, "y": None, "index": None}
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"target": nulls}))
+    assert not out.is_error and seen[0]["target"] == {"id": "a"}

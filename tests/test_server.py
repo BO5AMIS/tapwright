@@ -237,3 +237,12 @@ def test_failures_come_back_with_a_code_and_a_status():
         d._set_state("no-device", "needs setup: run `tapwright setup`")
         none = c.post("/api/look", headers=AUTH, json={})
         assert none.status_code == 503 and none.json()["error"]["code"] == "not_connected"
+
+
+def test_a_closed_hub_ends_the_stream_body_cleanly():
+    app, d = app_and_daemon()
+    d.hub.close()
+    with TestClient(app) as c:
+        r = c.get("/stream", headers=AUTH)
+    assert r.status_code == 200 and r.content == b"--frame\r\n"
+    assert d.pump.viewers == 0

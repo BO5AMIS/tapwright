@@ -112,12 +112,22 @@ class TapwrightServer(MCPServer):
             return _error("bad_params", str(e).removeprefix(f"Error executing tool {name}: "))
 
 
+def _unset_means_absent(schema: dict) -> None:
+    """Drop the null branch from every field, so a client must leave an unset key out. Otherwise a `null`
+    counts as present in the `oneOf` below. The server still accepts nulls and strips them."""
+    schema["oneOf"] = [{"required": ["ref"]}, {"required": ["id"]}, {"required": ["label"]},
+                       {"required": ["text"]}, {"required": ["x", "y"]}]
+    for prop in schema["properties"].values():
+        prop.pop("default", None)
+        kinds = [k for k in prop.pop("anyOf", []) if k.get("type") != "null"]
+        if kinds:
+            prop.update(kinds[0])
+
+
 class Target(BaseModel):
     """What to act on: exactly one of ref, id, label, text, or x with y. The daemon checks the rule and
     answers `bad_params` with an example when it isn't met."""
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"oneOf": [
-        {"required": ["ref"]}, {"required": ["id"]}, {"required": ["label"]}, {"required": ["text"]},
-        {"required": ["x", "y"]}]})
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_unset_means_absent)
     ref: str | None = None
     id: str | None = None
     label: str | None = None
@@ -243,6 +253,7 @@ async def open_app(app: str, look: bool = True, screenshot: bool = False) -> Cal
 @server.tool(annotations=READ_ONLY, structured_output=False)
 async def viewer() -> CallToolResult:
     """The link to the live view, where the user can watch or take over the phone."""
+    # Unlike the other tools this one may start the daemon (find_or_start), since only this side knows its port and key.
     try:
         info = await asyncio.to_thread(client.find_or_start)
     except client.DaemonError as e:
