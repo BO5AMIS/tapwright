@@ -180,9 +180,9 @@ SHEET = [node("Button", 0, 0, 430, 510, "Dismiss"), node("Button", 20, 560, 390,
 
 def test_a_full_screen_layer_hides_what_is_behind_it():
     items = ui.elements(sheet_over_base(SHEET), PHONE)
-    assert labels(items) == ["Home", "Stats", "Dismiss", "Sheet action", "Sheet close"]  # the tab bar stays listed
-    assert [e.ref for e in items] == [f"e{i}" for i in range(1, 7)]  # numbered after the hiding
-    assert all(e.covered_by == () for e in items if e.label.startswith("Sheet") or e.label == "Dismiss")  # the tab bar behind covers nothing
+    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]  # a sheet dims the tab bar behind it
+    assert [e.ref for e in items] == ["e1", "e2", "e3"]  # numbered after the hiding
+    assert all(e.covered_by == () for e in items)  # the tab bar behind the sheet covers nothing in front of it
 
 
 def test_a_small_later_layer_hides_nothing():
@@ -248,7 +248,7 @@ def test_a_full_screen_page_with_a_scroll_view_hides_the_screen_under_it():
 
 def test_a_sheet_three_levels_down_hides_the_base_screen():
     items = ui.elements(phone(nested(2, base_screen(), node("Other", 0, 0, 430, 932, children=SHEET))), PHONE)
-    assert labels(items) == ["Home", "Stats", "Dismiss", "Sheet action", "Sheet close"]
+    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]
 
 
 def test_a_layer_hides_only_what_is_inside_its_rect():
@@ -302,7 +302,7 @@ def test_a_dimming_view_then_a_dialog_hides_the_base_screen():
     dim = node("Other", 0, 0, 430, 932)  # childless, unlisted
     dialog = node("Other", 30, 150, 370, 650, children=[node("Cell", 30, 150, 370, 650, "Dialog body")])
     items = ui.elements(phone(nested(1, base_screen(), node("Other", 0, 0, 430, 932, children=[dim, dialog]))), PHONE)
-    assert labels(items) == ["Home", "Stats", "Dialog body"]
+    assert labels(items) == ["Dialog body"]
 
 
 def test_a_first_child_with_listed_children_is_content_not_a_backdrop():
@@ -469,3 +469,18 @@ def test_a_later_element_up_to_95_percent_of_the_screen_covers():
     overlay = node("Other", 0, 0, 430, 858, "", name="lab-overlay")  # 92% of the screen
     (cover,) = {e.label: e for e in ui.elements(phone(button, overlay), PHONE)}["Covered"].covered_by
     assert cover.rect == (0.0, 0.0, 430.0, 858.0)
+
+
+def test_a_presented_sheet_hides_the_tab_bar_behind_it_and_a_tap_on_a_tab_is_not_found():
+    items = ui.elements(sheet_over_base(SHEET), PHONE)
+    assert "Home" not in labels(items) and "tabbar" not in [e.type.lower() for e in items]
+    with pytest.raises(Refused) as e:
+        ui.resolve(items, ui.Target(label="Home"))
+    assert e.value.code == "not_found"
+
+
+def test_the_keyboard_stays_in_front_of_a_presented_sheet():
+    keys = node("Keyboard", 0, 700, 430, 232, children=[node("Key", 10, 710, 40, 50, "q")])
+    layer = node("Other", 0, 0, 430, 932, children=SHEET)
+    tree = ui.read(phone(keys, layer), PHONE, keyboard=True)
+    assert "q" in labels(tree.items)

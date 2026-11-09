@@ -281,7 +281,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     # Everything below is numbered by visit order, so "what is inside this node" is a range of numbers.
     found: list[tuple[Element, int, tuple[int, ...]]] = []  # each listed element, its number, the bars it is inside
     covering: list[tuple[int, Bar]] = []  # the bars iOS draws over content, by number
-    hidden: list[tuple[int, int, tuple[float, float, float, float]]] = []  # number ranges a later layer covers, and where
+    # number ranges a later layer covers, where, and whether it is a presentation (which hides bars too)
+    hidden: list[tuple[int, int, tuple[float, float, float, float], bool]] = []
     visits = [0]
     numbered: dict[int, ET.Element] = {}  # each visited node by its number...
     ends: dict[int, int] = {}  # ...and the number after its subtree
@@ -354,8 +355,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
             for k, child in enumerate(node):
                 if k and spans[k][1] > spans[k][0]:  # the earlier children, under what the layer hides
-                    hidden.extend((spans[0][0], spans[k][0], r)
-                                  for r in _layer(child, spans[k], found, screen_rect, numbered, ends))
+                    rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends)
+                    hidden.extend((spans[0][0], spans[k][0], r, presented) for r in rects)
 
     inf = math.inf
     try:
@@ -364,12 +365,16 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
     walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
 
-    def behind(number: int, point: tuple[float, float]) -> bool:
-        return any(a <= number < b and _holds(rect, point) for a, b, rect in hidden)
-    # a layer never hides bars, their tabs and buttons, or the keyboard: the cover logic handles touches near them
+    keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
+
+    def behind(number: int, point: tuple[float, float], barlike: bool) -> bool:
+        """Does a layer hide it? Opaque content leaves bars and their children alone (the cover logic handles
+        touches near them); a presentation dims them. The keyboard is always in front."""
+        return any(a <= number < b and _holds(rect, point) and (presented or not barlike) for a, b, rect, presented in hidden)
     shown = [(e, number, inside) for e, number, inside in found
-             if inside or e.type in BARS or not behind(number, e.center)]
-    live = [(n, bar) for n, bar in covering if not behind(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2))]
+             if keyboards & set(inside) or not behind(number, e.center, bool(inside) or e.type in BARS)]
+    live = [(n, bar) for n, bar in covering if bar.kind == "Keyboard"
+            or not behind(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2), False)]
     bar_numbers = {n for n, _ in covering}
     area = screen[0] * screen[1] if screen else math.inf
     ahead = [(o, m, set(within)) for o, m, within in shown]
@@ -422,21 +427,23 @@ def _backdrop(span: tuple[int, int], found: list[tuple[Element, int, tuple[int, 
 
 def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
            screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]
-           ) -> list[tuple[float, float, float, float]]:
-    """The places a later sibling hides in the earlier ones, empty when it is no layer (see LAYER_MAX_DEPTH;
-    the caller checks the depth). With a backdrop and something to act on, its whole rect; with no backdrop,
-    the rects of what it lists, when they fill half the screen."""
+           ) -> tuple[list[tuple[float, float, float, float]], bool]:
+    """The places a later sibling hides in the earlier ones (empty when it is no layer; see LAYER_MAX_DEPTH, the
+    caller checks the depth), and whether it is a presentation. With a backdrop and something to act on: its whole
+    rect, and bars are hidden too (a sheet dims them). With no backdrop: the rects of what it lists, when they
+    fill half the screen, and bars stay."""
     area = screen[2] * screen[3]
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
-        return []
+        return [], False
     # what the layer lists below itself, and itself when it is a scroll view (a scroll view is content)
     inner = [e for e, number, _ in found if (span[0] < number < span[1] or (number == span[0] and e.role == "scroll"))
              and (e.role == "scroll" or (o := _overlap(e.rect, screen))[2] * o[3] < WRAPPER * area)]
     if (dim := _backdrop(span, found, screen, numbered, ends)) is not None:
-        return [_rect(child)] if any(e.actions for e, number, _ in found if span[0] < number < span[1] and number != dim) else []
+        acts = any(e.actions for e, number, _ in found if span[0] < number < span[1] and number != dim)
+        return ([_rect(child)] if acts else []), True
     if _union_area([_overlap(e.rect, screen) for e in inner]) >= LAYER_FILL * area:
-        return [e.rect for e in inner]
-    return []
+        return [e.rect for e in inner], False
+    return [], False
 
 
 def elements(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:
