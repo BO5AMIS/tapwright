@@ -3,19 +3,27 @@ WebSocket and the agent API, all behind one token; and starting, finding and sto
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
 import json
+import logging
+import os
 import secrets
+import socket
+import time
 from importlib.resources import files
+from logging.handlers import RotatingFileHandler
 
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
+from . import store
 from .control import Refused
 
 COOKIE = "tapwright_token"
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 HTTP_STATUS = {"busy": 409, "paused": 409, "stale": 409, "reconnecting": 503, "locked": 503, "unsupported": 400}
+DEFAULT_PORT = 8417
+IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
 
 
 def _host_ok(conn, hosts) -> bool:
@@ -189,3 +197,97 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/{name}", tool, methods=["POST"]),
     ])
+
+
+class _DropNoise(logging.Filter):
+    """pymobiledevice3 logs its cancelled background readers as errors when a connection closes."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (record.exc_info and record.exc_info[0] is asyncio.CancelledError)
+
+
+def configure_logging(path) -> logging.Logger:
+    """Everything to a rotating file (never the token); pymobiledevice3 only from warnings up."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.addFilter(_DropNoise())
+    root = logging.getLogger()
+    for old in list(root.handlers):
+        root.removeHandler(old)
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    logging.getLogger("pymobiledevice3").setLevel(logging.WARNING)
+    return logging.getLogger("tapwright")
+
+
+def _bind(port: int) -> socket.socket | None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if os.name != "nt":  # on Windows this flag would let two servers share the port
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
+async def _idle_watch(daemon, stop: asyncio.Event, limit: float, every: float = 30.0) -> None:
+    while not stop.is_set():
+        await asyncio.sleep(every)
+        if daemon.pump.viewers == 0 and daemon.ws_clients == 0 and time.monotonic() - daemon.last_request > limit:
+            daemon.log(f"no viewers or requests for {limit / 60:.0f} min: stopping")
+            stop.set()
+
+
+def _default_daemon(log, phone: str | None):
+    from .daemon import Daemon
+    from .device import Device
+    from .session import Session
+    return Daemon(Session(Device(host=phone, log=log)), log=log)
+
+
+async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: bool = False,
+                phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT) -> int:
+    """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
+    import uvicorn
+
+    from .client import healthy, viewer_url
+    info = store.read_serve_info()
+    if await asyncio.to_thread(healthy, info):
+        print(f"already running: {viewer_url(info)}", flush=True)
+        return 0
+    sock = _bind(port)
+    if sock is None:
+        for _ in range(20):  # another daemon may be starting on that port right now
+            await asyncio.sleep(0.5)
+            info = store.read_serve_info()
+            if await asyncio.to_thread(healthy, info):
+                print(f"already running: {viewer_url(info)}", flush=True)
+                return 0
+        sock = _bind(0)
+    token = info["token"] if info.get("token") and not new_token else secrets.token_urlsafe(32)
+    actual = sock.getsockname()[1]
+    log = configure_logging(store.HOME / "serve.log")
+    daemon = make_daemon(log.info, phone)
+    stop = asyncio.Event()
+    app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
+    server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None, access_log=False))
+    store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token, "started": int(time.time())})
+    log.info("listening on http://127.0.0.1:%d", actual)
+    print(f"Tapwright live view: http://127.0.0.1:{actual}/?token={token}", flush=True)
+    serving = asyncio.create_task(server.serve(sockets=[sock]))
+    helpers = [asyncio.create_task(daemon.supervise(stop))]
+    if not keep_alive:
+        helpers.append(asyncio.create_task(_idle_watch(daemon, stop, idle_limit)))
+    stopping = asyncio.create_task(stop.wait())
+    await asyncio.wait({serving, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    stop.set()
+    server.should_exit = True
+    for task in helpers + [stopping]:
+        task.cancel()
+    await asyncio.gather(serving, *helpers, stopping, return_exceptions=True)
+    await daemon.close()
+    log.info("stopped")
+    return 0

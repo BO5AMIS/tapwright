@@ -18,6 +18,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("TAPWRIGHT_HOME") or Path.home() / ".tapwright")
 SECRETS = HOME / "signing"  # private key, certificate, profile: never leave this machine
 STATE = HOME / "state.json"
+SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, token (kept after it stops)
 
 WDA_VERSION = "16.15.3"
 WDA_SHA256 = "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5"
@@ -38,6 +39,22 @@ def save_state(**changes) -> dict:
     HOME.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps(state, indent=2))
     return state
+
+
+def read_serve_info() -> dict:
+    try:
+        return json.loads(SERVE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_serve_info(info: dict) -> None:
+    SERVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SERVE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(info, indent=2))
+    if os.name != "nt":
+        tmp.chmod(0o600)  # it holds the live view's token
+    os.replace(tmp, SERVE_FILE)
 
 
 def _fetch(url: str, accept: str = "*/*") -> bytes:
