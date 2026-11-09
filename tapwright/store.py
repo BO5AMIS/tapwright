@@ -9,6 +9,8 @@ import os
 import platform
 import shutil
 import tarfile
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -18,12 +20,9 @@ SECRETS = HOME / "signing"  # private key, certificate, profile: never leave thi
 STATE = HOME / "state.json"
 
 WDA_VERSION = "16.15.3"
-WDA_URL = f"https://github.com/appium/WebDriverAgent/releases/download/v{WDA_VERSION}/WebDriverAgentRunner-Runner.zip"
 WDA_SHA256 = "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5"
 
 RCODESIGN_VERSION = "0.29.0"
-RCODESIGN_BASE = (f"https://github.com/indygreg/apple-platform-rs/releases/download/"
-                  f"apple-codesign%2F{RCODESIGN_VERSION}/apple-codesign-{RCODESIGN_VERSION}-")
 
 
 def load_state() -> dict:
@@ -41,10 +40,26 @@ def save_state(**changes) -> dict:
     return state
 
 
-def _fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "tapwright"})
+def _fetch(url: str, accept: str = "*/*") -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "tapwright", "Accept": accept})
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read()
+
+
+def _release_file(repo: str, tag: str, name: str) -> bytes:
+    """A file from a GitHub release. The download link sometimes fails with a 5xx for a
+    while; then the same file comes through GitHub's API. Callers check the SHA-256."""
+    tag = urllib.parse.quote(tag, safe="")
+    link = f"https://github.com/{repo}/releases/download/{tag}/{name}"
+    try:
+        return _fetch(link)
+    except (urllib.error.URLError, TimeoutError) as e:
+        try:
+            release = json.loads(_fetch(f"https://api.github.com/repos/{repo}/releases/tags/{tag}"))
+            asset = next(a for a in release["assets"] if a["name"] == name)
+            return _fetch(asset["url"], accept="application/octet-stream")
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError, StopIteration):
+            raise RuntimeError(f"couldn't download {link}: {e}") from None
 
 
 def wda_app() -> Path:
@@ -52,9 +67,9 @@ def wda_app() -> Path:
     target = HOME / "wda" / WDA_VERSION / "WebDriverAgentRunner-Runner.app"
     if target.exists():
         return target
-    data = _fetch(WDA_URL)
+    data = _release_file("appium/WebDriverAgent", f"v{WDA_VERSION}", "WebDriverAgentRunner-Runner.zip")
     if hashlib.sha256(data).hexdigest() != WDA_SHA256:
-        raise RuntimeError(f"WebDriverAgent download doesn't match its pinned SHA-256 ({WDA_URL})")
+        raise RuntimeError(f"the WebDriverAgent {WDA_VERSION} download doesn't match its pinned SHA-256")
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(target.parent)
     return target
@@ -78,11 +93,11 @@ def rcodesign() -> Path:
     exe = HOME / "tools" / f"rcodesign-{RCODESIGN_VERSION}" / ("rcodesign.exe" if os.name == "nt" else "rcodesign")
     if exe.exists():
         return exe
-    url = f"{RCODESIGN_BASE}{target_name}.{ext}"
-    data = _fetch(url)
-    expected = _fetch(url + ".sha256").decode().split()[0].strip()
+    tag, asset = f"apple-codesign/{RCODESIGN_VERSION}", f"apple-codesign-{RCODESIGN_VERSION}-{target_name}.{ext}"
+    data = _release_file("indygreg/apple-platform-rs", tag, asset)
+    expected = _release_file("indygreg/apple-platform-rs", tag, asset + ".sha256").decode().split()[0].strip()
     if hashlib.sha256(data).hexdigest() != expected:
-        raise RuntimeError(f"rcodesign download doesn't match its published SHA-256 ({url})")
+        raise RuntimeError(f"the rcodesign download doesn't match its published SHA-256 ({asset})")
     exe.parent.mkdir(parents=True, exist_ok=True)
     name = "rcodesign.exe" if os.name == "nt" else "rcodesign"
     if ext == "zip":
