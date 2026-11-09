@@ -1,20 +1,31 @@
 """The daemon's phone side with a fake session: connecting, tools, control rules, viewer input."""
 import asyncio
 import base64
+import hashlib
+import re
 
 import pytest
-from fakes import Clock, FakeDevice, FakeSession, button
+from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, button
 
+from tapwright import daemon as daemon_module
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
 from tapwright.device import ConnectionLost, DeviceError
 from tapwright.stream import PRESETS
 
+SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
+
+
+def unsettled(answer: dict) -> list[str]:
+    """The answer's lines without its `Settled in` line, which varies with timing."""
+    return [line for line in answer["text"].splitlines() if not SETTLED.fullmatch(line)]
+
 
 def make(session=None, **options) -> Daemon:
     clock = Clock()
     settings = dict(control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None, heartbeat=0.02,
-                    backoff=(0.01,), ready_wait=2.0, stream_linger=0, stream_retry=0.01)
+                    backoff=(0.01,), ready_wait=2.0, stream_linger=0, stream_retry=0.01,
+                    settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0)
     settings.update(options)
     return Daemon(session or FakeSession(), **settings)
 
@@ -63,7 +74,7 @@ def test_look_then_act_by_ref():
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("Tapped e1")
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with what changed after it
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."] and r["image"] is None
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."] and r["image"] is None
         await finish(stop, task)
     run(go)
 
@@ -473,7 +484,8 @@ def test_a_look_that_fails_after_an_action_is_a_note():
         stop, task = await started(d)
         d.session.fail["snapshot"] = RuntimeError("boom")
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        assert r["text"] == "Tapped (5, 5).\nNote: couldn't look afterwards: boom."
+        assert unsettled(r) == ["Tapped (5, 5).", "Note: couldn't look afterwards: boom."]
+        assert SETTLED.fullmatch(r["text"].splitlines()[1])  # the settle line sits before the notes
         await finish(stop, task)
     run(go)
 
@@ -744,13 +756,13 @@ def test_an_action_answers_with_what_changed_and_the_refs_stay():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done-button", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"] == ('Tapped e1 button "OK" id=ok-button @10,10 100x40.\n'
-                             "Same screen. Changes:\n"
-                             '+ e2 button "Done" id=done-button @10,60 100x40 [tap]')
+        assert unsettled(r) == ['Tapped e1 button "OK" id=ok-button @10,10 100x40.', "Same screen. Changes:",
+                                '+ e2 button "Done" id=done-button @10,60 100x40 [tap]']
+        assert SETTLED.fullmatch(r["text"].splitlines()[-1])
         assert r["image"] is None  # a screenshot only when asked
         d.session.tree = [button("e1", "OK", "ok-button")]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '- button "Done"']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '- button "Done"']
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "More", "more", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert '+ e3 button "More"' in r["text"]  # e2 went away once: its number is not reused
@@ -763,16 +775,16 @@ def test_a_new_app_or_a_screen_the_agent_has_not_seen_gets_the_full_list():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})  # no look yet
-        assert r["text"].splitlines()[1:4] == ["Screen 400x800 pt @3x · 1 elements", "App: Example (com.example.app)",
+        assert unsettled(r)[1:4] == ["Screen 400x800 pt @3x · 1 elements", "App: Example (com.example.app)",
                                                'e1 button "OK" id=ok-button @10,10 100x40 [tap]']
         d.session.app = ("Settings", "com.apple.Preferences")
         d.session.tree = [button("e1", "Wi-Fi"), button("e2", "Bluetooth", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"text": "OK"}})
-        assert r["text"].splitlines()[1:3] == ["Screen 400x800 pt @3x · 2 elements",
+        assert unsettled(r)[1:3] == ["Screen 400x800 pt @3x · 2 elements",
                                                "App: Settings (com.apple.Preferences)"]
         d.session.tree = [button("e1", "Wi-Fi")]  # the app didn't change: a change list, e2 is gone
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '- button "Bluetooth"']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '- button "Bluetooth"']
         await finish(stop, task)
     run(go)
 
@@ -784,7 +796,7 @@ def test_after_a_person_acted_the_answer_is_the_full_list_with_the_note():
         await d.run_tool("a", "look", {"screenshot": False})
         await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        lines = r["text"].splitlines()
+        lines = unsettled(r)
         assert lines[1].startswith("Screen 400x800") and lines[-1] == "Note: a person used the phone since your last look."
         await finish(stop, task)
     run(go)
@@ -797,7 +809,7 @@ def test_after_a_dropped_connection_the_answer_is_the_full_list():
         await d.run_tool("a", "look", {"screenshot": False})
         d.control.clients["a"].dropped = True
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})
-        assert r["text"].splitlines()[1].startswith("Screen 400x800")
+        assert unsettled(r)[1].startswith("Screen 400x800")
         assert d.control.clients["a"].dropped is False
         await finish(stop, task)
     run(go)
@@ -832,12 +844,12 @@ def test_changes_are_measured_against_the_last_answer_not_the_last_full_list():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 160, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,160 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,160 100x40 [tap]']
         d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 60, 100, 40))]  # back where the look had it
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,60 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,60 100x40 [tap]']
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # and now nothing moved
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
 
@@ -850,7 +862,7 @@ def test_a_silent_re_read_does_not_hide_what_changed_from_the_agent():
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Late", "late", rect=(10, 60, 100, 40))]
         d.control.clock.t += 5.0
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})  # re-reads, then answers
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '+ e2 button "Late" id=late @10,60 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '+ e2 button "Late" id=late @10,60 100x40 [tap]']
         await finish(stop, task)
     run(go)
 
@@ -862,7 +874,7 @@ def test_an_action_that_leaves_nothing_on_screen_answers_with_the_full_list_and_
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = []
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == [
+        assert unsettled(r)[1:] == [
             "Screen 400x800 pt @3x · 0 elements", "App: Example (com.example.app)",
             "(nothing visible; the app may still be loading)",
             "Note: something outside the app (a system sheet or browser) may cover it."]
@@ -879,7 +891,7 @@ def test_an_empty_screen_before_and_after_is_no_change_not_a_note():
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
 
@@ -892,7 +904,7 @@ def test_a_full_list_is_never_a_change_block_even_when_the_screen_is_empty():
         await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
         d.session.tree = []
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        assert r["text"].splitlines()[1:] == [
+        assert unsettled(r)[1:] == [
             "Screen 400x800 pt @3x · 0 elements", "App: Example (com.example.app)",
             "(nothing visible; the app may still be loading)",
             "Note: a person used the phone since your last look.",
@@ -900,7 +912,7 @@ def test_a_full_list_is_never_a_change_block_even_when_the_screen_is_empty():
         d.session.tree = [button("e1", "OK", "ok-button")]
         await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        assert "Same screen." not in r["text"] and r["text"].splitlines()[1].startswith("Screen 400x800")
+        assert "Same screen." not in r["text"] and unsettled(r)[1].startswith("Screen 400x800")
         assert "may cover it" not in r["text"]  # the list wasn't non-empty -> empty
         await finish(stop, task)
     run(go)
@@ -930,15 +942,15 @@ def test_an_alert_appearing_changing_and_going_heads_the_change_block():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.last_alert = _alert()
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", 'Alert: "Allow Notifications?" [Allow] [Don\'t Allow]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", 'Alert: "Allow Notifications?" [Allow] [Don\'t Allow]']
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
         d.session.last_alert = _alert("Allow Location?", ("OK",))
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[2] == 'Alert: "Allow Location?" [OK]'
+        assert unsettled(r)[2] == 'Alert: "Allow Location?" [OK]'
         d.session.last_alert = None
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "Alert: gone"]
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "Alert: gone"]
         await finish(stop, task)
     run(go)
 
@@ -951,11 +963,11 @@ def test_the_keyboard_showing_and_hiding_heads_the_change_block_before_the_eleme
         d.session.last_keyboard = True
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:4] == ["Same screen. Changes:", "Keyboard: shown",
+        assert unsettled(r)[1:4] == ["Same screen. Changes:", "Keyboard: shown",
                                                '+ e2 button "Done" id=done @10,60 100x40 [tap]']
         d.session.last_keyboard = False
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:3] == ["Same screen. Changes:", "Keyboard: hidden"]
+        assert unsettled(r)[1:3] == ["Same screen. Changes:", "Keyboard: hidden"]
         await finish(stop, task)
     run(go)
 
@@ -967,7 +979,7 @@ def test_a_look_records_the_alert_and_keyboard_so_they_are_not_news_afterwards()
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
 
@@ -1018,8 +1030,233 @@ def test_after_a_scroll_the_old_refs_of_identical_buttons_are_not_found():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = rows("BCD")  # one row up: the buttons sit where they sat
         r = await d.run_tool("a", "scroll", {"direction": "down"})
-        assert r["text"].splitlines()[1].startswith("Screen")  # nothing is known to carry over: the full list
+        assert unsettled(r)[1].startswith("Screen")  # nothing is known to carry over: the full list
         view = d.control.client("a")
         assert [x.ref for x in view.items if x.label == "Edit"] == ["e4", "e5", "e6"]  # renumbered, and shown
+        await finish(stop, task)
+    run(go)
+
+
+TAP = {"target": {"x": 5, "y": 5}}
+
+
+class WatchingSession(FakeSession):
+    """Records how many stream watchers the pump had while a tap ran."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.daemon = None
+        self.viewers: list = []
+
+    async def tap(self, *args, **kwargs):
+        self.viewers.append(self.daemon.pump.viewers)
+        return await super().tap(*args, **kwargs)
+
+
+def test_mark_is_where_the_stream_stands():
+    async def go():
+        d = make()
+        assert d._mark() == (0, None)
+        d.hub.publish(b"A")
+        assert d._mark() == (1, hashlib.sha1(b"A").digest())
+    run(go)
+
+
+def test_settle_ends_once_the_picture_is_still():
+    async def go():
+        d = make()
+        d.hub.publish(b"A")
+        seq, since = d._mark()
+        feeder = FrameFeeder(d.hub).start([b"B", b"C"], then=b"C")
+        seconds, changed = await d.settle(seq, still=0.05, cap=1.0, since=since)
+        assert changed and 0.04 <= seconds < 0.5
+        await feeder.stop()
+    run(go)
+
+
+def test_settle_reports_no_change_when_every_frame_is_the_same():
+    async def go():
+        d = make()
+        d.hub.publish(b"A")
+        seq, since = d._mark()
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        seconds, changed = await d.settle(seq, still=0.05, cap=1.0, since=since)
+        assert not changed and seconds < 0.5
+        await feeder.stop()
+    run(go)
+
+
+def test_settle_gives_up_at_the_cap_while_frames_keep_changing():
+    async def go():
+        d = make()
+        d.hub.publish(b"A")
+        seq, since = d._mark()
+        feeder = FrameFeeder(d.hub).start(churn=True)
+        seconds, changed = await d.settle(seq, still=0.05, cap=0.2, since=since)
+        assert changed and 0.15 <= seconds < 0.6
+        await feeder.stop()
+    run(go)
+
+
+def test_settle_without_frames_falls_back_to_a_short_sleep():
+    async def go():
+        d = make(settle_first_frame=0.02, settle_fallback=0.03)
+        seconds, changed = await d.settle(0, cap=2.0)
+        assert changed and 0.04 <= seconds < 0.5
+    run(go)
+
+
+def test_an_unchanged_screen_is_answered_without_reading_the_tree():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", TAP)
+        text = r["text"].splitlines()
+        assert text[1:3] == ["Same screen. Changes:", "No visible change."] and SETTLED.fullmatch(text[-1])
+        assert d.session.calls.count("snapshot") == reads and d.session.calls.count("refresh") == 0
+        assert [e.ref for e in d.control.client("a").items] == ["e1"]  # the agent's list stays current
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_changed_screen_reads_the_tree_and_answers_with_changes():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start([b"B"], then=b"B")
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 60, 100, 40))]
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", TAP)
+        text = r["text"].splitlines()
+        assert text[1] == "Same screen. Changes:" and text[2].startswith('+ e2 button "Done"')
+        assert SETTLED.fullmatch(text[-1]) and d.session.calls.count("snapshot") == reads + 1
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_settle_line_comes_after_the_changes_and_before_the_notes():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        r = await d.run_tool("a", "tap", TAP)
+        text = r["text"].splitlines()
+        assert text[-1].startswith("Note:") and SETTLED.fullmatch(text[-2])
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_full_list_is_followed_by_the_settle_line():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "tap", TAP)  # no look yet: the full list
+        text = r["text"].splitlines()
+        assert text[1].startswith("Screen 400x800") and SETTLED.fullmatch(text[-1])
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_unchanged_screen_still_reads_the_tree_when_the_agent_holds_no_current_list():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        r = await d.run_tool("a", "tap", TAP)  # the agent never looked: it needs the list
+        assert r["text"].splitlines()[1].startswith("Screen 400x800")
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_look_false_has_no_settle_line():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "tap", {**TAP, "look": False})
+        assert "Settled" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_tail_can_leave_out_the_settle_line():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        view = d.control.client("a")
+        r = await d._after(view, "Waited 1.0 s.", [], False, seconds=None)
+        assert r["text"] == "Waited 1.0 s.\nSame screen. Changes:\nNo visible change."
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_list_is_current_while_the_stream_shows_the_same_picture():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        view = d.control.client("a")
+        d.control.clock.t += 5.0  # older than LIVE_AGE
+        assert d._current(view)  # the newest frame is the one the list was read against
+        d.hub.publish(b"B")
+        assert not d._current(view)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_stream_is_held_while_a_tool_runs_and_kept_for_its_linger():
+    async def go():
+        s = WatchingSession()
+        d = make(s, stream_linger=5.0)
+        s.daemon = d
+        stop, task = await started(d)
+        await d.run_tool("a", "tap", {**TAP, "look": False})
+        assert s.viewers == [1] and d.pump.viewers == 0
+        pump_task = d.pump._task
+        assert pump_task is not None and not pump_task.done()  # the pump's own linger keeps it open
+        await d.run_tool("a", "tap", {**TAP, "look": False})
+        assert d.pump._task is pump_task  # the next tool reuses the connection
+        await d.pump.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_stream_closes_after_its_linger_once_tools_stop():
+    async def go():
+        d = make(stream_linger=0.05)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await asyncio.wait_for(d.pump._task, 2)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_fixed_sleeps_are_gone():
+    assert not hasattr(daemon_module, "SETTLE")
+    assert (daemon_module.STILL, daemon_module.CAP, daemon_module.LONG_CAP) == (0.1, 2.0, 4.0)
+    assert daemon_module.ACTIONS["tap"][1] == daemon_module.CAP
+    assert daemon_module.ACTIONS["launch_app"][1] == daemon_module.LONG_CAP
+    assert daemon_module.ACTIONS["open_url"][1] == daemon_module.LONG_CAP
+
+
+def test_the_list_is_not_current_without_a_stream_to_say_so():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})  # no frame at all
+        d.control.clock.t += 5.0
+        assert not d._current(d.control.client("a"))
         await finish(stop, task)
     run(go)

@@ -20,6 +20,32 @@ class Clock:
         await asyncio.sleep(0)
 
 
+class FrameFeeder:
+    """Publishes fake frames into a FrameHub from a background task, a few ms apart.
+    `frames` go out once; then `then` repeats forever, or (churn=True) a new picture every time."""
+
+    def __init__(self, hub, every: float = 0.004) -> None:
+        self.hub, self.every, self._task = hub, every, None
+
+    def start(self, frames=(), then=None, churn: bool = False) -> "FrameFeeder":
+        async def feed():
+            for frame in frames:
+                self.hub.publish(frame)
+                await asyncio.sleep(self.every)
+            i = 0
+            while then is not None or churn:
+                self.hub.publish(b"churn%d" % i if churn else then)
+                i += 1
+                await asyncio.sleep(self.every)
+        self._task = asyncio.create_task(feed())
+        return self
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
 class FakeDevice:
     def __init__(self) -> None:
         self.rsd = "tunnel"

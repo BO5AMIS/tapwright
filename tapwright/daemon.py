@@ -3,6 +3,7 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
+import hashlib
 import io
 import math
 import time
@@ -18,8 +19,11 @@ from .stream import PRESETS, FrameHub, StreamPump
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
 BUTTONS = ("home", "volumeUp", "volumeDown")
-SETTLE = 0.6  # seconds a screen gets to settle after an action, before the look that follows
+STILL = 0.1  # seconds without a changed frame before a screen counts as still (docs/AGENT-TOOLS.md §6)
+CAP = 2.0  # the longest an action's answer waits for the screen
+LONG_CAP = 4.0  # the same after launching an app or opening a URL
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
+FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -40,6 +44,10 @@ def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | Non
     and the picture, if any, with its size."""
     text = "\n".join([*lines, *(f"Note: {n}" for n in notes or [])])
     return {"text": text, "image": base64.b64encode(image).decode() if image else None, "image_size": _size(image)}
+
+
+def settled_line(seconds: float) -> str:
+    return f"Settled in {seconds:.2f} s."
 
 
 def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...]] | None:
@@ -95,18 +103,18 @@ def _field(a: dict) -> ui.Target | None:
 
 # Agent actions: tool -> (what it does on the session, seconds to settle before the look; None: no look)
 ACTIONS = {
-    "launch_app": (lambda s, a: s.launch(a["bundle_id"]), 2.0),
+    "launch_app": (lambda s, a: s.launch(a["bundle_id"]), LONG_CAP),
     "terminate_app": (lambda s, a: s.terminate(a["bundle_id"]), None),
-    "tap": (lambda s, a: s.tap(_target(a)), SETTLE),
-    "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), SETTLE),
+    "tap": (lambda s, a: s.tap(_target(a)), CAP),
+    "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), CAP),
     "type_text": (lambda s, a: s.type_text(a["text"], replace=bool(a.get("replace")), submit=bool(a.get("submit")),
-                                           target=_field(a)), SETTLE),
-    "scroll": (lambda s, a: s.scroll(a.get("direction", "down"), float(a.get("amount", 0.5))), SETTLE),
+                                           target=_field(a)), CAP),
+    "scroll": (lambda s, a: s.scroll(a.get("direction", "down"), float(a.get("amount", 0.5))), CAP),
     "swipe": (lambda s, a: s.swipe(float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"]),
-                                   int(float(a.get("seconds", 0.35)) * 1000)), SETTLE),
-    "press_button": (lambda s, a: s.press_button(a["name"]), SETTLE),
-    "alert": (lambda s, a: s.alert(a["action"]), SETTLE),
-    "open_url": (lambda s, a: s.open_url(a["url"]), 1.5),
+                                   int(float(a.get("seconds", 0.35)) * 1000)), CAP),
+    "press_button": (lambda s, a: s.press_button(a["name"]), CAP),
+    "alert": (lambda s, a: s.alert(a["action"]), CAP),
+    "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
 MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "launch_app", "open_url", "press_button")  # identical elements can't be told apart after these
 READS = ("look", "list_apps", "wait")
@@ -129,8 +137,12 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
 class Daemon:
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
-                 stream_linger: float = 30.0, stream_retry: float = 1.0) -> None:
+                 stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
+                 settle_first_frame: float = 1.0, settle_fallback: float = 0.6) -> None:
         self.session = session
+        # settle: how long a still screen is quiet, how long to wait for a first frame, and the
+        # blind sleep used when the stream gives no frames at all
+        self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
         self.control = control or Controller()
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log)
@@ -310,7 +322,10 @@ class Daemon:
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged)."""
         self.last_request = time.monotonic()
         try:
-            return await self._run_tool(client_id, name, args)
+            # The stream is held open for the length of every tool call; the pump's own linger keeps
+            # it open for 30 s after the last one, so the settle always has frames to read.
+            async with self.pump.watching():
+                return await self._run_tool(client_id, name, args)
         except Refused:
             raise
         except DeviceError as e:  # WebDriverAgent or the link answered with an error; not our bug
@@ -349,7 +364,7 @@ class Daemon:
         by_lookup = target is not None and (target.kind in ("id", "label", "text")
                                             or (name == "type_text" and target.kind == "point"))
 
-        fresh, full = [True], [False]
+        fresh, full, box = [True], [False], {}
 
         async def act():
             self._require_connected()
@@ -367,14 +382,16 @@ class Daemon:
                 # Resolve on the live tree. The agent's refs follow their elements onto it, so `e3` still
                 # means the same element when it moved. The view's freshness doesn't change: a person's
                 # action still makes refs stale, and `view.shown` (what the agent was told) stays put.
+                mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
                 await s.refresh()
                 known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
                 held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
                 view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
                 view.top_ref = max(view.top_ref, changes.highest(view.items))
-                view.read_at = self.control.clock()  # the next target in the same window needn't read again
+                view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
                 s.items = view.items
             s.last_point = None
+            box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             return await call(s, args)
 
         try:
@@ -391,11 +408,58 @@ class Daemon:
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
             return _answer([str(result)], notes)
-        await asyncio.sleep(settle)
-        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT)
+        mark = box["mark"]
+        seconds, changed = await self.settle(mark[0], cap=settle, since=mark[1])
+        if not changed and not (full[0] or view.moved):
+            # nothing on screen differs from the start of the action, and the agent's list is current:
+            # no tree read, and the list stays as it is
+            view.read_at, view.read_mark = self.control.clock(), self._mark()
+            return _answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE, settled_line(seconds)], notes)
+        return await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, seconds)
+
+    async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
+                     since: bytes | None = None) -> tuple[float, bool]:
+        """Wait until the screen is still, as the stream shows it: `still` seconds without a frame whose
+        bytes differ from the one before, but at most `cap`. Returns (seconds waited, changed).
+        `changed` means a frame differs from the one at `after_seq` (`since`, its SHA-1 from _mark;
+        None means there was no frame then, so any frame counts). With no frames at all (the stream
+        is down or still opening) it sleeps `settle_fallback` and reports changed=True."""
+        still = self.settle_still if still is None else still
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline, last_change = started + cap, started
+        seq, previous, changed, seen = after_seq, since, False, False
+        while True:
+            now = loop.time()
+            left = deadline - now
+            if left <= 0:
+                break
+            if seen:
+                wait = min(left, still - (now - last_change))
+                if wait <= 0:
+                    break
+            else:
+                wait = min(left, self.settle_first_frame)
+            frame = await self.hub.next_after(seq, timeout=wait)
+            if frame is None:
+                if not seen:
+                    await asyncio.sleep(self.settle_fallback)
+                    return loop.time() - started, True
+                break  # the stream went quiet: the picture is still
+            seen, seq = True, frame.seq
+            digest = hashlib.sha1(frame.jpeg).digest()
+            if digest != previous:
+                changed, previous, last_change = True, digest, loop.time()
+        return loop.time() - started, changed
+
+    def _mark(self) -> tuple[int, bytes | None]:
+        """(seq, SHA-1 of the newest frame): where the stream stood at this moment."""
+        frame = self.hub.latest
+        return (frame.seq, hashlib.sha1(frame.jpeg).digest()) if frame else (0, None)
 
     async def _look(self, view, screenshot: bool, lines: list, notes: list) -> dict:
         async def read():
+            view.read_mark = self._mark()
             text, image = await self.session.look(screenshot=screenshot)
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
@@ -411,12 +475,16 @@ class Daemon:
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return _answer([*lines, text], notes, image)
 
-    async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False) -> dict:
+    async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False,
+                     seconds: float | None = None) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
-        (`view.shown`), or the full list when the app changed or `full`. Refs follow their elements."""
+        (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
+        `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
         s = self.session
+        tail = [] if seconds is None else [settled_line(seconds)]
 
         async def read():
+            view.read_mark = self._mark()
             snap = await s.snapshot()
             app_changed = snap.app is not None and view.app is not None and snap.app != view.app
             head = _furniture(view, snap.tree.alert, snap.tree.keyboard)
@@ -427,7 +495,7 @@ class Daemon:
             snap, up = await self._read(read)
         except Exception as e:
             view.moved = True  # no list came back: the screen has probably changed
-            return _answer([result], [*notes, f"couldn't look afterwards: {e}."])
+            return _answer([result, *tail], [*notes, f"couldn't look afterwards: {e}."])
         covered = not snap.tree.items and bool(view.shown)  # the agent saw elements; now there are none
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
@@ -437,8 +505,8 @@ class Daemon:
         if up.full:
             tree = snap.tree
             head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more)
-            return _answer([result, head], [*notes, *([NOTE_COVERED] if covered else [])])
-        return _answer([result, *up.lines], notes)
+            return _answer([result, head, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+        return _answer([result, *up.lines, *tail], notes)
 
     def _current(self, view) -> bool:
         """Is the agent's last list still the screen? Not if a person or another agent acted since
@@ -449,8 +517,12 @@ class Daemon:
         return self.control.clock() - view.read_at < LIVE_AGE or self._screen_unchanged(view)
 
     def _screen_unchanged(self, view) -> bool:
-        """Task 5 replaces this: true when the stream shows no change since the list was read."""
-        return False
+        """Does the stream show the picture the list was read against? Only a fresh newest frame that
+        matches the one at read time says so; with no stream the answer is no, and the list is read again."""
+        frame, (_, was) = self.hub.latest, view.read_mark
+        if frame is None or was is None or time.time() * 1000 - frame.at > FRESH_FRAME * 1000:
+            return False
+        return hashlib.sha1(frame.jpeg).digest() == was
 
     async def _read(self, fn):
         """A read through the queue; after a dropped line, once more when reconnected."""
