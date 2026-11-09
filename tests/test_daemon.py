@@ -2684,7 +2684,7 @@ def test_wait_for_answers_from_its_last_poll_without_reading_again():
         scripted(d, loading, loading, done)
         before = d.session.calls.count("refresh")
         r = await d.run_tool("a", "wait_for", {"text": "all done"})
-        assert d.session.calls.count("refresh") - before == 3 and d.session.calls.count("refresh") == 1 and d.session.calls.count("app") == 1  # the look
+        assert d.session.calls.count("refresh") - before == 3 and d.session.calls.count("snapshot") == 0
         assert d.session.calls.count("app") == 1  # the foreground app is looked up once, for the answer
         assert r["text"].splitlines()[2].startswith("+ e2 text")
         assert [e.ref for e in d.control.client("a").items] == ["e1", "e2"]
