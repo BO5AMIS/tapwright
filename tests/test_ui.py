@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import pytest
+
 from tapwright import ui
+from tapwright.device import DeviceError
 
 DATA = Path(__file__).parent / "data"
 SCREEN = (430.0, 932.0)
@@ -166,8 +169,9 @@ def test_visibility_comes_from_the_rect():
     assert "Accessibility" not in [e.label for e in tree.items]  # y=1000 is below the 932 pt screen
     flat = node("Other", rect=(0, 0, 430, 932), children=[
         node("Button", "Zero", rect=(10, 10, 0, 40)), node("Button", "Left", rect=(-120, 10, 100, 40)),
-        node("Button", "Right", rect=(430, 10, 100, 40)), node("Button", "Edge", rect=(-50, 10, 60, 40))])
-    assert [e.label for e in ui.elements(xml(flat), SCREEN)] == ["Edge"]
+        node("Button", "Right", rect=(430, 10, 100, 40)), node("Button", "Edge", rect=(-10, 10, 60, 40)),
+        node("Button", "Sliver", rect=(-50, 10, 60, 40))])
+    assert [e.label for e in ui.elements(xml(flat), SCREEN)] == ["Edge"]  # the centre must be on screen
 
 
 def test_the_list_holds_200_and_counts_the_rest():
@@ -182,3 +186,55 @@ def test_direction_marks_are_dropped():
     # iOS Calculator, measured: the result is a StaticText labelled "‎42".
     e = ui.read(load("calculator"), SCREEN).items[0]
     assert e.label == "42" and e.line() == 'e1 text "42" @326,294 88x87'
+
+
+def test_a_scroll_container_clips_what_is_inside_it():
+    table = node("Table", name="list", rect=(0, 300, 430, 400), children=[
+        node("Cell", "Scrolled above", rect=(16, 200, 398, 52)),  # inside the screen, outside the table
+        node("Cell", "Half hidden", rect=(16, 280, 398, 52)),  # centre y=306: inside the table
+        node("Cell", "Centre clipped", rect=(16, 260, 398, 52)),  # centre y=286: above the table
+        node("Cell", "Visible", rect=(16, 400, 398, 52)),
+        node("Cell", "Past the bottom", rect=(16, 750, 398, 52))])
+    labels = [e.label for e in ui.elements(xml(node("Other", rect=(0, 0, 430, 932), children=[table])), SCREEN)]
+    assert labels == ["", "Half hidden", "Visible"]  # "" is the table itself
+
+
+def test_the_clip_applies_to_web_views_and_collection_views():
+    for kind in ("WebView", "CollectionView", "ScrollView"):
+        view = node(kind, name="v", rect=(0, 300, 430, 400), children=[node("Button", "Above", rect=(0, 100, 50, 50))])
+        assert "Above" not in [e.label for e in ui.elements(xml(view), SCREEN)], kind
+
+
+def test_find_by_id_uses_the_raw_name_even_when_it_equals_the_label():
+    e = one("Button", "Login", name="Login")
+    assert e.identifier == "" and e.name == "Login"  # not shown: it only mirrors the label
+    assert e.line() == 'e1 button "Login" @10,10 100x40 [tap]'
+    assert ui.find([e], id="Login") is e
+    assert ui.find([one("Button", "OK", name="ok-button")], id="ok-button").label == "OK"
+
+
+def test_control_characters_are_removed_before_parsing():
+    raw = '<A><XCUIElementTypeButton type="XCUIElementTypeButton" label="Hi&#x1;&#11;there' + chr(2) + '" x="0" y="0" width="50" height="50"/></A>'
+    assert [e.label for e in ui.elements(raw, SCREEN)] == ["Hithere"]
+    tab = '<A><XCUIElementTypeButton type="XCUIElementTypeButton" label="a&#9;b" x="0" y="0" width="50" height="50"/></A>'
+    assert ui.elements(tab, SCREEN)[0].label == "a	b"  # tab, newline and return stay legal
+
+
+def test_an_unreadable_tree_is_a_device_error():
+    with pytest.raises(DeviceError, match="unreadable element tree"):
+        ui.read('<AppiumAUT><XCUIElementTypeButton type="XCUIElementTypeButton" label="x', SCREEN)
+
+
+def test_a_bad_rect_counts_as_zero_size():
+    for bad in ({"width": "inf"}, {"x": "nan"}, {"height": "1e999"}, {"width": "wide"}):
+        attrs = {"x": "0", "y": "0", "width": "50", "height": "50", **bad}
+        n = '<XCUIElementTypeButton type="XCUIElementTypeButton" label="b" ' + " ".join(
+            f'{k}="{v}"' for k, v in attrs.items()) + "/>"
+        assert ui.elements(n, SCREEN) == [], bad
+    assert ui._rect(ET.fromstring('<A x="inf" y="0" width="5" height="5"/>')) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_traits_are_split_on_commas_and_stripped():
+    assert one("StaticText", "General", traits="StaticText, Header").role == "header"
+    assert one("Tab", "A", traits="Button, Selected").selected
+    assert not one("Button", "B", traits="Button, NotEnabled").enabled

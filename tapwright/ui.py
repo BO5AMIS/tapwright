@@ -8,10 +8,12 @@ Format and vocabulary: docs/AGENT-TOOLS.md §3.
 """
 import json
 import math
+import re
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
 from .control import Refused
+from .device import DeviceError
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
 # or focus attribute, so visibility comes from the rect and a focused input can't be known.
@@ -28,6 +30,11 @@ CONTAINERS = {"Application", "Window", "Other", "Group", "ScrollView", "Table", 
               "NavigationBar", "Toolbar", "StatusBar", "Keyboard", "WebView", "Sheet", "Alert"}
 MAX_ELEMENTS = 200
 TEXT_LIMIT = 80
+# Views that clip their children: what is scrolled out of them is still in the tree, but not on screen.
+CLIPPING = {"ScrollView", "Table", "CollectionView", "WebView"}
+# Characters XML 1.0 forbids, raw or as references; WebDriverAgent sometimes sends them in labels.
+_RAW_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_CONTROL_REFS = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
 
 # XCUIElementType (without the prefix) -> role, docs/AGENT-TOOLS.md §3.3. Anything else: the type lowercased.
 # A StaticText with the Header trait is a `header`; a Button inside a TabBar is a `tab`.
@@ -67,6 +74,7 @@ class Element:
     type: str = ""  # the XCUIElementType without its prefix
     in_alert: bool = False  # inside an OS alert
     focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
+    name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
 
     @property
     def x(self) -> float:
@@ -136,12 +144,20 @@ class Tree:
 
 
 def _rect(node: ET.Element) -> tuple[float, float, float, float]:
-    def num(key: str) -> float:
-        try:
-            return float(node.get(key, 0))
-        except ValueError:
-            return 0.0
-    return num("x"), num("y"), num("width"), num("height")
+    """The node's frame; anything unreadable (not a number, inf, nan) makes it zero-size."""
+    try:
+        rect = tuple(float(node.get(key, 0)) for key in ("x", "y", "width", "height"))
+    except ValueError:
+        return 0.0, 0.0, 0.0, 0.0
+    return rect if all(math.isfinite(v) for v in rect) else (0.0, 0.0, 0.0, 0.0)  # type: ignore[return-value]
+
+
+def _clean(source: str) -> str:
+    """The XML without characters XML 1.0 forbids."""
+    def drop(m: re.Match) -> str:
+        code = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+        return "" if code < 0x20 and code not in (9, 10, 13) else m.group(0)
+    return _CONTROL_REFS.sub(drop, _RAW_CONTROLS.sub("", source))
 
 
 def _kind(node: ET.Element) -> str:
@@ -155,17 +171,21 @@ def _alert(node: ET.Element) -> Alert:
 
 def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
     """Flatten WDA's XML tree into the elements worth showing, in reading order, numbered e1...
-    Skips what has no size or lies off the screen, and the keyboard's keys unless `keyboard`."""
+    Skips what has no size or whose centre (where a tap would land) is clipped by the screen or a
+    scroll container, and the keyboard's keys unless `keyboard`. Raises DeviceError on a broken tree."""
     tree = Tree([])
 
-    def walk(node: ET.Element, in_keyboard: bool, in_tab_bar: bool, in_alert: bool) -> None:
+    def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
+             in_alert: bool) -> None:
         kind = _kind(node)
         x, y, w, h = rect = _rect(node)
         label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
-        traits = set((node.get("traits") or "").split(","))
-        visible = w > 0 and h > 0
-        if screen and (x + w <= 0 or y + h <= 0 or x >= screen[0] or y >= screen[1]):
-            visible = False
+        traits = {t.strip() for t in (node.get("traits") or "").split(",")}
+        left, top, right, bottom = clip
+        if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
+            return  # nothing in this subtree is on screen
+        cx, cy = x + w / 2, y + h / 2
+        visible = w > 0 and h > 0 and left <= cx < right and top <= cy < bottom
         if kind == "Alert" and visible and tree.alert is None:
             tree.alert = _alert(node)
         if kind == "Keyboard" and visible:
@@ -191,13 +211,20 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 checked = (value == "1") if role == "switch" else None
                 tree.items.append(Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
                                           "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind,
-                                          in_alert))
+                                          in_alert, False, name))
             else:
                 tree.more += 1
+        if kind in CLIPPING:
+            clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
         for child in node:
-            walk(child, in_keyboard, in_tab_bar or kind == "TabBar", in_alert)
+            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert)
 
-    walk(ET.fromstring(source), False, False, False)
+    inf = math.inf
+    try:
+        root = ET.fromstring(_clean(source))
+    except ET.ParseError as e:
+        raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
     return tree
 
 
@@ -241,7 +268,7 @@ def find(items: list[Element], ref: str | None = None, label: str | None = None,
                 return e
         raise NotFound(f"no {ref} on the last screen; look again")
     if id:
-        hits = [e for e in items if e.identifier == id]
+        hits = [e for e in items if id in (e.name, e.identifier)]
     elif label:
         want = label.strip().lower()
         hits = [e for e in items if e.label.lower() == want or e.value.lower() == want]
