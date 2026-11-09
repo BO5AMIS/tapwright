@@ -229,7 +229,7 @@ def test_a_drop_noticed_while_reconnecting_does_not_spin():
     run(go)
 
 
-def test_input_queued_during_a_reconnect_waits_for_it():
+def test_an_agent_look_during_a_reconnect_waits_for_it():
     async def go():
         s = FakeSession()
         d = make(s)
@@ -237,10 +237,26 @@ def test_input_queued_during_a_reconnect_waits_for_it():
         s.ensure_delay = 0.1
         d.lost("gone")
         await asyncio.sleep(0.03)
-        assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["texts"][0].startswith("screen")
         calls = s.calls
-        assert max(i for i, c in enumerate(calls) if c == "ensure") < max(i for i, c in enumerate(calls) if c == "tap")
-        assert calls.count("tap") == 1
+        assert max(i for i, c in enumerate(calls) if c == "ensure") < max(i for i, c in enumerate(calls) if c == "look")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_persons_tap_during_a_reconnect_is_refused_at_once():
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        s.ensure_delay = 0.1
+        d.lost("gone")
+        await asyncio.sleep(0.03)
+        e = await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        assert e["type"] == "error" and e["code"] == "reconnecting"
+        await asyncio.sleep(0.3)
+        assert "tap" not in s.calls
         await finish(stop, task)
     run(go)
 

@@ -339,8 +339,8 @@ class Daemon:
                 return None
             if kind not in ("gesture", "scroll", "text", "key", "button"):
                 return None  # "overlay" comes in part 2; anything else is unknown
-            if self.state == "locked":
-                return {"type": "error", "code": "locked",
+            if self.state != "live":
+                return {"type": "error", "code": "locked" if self.state == "locked" else "reconnecting",
                         "message": f"not connected to the phone ({self.detail or self.state})"}
             run, action, point = self._person_action(kind, message)
             await self.control.person(lambda: self._connected_only(run))
