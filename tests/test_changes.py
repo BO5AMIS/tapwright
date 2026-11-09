@@ -195,3 +195,10 @@ def test_nothing_left_of_a_list_is_the_full_list_not_a_column_of_gone_lines():
     up = changes.update(old, [])
     assert up.full and up.items == [] and up.lines == [] and up.top == 0
     assert changes.update([], []).lines == [changes.SAME_SCREEN, changes.NO_CHANGE]
+
+
+def test_full_forces_the_full_list_even_for_an_empty_screen():
+    up = changes.update([], [], full=True)
+    assert up.full and up.lines == [] and up.items == []
+    up = changes.update([el("e1", label="A")], [el("e1", label="A")], full=True)
+    assert up.full and refs(up.items) == ["e1"]

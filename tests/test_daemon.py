@@ -882,3 +882,37 @@ def test_an_empty_screen_before_and_after_is_no_change_not_a_note():
         assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
+
+
+def test_a_full_list_is_never_a_change_block_even_when_the_screen_is_empty():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        d.session.tree = []
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        assert r["text"].splitlines()[1:] == [
+            "Screen 400x800 pt @3x · 0 elements", "App: Example (com.example.app)",
+            "(nothing visible; the app may still be loading)",
+            "Note: a person used the phone since your last look.",
+            "Note: something outside the app (a system sheet or browser) may cover it."]
+        d.session.tree = [button("e1", "OK", "ok-button")]
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        assert "Same screen." not in r["text"] and r["text"].splitlines()[1].startswith("Screen 400x800")
+        assert "may cover it" not in r["text"]  # the list wasn't non-empty -> empty
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_scale_is_read_once_per_connection_at_connect():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        assert d.session.scale_reads == 1
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        assert d.session.scale_reads == 1
+        await finish(stop, task)
+    run(go)

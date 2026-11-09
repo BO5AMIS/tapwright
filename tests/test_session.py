@@ -168,6 +168,7 @@ def test_look_reads_the_tree_the_app_and_the_scale(phone):
         return await original(method, path, payload, timeout)
     phone.http = http
     s = Session(phone)
+    asyncio.run(s.read_scale())  # at connect
     text, image = asyncio.run(s.look(screenshot=False))
     assert image is None and s.scale == 3.0
     assert text.splitlines() == ["Screen 430x932 pt @3x · 1 elements", "App: Settings (com.apple.Preferences)",
@@ -239,6 +240,7 @@ def test_snapshot_is_the_tree_the_app_and_the_scale_and_sets_items(phone):
         return await original(method, path, payload, timeout)
     phone.http = http
     s = Session(phone)
+    asyncio.run(s.read_scale())
     snap = asyncio.run(s.snapshot())
     assert [e.line() for e in snap.tree.items] == ['e1 button "Wi-Fi" id=wifi @16,215 398x52 [tap]']
     assert snap.app == ("Settings", "com.apple.Preferences") == s.app and snap.scale == 2.0
@@ -262,3 +264,29 @@ def test_the_scale_comes_from_a_screenshot_when_the_screen_endpoint_has_none(pho
     count = len(phone.requests)
     asyncio.run(s.read_scale())
     assert len(phone.requests) == count  # read once
+
+
+def test_an_unknown_scale_is_remembered_and_snapshots_never_read_it(phone):
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        phone.requests.append((method, path, payload))
+        if path == "/session/S/wda/screen":
+            raise DeviceError("HTTP 404: unknown command")
+        if path == "/screenshot":
+            raise DeviceError("HTTP 500: no picture")
+        if path == ui_module.SOURCE_PATH:
+            return {"value": SETTINGS_TREE}
+        phone.requests.pop()  # the recorder notes it itself
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    assert asyncio.run(s.read_scale()) is None
+    paths = lambda: [p for _, p, _ in phone.requests]  # noqa: E731
+    assert paths().count("/screenshot") == 1
+    for _ in range(2):
+        text, _ = asyncio.run(s.look(screenshot=False))
+    assert paths().count("/screenshot") == 1 and paths().count("/session/S/wda/screen") == 1
+    assert text.splitlines()[0] == "Screen 430x932 pt · 1 elements"
+    asyncio.run(s.read_scale(refresh=True))  # a new connection reads it again
+    assert paths().count("/screenshot") == 2

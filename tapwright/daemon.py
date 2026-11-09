@@ -236,7 +236,7 @@ class Daemon:
             else:
                 await s.ensure()
             await s.settings(PRESETS[self.preset])
-            await s.read_scale()  # once per connection, so every header says @3x, not only SpringBoard's
+            await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
@@ -400,15 +400,14 @@ class Daemon:
         async def read():
             snap = await s.snapshot()
             app_changed = snap.app is not None and view.app is not None and snap.app != view.app
-            up = changes.update([] if full else view.items, snap.tree.items, app_changed, view.top_ref,
-                                None if full else view.shown)
+            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full)
             return snap, up
         try:
             snap, up = await self._read(read)
         except Exception as e:
             view.moved = True  # no list came back: the screen has probably changed
             return _answer([result], [*notes, f"couldn't look afterwards: {e}."])
-        covered = up.full and not up.items and bool(view.shown) and not full
+        covered = not snap.tree.items and bool(view.shown)  # the agent saw elements; now there are none
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),

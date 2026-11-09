@@ -121,16 +121,17 @@ class Update:
 
 
 def update(old: list[Element], new: list[Element], app_changed: bool = False, used: int = 0,
-           shown: list[Element] | None = None) -> Update:
+           shown: list[Element] | None = None, full: bool = False) -> Update:
     """After an action: carry the refs over, and say what changed. The full list instead (renumbered from
     e1, so every older ref is invalid) when the app changed, when there was no list before, or when more
     than max(8, half the new list) of the elements changed, or when nothing is left of a list that had
     elements (a column of `-` lines would only hide that the screen is covered).
     `old` is the list whose refs carry; `shown` is what the agent was last told, when a silent re-read
-    moved `old` past it: the changes are measured against that, so nothing it hasn't heard of is lost."""
+    moved `old` past it: the changes are measured against that, so nothing it hasn't heard of is lost.
+    `full` forces the full list (a person acted, the line dropped, the agent never looked)."""
     carried = carry_refs(old, new, used)
     base = old if shown is None else shown
     lines, count = _changes(base, carried)
-    if app_changed or (not base and bool(new)) or (bool(base) and not new) or count > max(FULL_MIN, len(new) / 2):
+    if full or app_changed or (not base and bool(new)) or (bool(base) and not new) or count > max(FULL_MIN, len(new) / 2):
         return Update(list(new), True, [], highest(new))
     return Update(carried, False, [SAME_SCREEN, *lines], max(used, highest(carried)))

@@ -25,7 +25,8 @@ class Session:
         self.device = device
         self.sid = None
         self.screen = (390.0, 844.0)
-        self.scale: float | None = None  # pixels per point, read once; None until known
+        self.scale: float | None = None  # pixels per point, read once per connection; None while unknown
+        self.scale_read = False  # whether that read has happened, so an unknown scale isn't asked for again
         self.items: list[ui.Element] = []
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
@@ -56,6 +57,7 @@ class Session:
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
         self.scale = self.app = None
+        self.scale_read = False
         self.items = []
         self.last_point = None
 
@@ -84,10 +86,12 @@ class Session:
         bundle = str(info.get("bundleId") or "")
         return (str(info.get("name") or bundle), bundle) if bundle else None
 
-    async def read_scale(self) -> float | None:
+    async def read_scale(self, refresh: bool = False) -> float | None:
         """Pixels per point, read once: from WebDriverAgent's screen info, else (it only answers in some
         apps) from a screenshot's width against the screen's width in points (1290 / 430 = 3)."""
-        if self.scale is None:
+        if refresh or not self.scale_read:
+            self.scale_read = True  # the outcome stays, unknown included: snapshots never ask again
+            self.scale = None
             try:
                 value = (await self._call("GET", "/session/{sid}/wda/screen")).get("value") or {}
                 self.scale = float(value["scale"])
@@ -115,7 +119,7 @@ class Session:
         tree = ui.read(source, self.screen, keyboard=keyboard)
         self.items = tree.items
         self.app = await self._app()
-        return Snapshot(tree, self.app, await self.read_scale())
+        return Snapshot(tree, self.app, self.scale)
 
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
         """(text, jpeg bytes or None): the screen as elements, and as a picture."""
