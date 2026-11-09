@@ -320,7 +320,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if kind in COVERING_BARS:
             inside += (number,)  # a bar's own contents and the bar itself aren't covered by it
             if visible:
-                covering.append((number, Bar(kind, rect, Element("", role, label, identifier, rect=rect)
+                cover = _keyboard_view(node, parents, screen_rect) if kind == "Keyboard" else rect
+                covering.append((number, Bar(kind, cover, Element("", role, label, identifier, rect=cover)
                                              .line(ref=False, actions=False))))
         if kind == "Button" and in_tab_bar:
             role = "tab"
@@ -363,6 +364,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    parents = {child: up for up in root.iter() for child in up}
     walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
@@ -396,6 +398,22 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         else:
             tree.bottom_inset = max(tree.bottom_inset or 0.0, reach)
     return tree
+
+
+def _keyboard_view(keyboard: ET.Element, parents: dict[ET.Element, ET.Element],
+                   screen: tuple[float, float, float, float] | None) -> tuple[float, float, float, float]:
+    """Where the keyboard is drawn: its highest ancestor smaller than the screen. The strip of suggestions above
+    the keys and the globe and dictation keys below them are the keyboard's too, outside its own rect."""
+    rect = _rect(keyboard)
+    if screen is None:
+        return rect
+    up = parents.get(keyboard)
+    while up is not None and _kind(up) not in ("Window", "Application"):
+        r = _rect(up)
+        if r[2] * r[3] >= LAYER_COVER * screen[2] * screen[3]:
+            break
+        rect, up = r, parents.get(up)
+    return rect
 
 
 def _holds(rect: tuple[float, float, float, float], point: tuple[float, float]) -> bool:

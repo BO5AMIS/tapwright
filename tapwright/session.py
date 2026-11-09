@@ -213,9 +213,10 @@ class Session:
         return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False,
-                        target: ui.Target | None = None) -> str:
-        """Type into the target (tapped first to focus it), or into whatever has focus. A point
-        names the input under it, not a touch: with none there, nothing is typed."""
+                        target: ui.Target | None = None, at: tuple[float, float] | None = None) -> str:
+        """Type into the target (tapped first to focus it, at `at` when given: the part of it that shows),
+        or into whatever has focus. A point names the input under it, not a touch: with none there,
+        nothing is typed."""
         if target is not None and target.point is not None:
             field = ui.at_point(self.items, target.point, "input")
             if field is None:
@@ -224,7 +225,7 @@ class Session:
             target = ui.Target(ref=field.ref)
         if target is not None:
             what = self._target(target)[2]
-            await self.tap(target)
+            await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
             hit = ui.resolve(self.items, target)  # focus is what counts: with a hardware keyboard no software one shows
             if not isinstance(hit, tuple) and not await self._has_focus(hit):
                 raise Refused("not_actionable", f"no_action: {what} didn't take focus.")

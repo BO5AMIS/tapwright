@@ -395,6 +395,20 @@ def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
 
 
+def test_the_keyboard_covers_its_whole_view_not_just_its_keys():
+    """On the phone the keys start at y 631, but the keyboard's view (its suggestions strip, the globe and dictation
+    keys below) runs from 614 to the bottom: a switch at 612-640 was touched at 626, on the keyboard (2026-11-09)."""
+    base = node("Other", 0, 0, 430, 932, children=[node("Switch", 351, 612, 63, 28, "Switch", name="lab-switch")])
+    keys = node("Other", 0, 631, 430, 243, children=[
+        node("Keyboard", 0, 631, 430, 243, children=[node("Key", 4, 640, 43, 56, "q")])])
+    strip = node("Other", 0, 631, 430, 301, children=[node("Button", 2, 864, 81, 69, "Next keyboard")])
+    view = node("Other", 0, 614, 430, 318, children=[node("Other", 0, 614, 430, 318), keys, strip])
+    window = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), view])
+    switch = next(e for e in ui.elements(under_window(base, window), PHONE) if e.identifier == "lab-switch")
+    assert [(b.kind, b.rect) for b in switch.covered_by] == [("Keyboard", (0.0, 614.0, 430.0, 318.0))]
+    assert ui.visible_part(switch.rect, switch.covered_by, PHONE) == (351.0, 612.0, 63.0, 2.0)
+
+
 def test_a_layer_with_a_backdrop_but_nothing_to_act_on_hides_nothing():
     inner = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), node("StaticText", 20, 747, 390, 26, "Loading")])
     items = ui.elements(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[inner])), PHONE)

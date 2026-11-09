@@ -3120,6 +3120,53 @@ def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
     run(go)
 
 
+KEYBOARD = ui.Bar("Keyboard", (0.0, 614.0, 430.0, 318.0), "keyboard @0,614 430x318")
+
+
+def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_shows():
+    """toggle touched a switch's centre with the keyboard over it, so the keyboard got the touch and the shared
+    runner's toggles did nothing (2026-11-09). It now checks covers as tap does."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "switch", "Switch", "lab-switch", rect=(351, 612, 63, 28), checked=False,
+                            covered_by=(KEYBOARD,)),
+                         el("e2", "switch", "Tall", rect=(351, 590, 63, 50), checked=False, covered_by=(KEYBOARD,))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == ('covered: e1 switch "Switch" id=lab-switch checked=false @351,612 63x28 is covered by '
+                                'keyboard @0,614 430x318; scroll it into view first.')
+        assert "tap" not in d.session.calls
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e2"}, "look": False})
+        assert d.session.last_point == (382.5, 602.0)  # its centre (615) is under the keyboard: y 590-614 shows
+        assert r["text"] == 'Tapped e2 switch "Tall" @351,590 63x50 at its visible part (382, 602).'
+        await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert d.session.last_point == (382.5, 626.0)  # forced: its own centre
+        await finish(stop, task)
+    run(go)
+
+
+def test_typing_refuses_a_field_it_cannot_touch_and_focuses_one_where_it_shows():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "input", "Low", rect=(17, 590, 396, 50), covered_by=(KEYBOARD,)),
+                         el("e2", "input", "Lower", rect=(17, 700, 396, 46), covered_by=(KEYBOARD,)),
+                         el("e3", "input", "Off", rect=(17, 100, 396, 46), enabled=False)])
+        await d.run_tool("a", "type_text", {"target": {"ref": "e1"}, "text": "hi", "look": False})
+        assert d.session.last_point == (215.0, 602.0)  # the middle of y 590-614, above the keyboard
+        for ref, reason in (("e2", "covered: e2 input"), ("e3", "disabled: e3 input")):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "type_text", {"target": {"ref": ref}, "text": "hi"})
+            assert e.value.code == "not_actionable" and str(e.value).startswith(reason), ref
+        assert len(d.session.typed) == 1
+        await finish(stop, task)
+    run(go)
+
+
 # ---- review fixes (Task 8a, follow-up) ----
 def test_an_alert_with_text_only_still_covers_the_app():
     async def go():

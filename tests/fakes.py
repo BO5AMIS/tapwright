@@ -193,9 +193,10 @@ class FakeSession:
         self.last_point = hit.center
         return f"Tapped {hit.line(actions=False)}."
 
-    async def type_text(self, text, replace=False, submit=False, target=None):
+    async def type_text(self, text, replace=False, submit=False, target=None, at=None):
         if target is not None:
-            ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
+            hit = ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
+            self.last_point = at or (hit if isinstance(hit, tuple) else hit.center)  # where the focusing tap went
         self._record("type_text")
         self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"

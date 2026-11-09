@@ -306,6 +306,18 @@ def test_typing_needs_focus_not_a_keyboard_on_screen(phone, monkeypatch):
     assert phone.requests[-1][1].endswith("/wda/keys")
 
 
+def test_typing_focuses_the_field_at_the_point_it_is_given(phone, monkeypatch):
+    """The daemon passes where the field shows when a bar or the keyboard covers its centre."""
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
+    _keyboard_after(phone, 10 ** 9)
+    _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = list(FIELD)
+    assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"), at=(60.0, 15.0))) == "typed 2 characters"
+    assert s.last_point == (60.0, 15.0)
+
+
 def test_typing_into_a_field_that_never_gets_focus_is_refused(phone, monkeypatch):
     monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
     monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)

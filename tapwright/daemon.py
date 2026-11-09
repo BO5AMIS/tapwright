@@ -701,8 +701,9 @@ class Daemon:
             field = ui.resolve(view.items, target)
             if field.role != "input":
                 raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
+        self._guard(view, field)  # the focusing tap is a touch: refused where tap would be, and made where it shows
         await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
-                                     target=ui.Target(ref=field.ref))
+                                     target=ui.Target(ref=field.ref), at=self._touch_point(field))
         done = Typed(f"Typed into {field.line(actions=False)}.")
         done.field = field
         return done
@@ -827,14 +828,17 @@ class Daemon:
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
         self._refuse_disabled(found)
+        point = None
         if not a.get("force"):
             self._guard(view, found)
+            point = self._touch_point(found)
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
-        await self.session.tap(ui.Target(ref=found.ref))
+        await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
-        done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}.")
+        where = "" if point is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
+        done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}{where}.")
         done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
         return done
 
