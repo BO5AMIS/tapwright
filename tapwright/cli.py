@@ -245,14 +245,11 @@ def main() -> int:
     p = sub.add_parser("probe")
     p.add_argument("--host", help="an address of the phone to try, e.g. its Tailscale IP")
     p.add_argument("--watch", action="store_true")
-    p = sub.add_parser("mcp")
-    p.add_argument("--udid")
-    p.add_argument("--host")
-    p.add_argument("--port", type=int)
+    sub.add_parser("mcp")
     a = ap.parse_args()
     if a.cmd == "mcp":
         from . import mcp_server
-        mcp_server.run(udid=a.udid, host=a.host, port=a.port)
+        mcp_server.run()
         return 0
     from .device import run
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
