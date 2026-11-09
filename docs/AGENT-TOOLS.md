@@ -1,7 +1,8 @@
 # Agent tools: one interface for Tapline and Tapwright
 
 Shared by Tapline and Tapwright. Version 1, agreed by both projects and approved by the user
-on 2026-11-09. Each repo keeps an identical copy in `docs/`. It changes only by agreement
+on 2026-11-09. Version 1.1 (2026-11-09) adds the `not_actionable` reason `no_action`, also
+agreed by both projects and approved by the user. Each repo keeps an identical copy in `docs/`. It changes only by agreement
 between the two projects and the user's approval, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
 
@@ -178,9 +179,21 @@ text items.
 - An error is MCP `isError: true` with one text item: `Error <code>: <message>`. The message
   says what to do next. `ambiguous` adds `Candidates:` lines, each an element line.
 - For `not_actionable`, the reason is the message's first word, so scripts can read it
-  without a new field: `disabled`, `off_screen`, `covered`, `under_tab_bar` or
-  `behind_alert`. For example:
+  without a new field: `disabled`, `off_screen`, `covered`, `under_tab_bar`,
+  `behind_alert` or `no_action`. For example:
   `Error not_actionable: covered: e47 button "Save" is covered by e45 button "Cancel"; close it or pass force: true.`
+- `no_action` means the element, or the screen for `back`, doesn't take this action, and
+  `force` doesn't help. Examples:
+  - `type_text` into something that isn't an input;
+  - `toggle` on something that isn't a switch;
+  - `scroll` outside any scroll view;
+  - a long press on a tab;
+  - `back` with nothing to go back to.
+
+  For `tap` and `long_press`, it applies only when nothing under the touch would respond: not
+  the element and not its ancestors. A tap on a label inside a tappable row goes to the row, as
+  a finger's would, so it is no `no_action` (R2: no false refusals). Tapwright's taps are real
+  touches, so Tapwright never answers `no_action` to a tap.
 - **Change Tapwright:** today it never sets `isError`, prefixes `<code>:`, `error:` or
   `not found:`, and treats "not found" as a normal answer.
 
@@ -188,7 +201,7 @@ text items.
 |---|---|---|---|
 | `not_found` | nothing matches the target, or the ref isn't on the last list | look, then pick another target | both |
 | `ambiguous` | several matches and no `index` | use one of the candidates' refs, or add `index` | both. **Change Tapwright:** it picks silently today |
-| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert` | fix the cause (scroll, close the alert), or pass `force: true` | both. Tapwright today: none. Plan: `disabled` and `behind_alert` first; `covered` is a gap |
+| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (scroll, close the alert), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
 | `stale` | a `ref` from a list made before a person acted from the viewer | look again | both. **Change Tapline:** the host remembers "a person acted since the agent's last list". A look, or an action answer carrying a full list, clears it, and the next answer gets `Note: a person used the app since your last look.` (Tapwright says "the phone"). `id`, `label` and `text` targets keep working |
 | `busy` | a person drove for the whole ~30 s wait | wait a few seconds, retry | both (VIEWER-PROTOCOL "Control") |
 | `paused` | the user paused the agent | ask the user to resume | both |
