@@ -172,8 +172,11 @@ LAYER_COVER = 0.95
 LAYER_FILL = 0.5
 BACKDROP_WIDTH = 0.95
 BACKDROP_HEIGHT = 0.4
-PASSIVE = {"text", "header", "image"}  # a label or picture drawn over a button (React Native) lets the touch through
-OVERLAY_MAX = 0.9 # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
+# A label or picture drawn over a button (React Native) lets the touch through, so it isn't a cover. Known limit:
+# XCUITest can't see gesture recognisers, so a text or image with a tap handler isn't detected as a cover either.
+PASSIVE = {"text", "header", "image"}
+OVERLAY_MAX = 0.95  # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
+WRAPPER = 0.9  # a layer's listed descendant this big, and not a scroll view, is a transparent wrapper: no content
 SCROLL_HOLD_MS = 150  # a scroll's finger rests this long at the end, so the content stops instead of flinging
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
@@ -363,16 +366,19 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
 
     def behind(number: int, point: tuple[float, float]) -> bool:
         return any(a <= number < b and _holds(rect, point) for a, b, rect in hidden)
-    shown = [(e, number, inside) for e, number, inside in found if not behind(number, e.center)]
+    # a layer never hides bars, their tabs and buttons, or the keyboard: the cover logic handles touches near them
+    shown = [(e, number, inside) for e, number, inside in found
+             if inside or e.type in BARS or not behind(number, e.center)]
     live = [(n, bar) for n, bar in covering if not behind(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2))]
     bar_numbers = {n for n, _ in covering}
     area = screen[0] * screen[1] if screen else math.inf
+    ahead = [(o, m, set(within)) for o, m, within in shown]
     for e, number, inside in shown[:MAX_ELEMENTS]:
         bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)]
         over = {n for n, _ in bars_over}
         # then every later listed element that is neither its descendant nor a layer, nor part of a bar over it
-        later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in shown
-                      if m >= ends[number] and m not in bar_numbers and not over & set(within)
+        later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in ahead
+                      if m >= ends[number] and m not in bar_numbers and not over & within
                       and o.role not in PASSIVE and o.width * o.height < OVERLAY_MAX * area and _meets(e.rect, o.rect))
         e.covered_by = tuple(bar for _, bar in bars_over) + later
     tree.items = [e for e, _, _ in shown[:MAX_ELEMENTS]]
@@ -424,7 +430,8 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
     if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
         return []
     # what the layer lists below itself, and itself when it is a scroll view (a scroll view is content)
-    inner = [e for e, number, _ in found if span[0] < number < span[1] or (number == span[0] and e.role == "scroll")]
+    inner = [e for e, number, _ in found if (span[0] < number < span[1] or (number == span[0] and e.role == "scroll"))
+             and (e.role == "scroll" or (o := _overlap(e.rect, screen))[2] * o[3] < WRAPPER * area)]
     if (dim := _backdrop(span, found, screen, numbered, ends)) is not None:
         return [_rect(child)] if any(e.actions for e, number, _ in found if span[0] < number < span[1] and number != dim) else []
     if _union_area([_overlap(e.rect, screen) for e in inner]) >= LAYER_FILL * area:

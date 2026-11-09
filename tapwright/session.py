@@ -9,7 +9,7 @@ from . import store, ui
 from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
-KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
+FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
@@ -226,7 +226,7 @@ class Session:
             what = self._target(target)[2]
             await self.tap(target)
             hit = ui.resolve(self.items, target)  # focus is what counts: with a hardware keyboard no software one shows
-            if not isinstance(hit, tuple) and not await self._has_focus(hit.rect):
+            if not isinstance(hit, tuple) and not await self._has_focus(hit):
                 raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
         note = ""
         if replace:
@@ -242,21 +242,52 @@ class Session:
         focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
         return focused.get("ELEMENT") or next(iter(focused.values()), None)
 
-    async def _has_focus(self, rect: tuple[float, float, float, float]) -> bool:
-        """Wait until the active element sits where the target does (within 2 pt): with the keyboard already up
-        for another field, the keys would otherwise land in the old one."""
+    async def _attribute(self, element: str, name: str) -> str | None:
+        try:
+            value = (await self._call("GET", f"/session/{{sid}}/element/{element}/attribute/{name}")).get("value")
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return None
+        return None if value is None else str(value)
+
+    async def _has_focus(self, field: ui.Element) -> bool:
+        """Wait until the active element is the target. The keyboard can scroll the field after the tap, so the
+        pre-tap rect says nothing: the element's identifier (else its label) is compared first, then its rect
+        against where a fresh read of the tree shows the field now. Without this, keys would land in the old field."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + KEYBOARD_WAIT
+        deadline = loop.time() + FOCUS_WAIT
         while True:
             element = await self._active_element()
-            if element:
-                box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
-                got = tuple(box.get(k, float("inf")) for k in ("x", "y", "width", "height"))
-                if all(abs(a - b) <= 2 for a, b in zip(got, rect)):
-                    return True
+            if element and await self._is_field(element, field):
+                return True
             if loop.time() >= deadline:
                 return False
-            await asyncio.sleep(KEYBOARD_POLL)
+            await asyncio.sleep(FOCUS_POLL)
+
+    async def _is_field(self, element: str, field: ui.Element) -> bool:
+        wanted = field.identifier or field.label
+        if wanted:
+            got = await self._attribute(element, "name") if field.identifier else None
+            if got is None and not field.identifier:
+                got = await self._attribute(element, "label")
+            if got == wanted:
+                return True
+        now = await self._field_now(field)
+        if now is None:
+            return False
+        box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
+        got_rect = tuple(box.get(k, float("inf")) for k in ("x", "y", "width", "height"))
+        return all(abs(a - b) <= 2 for a, b in zip(got_rect, now))
+
+    async def _field_now(self, field: ui.Element) -> tuple[float, float, float, float] | None:
+        """Where the tree shows the field now: the one input with its identifier (else its label), or None."""
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60)).get("value")
+        if not isinstance(source, str):
+            return None
+        same = [e for e in ui.read(source, self.screen).items if e.role == field.role
+                and (e.identifier == field.identifier if field.identifier else e.label == field.label)]
+        return same[0].rect if len(same) == 1 else None
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))

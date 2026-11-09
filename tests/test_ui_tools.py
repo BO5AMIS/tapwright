@@ -180,9 +180,9 @@ SHEET = [node("Button", 0, 0, 430, 510, "Dismiss"), node("Button", 20, 560, 390,
 
 def test_a_full_screen_layer_hides_what_is_behind_it():
     items = ui.elements(sheet_over_base(SHEET), PHONE)
-    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]
-    assert [e.ref for e in items] == ["e1", "e2", "e3"]  # numbered after the hiding
-    assert all(e.covered_by == () for e in items)  # the tab bar behind the sheet covers nothing in front of it
+    assert labels(items) == ["Home", "Stats", "Dismiss", "Sheet action", "Sheet close"]  # the tab bar stays listed
+    assert [e.ref for e in items] == [f"e{i}" for i in range(1, 7)]  # numbered after the hiding
+    assert all(e.covered_by == () for e in items if e.label.startswith("Sheet") or e.label == "Dismiss")  # the tab bar behind covers nothing
 
 
 def test_a_small_later_layer_hides_nothing():
@@ -197,11 +197,18 @@ def test_a_layer_before_the_content_hides_nothing():
     assert {"Add", "Card", "Dismiss"} <= set(labels(items))  # the base screen is in front here
 
 
-def test_a_full_screen_scroll_drawn_after_a_bar_hides_what_is_under_it():
+def test_a_full_screen_scroll_drawn_after_a_bar_leaves_the_bar_listed():
     rows = [node("Cell", 0, 100 + 60 * i, 430, 60, f"Row {i}") for i in range(12)]
     items = ui.elements(phone(node("NavigationBar", 0, 59, 430, 44, children=[node("Button", 8, 59, 60, 44, "Back")]),
                               node("ScrollView", 0, 0, 430, 932, children=rows)), PHONE)
-    assert "Back" not in labels(items)  # drawn over the bar, so a finger can't reach it
+    assert "Back" in labels(items)  # bars are never hidden by a layer; the bar logic handles touches near them
+
+
+def test_a_tab_bar_before_a_full_screen_scroll_stays_listed():
+    tabs = node("TabBar", 0, 849, 430, 83, children=[node("Button", 0, 849, 215, 83, "Home")])
+    rows = [node("Cell", 0, 60 * i, 430, 60, f"Row {i}") for i in range(15)]
+    items = ui.elements(phone(tabs, node("ScrollView", 0, 0, 430, 932, children=rows)), PHONE)
+    assert "Home" in labels(items) and "tabbar" in [e.type.lower() for e in items]
 
 
 def test_the_visible_part_of_an_element_is_its_rect_minus_the_bars():
@@ -236,12 +243,12 @@ def test_a_full_screen_page_with_a_scroll_view_hides_the_screen_under_it():
     rows = [node("Cell", 0, 60 * i, 430, 60, f"Row {i}") for i in range(15)]
     page = node("Other", 0, 0, 430, 932, children=[node("ScrollView", 0, 0, 430, 900, children=rows)])
     items = ui.elements(phone(base_screen(), page), PHONE)
-    assert labels(items) == [f"Row {i}" for i in range(15)]  # no scroll exemption: it is opaque content on top
+    assert labels(items) == ["Home", "Stats"] + [f"Row {i}" for i in range(15)]  # opaque content hides the screen, not its bars
 
 
 def test_a_sheet_three_levels_down_hides_the_base_screen():
     items = ui.elements(phone(nested(2, base_screen(), node("Other", 0, 0, 430, 932, children=SHEET))), PHONE)
-    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]
+    assert labels(items) == ["Home", "Stats", "Dismiss", "Sheet action", "Sheet close"]
 
 
 def test_a_layer_hides_only_what_is_inside_its_rect():
@@ -295,7 +302,7 @@ def test_a_dimming_view_then_a_dialog_hides_the_base_screen():
     dim = node("Other", 0, 0, 430, 932)  # childless, unlisted
     dialog = node("Other", 30, 150, 370, 650, children=[node("Cell", 30, 150, 370, 650, "Dialog body")])
     items = ui.elements(phone(nested(1, base_screen(), node("Other", 0, 0, 430, 932, children=[dim, dialog]))), PHONE)
-    assert labels(items) == ["Dialog body"]
+    assert labels(items) == ["Home", "Stats", "Dialog body"]
 
 
 def test_a_first_child_with_listed_children_is_content_not_a_backdrop():
@@ -442,3 +449,23 @@ def test_a_swipe_can_hold_before_the_finger_lifts():
     assert [s["type"] for s in held[-3:]] == ["pointerMove", "pause", "pointerUp"] and held[-2]["duration"] == 150
     plain = ui.swipe(5, 400, 5, 100, 600)["actions"][0]["actions"]
     assert [s["type"] for s in plain[-2:]] == ["pointerMove", "pointerUp"]
+
+
+def test_a_later_transparent_wrapper_with_a_small_button_hides_nothing():
+    wrapper = node("Other", 0, 0, 430, 932, "Screen", name="wrapper", children=[node("Button", 20, 500, 100, 44, "Floating")])
+    layer = node("Other", 0, 0, 430, 932, children=[wrapper])
+    assert {"Add", "Card", "Floating"} <= set(labels(ui.elements(phone(base_screen(), layer), PHONE)))
+
+
+def test_the_keyboard_is_never_hidden_by_a_layer():
+    keys = node("Keyboard", 0, 700, 430, 232, children=[node("Key", 10, 710, 40, 50, "q")])
+    layer = node("Other", 0, 0, 430, 932, children=[node("Cell", 0, 0, 430, 932, "Page")])
+    tree = ui.read(phone(keys, layer), PHONE, keyboard=True)
+    assert tree.keyboard and "q" in labels(tree.items)
+
+
+def test_a_later_element_up_to_95_percent_of_the_screen_covers():
+    button = node("Button", 20, 100, 390, 60, "Covered")
+    overlay = node("Other", 0, 0, 430, 858, "", name="lab-overlay")  # 92% of the screen
+    (cover,) = {e.label: e for e in ui.elements(phone(button, overlay), PHONE)}["Covered"].covered_by
+    assert cover.rect == (0.0, 0.0, 430.0, 858.0)

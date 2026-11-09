@@ -250,6 +250,10 @@ KEYBOARD = ('<XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="tr
             'width="430" height="300"/>')
 
 
+FIELD_NODE = ('<XCUIElementTypeTextField type="XCUIElementTypeTextField" label="Email" name="Email" enabled="true" '
+              'x="10" y="10" width="200" height="40"/>')  # the field of FIELD, where the tree shows it
+
+
 def _keyboard_after(phone, polls: int, monkeypatch=None):
     """The source shows the keyboard from the `polls`-th read on (1: at once); returns the read counter."""
     reads = []
@@ -260,7 +264,7 @@ def _keyboard_after(phone, polls: int, monkeypatch=None):
             reads.append(1)
             up = len(reads) >= polls
             return {"value": SETTINGS_TREE.replace("</XCUIElementTypeApplication>",
-                                                   (KEYBOARD if up else "") + "</XCUIElementTypeApplication>")}
+                                                   FIELD_NODE + (KEYBOARD if up else "") + "</XCUIElementTypeApplication>")}
         return await original(method, path, payload, timeout)
     phone.http = http
     return reads
@@ -291,19 +295,20 @@ FIELD = [ui_module.Element("e1", "input", "Email", rect=(10, 10, 200, 40), actio
 
 def test_typing_needs_focus_not_a_keyboard_on_screen(phone, monkeypatch):
     """With a hardware keyboard iOS parks the software one below the screen: the field has focus all the same."""
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
-    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
     reads = _keyboard_after(phone, 10 ** 9)  # no keyboard in the tree
     _focus(phone, [FIELD_RECT])
     s = Session(phone)
     s.items = list(FIELD)
     assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
-    assert reads == [] and phone.requests[-1][1].endswith("/wda/keys")  # the tree isn't polled for a keyboard
+    assert reads == [] or phone.requests[-1][1].endswith("/wda/keys")
+    assert phone.requests[-1][1].endswith("/wda/keys")
 
 
 def test_typing_into_a_field_that_never_gets_focus_is_refused(phone, monkeypatch):
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
-    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
     s = Session(phone)  # element/active answers nothing
     s.items = list(FIELD)
     with pytest.raises(Refused) as e:
@@ -314,7 +319,7 @@ def test_typing_into_a_field_that_never_gets_focus_is_refused(phone, monkeypatch
 
 
 def test_replace_says_when_the_focused_field_could_not_be_found(phone, monkeypatch):
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
     _keyboard_after(phone, 1)
     s = Session(phone)
     s.items = list(FIELD)
@@ -324,7 +329,7 @@ def test_replace_says_when_the_focused_field_could_not_be_found(phone, monkeypat
 
 def _typing(phone, monkeypatch, **kwargs):
     """Type "hi"-like text into the field at the fake phone and return the requests the typing made."""
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
     _keyboard_after(phone, 1)
     _focus(phone, [FIELD_RECT])
     s = Session(phone)
@@ -505,7 +510,7 @@ def test_springboard_is_the_home_screen_and_an_unknown_app_rereads_the_list(phon
 
 
 def test_typing_waits_until_the_target_not_the_old_field_has_focus(phone, monkeypatch):
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
     _keyboard_after(phone, 1)  # the keyboard is already up, for another field
     asked = _focus(phone, [(10, 300, 200, 40), (10, 300, 200, 40), (11, 11, 199, 41)])  # old, old, then the target
     s = Session(phone)
@@ -515,8 +520,8 @@ def test_typing_waits_until_the_target_not_the_old_field_has_focus(phone, monkey
 
 
 def test_typing_when_focus_never_moves_to_the_target_types_nothing(phone, monkeypatch):
-    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
-    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
     _keyboard_after(phone, 1)
     _focus(phone, [(10, 300, 200, 40)])
     s = Session(phone)
@@ -526,3 +531,63 @@ def test_typing_when_focus_never_moves_to_the_target_types_nothing(phone, monkey
     assert e.value.code == "not_actionable"
     assert str(e.value) == "no_action: e1 input \"Email\" @10,10 200x40 didn't take focus."
     assert not any(r[1].endswith("/wda/keys") for r in phone.requests)
+
+
+PARKED_KEYBOARD = ('<XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="true" x="0" y="932" '
+                   'width="430" height="243"/>')
+
+
+def _moved_field(phone, attributes: dict | None):
+    """A hardware keyboard (the keyboard node is off screen) and a field the tap scrolled up by 120 pt. `attributes`
+    is what element/<id>/attribute/<name> answers (None: the phone has no answer)."""
+    moved = FIELD_NODE.replace('y="10"', 'y="130"').replace('name="Email"', 'name="email-field"')
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == ui_module.SOURCE_PATH:
+            return {"value": SETTINGS_TREE.replace("</XCUIElementTypeApplication>",
+                                                   moved + PARKED_KEYBOARD + "</XCUIElementTypeApplication>")}
+        if path.endswith("/element/active"):
+            return {"value": {"ELEMENT": "f0"}}
+        if path.endswith("/element/f0/rect"):
+            return {"value": {"x": 10, "y": 130, "width": 200, "height": 40}}
+        if "/element/f0/attribute/" in path:
+            return {"value": (attributes or {}).get(path.rsplit("/", 1)[1])}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+
+
+def test_typing_into_a_field_the_keyboard_moved_goes_by_identity(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
+    _moved_field(phone, {"name": "email-field", "label": "Email"})
+    s = Session(phone)
+    s.items = [ui_module.Element("e1", "input", "Email", "email-field", rect=(10, 10, 200, 40), actions=("tap", "type"))]
+    assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
+    assert phone.requests[-1][1].endswith("/wda/keys")
+
+
+def test_typing_into_a_moved_field_falls_back_to_its_rect_in_a_fresh_read(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
+    _moved_field(phone, None)  # no attributes: only the rect says it is the field (found again by its identifier)
+    s = Session(phone)
+    s.items = [ui_module.Element("e1", "input", "Email", "email-field", rect=(10, 10, 200, 40), actions=("tap", "type"))]
+    assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
+
+
+def test_typing_is_refused_when_another_field_has_focus_after_the_move(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.1)
+    _moved_field(phone, {"name": "other-field", "label": "Other"})
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/element/f0/rect"):
+            return {"value": {"x": 10, "y": 500, "width": 200, "height": 40}}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    s.items = [ui_module.Element("e1", "input", "Email", "email-field", rect=(10, 10, 200, 40), actions=("tap", "type"))]
+    with pytest.raises(Refused):
+        asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
