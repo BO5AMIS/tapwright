@@ -254,7 +254,8 @@ def main() -> int:
         from . import mcp_server
         mcp_server.run(udid=a.udid, host=a.host, port=a.port)
         return 0
-    return asyncio.run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd](a))
+    from .device import run
+    return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
     "pymobiledevice3>=11.50,<12",  # Apple's device protocols; device.py relies on its user-space tunnel
     "mcp>=2.3",
+    "anyio>=4.5",  # runs everything on the event loop pymobiledevice3 needs (device.run)
     "pillow",
 ]
 

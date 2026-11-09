@@ -10,6 +10,7 @@ over:
 """
 import asyncio
 import json
+import sys
 import time
 
 from . import store
@@ -20,6 +21,15 @@ TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer 
 
 class DeviceError(RuntimeError):
     pass
+
+
+def run(fn, *args):
+    """Run an async function on the event loop pymobiledevice3 needs. On Windows that is a
+    selector loop: the default (proactor) loop breaks some of its connections (its issue
+    #1217) and never receives mDNS replies, so the phone isn't found on Wi-Fi (measured)."""
+    import anyio
+    options = {"loop_factory": asyncio.SelectorEventLoop} if sys.platform == "win32" else None
+    return anyio.run(fn, *args, backend_options=options)
 
 
 class Device:

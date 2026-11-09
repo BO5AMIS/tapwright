@@ -10,6 +10,7 @@ from typing import Literal
 
 from mcp.server.mcpserver import Image, MCPServer
 
+from . import device
 from .device import Device
 from .session import Session
 from .ui import NotFound
@@ -172,4 +173,4 @@ async def wait(seconds: float = 1.0) -> list:
 
 def run(**options) -> None:
     configure(**options)
-    server.run("stdio")
+    device.run(server.run_stdio_async)
