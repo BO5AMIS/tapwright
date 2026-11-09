@@ -38,6 +38,7 @@ class Controller:
         self.clients: dict[str, ClientView] = {}
         self._lock = asyncio.Lock()
         self._person_at: float | None = None
+        self._people_waiting = 0  # people queued for the lock: agents step aside while any wait
         self._agent_at: float | None = None
         self._agent_running = False
 
@@ -48,7 +49,7 @@ class Controller:
         return at is not None and self.clock() - at < PERSON_IDLE_S
 
     def person_active(self) -> bool:
-        return self._recent(self._person_at)
+        return self._people_waiting > 0 or self._recent(self._person_at)
 
     @property
     def driver(self) -> str | None:
@@ -64,13 +65,18 @@ class Controller:
     async def person(self, fn):
         """A person's action: runs as soon as the current action ends, ahead of waiting agents."""
         self._person_at = self.clock()
-        async with self._lock:
-            try:
-                return await fn()
-            finally:
-                self.generation += 1
-                self.person_generation = self.generation
-                self._person_at = self.clock()
+        self._people_waiting += 1
+        try:
+            await self._lock.acquire()
+        finally:
+            self._people_waiting -= 1
+        try:
+            return await fn()
+        finally:
+            self.generation += 1
+            self.person_generation = self.generation
+            self._person_at = self.clock()
+            self._lock.release()
 
     async def agent(self, fn):
         """An agent's action: refused while paused, waits while a person drives."""
@@ -117,9 +123,17 @@ def to_points(path, screen: tuple[float, float]) -> list[tuple[int, float, float
     if not path:
         raise ValueError("a gesture needs at least one point")
     w, h = screen
-    out = []
-    for t, x, y in path:
-        out.append((float(t), min(max(float(x), 0.0), 1.0) * w, min(max(float(y), 0.0), 1.0) * h))
+    out: list[tuple[float, float, float]] = []
+    for point in path:
+        try:
+            t, x, y = (float(v) for v in point)
+        except (TypeError, ValueError) as e:
+            raise ValueError("each gesture point must be [t_ms, x, y] numbers") from e
+        if not all(math.isfinite(v) for v in (t, x, y)):
+            raise ValueError("gesture numbers must be finite")
+        if out:
+            t = max(t, out[-1][0])  # times never go backwards
+        out.append((t, min(max(x, 0.0), 1.0) * w, min(max(y, 0.0), 1.0) * h))
     t0 = out[0][0]
     return [(int(round(t - t0)), x, y) for t, x, y in out]
 

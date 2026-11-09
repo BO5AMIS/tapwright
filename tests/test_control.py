@@ -74,7 +74,67 @@ def test_a_refused_action_leaves_the_screen_generation_alone():
         with pytest.raises(Refused):
             await c.agent(refuse)
         assert c.generation == 0
-        assert c.client("a").seen == -1 and c.client("a") is c.client("a")
+    asyncio.run(go())
+
+
+def test_client_views_are_per_id():
+    c = Controller()
+    assert c.client("a") is c.client("a") and c.client("a").seen == -1 and c.client("b") is not c.client("a")
+
+
+def test_a_waiting_person_goes_before_queued_agents():
+    clock = Clock()
+
+    async def go():
+        c, order, queued = Controller(clock=clock, sleep=clock.sleep), [], asyncio.Event()
+
+        async def a():
+            order.append("A")
+            await queued.wait()  # keep holding the lock until B and P are both waiting
+            await clock.sleep(5)  # longer than PERSON_IDLE_S: P's arrival no longer counts as recent
+
+        async def b():
+            order.append("B")
+
+        async def p():
+            order.append("P")
+        ta = asyncio.create_task(c.agent(a))
+        await asyncio.sleep(0)
+        tb = asyncio.create_task(c.agent(b))
+        await asyncio.sleep(0)
+        tp = asyncio.create_task(c.person(p))
+        await asyncio.sleep(0)
+        queued.set()
+        await asyncio.gather(ta, tb, tp)
+        assert order == ["A", "P", "B"]
+    asyncio.run(go())
+
+
+def test_pause_reaches_an_agent_that_is_waiting():
+    clock = Clock()
+
+    async def go():
+        c = Controller(clock=clock, sleep=clock.sleep)
+        c.person_active = lambda: True
+        task = asyncio.create_task(c.agent(noop))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        c.set_paused(True)
+        with pytest.raises(Refused) as e:
+            await task
+        assert e.value.code == "paused"
+    asyncio.run(go())
+
+
+def test_a_failed_person_action_still_counts():
+    async def go():
+        c = Controller()
+
+        async def boom():
+            raise RuntimeError("nope")
+        with pytest.raises(RuntimeError):
+            await c.person(boom)
+        assert c.generation == c.person_generation == 1
     asyncio.run(go())
 
 
@@ -94,3 +154,11 @@ def test_points_are_clamped_and_bad_paths_rejected():
         classify([], SCREEN)
     with pytest.raises(ValueError):
         classify([[0, "a"]], SCREEN)
+
+
+def test_times_stay_in_order_and_malformed_points_are_value_errors():
+    times = [p[0] for p in classify([[0, 0.1, 0.1], [50, 0.9, 0.9], [30, 0.5, 0.5]], SCREEN).points]
+    assert times == sorted(times) == [0, 50, 50]
+    for bad in ([[0, float("nan"), 0.5]], [[0, 0.5]], [None], [[0, float("inf"), 0.5]]):
+        with pytest.raises(ValueError):
+            classify(bad, SCREEN)
