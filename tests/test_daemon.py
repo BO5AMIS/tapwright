@@ -2329,7 +2329,7 @@ def test_scroll_moves_a_share_of_the_screen_by_default():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "scroll", {"look": False})
-        assert d.session.last_point == (200.0, 720.0)  # no scroll element: the screen
+        assert d.session.last_point == (200.0, 690.0)  # no scroll element: the screen, minus the fixed 60/40 pt insets
         assert r["text"] == "Scrolled the screen down."
         await finish(stop, task)
     run(go)
@@ -2428,11 +2428,12 @@ def test_scroll_to_the_end_swipes_until_the_stream_stops_changing():
     run(go)
 
 
-def test_scroll_to_start_goes_up_and_stops_after_15_swipes_if_it_never_ends():
+def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_ends(monkeypatch):
+    monkeypatch.setattr(daemon_module, "SCROLL_CAP", 0.3)  # 12 s in life
     async def go():
         d = make()
         stop, task = await started(d)
-        picture = MovingPicture(d, moves=100)
+        picture = MovingPicture(d, moves=1000)  # endless loading: every swipe brings something new
         ends = []
         original = d.session.swipe
 
@@ -2441,8 +2442,61 @@ def test_scroll_to_start_goes_up_and_stops_after_15_swipes_if_it_never_ends():
             return await original(x0, y0, x1, y1, duration_ms)
         d.session.swipe = swipe
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
-        assert picture.swipes == 15 and ends[0][0] < ends[0][1]  # the finger moves down: content moves up
-        assert r["text"] == "Scrolled the screen up."
+        assert 1 <= picture.swipes < 15 and ends[0][0] < ends[0][1]  # the finger moves down: content moves up
+        assert r["text"].splitlines() == ["Scrolled the screen up.",
+                                          "Note: stopped after 0.3 s; the list may keep loading."]
+        await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+class BouncingPicture:
+    """A list with a rubber band: each swipe shows a transient picture for a moment, then settles on the
+    `finals` (the last repeats). The settle sees the screen change every time; the settled frames match at the end."""
+
+    def __init__(self, d, *finals: bytes) -> None:
+        self.finals, self.swipes, self.picture = list(finals), 0, b"START"
+        d.hub.publish(self.picture)
+        original = d.session.swipe
+
+        async def swipe(*a, **k):
+            self.swipes += 1
+            self.picture = b"bounce%d" % self.swipes
+            final = self.finals[min(self.swipes, len(self.finals)) - 1]
+            asyncio.get_running_loop().call_later(0.01, lambda: setattr(self, "picture", final))
+            return await original(*a, **k)
+        d.session.swipe = swipe
+
+        async def feed():
+            while True:
+                d.hub.publish(self.picture)
+                await asyncio.sleep(0.004)
+        self.task = asyncio.create_task(feed())
+
+    async def stop(self) -> None:
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+
+def test_a_bouncing_end_of_the_list_stops_the_scroll_when_the_settled_pictures_match():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        picture = BouncingPicture(d, b"END", b"END")  # swipe 1 reaches the end; swipe 2 only bounces
+        r = await d.run_tool("a", "scroll", {"to": "end", "look": False})
+        assert picture.swipes == 2 and r["text"] == "Scrolled the screen down."
+        await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_scroll_to_the_end_that_already_is_there_stops_after_one_swipe():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        picture = BouncingPicture(d, b"START")  # the bounce settles where it began
+        await d.run_tool("a", "scroll", {"to": "end", "look": False})
+        assert picture.swipes == 1
         await picture.stop()
         await finish(stop, task)
     run(go)
@@ -2453,9 +2507,74 @@ def test_a_sideways_scroll_to_the_end_goes_right():
         d = make()
         stop, task = await started(d)
         picture = MovingPicture(d, moves=0)
-        r = await d.run_tool("a", "scroll", {"to": "end", "direction": "left", "look": False})
+        r = await d.run_tool("a", "scroll", {"to": "end", "direction": "right", "look": False})
         assert r["text"] == "Scrolled the screen right." and picture.swipes == 1
+        r = await d.run_tool("a", "scroll", {"to": "start", "direction": "left", "look": False})
+        assert r["text"] == "Scrolled the screen left."
         await picture.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_direction_that_contradicts_to_is_bad_params():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ({"to": "end", "direction": "up"}, {"to": "end", "direction": "left"},
+                    {"to": "start", "direction": "down"}, {"to": "start", "direction": "right"}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "scroll", bad)
+            assert e.value.code == "bad_params" and "to" in str(e.value), bad
+        assert "swipe" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_swipe_stays_between_the_bars_read_from_the_tree():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        page = el("e1", "scroll", "Page", rect=(0, 0, 400, 800))
+        await looked(d, [page])
+        d.session.last_insets = (100.0, 80.0)  # a navigation bar ends at y 100; a tab bar starts at y 720
+        for direction in ("down", "up"):
+            seen = []
+            original = d.session.swipe
+
+            async def swipe(x0, y0, x1, y1, duration_ms=350):
+                seen.append((y0, y1))
+                return await original(x0, y0, x1, y1, duration_ms)
+            d.session.swipe = swipe
+            await d.run_tool("a", "scroll", {"direction": direction, "amount": 1.0, "look": False})
+            d.session.swipe = original
+            assert all(100 < y < 720 for y in seen[0]), (direction, seen)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_screen_fallback_keeps_off_the_bars_too():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_insets = (100.0, 80.0)
+        await d.run_tool("a", "scroll", {"direction": "down", "amount": 1.0, "look": False})
+        y0 = d.session.last_point[1]
+        assert 100 < y0 < 720
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_innermost_scroll_view_is_the_area():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        outer = el("e1", "scroll", "Page", rect=(0, 0, 400, 800))
+        inner = el("e2", "scroll", "Feed", rect=(0, 300, 400, 200))
+        await looked(d, [outer, inner])
+        r = await d.run_tool("a", "scroll", {"look": False})  # both hold the screen's centre
+        assert r["text"].startswith('Scrolled e2 scroll "Feed"')
+        r = await d.run_tool("a", "scroll", {"target": {"x": 50, "y": 350}, "look": False})
+        assert re.match(r'Scrolled e\d+ scroll "Feed"', r["text"])  # a point reads the screen again: new refs
         await finish(stop, task)
     run(go)
 
@@ -2485,13 +2604,13 @@ def test_a_scroll_counts_as_moving_content_for_the_refs_it_carries():
 
 
 def scripted(d, *trees):
-    """The session's refresh() reads these trees in turn; the last one stays."""
-    queue, real = list(trees), type(d.session).refresh.__get__(d.session)
+    """The session's snapshot() reads these trees in turn; the last one stays."""
+    queue, real = list(trees), type(d.session).snapshot.__get__(d.session)
 
-    async def refresh():
+    async def snapshot(keyboard=False, timeout=None):
         d.session.tree = queue.pop(0) if len(queue) > 1 else queue[0]
-        return await real()
-    d.session.refresh = refresh
+        return await real(keyboard, timeout)
+    d.session.snapshot = snapshot
 
 
 def test_wait_for_text_returns_once_it_shows_up():
@@ -2550,6 +2669,91 @@ def test_wait_for_checks_its_arguments():
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "wait_for", bad)
             assert e.value.code == "bad_params", bad
-        assert d.session.calls.count("refresh") == 0
+        assert d.session.calls.count("snapshot") == 0
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_for_answers_from_its_last_poll_without_reading_again():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        loading = [el("e1", "text", "Loading")]
+        done = [el("e1", "text", "Loading"), el("e2", "text", "All done")]
+        await looked(d, loading)
+        scripted(d, loading, loading, done)
+        before = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "wait_for", {"text": "all done"})
+        assert d.session.calls.count("snapshot") - before == 3 and "refresh" not in d.session.calls
+        assert r["text"].splitlines()[2].startswith("+ e2 text")
+        assert [e.ref for e in d.control.client("a").items] == ["e1", "e2"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_each_wait_for_read_is_limited_by_the_time_that_is_left():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused):
+            await d.run_tool("a", "wait_for", {"text": "never", "timeout": 2})
+        timeouts = d.session.snapshot_timeouts
+        assert timeouts[0] == 2.0 and timeouts == sorted(timeouts, reverse=True) and timeouts[-1] < 0.5
+        d.session.snapshot_timeouts.clear()
+        await d.run_tool("a", "wait_for", {"label": "OK"})
+        assert d.session.snapshot_timeouts == [5.0]  # never more than 5 s for one read
+        await finish(stop, task)
+    run(go)
+
+
+def test_waiting_for_something_to_go_that_was_never_there_succeeds_at_once():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "wait_for", {"text": "ghost", "gone": True})
+        assert r["text"].splitlines()[0] == "Done after 0.0 s." and d.session.calls.count("snapshot") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_does_not_take_the_value_from_another_input_that_got_the_ref():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp("e1", "Name"), inp("e2", "Email", y=160)])
+        d.session.tree = [inp("e1", "Email", value="zzz")]  # after the submit, a new screen: e1 is another field
+        d.session.app = ("Other", "com.example.other")  # a new app renumbers the list from e1
+        r = await d.run_tool("a", "type_text", {"text": "Ada", "target": {"ref": "e1"}, "submit": True})
+        first = r["text"].splitlines()[0]
+        assert first == 'Typed into e1 input "Name" @10,100 300x44.' and "zzz" not in first
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_secure_field_never_has_its_value_shown():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        secret = el("e1", "input", "Password", rect=(10, 100, 300, 44), secure=True)
+        await looked(d, [secret])
+        d.session.tree = [el("e1", "input", "Password", value="••••", rect=(10, 100, 300, 44), secure=True)]
+        r = await d.run_tool("a", "type_text", {"text": "hunter2", "target": {"ref": "e1"}})
+        first = r["text"].splitlines()[0]
+        assert first == 'Typed into e1 input "Password" value="••••" @10,100 300x44. The value is hidden (secure field).'
+        assert "Value is now" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_ambiguity_says_how_many_more_inputs_there_are():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [inp(f"e{i}", f"Field {i}", y=50 * i) for i in range(1, 8)])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "x"})
+        lines = str(e.value).splitlines()
+        assert lines[0].startswith("7 inputs on screen;") and len(lines) == 2 + 5 + 1
+        assert lines[-1] == '  (+2 more; use a ref or "index")'
         await finish(stop, task)
     run(go)

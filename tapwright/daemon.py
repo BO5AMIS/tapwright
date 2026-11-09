@@ -20,6 +20,7 @@ from . import changes, ui
 from . import shot as shotlib
 from .control import Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
+from .session import Snapshot
 from .stream import NO_IDLE_WAIT, PRESETS, FrameHub, StreamPump
 
 PROTOCOL = 1
@@ -46,6 +47,11 @@ WAIT_FOR_KINDS = ("text", "id", "label")
 WAIT_FOR_POLL = 0.3  # seconds between tree reads while waiting
 SCROLL_MIN, SCROLL_MAX = 0.1, 1.0  # `scroll`'s amount: a share of the scroll area
 MAX_SCROLL_SWIPES = 15  # `scroll to start|end` gives up after this many swipes
+SCROLL_CAP = 12.0  # ... or after this many seconds (a spinner or a bounce can keep the screen moving)
+SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the directions each `to` can mean; the first is the default
+SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
+WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
+WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -114,6 +120,9 @@ def _checked(name: str, args: dict) -> dict:
             raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
         if args.get("to") not in (None, "start", "end"):
             raise Refused("bad_params", f"to must be start or end, not {args['to']!r}")
+        if args.get("to") and "direction" in args and args["direction"] not in SCROLL_TO[args["to"]]:
+            raise Refused("bad_params", f"to {args['to']} scrolls {' or '.join(SCROLL_TO[args['to']])}, not "
+                                        f"{args['direction']}; leave direction out, or make them agree")
         if "amount" in checked and not SCROLL_MIN <= checked["amount"] <= SCROLL_MAX:
             raise Refused("bad_params", f"amount must be from {SCROLL_MIN:g} to {SCROLL_MAX:g}, not {args['amount']!r}")
     if name == "type_text":
@@ -172,10 +181,25 @@ class Toggled(str):
 
 class Typed(str):
     """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
-    ref: str = ""
+    field: ui.Element = ui.Element("", "input")  # the input as it was when typed into
+
+    def same_field(self, now: ui.Element) -> bool:
+        """Is `now` the field typed into (the ref may have gone to another input since)? The same ref and
+        role, and the same identifier, or without one the same label."""
+        old = self.field
+        return (now.ref, now.role, now.identifier) == (old.ref, old.role, old.identifier) \
+            and (bool(old.identifier) or now.label == old.label)
 
     def verdict(self, now: ui.Element) -> str:
-        return f"Typed into {now.line(actions=False)}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
+        line = now.line(actions=False)
+        if now.secure:
+            return f"Typed into {line}. The value is hidden (secure field)."
+        return f"Typed into {line}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
+
+
+class Scrolled(str):
+    """`scroll`'s result, with a note for the answer when it stopped early."""
+    note: str = ""
 
 
 # What `open_app "Settings"` means: the built-in apps aren't in the installed list.
@@ -507,6 +531,8 @@ class Daemon:
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
+        if isinstance(result, Scrolled) and result.note:
+            notes = [*notes, result.note]
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
@@ -542,7 +568,7 @@ class Daemon:
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now, bool(view.alert)), 1)
         if isinstance(result, Typed):  # the value as the new list shows it, not as it was typed
-            now = next((e for e in view.items if e.ref == result.ref and e.role == "input"), None)
+            now = next((e for e in view.items if result.same_field(e)), None)
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         return await self._add_shot(answer, view, shot)
@@ -619,22 +645,24 @@ class Daemon:
         target = ui.parse_target({kind: args[kind]})
         gone, timeout = bool(args.get("gone", False)), float(args.get("timeout", WAIT_FOR_DEFAULT))
         clock = self.control.clock
-        began = clock()
+        began, left = clock(), timeout
         while True:
-            tree = await self._read(self.session.refresh)
-            present = not self._missing(tree.items, target)
-            if present != gone:
+            # each read may take what is left of the timeout (at most WAIT_FOR_READ_MAX), so the timeout holds
+            snap = await self._read(lambda: self.session.snapshot(timeout=min(WAIT_FOR_READ_MAX, left)))
+            if self._missing(snap.tree.items, target) == gone:
                 break
             left = timeout - (clock() - began)
-            if left <= 0:
+            if left < WAIT_FOR_MIN_LEFT:
                 raise Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
                                          f"{'disappear' if gone else 'appear'}; it didn't happen.")
             await self.control.sleep(min(WAIT_FOR_POLL, left))
+            left = timeout - (clock() - began)
         result = f"Done after {clock() - began:.1f} s."
         if not args.get("look", True):
             return _answer([result], notes)
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
-        return await self._add_shot(await self._after(view, result, notes, full), view, shot)
+        # the last poll is the answer's tree: no read of its own
+        return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view, shot)
 
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
@@ -646,7 +674,8 @@ class Daemon:
             if not inputs:
                 raise Refused("not_found", "No input on screen")
             if len(inputs) > 1:
-                shown = "\n".join(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES])
+                shown = "\n".join([*(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES]),
+                                   *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES)])
                 raise Refused("ambiguous", f"{len(inputs)} inputs on screen; pass a target to pick one:\n"
                                            f"Candidates:\n{shown}")
             field = inputs[0]
@@ -662,19 +691,21 @@ class Daemon:
         await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
                                      target=ui.Target(ref=field.ref))
         done = Typed(f"Typed into {field.line(actions=False)}.")
-        done.ref = field.ref
+        done.field = field
         return done
 
-    async def _scroll(self, view, a: dict) -> str:
-        """Swipe through the centre of the scroll area, `amount` of its height (or width). `to` repeats
-        that until the stream shows no change after a swipe, at most MAX_SCROLL_SWIPES times."""
+    async def _scroll(self, view, a: dict) -> Scrolled:
+        """Swipe through the centre of the scroll area (the innermost one around the target, the point or the
+        screen's centre), `amount` of its height (or width), between the bars. `to` repeats that until a swipe
+        leaves the settled screen as the one before left it (a rubber band or a spinner moves the screen
+        meanwhile, so "no change at all" would never come), at most MAX_SCROLL_SWIPES times or SCROLL_CAP seconds."""
         s = self.session
         target, to = a.get("target"), a.get("to")
         if target is None:
             area = ui.scroll_container(view.items, s.screen)
         elif target.point is not None:
             x, y = target.point
-            area = ui.at_point(view.items, target.point, "scroll")
+            area = ui.scroll_at(view.items, target.point)
             if area is None:
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes a scroll.")
         else:
@@ -682,20 +713,30 @@ class Daemon:
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
-        direction = a.get("direction", "down")
-        if to:
-            sideways = direction in ("left", "right")
-            direction = ("right" if sideways else "down") if to == "end" else ("left" if sideways else "up")
+        direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
+        top, bottom = s.last_insets
+        band = (SCROLL_TOP_INSET if top is None else top,
+                s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
         x0, y0, x1, y1 = ui.scroll_area_points(direction, area.rect if area else (0.0, 0.0, *s.screen),
-                                               a.get("amount", 0.8))
+                                               a.get("amount", 0.8), band)
+        loop = asyncio.get_running_loop()
+        began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
             seq, since = self._mark()
             await s.swipe(x0, y0, x1, y1, 600)
             if not to or swipes == MAX_SCROLL_SWIPES:
                 break
-            if not (await self._settle(seq, cap=RESOLVE_SETTLE, since=since)).changed:
-                break  # the picture didn't move: the end of the list (with no stream, every swipe is made)
-        return f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}."
+            await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
+            settled = self._mark()[1]
+            if settled is not None and settled == previous:
+                break  # the swipe left the screen as the one before did: the end of the list
+            previous = settled  # (with no stream there is nothing to compare: every swipe is made)
+            if loop.time() - began >= SCROLL_CAP:
+                note = f"stopped after {SCROLL_CAP:g} s; the list may keep loading."
+                break
+        done = Scrolled(f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}.")
+        done.note = note
+        return done
 
     async def _toggle(self, view, a: dict) -> str:
         target = _target(a)
@@ -898,7 +939,7 @@ class Daemon:
         return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False,
-                     seconds: float | None = None) -> dict:
+                     seconds: float | None = None, snap: Snapshot | None = None) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
         `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
@@ -907,12 +948,13 @@ class Daemon:
 
         async def read():
             self._mark_read(view)
-            snap = await s.snapshot()
-            app_changed = snap.app is not None and view.app is not None and snap.app != view.app
-            head = _furniture(view, snap.tree.alert, snap.tree.keyboard)
-            up = changes.update(view.items, snap.tree.items, app_changed, view.top_ref, view.shown, full, head,
+            read_now = snap or await s.snapshot()  # `snap`: a read the caller already made (wait_for's last poll)
+            s.items = read_now.tree.items
+            app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
+            head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
+            up = changes.update(view.items, read_now.tree.items, app_changed, view.top_ref, view.shown, full, head,
                                 moves_content)
-            return snap, up
+            return read_now, up
         try:
             snap, up = await self._read(read)
         except Exception as e:

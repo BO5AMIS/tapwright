@@ -104,6 +104,8 @@ class FakeSession:
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.launched: list = []
         self.closed: list = []
+        self.snapshot_timeouts: list = []  # the per-read timeout each snapshot() was given
+        self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
         self.typed: list = []  # (text, replace, submit, target) of each type_text
 
     def _record(self, name: str) -> None:
@@ -147,8 +149,9 @@ class FakeSession:
         self._record("screenshot")
         return image_bytes((800, 1600), (0, 255, 0), "PNG")  # green: tells it apart from the blue stream frame
 
-    async def snapshot(self, keyboard=False):
+    async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
+        self.snapshot_timeouts.append(timeout)
         self.items = list(self.tree)
         return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
 

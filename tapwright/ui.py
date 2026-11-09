@@ -76,6 +76,7 @@ class Element:
     in_alert: bool = False  # inside an OS alert
     focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
     name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
+    secure: bool = False  # a password field: its value is never shown
 
     @property
     def x(self) -> float:
@@ -142,6 +143,12 @@ class Tree:
     more: int = 0  # elements past MAX_ELEMENTS, not listed
     alert: Alert | None = None
     keyboard: bool = False
+    top_inset: float | None = None  # where the bars along the top edge end (y), None when there are none
+    bottom_inset: float | None = None  # how far the bars along the bottom edge reach up from it
+
+
+BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
+BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
 def _rect(node: ET.Element) -> tuple[float, float, float, float]:
@@ -207,6 +214,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             tree.alert = _alert(node)
         if kind == "Keyboard" and visible:
             tree.keyboard = True
+        if kind in BARS and visible and screen:
+            if y < screen[1] * BAR_EDGE:
+                tree.top_inset = max(tree.top_inset or 0.0, y + h)
+            elif y + h > screen[1] * (1 - BAR_EDGE):
+                tree.bottom_inset = max(tree.bottom_inset or 0.0, screen[1] - y)
         in_keyboard = in_keyboard or kind == "Keyboard"
         in_alert = in_alert or kind == "Alert"
         # WDA mirrors the label into name when there is no identifier
@@ -227,7 +239,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
             checked = (value == "1") if role == "switch" else None
             candidate = Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
-                                "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name)
+                                "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
+                                kind == "SecureTextField")
             if parent and _duplicate(parent, candidate):
                 pass  # the same thing as its parent, exposed twice (React Native does): list it once
             elif len(tree.items) < MAX_ELEMENTS:
@@ -370,6 +383,11 @@ def _without_nested(hits: list[Element]) -> list[Element]:
     return [e for e in hits if id(e) not in drop]
 
 
+def more_candidates(total: int, shown: int) -> list[str]:
+    """The closing line of an `ambiguous` message that lists only some of the matches."""
+    return [f'  (+{total - shown} more; use a ref or "index")'] if total > shown else []
+
+
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are
@@ -409,7 +427,7 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         raise Refused("ambiguous", f"{len(hits)} elements match {what}"
                       + (f", showing {len(shown)}" if len(hits) > len(shown) else "")
                       + "; use one of their refs, or add index (0 is the first). Candidates:\n"
-                      + "\n".join(e.line() for e in shown))
+                      + "\n".join([*(e.line() for e in shown), *more_candidates(len(hits), len(shown))]))
     return hits[0]
 
 
@@ -523,11 +541,17 @@ def scroll_points(direction: str, screen: tuple[float, float], amount: float = 0
 SCROLL_USABLE = 0.84  # a scroll never spans more than this share of its area: the finger stays off the edges
 
 
-def scroll_area_points(direction: str, rect: tuple[float, float, float, float],
-                       amount: float = 0.8) -> tuple[float, ...]:
+def scroll_area_points(direction: str, rect: tuple[float, float, float, float], amount: float = 0.8,
+                       band: tuple[float, float] | None = None) -> tuple[float, ...]:
     """Swipe endpoints that scroll the content of `rect` (x, y, w, h in points) by `amount` of it,
-    centred in it and at most SCROLL_USABLE of it. "down" shows what is below (the finger moves up)."""
+    centred in it and at most SCROLL_USABLE of it. "down" shows what is below (the finger moves up).
+    `band` is the (top, bottom) y between the bars: `rect` is cut to it first, so a swipe never starts
+    or ends on a navigation, tab or tool bar."""
     x, y, w, h = rect
+    if band is not None:
+        top, bottom = max(y, band[0]), min(y + h, band[1])
+        if bottom > top:
+            y, h = top, bottom - top
     cx, cy = x + w / 2, y + h / 2
     length = w if direction in ("left", "right") else h
     half = min(max(amount, 0.1) * length, length * SCROLL_USABLE) / 2
@@ -543,12 +567,15 @@ def scroll_area_points(direction: str, rect: tuple[float, float, float, float],
 
 
 def scroll_container(items: list[Element], screen: tuple[float, float]) -> Element | None:
-    """The first `scroll` element whose rect holds the centre of the screen, else None."""
-    cx, cy = screen[0] / 2, screen[1] / 2
-    for e in items:
-        if e.role == "scroll" and e.x <= cx <= e.x + e.width and e.y <= cy <= e.y + e.height:
-            return e
-    return None
+    """The innermost (smallest) `scroll` element whose rect holds the centre of the screen, else None."""
+    return scroll_at(items, (screen[0] / 2, screen[1] / 2))
+
+
+def scroll_at(items: list[Element], point: tuple[float, float]) -> Element | None:
+    """The innermost (smallest) `scroll` element whose rect holds the point, else None."""
+    x, y = point
+    around = [e for e in items if e.role == "scroll" and e.x <= x <= e.x + e.width and e.y <= y <= e.y + e.height]
+    return min(around, key=lambda e: e.width * e.height, default=None)
 
 
 def scroll_of(items: list[Element], element: Element) -> Element | None:

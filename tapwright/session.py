@@ -32,6 +32,7 @@ class Session:
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
+        self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end (y)
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
         self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
         self.not_installed: set[str] = set()  # bundle ids already looked for in the installed apps and not found
@@ -148,11 +149,12 @@ class Session:
             return None  # the header just leaves out "@3x"
         return float(round(scale)) if scale >= 1 else None
 
-    async def snapshot(self, keyboard: bool = False) -> Snapshot:
+    async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
+        source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
         tree = ui.read(source, self.screen, keyboard=keyboard)
         self.items = tree.items
+        self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.app = await self._app()
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return Snapshot(tree, self.app, self.scale)
@@ -187,6 +189,7 @@ class Session:
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
         tree = ui.read(source, self.screen)
         self.items = tree.items
+        self.last_insets = (tree.top_inset, tree.bottom_inset)
         return tree
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:

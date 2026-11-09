@@ -78,6 +78,39 @@ def test_the_scroll_area_is_the_first_scroll_element_over_the_screen_centre():
     assert ui.scroll_container([corner, button], SCREEN) is None
 
 
+def test_the_tree_says_how_far_the_bars_reach_into_the_screen():
+    bars = screen(node("NavigationBar", 0, 59, 400, 44), node("TabBar", 0, 749, 400, 51))
+    tree = ui.read(bars, SCREEN)
+    assert (tree.top_inset, tree.bottom_inset) == (103.0, 51.0)
+    tree = ui.read(screen(node("StatusBar", 0, 0, 400, 50), node("Toolbar", 0, 740, 400, 60)), SCREEN)
+    assert (tree.top_inset, tree.bottom_inset) == (50.0, 60.0)
+    assert ui.read(screen(node("Button", 8, 300, 80, 44, "OK")), SCREEN).top_inset is None  # no bars: unknown
+
+
+def test_swipes_stay_between_the_bars():
+    for direction in ("up", "down"):
+        _, y0, _, y1 = ui.scroll_area_points(direction, (0, 0, 400, 800), 1.0, band=(100.0, 720.0))
+        assert 100 < y0 < 720 and 100 < y1 < 720, direction
+    _, y, _, _ = ui.scroll_area_points("left", (0, 0, 400, 800), 1.0, band=(100.0, 720.0))
+    assert y == 410.0  # a sideways swipe runs through the middle of what is between the bars
+
+
+def test_the_scroll_area_is_the_innermost_one_around_the_centre_or_a_point():
+    outer = el("e1", "scroll", "Page", rect=(0, 0, 400, 800))
+    inner = el("e2", "scroll", "Feed", rect=(0, 300, 400, 200))
+    assert ui.scroll_container([outer, inner], SCREEN) is inner
+    assert ui.scroll_container([inner, outer], SCREEN) is inner
+    assert ui.scroll_at([inner, outer], (50.0, 350.0)) is inner
+    assert ui.scroll_at([inner, outer], (50.0, 50.0)) is outer
+    assert ui.scroll_at([inner, outer], (50.0, 900.0)) is None
+
+
+def test_a_secure_text_field_is_marked_secure():
+    items = ui.elements(screen(node("SecureTextField", 10, 100, 300, 44, "Password"),
+                               node("TextField", 10, 160, 300, 44, "Email")), SCREEN)
+    assert [(e.role, e.secure) for e in items] == [("input", True), ("input", False)]
+
+
 def test_the_scroll_view_of_an_element_is_itself_or_the_smallest_one_around_it():
     page = el("e1", "scroll", "Page", rect=(0, 100, 400, 600))
     row = el("e2", "scroll", "Row", rect=(0, 200, 400, 100))

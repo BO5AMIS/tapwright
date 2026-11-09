@@ -298,6 +298,38 @@ def test_replace_says_when_the_focused_field_could_not_be_found(phone, monkeypat
     assert text.startswith("typed 2 characters") and "couldn't find the focused field to clear" in text
 
 
+def _typing(phone, monkeypatch, **kwargs):
+    """Type "hi"-like text into the field at the fake phone and return the requests the typing made."""
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
+    s = Session(phone)
+    s.items = list(FIELD)
+    text = kwargs.pop("text", "hi")
+    asyncio.run(s.type_text(text, target=ui_module.Target(ref="e1"), **kwargs))
+    return [(m, p, v) for m, p, v in phone.requests if p.endswith(("/clear", "/wda/keys"))]
+
+
+def test_replace_clears_the_field_before_the_keys_go_out(phone, monkeypatch):
+    sent = _typing(phone, monkeypatch, replace=True)
+    assert [p.rsplit("/", 1)[1] for _, p, _ in sent] == ["clear", "keys"]
+
+
+def test_without_replace_nothing_is_cleared(phone, monkeypatch):
+    sent = _typing(phone, monkeypatch, replace=False)
+    assert [p.rsplit("/", 1)[1] for _, p, _ in sent] == ["keys"]
+
+
+def test_submit_sends_return_after_the_text(phone, monkeypatch):
+    sent = _typing(phone, monkeypatch, submit=True)
+    assert sent[-1][2] == {"value": ["h", "i", "\n"]}
+
+
+def test_multi_line_text_is_sent_intact(phone, monkeypatch):
+    sent = _typing(phone, monkeypatch, text="a\nb  c")
+    assert sent[-1][2] == {"value": ["a", "\n", "b", " ", " ", "c"]}
+
+
 def _png(width: int) -> str:
     import base64
     import io

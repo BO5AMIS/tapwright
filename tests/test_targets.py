@@ -122,8 +122,9 @@ def test_ambiguity_shows_at_most_five():
     many = [ui.Element(f"e{i}", "button", "Row", rect=(0, i * 50, 100, 40), actions=("tap",)) for i in range(1, 8)]
     e = code(ui.resolve, many, ui.Target(text="row"))
     head, _, candidates = str(e).partition("Candidates:\n")
-    assert head.startswith('7 elements match text "row", showing 5;') and len(candidates.splitlines()) == 5
-    assert candidates.splitlines()[-1].startswith("e5 ")
+    lines = candidates.splitlines()
+    assert head.startswith('7 elements match text "row", showing 5;') and len(lines) == 6
+    assert lines[4].startswith("e5 ") and lines[-1] == '  (+2 more; use a ref or "index")'
 
 
 def test_index_picks_in_reading_order_and_is_checked():
