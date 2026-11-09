@@ -126,3 +126,87 @@ def test_the_scroll_view_of_an_element_is_itself_or_the_smallest_one_around_it()
     assert ui.scroll_of(items, page) is page
     assert ui.scroll_of(items, inside) is row
     assert ui.scroll_of(items, outside) is None
+
+
+# ---- bars drawn over content, and layers that hide what is behind them (Task 8a) ----
+PHONE = (430.0, 932.0)
+
+
+def phone(*children):
+    return f"<AppiumAUT>{node('Application', 0, 0, 430, 932, children=children)}</AppiumAUT>"
+
+
+def base_screen():
+    """A screen with a card whose centre is under the tab bar, and a tab bar with two tabs."""
+    tabs = node("TabBar", 0, 849, 430, 83, children=[node("Button", 0, 849, 215, 83, "Home"),
+                                                     node("Button", 215, 849, 215, 83, "Stats")])
+    return node("Other", 0, 0, 430, 932, children=[node("Button", 20, 100, 100, 44, "Add"),
+                                                   node("Cell", 20, 808, 390, 90, "Card"), tabs])
+
+
+def labels(items):
+    return [e.label for e in items if e.label]  # the tab bar itself is listed, without a label
+
+
+def test_an_element_under_a_bar_that_is_not_its_ancestor_knows_the_bar():
+    items = ui.elements(phone(base_screen()), PHONE)
+    by = {e.label: e for e in items}
+    assert [b.kind for b in by["Card"].covered_by] == ["TabBar"]
+    assert by["Card"].covered_by[0].rect == (0.0, 849.0, 430.0, 83.0)
+    assert by["Card"].covered_by[0].line == "tabbar @0,849 430x83"
+    assert by["Add"].covered_by == () and by["Home"].covered_by == () and by["Stats"].covered_by == ()  # a bar's own tabs
+
+
+def test_a_toolbar_and_a_navigation_bar_cover_too_and_a_status_bar_does_not():
+    top = node("NavigationBar", 0, 0, 430, 100, "Title")
+    tool = node("Toolbar", 0, 800, 430, 132)
+    status = node("StatusBar", 0, 400, 430, 40)
+    items = ui.elements(phone(node("Cell", 20, 50, 390, 80, "Row"), node("Cell", 20, 820, 390, 80, "Low"),
+                              node("Cell", 20, 380, 390, 80, "Mid"), top, tool, status), PHONE)
+    by = {e.label: e for e in items}
+    assert [b.kind for b in by["Row"].covered_by] == ["NavigationBar"]
+    assert [b.kind for b in by["Low"].covered_by] == ["Toolbar"]
+    assert by["Mid"].covered_by == ()
+
+
+def sheet_over_base(layer_children):
+    return phone(base_screen(), node("Other", 0, 0, 430, 932, children=layer_children))
+
+
+SHEET = [node("Button", 0, 0, 430, 510, "Dismiss"), node("Button", 20, 560, 390, 50, "Sheet action"),
+         node("Button", 20, 850, 390, 50, "Sheet close")]  # the last one sits where the tab bar is
+
+
+def test_a_full_screen_layer_hides_what_is_behind_it():
+    items = ui.elements(sheet_over_base(SHEET), PHONE)
+    assert labels(items) == ["Dismiss", "Sheet action", "Sheet close"]
+    assert [e.ref for e in items] == ["e1", "e2", "e3"]  # numbered after the hiding
+    assert all(e.covered_by == () for e in items)  # the tab bar behind the sheet covers nothing in front of it
+
+
+def test_a_small_later_layer_hides_nothing():
+    toast = node("Other", 0, 700, 430, 80, children=[node("Button", 300, 710, 100, 60, "Undo")])
+    assert labels(ui.elements(phone(base_screen(), toast), PHONE)) == ["Add", "Card", "Home", "Stats", "Undo"]
+    big_but_sparse = node("Other", 0, 0, 430, 932, children=[node("Button", 20, 500, 100, 44, "Floating")])
+    assert "Add" in labels(ui.elements(phone(base_screen(), big_but_sparse), PHONE))  # 95% of the screen, under 50% filled
+
+
+def test_a_layer_before_the_content_hides_nothing():
+    items = ui.elements(phone(node("Other", 0, 0, 430, 932, children=SHEET), base_screen()), PHONE)
+    assert {"Add", "Card", "Dismiss"} <= set(labels(items))  # the base screen is in front here
+
+
+def test_a_full_screen_scroll_after_a_bar_does_not_hide_the_bar():
+    rows = [node("Cell", 0, 100 + 60 * i, 430, 60, f"Row {i}") for i in range(12)]
+    items = ui.elements(phone(node("NavigationBar", 0, 59, 430, 44, children=[node("Button", 8, 59, 60, 44, "Back")]),
+                              node("ScrollView", 0, 0, 430, 932, children=rows)), PHONE)
+    assert "Back" in labels(items)
+
+
+def test_the_visible_part_of_an_element_is_its_rect_minus_the_bars():
+    tab = ui.Bar("TabBar", (0.0, 849.0, 430.0, 83.0), "tabbar @0,849 430x83")
+    assert ui.visible_part((20, 808, 390, 90), (tab,), PHONE) == (20, 808, 390, 41)
+    assert ui.visible_part((20, 845, 390, 60), (tab,), PHONE)[3] == 4  # a sliver: the caller refuses it
+    top = ui.Bar("NavigationBar", (0.0, 0.0, 430.0, 100.0), "navigationbar @0,0 430x100")
+    assert ui.visible_part((20, 60, 390, 200), (top, tab), PHONE) == (20, 100, 390, 160)
+    assert ui.visible_part((20, 900, 390, 100), (), PHONE) == (20, 900, 390, 32)  # the screen's edge counts too

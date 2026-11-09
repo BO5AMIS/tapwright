@@ -1803,9 +1803,9 @@ def test_toggle_with_a_value_taps_only_when_it_differs():
         assert r["text"] == 'e1 switch "Wi-Fi" checked=false @300,100 60x30 is already false.'
         assert d.session.last_point is None and "tap" not in d.session.calls
         d.session.tree = [switch(True)]
-        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True, "force": True})
         assert "tap" in d.session.calls and "checked=true" in r["text"].splitlines()[0]
-        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True, "force": True})
         assert r["text"].endswith("is already true.")
         await finish(stop, task)
     run(go)
@@ -1901,7 +1901,7 @@ def test_toggle_that_did_not_flip_says_so_and_a_wanted_value_not_reached_is_refu
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "force": True})
         assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" disabled checked=false @300,100 60x30, but it is still checked=false.'
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True, "force": True})
         assert e.value.code == "not_actionable"
         assert str(e.value) == 'no_action: e1 switch "Wi-Fi" disabled checked=false @300,100 60x30 didn\'t change'
         await finish(stop, task)
@@ -2756,5 +2756,191 @@ def test_type_text_ambiguity_says_how_many_more_inputs_there_are():
         lines = str(e.value).splitlines()
         assert lines[0].startswith("7 inputs on screen;") and len(lines) == 2 + 5 + 1
         assert lines[-1] == '  (+2 more; use a ref or "index")'
+        await finish(stop, task)
+    run(go)
+
+
+# ---- refusals before acting (Task 8a) ----
+def test_a_disabled_element_is_refused_before_the_touch():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "Save", enabled=False)])
+        for tool in ("tap", "long_press"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, {"target": {"ref": "e1"}})
+            assert e.value.code == "not_actionable"
+            assert str(e.value) == ('disabled: e1 button "Save" disabled @10,10 100x40 is disabled; '
+                                    'pass force: true to touch it anyway.')
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_force_overrides_disabled():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "Save", enabled=False)])
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert "tap" in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+ALERT = ui.Alert("Allow notifications?", ("Allow", "Don't Allow"), (50.0, 300.0, 300.0, 200.0))
+
+
+def alerted():
+    return [el("e1", "button", "Allow", in_alert=True, rect=(100, 400, 100, 44)),
+            el("e2", "button", "Save", rect=(10, 100, 100, 44))]
+
+
+def test_an_element_behind_an_alert_is_refused_but_the_alerts_buttons_work():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_alert = ALERT
+        await looked(d, alerted())
+        for tool in ("tap", "long_press"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, {"target": {"ref": "e2"}})
+            assert e.value.code == "not_actionable"
+            assert str(e.value) == ('behind_alert: an alert covers it: "Allow notifications?" [Allow] [Don\'t Allow]; '
+                                    'answer it with alert, or pass force: true.')
+        assert "tap" not in d.session.calls
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert "tap" in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_force_overrides_behind_alert_and_a_point_is_never_checked():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, alerted())
+        await d.run_tool("a", "tap", {"target": {"ref": "e2"}, "force": True, "look": False})
+        assert d.session.calls.count("tap") == 1
+        await d.run_tool("a", "tap", {"target": {"x": 20, "y": 120}, "look": False})  # a real touch lands where it lands
+        assert d.session.calls.count("tap") == 2
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_target_not_found_while_an_alert_is_up_says_the_alert_hides_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_alert = ALERT
+        await looked(d, [el("e1", "button", "Allow", in_alert=True, rect=(100, 400, 100, 44))])
+        for target in ({"id": "save"}, {"label": "Save"}, {"text": "Sav"}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": target})
+            assert e.value.code == "not_actionable" and str(e.value).startswith("behind_alert: an alert covers it:")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e9"}})
+        assert e.value.code == "not_found"  # only id, label and text say so
+        d.session.last_alert = None
+        await looked(d, [el("e1", "button", "Allow", rect=(100, 400, 100, 44))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"label": "Save"}})
+        assert e.value.code == "not_found"  # no alert any more: an ordinary miss
+        await finish(stop, task)
+    run(go)
+
+
+def test_disabled_comes_before_behind_alert_and_toggle_is_guarded_too():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        off = el("e2", "switch", "Wi-Fi", checked=False, enabled=False, rect=(300, 100, 60, 30))
+        await looked(d, [alerted()[0], off])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e2"}})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("disabled: e2 switch")
+        on = el("e2", "switch", "Wi-Fi", checked=False, rect=(300, 100, 60, 30))
+        await looked(d, [alerted()[0], on])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e2"}})
+        assert str(e.value).startswith("behind_alert: ")
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_force_never_overrides_no_action():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "Save", enabled=False)])
+        for tool, args in (("toggle", {"target": {"ref": "e1"}}), ("type_text", {"text": "x", "target": {"ref": "e1"}}),
+                           ("scroll", {"target": {"ref": "e1"}})):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, {**args, "force": True})
+            assert e.value.code == "not_actionable" and str(e.value).startswith("no_action: ")
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_refusal_does_not_touch_the_phone_or_the_generation():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "Save", enabled=False)])
+        generation = d.control.generation
+        with pytest.raises(Refused):
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.control.generation == generation
+        await finish(stop, task)
+    run(go)
+
+
+TAB = ui.Bar("TabBar", (0.0, 849.0, 430.0, 83.0), "tabbar @0,849 430x83")
+
+
+def test_a_card_under_the_tab_bar_is_tapped_where_it_shows():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        card = el("e1", "cell", "Card", rect=(20, 808, 390, 90), covered_by=(TAB,))
+        await looked(d, [card])
+        for target in ({"ref": "e1"}, {"label": "Card"}, {"text": "Card"}):
+            r = await d.run_tool("a", "tap", {"target": target, "look": False})
+            assert d.session.last_point == (215.0, 828.5)  # the middle of y 808-849, not of the whole card
+            assert re.fullmatch(r'Tapped e\d cell "Card" @20,808 390x90\.', r["text"])
+        await looked(d, [card])
+        r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 828.5) and r["text"].startswith("Long-pressed e")
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert d.session.last_point == (215.0, 853.0)  # forced: the card's own centre
+        await d.run_tool("a", "tap", {"target": {"x": 215, "y": 853}, "look": False})
+        assert d.session.last_point == (215.0, 853.0)  # a raw point stays raw
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_element_with_too_little_showing_is_refused():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "cell", "Card", rect=(20, 845, 390, 60), covered_by=(TAB,)),
+                         el("e2", "cell", "Draft", rect=(20, 100, 390, 60),
+                            covered_by=(ui.Bar("Toolbar", (0.0, 90.0, 430.0, 100.0), "toolbar @0,90 430x100"),))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == ('under_tab_bar: e1 cell "Card" @20,845 390x60 is under the tab bar iOS draws; '
+                                'scroll it up first.')
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "long_press", {"target": {"ref": "e2"}})
+        assert str(e.value) == ('covered: e2 cell "Draft" @20,100 390x60 is covered by toolbar @0,90 430x100; '
+                                'scroll it into view first.')
+        assert "tap" not in d.session.calls
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert d.session.last_point == (215.0, 875.0)
         await finish(stop, task)
     run(go)

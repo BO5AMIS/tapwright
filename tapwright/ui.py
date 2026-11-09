@@ -60,6 +60,15 @@ def clip(text: str, limit: int = TEXT_LIMIT) -> str:
     return json.dumps(" ".join(text.split())[:limit], ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class Bar:
+    """A tab bar, toolbar or navigation bar iOS draws over the content: its kind (the XCUIElementType
+    without its prefix), its rect, and its element line (without a ref or actions) for messages."""
+    kind: str
+    rect: tuple[float, float, float, float]
+    line: str
+
+
 @dataclass
 class Element:
     ref: str
@@ -77,6 +86,7 @@ class Element:
     focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
     name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
     secure: bool = False  # a password field: its value is never shown
+    covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
 
     @property
     def x(self) -> float:
@@ -148,6 +158,9 @@ class Tree:
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
+COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar"}  # the ones a touch at an element's centre can land on
+LAYER_COVER = 0.95  # a later sibling covering this share of the screen is a layer in front of the earlier ones...
+LAYER_FILL = 0.5  # ...when what it lists fills this share: a modal, not a toast or a floating button
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -176,6 +189,45 @@ def _duplicate(parent: Element, child: Element) -> bool:
                 and _same_rect(parent.rect, child.rect))
 
 
+def _overlap(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, float, float, float]:
+    """The part of rect `a` inside rect `b` (zero-size when they don't meet)."""
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    return (x0, y0, max(0.0, x1 - x0), max(0.0, y1 - y0))
+
+
+def _union_area(rects: list[tuple[float, float, float, float]]) -> float:
+    """The area the rects cover together (no double counting)."""
+    rects = [r for r in rects if r[2] > 0 and r[3] > 0]
+    xs = sorted({v for r in rects for v in (r[0], r[0] + r[2])})
+    total = 0.0
+    for left, right in zip(xs, xs[1:]):
+        spans = sorted((r[1], r[1] + r[3]) for r in rects if r[0] <= left and r[0] + r[2] >= right)
+        end = -math.inf
+        for top, bottom in spans:
+            total += (right - left) * max(0.0, bottom - max(top, end))
+            end = max(end, bottom)
+    return total
+
+
+def visible_part(rect: tuple[float, float, float, float], bars: tuple[Bar, ...],
+                 screen: tuple[float, float] | None = None) -> tuple[float, float, float, float]:
+    """What of `rect` a finger could reach: the rect inside the screen, minus each bar. Where a bar
+    leaves several strips (a bar across the middle), the largest strip stays."""
+    part = _overlap(rect, (0.0, 0.0, *screen)) if screen else rect
+    for bar in bars:
+        cut = _overlap(part, bar.rect)
+        if cut[2] <= 0 or cut[3] <= 0:
+            continue
+        x, y, w, h = part
+        strips = [(x, y, w, cut[1] - y), (x, cut[1] + cut[3], w, y + h - cut[1] - cut[3]),
+                  (x, y, cut[0] - x, h), (cut[0] + cut[2], y, x + w - cut[0] - cut[2], h)]
+        part = max(strips, key=lambda r: max(r[2], 0.0) * max(r[3], 0.0))
+        if part[2] <= 0 or part[3] <= 0:
+            return (part[0], part[1], 0.0, 0.0)
+    return part
+
+
 def _clean(source: str) -> str:
     """The XML without characters XML 1.0 forbids."""
     def drop(m: re.Match) -> str:
@@ -199,9 +251,15 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     scroll container, and the keyboard's keys unless `keyboard`. Raises DeviceError on a broken tree."""
     tree = Tree([])
     bars: list[tuple[bool, float]] = []  # (at the top?, how far it reaches in) of each bar seen
+    # Everything below is numbered by visit order, so "what is inside this node" is a range of numbers.
+    found: list[tuple[Element, int, tuple[int, ...]]] = []  # each listed element, its number, the bars it is inside
+    covering: list[tuple[int, Bar]] = []  # the bars iOS draws over content, by number
+    hidden: list[tuple[int, int]] = []  # number ranges a later layer covers
+    visits = [0]
+    screen_rect = (0.0, 0.0, *screen) if screen else None
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
-             in_alert: bool, parent: Element | None = None) -> None:
+             in_alert: bool, parent: Element | None = None, inside: tuple[int, ...] = ()) -> None:
         kind = _kind(node)
         x, y, w, h = rect = _rect(node)
         label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
@@ -209,6 +267,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         left, top, right, bottom = clip
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
             return  # nothing in this subtree is on screen
+        number = visits[0]
+        visits[0] += 1
         cx, cy = x + w / 2, y + h / 2
         visible = w > 0 and h > 0 and left <= cx < right and top <= cy < bottom
         if kind == "Alert" and visible and tree.alert is None:
@@ -225,6 +285,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         # WDA mirrors the label into name when there is no identifier
         identifier = "" if name == label else name
         role = ROLES.get(kind, kind.lower())
+        if kind in COVERING_BARS:
+            inside += (number,)  # a bar's own contents and the bar itself aren't covered by it
+            if visible:
+                covering.append((number, Bar(kind, rect, Element("", role, label, identifier, rect=rect)
+                                             .line(ref=False, actions=False))))
         if kind == "Button" and in_tab_bar:
             role = "tab"
         elif kind == "StaticText" and "Header" in traits:
@@ -239,20 +304,25 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
             checked = (value == "1") if role == "switch" else None
-            candidate = Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
+            candidate = Element("", role, label, identifier, value, rect, enabled,
                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
                                 kind == "SecureTextField")
             if parent and _duplicate(parent, candidate):
                 pass  # the same thing as its parent, exposed twice (React Native does): list it once
-            elif len(tree.items) < MAX_ELEMENTS:
-                listed = candidate
-                tree.items.append(listed)
             else:
-                tree.more += 1
+                listed = candidate
+                found.append((listed, number, inside))
         if kind in CLIPPING:
             clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
+        spans = []  # the numbers each child's subtree used
         for child in node:
-            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed)
+            start = visits[0]
+            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside)
+            spans.append((start, visits[0]))
+        if screen_rect:
+            for k, child in enumerate(node):
+                if k and spans[k][1] > spans[k][0] and _layer(child, spans[k], found, screen_rect):
+                    hidden.append((spans[0][0], spans[k][0]))  # the earlier children are behind it
 
     inf = math.inf
     try:
@@ -260,12 +330,38 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
     walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+
+    def behind(number: int) -> bool:
+        return any(a <= number < b for a, b in hidden)
+    shown = [(e, number, inside) for e, number, inside in found if not behind(number)]
+    for e, number, inside in shown:
+        cx, cy = e.center
+        e.covered_by = tuple(b for (n, b) in covering if n not in inside and not behind(n)
+                             and b.rect[0] <= cx < b.rect[0] + b.rect[2] and b.rect[1] <= cy < b.rect[1] + b.rect[3])
+    tree.items = [e for e, _, _ in shown[:MAX_ELEMENTS]]
+    tree.more = max(0, len(shown) - MAX_ELEMENTS)
+    for i, e in enumerate(tree.items, 1):
+        e.ref = f"e{i}"
     for top, reach in ([] if tree.alert else bars):  # bars behind an alert aren't what a swipe would meet
         if top:
             tree.top_inset = max(tree.top_inset or 0.0, reach)
         else:
             tree.bottom_inset = max(tree.bottom_inset or 0.0, reach)
     return tree
+
+
+def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
+           screen: tuple[float, float, float, float]) -> bool:
+    """Is this node a layer in front of its earlier siblings (a sheet or modal)? It covers nearly the whole
+    screen, and what it lists inside fills at least half of it. A scroll view isn't one: content scrolls
+    under the bars, so a full-screen scroll after a navigation bar is just the page."""
+    if _kind(child) in CLIPPING:
+        return False
+    area = screen[2] * screen[3]
+    if area <= 0 or (a := _overlap(_rect(child), screen))[2] * a[3] < LAYER_COVER * area:
+        return False
+    inner = [_overlap(e.rect, screen) for e, number, _ in found if span[0] < number < span[1]]
+    return _union_area(inner) >= LAYER_FILL * area
 
 
 def elements(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> list[Element]:

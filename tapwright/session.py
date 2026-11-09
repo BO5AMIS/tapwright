@@ -194,6 +194,7 @@ class Session:
         tree = ui.read(source, self.screen)
         self.items = tree.items
         self.last_insets = (tree.top_inset, tree.bottom_inset)
+        self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return tree
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:

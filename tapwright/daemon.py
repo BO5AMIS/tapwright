@@ -224,8 +224,8 @@ ACTIONS = {
     "close_app": (None, None),
     "toggle": (None, CAP),
     "back": (None, CAP),
-    "tap": (lambda s, a: s.tap(_target(a)), CAP),
-    "long_press": (lambda s, a: s.tap(_target(a), hold_ms=int(float(a.get("seconds", 1.0)) * 1000)), CAP),
+    "tap": (None, CAP),
+    "long_press": (None, CAP),
     "type_text": (None, CAP),
     "scroll": (None, CAP),
     "swipe": (lambda s, a: s.swipe(float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"]),
@@ -234,6 +234,7 @@ ACTIONS = {
     "alert": (lambda s, a: s.alert(a["action"]), CAP),
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
+MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "open_url", "press_button")  # identical elements can't be told apart after these
 READS = ("look", "apps")
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
@@ -282,7 +283,7 @@ class Daemon:
         self._lost = asyncio.Event()
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
-                          "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
+                          "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -519,6 +520,8 @@ class Daemon:
                 if await self._silent_read(view) and self._missing(s.items, target):
                     # the app may have been mid-redraw: one more look, once it is still, before saying so
                     await self._silent_read(view)
+            if by_lookup and target.kind != "point" and self._missing(s.items, target):
+                self._refuse_behind_alert(view, s.items)  # an alert hides the app's elements: say so, not "not found"
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
@@ -739,6 +742,64 @@ class Daemon:
         done.note = note
         return done
 
+    def _alert_text(self, view, items: list[ui.Element]) -> str | None:
+        """`"<title>" [<button>] ...` when an OS alert is up on this list (some element is inside one), else None."""
+        if not any(e.in_alert for e in items):
+            return None
+        alert = self.session.last_alert
+        title, buttons = (alert.title, alert.buttons) if alert else view.alert or ("", ())
+        buttons = buttons or tuple(e.text for e in items if e.in_alert and e.role == "button")
+        return " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
+
+    def _refuse_behind_alert(self, view, items: list[ui.Element]) -> None:
+        if (alert := self._alert_text(view, items)) is not None:
+            raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; "
+                                            "answer it with alert, or pass force: true.")
+
+    def _guard(self, view, items: list[ui.Element], element: ui.Element) -> None:
+        """A9: refuse what a real touch couldn't do. The reason word comes first in the message."""
+        if not element.enabled:
+            raise Refused("not_actionable", f"disabled: {element.line(actions=False)} is disabled; "
+                                            "pass force: true to touch it anyway.")
+        if not element.in_alert:
+            self._refuse_behind_alert(view, items)
+
+    def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
+        """Where a finger would touch an element a bar is drawn over: the middle of the part that shows.
+        None when a bar covers none of its centre. Refuses when too little shows."""
+        if not element.covered_by:
+            return None
+        x, y, w, h = ui.visible_part(element.rect, element.covered_by, self.session.screen)
+        if w >= MIN_VISIBLE and h >= MIN_VISIBLE:
+            return x + w / 2, y + h / 2
+        bar = element.covered_by[0]
+        line = element.line(actions=False)
+        if bar.kind == "TabBar":
+            raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; scroll it up first.")
+        raise Refused("not_actionable", f"covered: {line} is covered by {bar.line}; scroll it into view first.")
+
+    async def _touch(self, view, a: dict, hold_ms: int) -> str:
+        """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
+        element under a bar that shows. `force` skips all of it. A point is a raw touch."""
+        s, target = self.session, _target(a)
+        verb = "Long-pressed" if hold_ms > 300 else "Tapped"
+        found = ui.resolve(s.items, target)
+        if isinstance(found, tuple):
+            return await s.tap(target, hold_ms=hold_ms)
+        if a.get("force"):
+            return await s.tap(target, hold_ms=hold_ms)
+        self._guard(view, s.items, found)
+        if (point := self._touch_point(found)) is None:
+            return await s.tap(target, hold_ms=hold_ms)
+        await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
+        return f"{verb} {found.line(actions=False)}."
+
+    async def _tap(self, view, a: dict) -> str:
+        return await self._touch(view, a, 60)
+
+    async def _long_press(self, view, a: dict) -> str:
+        return await self._touch(view, a, int(float(a.get("seconds", 1.0)) * 1000))
+
     async def _toggle(self, view, a: dict) -> str:
         target = _target(a)
         if target.point is not None:
@@ -751,6 +812,8 @@ class Daemon:
         line = found.line(actions=False)
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
+        if not a.get("force"):
+            self._guard(view, view.items, found)
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
