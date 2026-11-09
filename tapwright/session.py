@@ -18,6 +18,7 @@ class Session:
         self.screen = (390.0, 844.0)
         self.scale: float | None = None  # pixels per point, read once; None until known
         self.items: list[ui.Element] = []
+        self.refs = True  # False while `items` is a silent re-read: its refs aren't the agent's, so lines omit them
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
 
     async def ensure(self) -> None:
@@ -112,11 +113,11 @@ class Session:
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:
         """(x, y, what to say) for a target, on the elements of the last look."""
-        hit = ui.resolve(self.items, target)
+        hit = ui.resolve(self.items, target, self.refs)
         if isinstance(hit, tuple):
             return hit[0], hit[1], f"({round(hit[0])}, {round(hit[1])})"
         cx, cy = hit.center
-        return cx, cy, hit.line()
+        return cx, cy, hit.line(ref=self.refs)
 
     # ---- acting ----
     async def tap(self, target: ui.Target, hold_ms: int = 60) -> str:

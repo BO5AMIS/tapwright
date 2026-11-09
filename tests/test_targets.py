@@ -184,3 +184,11 @@ def test_at_point_gives_a_shared_edge_to_one_field():
     assert ui.at_point([a, b], (100.0, 10.0), "input") is b
     assert ui.at_point([a, b], (99.9, 10.0), "input") is a
     assert ui.at_point([a, b], (200.0, 10.0), "input") is None
+
+
+def test_without_refs_the_candidates_carry_none_and_the_hint_says_why():
+    list_ = items("calculator")
+    e = code(ui.resolve, list_, ui.Target(label="7"), False)
+    head, _, candidates = str(e).partition("Candidates:\n")
+    assert "fresh read of the screen" in head and "or look to get refs" in head and "use one of their refs" not in head
+    assert candidates.splitlines() == ['button "7" @14,520 90x90 [tap]', 'button "7" id=7-memory @14,620 90x90 [tap]']

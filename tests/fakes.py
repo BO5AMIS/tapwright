@@ -43,6 +43,7 @@ class FakeSession:
         self.screen = (400.0, 800.0)
         self.items: list = []
         self.last_point = None
+        self.refs = True
         self.sid = None
         self.calls: list = []
         self.fail: dict = {}
@@ -99,17 +100,17 @@ class FakeSession:
         return [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
 
     async def tap(self, target, hold_ms=60):
-        hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
+        hit = ui.resolve(self.items, target, self.refs)  # a refused target never reaches the phone
         self._record("tap")
         if isinstance(hit, tuple):
             self.last_point = hit
             return f"tapped ({round(hit[0])}, {round(hit[1])})"
         self.last_point = hit.center
-        return f"tapped {hit.line()}"
+        return f"tapped {hit.line(ref=self.refs)}"
 
     async def type_text(self, text, replace=False, submit=False, target=None):
         if target is not None:
-            ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
+            ui.resolve(self.items, target, self.refs)  # a missing or ambiguous field is refused, as in Session
         self._record("type_text")
         return f"typed {len(text)} characters"
 

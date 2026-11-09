@@ -346,10 +346,11 @@ def _without_nested(hits: list[Element]) -> list[Element]:
     return [e for e in hits if id(e) not in drop]
 
 
-def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
+def resolve(items: list[Element], target: Target, refs: bool = True) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are
-    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
+    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`.
+    `refs=False` (the list was read silently, so its numbers aren't the agent's) leaves refs out of the lines."""
     if target.point is not None:
         return target.point
     if target.ref is not None:
@@ -383,8 +384,10 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}"
                       + (f", showing {len(shown)}" if len(hits) > len(shown) else "")
-                      + "; use one of their refs, or add index (0 is the first). Candidates:\n"
-                      + "\n".join(e.line() for e in shown))
+                      + ("; use one of their refs, or add index (0 is the first). Candidates:\n" if refs else
+                         "; these come from a fresh read of the screen; add index, or use a more specific id, "
+                         "label or text, or look to get refs. Candidates:\n")
+                      + "\n".join(e.line(ref=refs) for e in shown))
     return hits[0]
 
 

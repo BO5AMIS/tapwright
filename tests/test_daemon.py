@@ -78,7 +78,7 @@ def test_a_person_makes_refs_stale_and_ids_are_looked_up_again():
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert e.value.code == "stale"
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
-        assert r["text"].startswith("tapped e1") and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith("tapped button") and d.session.calls.count("refresh") == 1
         assert r["text"].endswith("\nNote: a person used the phone since your last look.")
         with pytest.raises(Refused) as e:  # the silent re-read isn't a look: the agent's refs are still stale
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
@@ -534,7 +534,7 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
             await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
         assert e.value.code == "not_found"
         r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
-        assert r["text"].startswith('tapped e3 button "8"')
+        assert r["text"].startswith('tapped button "8"')
         await finish(stop, task)
     run(go)
 
@@ -559,11 +559,11 @@ def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
         d.session.tree = [button("e1", "Done", "done-button")]  # the screen changed behind the agent's back
         d.control.clock.t += 5.0  # older than LIVE_AGE
         r = await d.run_tool("a", "tap", {"target": {"id": "done-button"}, "look": False})
-        assert r["text"].startswith('tapped e1 button "Done"') and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith('tapped button "Done"') and d.session.calls.count("refresh") == 1
         # an action that returned no list: the screen has probably changed
         d.session.tree = [button("e1", "Back", "back-button")]
         r = await d.run_tool("a", "tap", {"target": {"label": "back"}, "look": False})
-        assert r["text"].startswith('tapped e1 button "Back"') and d.session.calls.count("refresh") == 2
+        assert r["text"].startswith('tapped button "Back"') and d.session.calls.count("refresh") == 2
         assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]  # refs don't re-read
         assert d.session.calls.count("refresh") == 2
         await d.run_tool("a", "look", {"screenshot": False})  # a look makes it current again
@@ -597,7 +597,7 @@ def test_a_person_makes_a_ref_stale_but_not_an_id_text_or_label():
             await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
             before = d.session.calls.count("refresh")
             r = await d.run_tool("a", "tap", {"target": target, "look": False})
-            assert r["text"].startswith("tapped e1") and d.session.calls.count("refresh") == before + 1
+            assert r["text"].startswith("tapped button") and d.session.calls.count("refresh") == before + 1
         await finish(stop, task)
     run(go)
 
@@ -625,7 +625,7 @@ def test_a_silent_re_read_does_not_renumber_the_agents_refs():
         d.session.tree = [button("e1", "Other", "other-button"), button("e2", "OK", "ok-button")]
         d.control.clock.t += 5.0
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
-        assert r["text"].startswith('tapped e2 button "OK"') and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith('tapped button "OK"') and d.session.calls.count("refresh") == 1
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # still the agent's own list
         assert r["text"].startswith('tapped e1 button "OK"')
         await finish(stop, task)
@@ -686,6 +686,37 @@ def test_a_list_is_current_until_exactly_live_age():
         assert d.session.calls.count("refresh") == 0
         await d.run_tool("a", "look", {"screenshot": False})
         d.control.clock.t += 2.0  # exactly LIVE_AGE: no longer current
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert d.session.calls.count("refresh") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_after_a_re_read_the_lines_show_no_refs():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "7"), button("e2", "7", rect=(10, 60, 100, 40)), button("e3", "Done", "done")]
+        d.control.clock.t += 5.0
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
+        assert e.value.code == "ambiguous" and "e1" not in str(e.value) and "fresh read" in str(e.value)
+        r = await d.run_tool("a", "tap", {"target": {"id": "done"}, "look": False})
+        assert r["text"].startswith('tapped button "Done"')  # no ref: the agent's list numbers differently
+        await d.run_tool("a", "look", {"screenshot": False})  # a current list shows refs as before
+        r = await d.run_tool("a", "tap", {"target": {"id": "done"}, "look": False})
+        assert r["text"].startswith("tapped e3 button")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_dropped_connection_makes_an_id_target_re_read():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clients["a"].dropped = True
         await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
         assert d.session.calls.count("refresh") == 1
         await finish(stop, task)

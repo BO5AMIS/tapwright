@@ -350,6 +350,7 @@ class Daemon:
                 # agent was last shown, so its refs keep pointing where it thinks (Task 4 carries refs
                 # across re-reads). Nothing about the view's freshness changes either.
                 await s.refresh()
+            s.refs = not reread
             s.last_point = None
             result = await call(s, args)
             if not reread:
