@@ -322,8 +322,28 @@ def parse_target(raw: dict | None) -> Target:
 MAX_CANDIDATES = 5
 
 
-def _same(a: str, b: str) -> bool:
-    return a.casefold() == b.casefold()
+def _norm(text: str) -> str:
+    return text.strip().casefold()
+
+
+def _inside(inner: Element, outer: Element) -> bool:
+    return (outer.x <= inner.x and outer.y <= inner.y and inner.x + inner.width <= outer.x + outer.width
+            and inner.y + inner.height <= outer.y + outer.height)
+
+
+def _actionable(e: Element) -> bool:
+    return any(a in e.actions for a in ("tap", "type", "toggle"))
+
+
+def _without_nested(hits: list[Element]) -> list[Element]:
+    """Of two matches where one's rect contains the other's, only the actionable one stays (a button
+    and its own text child are one match). Both or neither actionable: both stay."""
+    drop = set()
+    for a in hits:
+        for b in hits:
+            if a is not b and _inside(b, a) and _actionable(a) != _actionable(b):
+                drop.add(id(b if _actionable(a) else a))
+    return [e for e in hits if id(e) not in drop]
 
 
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
@@ -343,13 +363,14 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
         what, hint = f'id "{target.id}"', 'look for its id, or use {"label": …} or {"text": …}'
     elif target.label is not None:
-        hits = [e for e in items if _same(e.label, target.label.strip())]
+        hits = _without_nested([e for e in items if _norm(e.label) == _norm(target.label)])
         what, hint = f'label "{target.label}"', 'use {"text": …} for a partial match, or look'
     else:
-        want = target.text.strip()
-        hits = [e for e in items if _same(e.label, want) or _same(e.value, want)]
+        want = _norm(target.text)
+        hits = [e for e in items if _norm(e.label) == want or _norm(e.value) == want]
         if not hits:
-            hits = [e for e in items if want.casefold() in e.label.casefold() or want.casefold() in e.value.casefold()]
+            hits = [e for e in items if want in _norm(e.label) or want in _norm(e.value)]
+        hits = _without_nested(hits)
         what, hint = f'text "{target.text}"', "scroll if it may be off screen, or look"
     if not hits:
         raise Refused("not_found", f"nothing on screen has {what}; {hint}")
@@ -369,10 +390,11 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
 
 def at_point(items: list[Element], point: tuple[float, float], role: str) -> Element | None:
     """The front-most listed element of `role` whose rect contains the point (a later element in
-    reading order is drawn over an earlier one), or None. For tools that act on an element, not a touch."""
+    reading order is drawn over an earlier one), or None. The far edge is outside, so two fields that
+    share an edge don't both claim it. For tools that act on an element, not a touch."""
     x, y = point
     for e in reversed(items):
-        if e.role == role and e.x <= x <= e.x + e.width and e.y <= y <= e.y + e.height:
+        if e.role == role and e.x <= x < e.x + e.width and e.y <= y < e.y + e.height:
             return e
     return None
 

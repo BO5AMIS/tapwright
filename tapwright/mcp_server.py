@@ -18,7 +18,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import client, device
+from . import client, device, ui
 
 logger = logging.getLogger("tapwright")
 
@@ -59,8 +59,11 @@ class TapwrightServer(MCPServer):
             return _error("internal", f"{name} failed unexpectedly. This is a bug; report it.")
         except ToolError as e:
             if isinstance(e.__cause__, ValidationError):  # the field names and what's wrong, not the input
-                lines = [f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-                         for err in e.__cause__.errors()]
+                errors = e.__cause__.errors()
+                lines = [f"{'.'.join(str(part) for part in err['loc'])}: {err['msg'].splitlines()[0]}"
+                         for err in errors]
+                if any(err["loc"][:1] == ("target",) for err in errors):
+                    lines.append(ui.TARGET_HELP)
                 return _error("bad_params", "; ".join(lines))
             if str(e).startswith("Unknown tool"):
                 tools = ", ".join(t.name for t in self._tool_manager.list_tools())

@@ -30,6 +30,7 @@ class ClientView:
     items: list = field(default_factory=list)
     read_at: float = float("-inf")  # the clock when `items` was read
     moved: bool = False  # an action that returned no list ran since: the screen has probably changed
+    dropped: bool = False  # the connection dropped since `items` was read
 
 
 class Controller:

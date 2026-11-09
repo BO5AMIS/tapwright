@@ -83,3 +83,11 @@ def test_validation_text_names_fields_without_echoing_input(monkeypatch):
     assert out.is_error is True and text.startswith("Error bad_params: ")
     assert "index" in text and "look" in text
     assert "input_value" not in text and "secret-x" not in text and "pydantic" not in text
+
+
+def test_a_target_error_is_one_line_with_an_example(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    for arguments in ({"target": {"index": "x"}}, {}, {"target": {"bogus": 1}}):
+        text = asyncio.run(mcp_server.server.call_tool("tap", arguments)).content[0].text
+        assert text.startswith("Error bad_params: ") and '{"ref": "e3"}' in text, text
+        assert "\n" not in text.removeprefix("Error bad_params: ").split("; a target is")[0], text

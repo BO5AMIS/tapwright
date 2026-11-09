@@ -63,19 +63,19 @@ def _checked(name: str, args: dict) -> dict:
         if (number := _number(args, key)) is not None:
             checked[key] = number
     if args.get("target") is not None:
-        ui.parse_target(args["target"])  # bad_params, with an example of a target
+        checked["target"] = ui.parse_target(args["target"])  # bad_params, with an example of a target
     if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
         raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
     return checked
 
 
 def _target(a: dict) -> ui.Target:
-    return ui.parse_target(a.get("target"))
+    return a["target"]  # parsed by _checked; tap and long_press require it
 
 
 def _field(a: dict) -> ui.Target | None:
     """type_text's target: an element to tap first, or none for the field that has focus."""
-    return None if a.get("target") is None else ui.parse_target(a["target"])
+    return a.get("target")
 
 
 # Agent actions: tool -> (what it does on the session, seconds to settle before the look; None: no look)
@@ -187,6 +187,8 @@ class Daemon:
         if self.state in ("live", "locked"):
             self.log(f"connection lost: {reason}")
             self._set_state("reconnecting", reason[:200])
+        for view in self.control.clients.values():
+            view.dropped = True  # every agent's list is from before the drop
         self._lost.set()
 
     def _not_connected(self) -> Refused:
@@ -308,9 +310,9 @@ class Daemon:
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         args = _checked(name, args)
-        # A bad target is refused before anything is queued or sent. Any tool whose arguments carry
-        # `target` goes through here, so the live-read rule in act() below covers it too.
-        target = ui.parse_target(args["target"]) if args.get("target") is not None else None
+        # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
+        # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
+        target = args.get("target")
         view = self.control.client(client_id)
         notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
         await self.wait_connected()
@@ -326,7 +328,9 @@ class Daemon:
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
         by_ref = target is not None and target.kind == "ref"
-        by_lookup = target is not None and target.kind in ("id", "label", "text")
+        # type_text at a point acts on the input under it, so it needs a current list too
+        by_lookup = target is not None and (target.kind in ("id", "label", "text")
+                                            or (name == "type_text" and target.kind == "point"))
 
         fresh = [True]
 
@@ -335,16 +339,21 @@ class Daemon:
             s = self.session
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
+            if by_ref and view.dropped:
+                raise Refused("stale", "the connection to the phone dropped since your last look; look again")
             if by_ref and not fresh[0]:
                 raise Refused("stale", "the screen changed since your last look (someone else used the "
                                        "phone); look again")
-            if by_lookup and not self._current(view):
-                await s.refresh()  # id, label and text are looked up on the live screen
-                view.items, view.read_at, view.moved = s.items, self.control.clock(), False
-                fresh[0] = True
+            reread = by_lookup and not self._current(view)
+            if reread:
+                # Resolve on the live tree, held only in the session: view.items stays the list the
+                # agent was last shown, so its refs keep pointing where it thinks (Task 4 carries refs
+                # across re-reads). Nothing about the view's freshness changes either.
+                await s.refresh()
             s.last_point = None
             result = await call(s, args)
-            view.items = s.items
+            if not reread:
+                view.items = s.items
             return result
 
         try:
@@ -368,13 +377,14 @@ class Daemon:
         async def read():
             text, image = await self.session.look(screenshot=screenshot)
             view.items, view.seen = self.session.items, self.control.generation
-            view.read_at, view.moved = self.control.clock(), False
+            view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             return text, image
         try:
             text, image = await self._read(read)
         except Exception as e:
             if not lines:
                 raise
+            view.moved = True  # no list came back: the screen has probably changed
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return _answer([*lines, text], notes, image)
 
@@ -382,7 +392,7 @@ class Daemon:
         """Is the agent's last list still the screen? Not if a person or another agent acted since
         (a different generation), if an action returned no list since, or if it is older than
         LIVE_AGE seconds and the screen may have changed meanwhile."""
-        if view.seen != self.control.generation or view.moved:
+        if view.seen != self.control.generation or view.moved or view.dropped:
             return False
         return self.control.clock() - view.read_at < LIVE_AGE or self._screen_unchanged(view)
 

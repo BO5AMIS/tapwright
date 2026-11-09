@@ -149,3 +149,38 @@ def test_at_point_is_the_front_most_element_of_a_fitting_role():
     assert ui.at_point(list_, (30.0, 180.0), "input") is list_[3]
     assert ui.at_point(list_, (370.0, 240.0), "input") is None  # a switch is no input
     assert ui.at_point(list_, (5.0, 5.0), "switch") is None
+
+
+def _el(ref, role, label, rect, *actions):
+    return ui.Element(ref, role, label, rect=rect, actions=tuple(actions))
+
+
+def test_a_button_and_its_own_text_are_one_match():
+    list_ = [_el("e1", "button", "Log in", (0, 0, 200, 50), "tap"), _el("e2", "text", "Log in", (10, 10, 80, 20))]
+    assert ui.resolve(list_, ui.Target(label="log in")) is list_[0]
+    assert ui.resolve(list_, ui.Target(text="log in")) is list_[0]
+    assert ui.resolve(list_, ui.Target(label="log in", index=0)) is list_[0]
+    assert "only 1 element match" in str(code(ui.resolve, list_, ui.Target(label="log in", index=1)))
+
+
+def test_separate_or_equally_actionable_matches_stay_ambiguous():
+    two = [_el("e1", "button", "Save", (0, 0, 100, 40), "tap"), _el("e2", "button", "Save", (0, 100, 100, 40), "tap")]
+    assert code(ui.resolve, two, ui.Target(label="save")).code == "ambiguous"
+    nested = [_el("e1", "cell", "Row", (0, 0, 300, 50), "tap"), _el("e2", "button", "Row", (10, 5, 50, 40), "tap")]
+    assert code(ui.resolve, nested, ui.Target(label="row")).code == "ambiguous"
+    plain = [_el("e1", "text", "Row", (0, 0, 300, 50)), _el("e2", "text", "Row", (10, 5, 50, 40))]
+    assert code(ui.resolve, plain, ui.Target(label="row")).code == "ambiguous"
+
+
+def test_padded_labels_and_values_still_match():
+    padded = [_el("e1", "button", "  Save \n", (0, 0, 50, 50), "tap")]
+    assert ui.resolve(padded, ui.Target(label="save")) is padded[0]
+    assert ui.resolve(padded, ui.Target(text="SAVE")) is padded[0]
+
+
+def test_at_point_gives_a_shared_edge_to_one_field():
+    a = _el("e1", "input", "A", (0, 0, 100, 50), "tap", "type")
+    b = _el("e2", "input", "B", (100, 0, 100, 50), "tap", "type")
+    assert ui.at_point([a, b], (100.0, 10.0), "input") is b
+    assert ui.at_point([a, b], (99.9, 10.0), "input") is a
+    assert ui.at_point([a, b], (200.0, 10.0), "input") is None

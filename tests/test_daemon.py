@@ -80,6 +80,11 @@ def test_a_person_makes_refs_stale_and_ids_are_looked_up_again():
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
         assert r["text"].startswith("tapped e1") and d.session.calls.count("refresh") == 1
         assert r["text"].endswith("\nNote: a person used the phone since your last look.")
+        with pytest.raises(Refused) as e:  # the silent re-read isn't a look: the agent's refs are still stale
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "stale"
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert "Note:" in r["text"]  # and a look is what clears it
         assert "Note:" not in (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]
         await finish(stop, task)
     run(go)
@@ -608,5 +613,80 @@ def test_type_text_takes_the_same_target_or_none():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "hi", "target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_silent_re_read_does_not_renumber_the_agents_refs():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})  # the agent's list: e1 = OK
+        d.session.tree = [button("e1", "Other", "other-button"), button("e2", "OK", "ok-button")]
+        d.control.clock.t += 5.0
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert r["text"].startswith('tapped e2 button "OK"') and d.session.calls.count("refresh") == 1
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # still the agent's own list
+        assert r["text"].startswith('tapped e1 button "OK"')
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_point_for_type_text_is_a_lookup_on_a_current_list():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clock.t += 5.0
+        await d.run_tool("a", "type_text", {"text": "hi", "target": {"x": 20, "y": 20}, "look": False})
+        assert d.session.calls.count("refresh") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_failed_look_after_an_action_makes_the_next_lookup_read_again():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.fail["look"] = DeviceError("boom")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "couldn't look afterwards" in r["text"]
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert d.session.calls.count("refresh") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_dropped_connection_makes_refs_stale_with_its_own_message():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.fail["tap"] = ConnectionLost("gone")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "reconnecting"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "stale" and "connection to the phone dropped" in str(e.value)
+        await d.run_tool("a", "look", {"screenshot": False})  # a look makes refs good again
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_list_is_current_until_exactly_live_age():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clock.t += 1.9
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert d.session.calls.count("refresh") == 0
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clock.t += 2.0  # exactly LIVE_AGE: no longer current
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
+        assert d.session.calls.count("refresh") == 1
         await finish(stop, task)
     run(go)
