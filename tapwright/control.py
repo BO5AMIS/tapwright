@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 PERSON_IDLE_S = 3.0  # a person counts as driving until idle this long
 AGENT_MAX_WAIT_S = 30.0  # an agent action waits at most this long for a person to finish
 LONG_PRESS_MS = 500
+# A tap's finger rests this long: the result showed 75 ms sooner than with 60 ms, and the call took as long
+# (an iPhone 14 Pro Max, iOS 26.5, 2026-11-09). A person's tap is over when it reaches the phone: replayed quick.
+TAP_MS = 20
 TAP_MOVE_PT = 10.0
 PATH_POINTS = 20  # a drag is replayed through at most this many points
 
@@ -177,5 +180,5 @@ def classify(path, screen: tuple[float, float]) -> Gesture:
     if moved < TAP_MOVE_PT:
         if duration >= LONG_PRESS_MS:
             return Gesture("longPress", (pts[0],), hold_ms=duration)
-        return Gesture("tap", (pts[0],), hold_ms=60)
+        return Gesture("tap", (pts[0],), hold_ms=TAP_MS)
     return Gesture("drag", tuple(thin(pts, PATH_POINTS)))

@@ -6,7 +6,7 @@ import io
 from dataclasses import dataclass
 
 from . import store, ui
-from .control import Refused
+from .control import TAP_MS, Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
@@ -103,14 +103,18 @@ class Session:
         except Exception:  # a nicety: without names the header shows what WebDriverAgent says
             pass
 
-    async def _app(self) -> tuple[str, str] | None:
-        """(name, bundle id) of the foreground app, or None when WebDriverAgent can't say."""
-        try:
-            info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
-        except ConnectionLost:
-            raise
-        except DeviceError:
-            return None
+    async def _app(self, known: tuple[str, str] | None = None) -> tuple[str, str] | None:
+        """(name, bundle id) of the foreground app, or None when WebDriverAgent can't say. `known` is the tree
+        root's (label, bundle id): the same answer without a request (activeAppInfo cost 70 ms an answer)."""
+        if known is not None:
+            info = {"name": known[0], "bundleId": known[1]}
+        else:
+            try:
+                info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
+            except ConnectionLost:
+                raise
+            except DeviceError:
+                return None
         bundle = str(info.get("bundleId") or "")
         if not bundle:
             return None
@@ -159,7 +163,7 @@ class Session:
         request a tree-only read leaves out."""
         self.items = tree.items
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = await self._app()
+        self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return Snapshot(tree, self.app, self.scale)
 
@@ -206,7 +210,7 @@ class Session:
         return cx, cy, hit.line(actions=False)
 
     # ---- acting ----
-    async def tap(self, target: ui.Target, hold_ms: int = 60) -> str:
+    async def tap(self, target: ui.Target, hold_ms: int = TAP_MS) -> str:
         x, y, what = self._target(target)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
         self.last_point = (x, y)

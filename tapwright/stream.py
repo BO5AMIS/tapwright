@@ -93,8 +93,11 @@ class MjpegParser:
         return frames
 
 
+HISTORY = 64  # recent frames kept (about 2.5 s at 25 fps), so a settle can see what happened during an action
+
+
 class FrameHub:
-    """The newest frame, and a way to wait for a newer one."""
+    """The newest frame, the last few with their arrival times, and a way to wait for a newer one."""
 
     def __init__(self, clock=time.time, mono=time.monotonic) -> None:
         self.latest: Frame | None = None
@@ -103,14 +106,21 @@ class FrameHub:
         self._seq = 0
         self._new = asyncio.Event()
         self._arrivals: deque[float] = deque(maxlen=120)
+        self._recent: deque[tuple[float, Frame]] = deque(maxlen=HISTORY)
 
     def publish(self, jpeg: bytes) -> Frame:
         self._seq += 1
         self.latest = Frame(self._seq, self.now_ms(), jpeg)
-        self._arrivals.append(self._mono())
+        arrived = self._mono()
+        self._arrivals.append(arrived)
+        self._recent.append((arrived, self.latest))
         self._new.set()
         self._new = asyncio.Event()
         return self.latest
+
+    def since(self, seq: int, upto: int | None = None) -> list[tuple[float, Frame]]:
+        """(arrival on the monotonic clock, frame) of the kept frames after `seq`, up to `upto`, oldest first."""
+        return [(t, f) for t, f in self._recent if f.seq > seq and (upto is None or f.seq <= upto)]
 
     def close(self) -> None:
         self.closed = True

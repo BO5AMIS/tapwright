@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from fakes import Clock
 
-from tapwright.control import (AGENT_MAX_WAIT_S, PATH_POINTS, PERSON_IDLE_S, Controller, Refused, classify)
+from tapwright.control import (AGENT_MAX_WAIT_S, PATH_POINTS, PERSON_IDLE_S, TAP_MS, Controller, Refused, classify)
 
 SCREEN = (400.0, 800.0)
 
@@ -140,7 +140,8 @@ def test_a_failed_person_action_still_counts():
 
 def test_tap_long_press_and_drag():
     tap = classify([[0, 0.5, 0.5], [80, 0.501, 0.5]], SCREEN)
-    assert tap.kind == "tap" and tap.points[0][1:] == (200.0, 400.0) and tap.hold_ms == 60
+    # replayed as a quick tap: the person's tap is over when it arrives, and a 60 ms hold showed 75 ms later
+    assert tap.kind == "tap" and tap.points[0][1:] == (200.0, 400.0) and tap.hold_ms == TAP_MS == 20
     hold = classify([[0, 0.5, 0.5], [600, 0.5, 0.505]], SCREEN)
     assert hold.kind == "longPress" and hold.hold_ms == 600
     drag = classify([[i * 10, 0.5, 0.9 - i * 0.01] for i in range(60)], SCREEN)

@@ -497,6 +497,29 @@ def test_the_header_names_the_app_from_the_installed_list(phone):
     assert "App: Example (app.example.mobile)" in text.splitlines()
 
 
+ROOTED_TREE = ('<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Example" label="Example" '
+               'x="0" y="0" width="430" height="932" bundleId="app.example.mobile">'
+               '<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+               '<XCUIElementTypeButton type="XCUIElementTypeButton" name="OK" label="OK" x="10" y="100" width="100" '
+               'height="44" enabled="true"/></XCUIElementTypeWindow></XCUIElementTypeApplication>')
+
+
+def test_the_foreground_app_comes_from_the_trees_root_with_no_extra_request(phone):
+    """The tree's root names the app (bundleId, label): asking activeAppInfo as well cost 70 ms an answer."""
+    class Apps(Recorder):
+        async def user_apps(self):
+            return [{"bundle_id": "app.example.mobile", "name": "Example App", "version": "1", "build": "1"}]
+    phone = Apps()
+    with_answers(phone, {ui_module.SOURCE_PATH: {"value": ROOTED_TREE}})
+    s = Session(phone)
+    asyncio.run(s.read_app_names())
+    assert asyncio.run(s.snapshot()).app == ("Example App", "app.example.mobile")
+    assert not [p for _, p, _ in phone.requests if p.endswith("/wda/activeAppInfo")]
+    unlisted = Recorder()  # not in the installed list (a system app): the root's own label
+    with_answers(unlisted, {ui_module.SOURCE_PATH: {"value": ROOTED_TREE}})
+    assert asyncio.run(Session(unlisted).snapshot()).app == ("Example", "app.example.mobile")
+
+
 def test_springboard_is_the_home_screen_and_an_unknown_app_rereads_the_list(phone):
     reads = []
 

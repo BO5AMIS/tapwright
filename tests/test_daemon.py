@@ -1097,6 +1097,78 @@ def test_a_faint_flicker_does_not_keep_a_still_screen_from_settling():
     run_virtual(go)
 
 
+def test_a_change_and_stillness_seen_during_the_call_end_the_settle_at_the_first_frame_after_it():
+    """The tap call returns about 200 ms after its effect shows on the stream; waiting for a fresh still run
+    after the return cost about 0.15 s an action (2026-11-09, the lab)."""
+    async def go():
+        d = make(settle_still=daemon_module.STILL)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        early, since = d._mark()  # the gesture goes out
+        await asyncio.sleep(0.05)
+        for _ in range(8):  # the effect, then still, while the call runs
+            d.hub.publish(b"B")
+            await asyncio.sleep(0.03)
+        returned = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
+        await feeder.stop()
+        assert changed and seconds < 0.01  # the first frame after the return, 4 ms later
+    run_virtual(go)
+
+
+def test_frames_during_the_call_count_only_once_they_show_a_change():
+    async def go():
+        d = make(settle_still=daemon_module.STILL, settle_quiet=daemon_module.MIN_QUIET)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        early, since = d._mark()
+        for _ in range(8):  # nothing changed during the call: no answer from before the return
+            d.hub.publish(b"A")
+            await asyncio.sleep(0.03)
+        returned = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
+        await feeder.stop()
+        assert not changed and seconds == pytest.approx(daemon_module.MIN_QUIET, abs=0.01)
+    run_virtual(go)
+
+
+def test_a_change_just_before_the_return_still_needs_its_full_still_time():
+    async def go():
+        d = make(settle_still=daemon_module.STILL)
+        on_loop_clock(d)
+        d.hub.publish(b"A")
+        early, since = d._mark()
+        await asyncio.sleep(0.2)
+        d.hub.publish(b"B")  # the effect shows 20 ms before the call returns
+        await asyncio.sleep(0.02)
+        returned = d._mark()[0]
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        seconds, changed = await d.settle(returned, cap=2.0, since=since, early=early)
+        await feeder.stop()
+        assert changed and seconds == pytest.approx(daemon_module.STILL - 0.02, abs=0.01)
+    run_virtual(go)
+
+
+def test_an_action_settles_from_the_frames_since_its_gesture_went_out():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        seen = {}
+        original = d._settle
+
+        async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None):
+            seen["early"], seen["cap"] = early, cap
+            return await original(after_seq, still, cap, since, early)
+        d._settle = settle
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert seen["early"] is not None and seen["cap"] == daemon_module.CAP
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_slow_fade_is_not_still_though_each_frame_is_close_to_the_last():
     async def go():
         d = make(settle_still=daemon_module.STILL)
@@ -2177,7 +2249,7 @@ def _recording_settles(d):
     """Replace the settle: the caps it was asked for, in order."""
     caps = []
 
-    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None):
+    async def settle(after_seq, still=None, cap=daemon_module.CAP, since=None, early=None):
         caps.append(cap)
         return daemon_module.Settled(0.0, True, False)
     d._settle = settle

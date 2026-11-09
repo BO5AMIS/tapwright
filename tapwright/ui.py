@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
-from .control import Refused
+from .control import TAP_MS, Refused
 from .device import DeviceError
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
@@ -155,6 +155,7 @@ class Tree:
     keyboard: bool = False
     top_inset: float | None = None  # where the bars along the top edge end (y), None when there are none
     bottom_inset: float | None = None  # how far the bars along the bottom edge reach up from it
+    app: tuple[str, str] | None = None  # (label, bundle id) from the root Application, when it says
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -371,7 +372,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
     parents = {child: up for up in root.iter() for child in up}
-    walk(root, (0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
+        tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
+    walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
@@ -705,7 +708,7 @@ def _pointer(steps: list[dict]) -> dict:
     return {"actions": [{"type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"}, "actions": steps}]}
 
 
-def tap(x: float, y: float, hold_ms: int = 60) -> dict:
+def tap(x: float, y: float, hold_ms: int = TAP_MS) -> dict:
     """W3C actions for a tap (or a long press with a longer hold)."""
     return _pointer([{"type": "pointerMove", "duration": 0, "x": round(x), "y": round(y)},
                      {"type": "pointerDown", "button": 0},

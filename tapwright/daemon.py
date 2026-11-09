@@ -17,7 +17,7 @@ from PIL import Image, UnidentifiedImageError
 
 from . import changes, ui
 from . import shot as shotlib
-from .control import Controller, Refused, classify
+from .control import TAP_MS, Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
 from .session import Snapshot
 from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, StreamPump, alike
@@ -553,7 +553,8 @@ class Daemon:
         if not looks:
             return _answer([str(result)], notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
-        done = await self._settle(self._mark()[0], cap=settle, since=mark[1])
+        # frames during the call count for actions with the normal cap; a launch may show a still splash first
+        done = await self._settle(self._mark()[0], cap=settle, since=mark[1], early=mark[0] if settle == CAP else None)
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:
@@ -814,7 +815,7 @@ class Daemon:
         return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     async def _tap(self, view, a: dict) -> str:
-        return await self._touch(view, a, 60)
+        return await self._touch(view, a, TAP_MS)
 
     async def _long_press(self, view, a: dict) -> str:
         return await self._touch(view, a, int(float(a.get("seconds", 1.0)) * 1000))
@@ -906,16 +907,20 @@ class Daemon:
         return False
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                     since: bytes | None = None) -> tuple[float, bool]:
+                     since: Frame | None = None, early: int | None = None) -> tuple[float, bool]:
         """(seconds waited, changed): see _settle."""
-        done = await self._settle(after_seq, still, cap, since)
+        done = await self._settle(after_seq, still, cap, since, early)
         return done.seconds, done.changed
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                      since: bytes | None = None) -> Settled:
+                      since: Frame | None = None, early: int | None = None) -> Settled:
         """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
-        phone call returned: only later frames count, since earlier ones may predate the effect. WebDriverAgent
-        streams continuously even when nothing changes, so a silence is a stall, not stillness.
+        phone call returned: the settle ends only on a later frame, since earlier ones may predate the effect.
+        WebDriverAgent streams continuously even when nothing changes, so a silence is a stall, not stillness.
+
+        `early` is the newest frame when the gesture went out. A tap's call returns about 200 ms after its effect
+        shows, so the frames in between count too, but only once one of them is unlike `since`: they can then
+        already hold the still run, and the settle ends at the first frame after the return that continues it.
 
         Still: at least 2 frames alike (stream.alike) spanning `still` seconds (at least 2.5 median frame gaps,
         so a slow stream isn't called still too soon). Each frame is compared with the first of its run, so a
@@ -931,6 +936,15 @@ class Daemon:
         began = loop.time()
         deadline = began + cap
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
+        if early is not None:
+            for arrived, frame in self.hub.since(early, upto=after_seq):
+                differs = differs or not alike(frame, since)
+                if alike(frame, first_of_run):
+                    run += 1
+                else:
+                    run, run_start, first_of_run = 1, arrived, frame
+            if not differs:  # nothing showed during the call: only frames after the return count
+                run, run_start, first_of_run = 0, began, None
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
             wait = min(left, self.settle_first_frame if first else stall)
