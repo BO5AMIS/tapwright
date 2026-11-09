@@ -179,11 +179,12 @@ BACKDROP_HEIGHT = 0.4
 PASSIVE = {"text", "header", "image"}
 OVERLAY_MAX = 0.95  # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
 WRAPPER = 0.9  # a layer's listed descendant this big, and not a scroll view, is a transparent wrapper: no content
-# A scroll is a quick drag whose finger rests at the end, so the content stops where the finger does instead of
-# flinging. On the lab 200 ms and 80 ms stopped as well as 600 ms and 150 ms, in a 0.92 s call against 1.3 s
-# (an iPhone 14 Pro Max, iOS 26.5, 2026-11-09).
-SCROLL_MOVE_MS = 200
-SCROLL_HOLD_MS = 80
+# A scroll is a slow drag whose finger rests at the end, so the content stops where the finger does instead of
+# flinging. On the lab a 600 ms move and 150 ms rest stopped in place (a 1.3 s call); a 300 ms move slid 85 pt
+# further after the call and 200 ms up to 150 pt, rests of 80-150 ms alike (iPhone 14 Pro Max, iOS 26.5,
+# 2026-11-09). A drifting list would make the next tap land on the wrong row, so the slow drag stays.
+SCROLL_MOVE_MS = 600
+SCROLL_HOLD_MS = 150
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
