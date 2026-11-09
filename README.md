@@ -116,7 +116,8 @@ you drive. The live view is reachable from this computer only, with an access to
 link.
 
 - Drags play on the phone after you let go: WebDriverAgent can't follow a finger live.
-- About 25 frames per second at most: fine for testing, not for judging animation smoothness.
+- About 22 frames per second at most (10 on the Light setting): fine for testing, not for
+  judging animation smoothness.
 - The volume buttons press the phone's real buttons.
 
 Other tools can use the same daemon: the agent tools over HTTP (`POST /api/<tool>`), and the

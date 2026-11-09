@@ -8,6 +8,7 @@ from fakes import Clock, FakeDevice, FakeSession
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
 from tapwright.device import ConnectionLost
+from tapwright.stream import PRESETS
 
 
 def make(session=None, **options) -> Daemon:
@@ -44,8 +45,8 @@ def test_connects_and_reports_status():
         s = d.status()
         assert (s["type"], s["protocol"], s["state"], s["via"]) == ("status", 1, "live", "usb")
         assert s["size"] == {"w": 400.0, "h": 800.0} and "drag" in s["accepts"] and s["quality"] == "balanced"
-        assert any(isinstance(c, tuple) and c[0] == "settings" and "mjpegFixOrientation" in c[1]
-                   for c in d.session.calls)
+        assert any(isinstance(c, tuple) and c[0] == "settings" and c[1] == PRESETS["balanced"]
+                   for c in d.session.calls)  # every setting, so a reused runner can't keep old ones
         await finish(stop, task)
     run(go)
 

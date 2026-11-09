@@ -119,5 +119,12 @@ def test_stop_cancels_the_pump():
 
 def test_presets_are_wda_settings():
     assert set(PRESETS) == {"sharp", "balanced", "light"}
-    assert PRESETS["balanced"] == {"mjpegScalingFactor": 50, "mjpegServerScreenshotQuality": 50,
-                                   "mjpegServerFramerate": 30}
+    assert PRESETS["balanced"] == {"mjpegScalingFactor": 100, "mjpegFixOrientation": False,
+                                   "mjpegServerScreenshotQuality": 50, "mjpegServerFramerate": 30}
+
+
+def test_presets_never_make_the_phone_redraw_frames():
+    """Resizing or rotating frames on the phone costs WebDriverAgent's runner 58-104% of a core,
+    and iOS kills it above 80% over a minute; frames sent as captured cost about 15% (measured)."""
+    for preset in PRESETS.values():
+        assert preset["mjpegScalingFactor"] == 100 and preset["mjpegFixOrientation"] is False

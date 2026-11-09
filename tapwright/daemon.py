@@ -173,7 +173,7 @@ class Daemon:
                     await s.ensure()
             else:
                 await s.ensure()
-            await s.settings({**PRESETS[self.preset], "mjpegFixOrientation": True})
+            await s.settings(PRESETS[self.preset])
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""

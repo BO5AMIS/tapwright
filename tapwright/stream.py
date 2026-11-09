@@ -9,11 +9,16 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 # WebDriverAgent settings per quality preset (POST /session/{sid}/appium/settings).
-# Measured over USB on 2026-11-09: balanced ~25 fps at ~117 KB a frame, light ~27 fps at ~63 KB.
+# Frames go out as the phone captures them: full size, portrait. Resizing or rotating them on
+# the phone costs WebDriverAgent's runner 58-104% of a core, and iOS kills it above 80% over a
+# minute (measured on an iPhone 14 Pro Max, iOS 26.5, 2026-11-09). As captured, every preset
+# costs it 9-16%. Measured over USB: sharp ~22 fps at ~250 KB a frame, balanced ~22 fps at
+# ~150 KB, light ~10 fps at ~105 KB. JPEG quality barely changes the runner's load.
+_AS_CAPTURED = {"mjpegScalingFactor": 100, "mjpegFixOrientation": False}
 PRESETS = {
-    "sharp": {"mjpegScalingFactor": 100, "mjpegServerScreenshotQuality": 50, "mjpegServerFramerate": 30},
-    "balanced": {"mjpegScalingFactor": 50, "mjpegServerScreenshotQuality": 50, "mjpegServerFramerate": 30},
-    "light": {"mjpegScalingFactor": 33, "mjpegServerScreenshotQuality": 25, "mjpegServerFramerate": 30},
+    "sharp": {**_AS_CAPTURED, "mjpegServerScreenshotQuality": 85, "mjpegServerFramerate": 30},
+    "balanced": {**_AS_CAPTURED, "mjpegServerScreenshotQuality": 50, "mjpegServerFramerate": 30},
+    "light": {**_AS_CAPTURED, "mjpegServerScreenshotQuality": 25, "mjpegServerFramerate": 10},
 }
 
 _LENGTH = re.compile(rb"content-length:[ \t]*(\d+)\r\n", re.IGNORECASE)

@@ -68,7 +68,7 @@ class FakeSession:
         self.device.rsd, self.sid = None, None
 
     async def settings(self, values):
-        self.calls.append(("settings", tuple(sorted(values))))
+        self.calls.append(("settings", dict(values)))
 
     async def locked(self):
         self._record("locked")
