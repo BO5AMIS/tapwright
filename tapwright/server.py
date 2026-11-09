@@ -22,7 +22,9 @@ from .control import Refused
 COOKIE = "tapwright_token"
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
-HTTP_STATUS = {"busy": 409, "paused": 409, "stale": 409, "reconnecting": 503, "locked": 503, "unsupported": 400}
+HTTP_STATUS = {"not_found": 404, "ambiguous": 409, "not_actionable": 409, "stale": 409, "busy": 409, "paused": 409,
+               "locked": 503, "reconnecting": 503, "not_connected": 503, "timeout": 504, "bad_params": 400,
+               "unsupported": 400, "internal": 500}
 DEFAULT_PORT = 8417
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
 
@@ -98,16 +100,17 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             body = await request.body()
             args = json.loads(body) if body else {}
         except (ValueError, RecursionError):
-            return _error("unsupported", "the body must be JSON", 400)
+            return _error("bad_params", "the body must be JSON", 400)
         if not isinstance(args, dict):
-            return _error("unsupported", "the body must be a JSON object", 400)
+            return _error("bad_params", "the body must be a JSON object", 400)
         client = request.headers.get("x-tapwright-client", "anonymous")
         try:
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
-        except (ValueError, TypeError) as e:
-            return _error("unsupported", f"bad arguments: {e}", 400)
+        except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net
+            logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
+            return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
 
     async def shutdown(request):
         problem = denied(request)

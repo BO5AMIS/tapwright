@@ -2,27 +2,55 @@
 import asyncio
 import base64
 
-from mcp.server.mcpserver import Image
+import pytest
+from mcp.types import ImageContent, TextContent
 
 from tapwright import client, mcp_server
+from tapwright.errors import CODES
 
 
 def test_tools_call_the_daemon(monkeypatch):
     seen = {}
+    text = "tapped e1\nscreen 1x1 pt, 0 elements\nNote: a person used the phone since your last look."
 
     def fake_call(tool, args, client_id, timeout=120.0):
         seen.update(tool=tool, args=args, client=client_id)
-        return {"texts": ["tapped e1", "screen 1x1 pt, 0 elements"], "image": base64.b64encode(b"JPEG").decode(),
-                "notes": ["a person used the phone since your last look"]}
+        return {"text": text, "image": base64.b64encode(b"JPEG").decode(), "image_size": [1, 1]}
     monkeypatch.setattr(client, "call", fake_call)
     out = asyncio.run(mcp_server.tap(ref="e1"))
     assert seen["tool"] == "tap" and seen["args"]["ref"] == "e1" and seen["client"] == mcp_server.CLIENT_ID
-    assert out[:3] == ["tapped e1", "screen 1x1 pt, 0 elements", "note: a person used the phone since your last look"]
-    assert isinstance(out[3], Image) and out[3].data == b"JPEG"
+    assert out.is_error is False and len(out.content) == 2
+    assert isinstance(out.content[0], TextContent) and out.content[0].text == text
+    assert isinstance(out.content[1], ImageContent) and out.content[1].mime_type == "image/jpeg"
+    assert base64.b64decode(out.content[1].data) == b"JPEG"
 
 
-def test_refusals_come_back_as_text(monkeypatch):
+def test_an_answer_without_a_picture_is_one_text_item(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: {"text": "closed x", "image": None, "image_size": None})
+    out = asyncio.run(mcp_server.terminate_app(bundle_id="x"))
+    assert out.is_error is False and [c.text for c in out.content] == ["closed x"]
+
+
+@pytest.mark.parametrize("code", CODES)
+def test_every_code_comes_back_as_an_error(monkeypatch, code):
     def refuse(*a, **k):
-        raise client.DaemonError("paused", "paused by the user in the live view; ask them to resume")
+        raise client.DaemonError(code, "do the next thing")
     monkeypatch.setattr(client, "call", refuse)
-    assert asyncio.run(mcp_server.look()) == ["paused: paused by the user in the live view; ask them to resume"]
+    out = asyncio.run(mcp_server.look())
+    assert out.is_error is True and [c.text for c in out.content] == [f"Error {code}: do the next thing"]
+
+
+def test_a_failure_outside_the_daemon_is_internal(monkeypatch):
+    def broken(*a, **k):
+        raise OSError("disk on fire")
+    monkeypatch.setattr(client, "call", broken)
+    out = asyncio.run(mcp_server.look())
+    assert out.is_error is True and out.content[0].text == "Error internal: OSError: disk on fire"
+
+
+def test_arguments_the_schema_rejects_are_bad_params(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    out = asyncio.run(mcp_server.server.call_tool("type_text", {}))
+    assert out.is_error is True
+    assert out.content[0].text.startswith("Error bad_params: ") and "text" in out.content[0].text
+    assert "Error executing tool" not in out.content[0].text

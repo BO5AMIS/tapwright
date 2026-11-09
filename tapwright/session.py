@@ -80,7 +80,7 @@ class Session:
         if x is not None and y is not None:
             return float(x), float(y), f"({round(x)}, {round(y)})"
         if not self.items:
-            raise DeviceError("look first: targets refer to the elements of the last look")
+            raise ui.NotFound("look first: targets refer to the elements of the last look")
         e = ui.find(self.items, ref=ref, label=label, id=id, index=index)
         cx, cy = e.center
         return cx, cy, e.line()

@@ -110,9 +110,9 @@ def test_agent_api():
     app, d = app_and_daemon()
     with TestClient(app) as c:
         look = c.post("/api/look", headers=AUTH, json={"screenshot": False})
-        assert look.status_code == 200 and look.json()["texts"][0].startswith("screen")
+        assert look.status_code == 200 and look.json()["text"].startswith("screen")
         tap = c.post("/api/tap", headers=AUTH, json={"ref": "e1", "look": False})
-        assert tap.json()["texts"][0].startswith("tapped e1")
+        assert tap.json()["text"].startswith("tapped e1")
         d.control.set_paused(True)
         refused = c.post("/api/tap", headers=AUTH, json={"x": 1, "y": 1})
         assert refused.status_code == 409 and refused.json()["error"]["code"] == "paused"
@@ -193,3 +193,29 @@ def test_websocket_refuses_strangers():
             with c.websocket_connect("/ws", headers={"sec-fetch-site": "same-site"}) as ws:
                 ws.receive_json()
     assert d.ws_clients == 0
+
+
+def test_every_code_has_an_http_status():
+    from tapwright.errors import CODES
+    from tapwright.server import HTTP_STATUS
+    assert set(HTTP_STATUS) == set(CODES)
+    assert (HTTP_STATUS["not_found"], HTTP_STATUS["ambiguous"], HTTP_STATUS["not_actionable"]) == (404, 409, 409)
+    assert (HTTP_STATUS["bad_params"], HTTP_STATUS["not_connected"], HTTP_STATUS["internal"]) == (400, 503, 500)
+
+
+def test_failures_come_back_with_a_code_and_a_status():
+    app, d = app_and_daemon()
+    with TestClient(app) as c:
+        c.post("/api/look", headers=AUTH, json={"screenshot": False})
+        gone = c.post("/api/tap", headers=AUTH, json={"ref": "e9", "look": False})
+        assert gone.status_code == 404 and gone.json()["error"]["code"] == "not_found"
+        assert "e9" in gone.json()["error"]["message"]
+        bad = c.post("/api/type_text", headers=AUTH, json={})
+        assert bad.status_code == 400 and bad.json()["error"]["code"] == "bad_params"
+        assert c.post("/api/tap", headers=AUTH, content=b"[]").json()["error"]["code"] == "bad_params"
+        d.session.fail["tap"] = RuntimeError("boom")
+        crash = c.post("/api/tap", headers=AUTH, json={"x": 1, "y": 1, "look": False})
+        assert crash.status_code == 500 and crash.json()["error"]["code"] == "internal"
+        d._set_state("no-device", "needs setup: run `tapwright setup`")
+        none = c.post("/api/look", headers=AUTH, json={})
+        assert none.status_code == 503 and none.json()["error"]["code"] == "not_connected"

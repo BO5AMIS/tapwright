@@ -117,7 +117,7 @@ def _attempt(info: dict, tool: str, args: dict, timeout: float, client_id: str, 
 
 
 def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
-    """One agent tool in the daemon: {"texts", "image", "notes"}. Raises DaemonError for refusals.
+    """One agent tool in the daemon: {"text", "image", "image_size"}. Raises DaemonError for refusals.
     It never sends an action twice: it retries only when the connection was refused."""
     info = find_or_start()
     try:

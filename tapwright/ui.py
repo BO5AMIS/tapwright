@@ -118,7 +118,7 @@ def find(items: list[Element], ref: str | None = None, label: str | None = None,
         if not hits:
             hits = [e for e in items if want in e.label.lower() or want in e.value.lower()]
     else:
-        raise NotFound("give a ref, an id, or a label")
+        raise ValueError("give a ref, an id, or a label")
     if not hits:
         raise NotFound(f"nothing matches {'id=' + id if id else repr(label)} on the screen")
     if index >= len(hits):

@@ -3,7 +3,11 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
+import io
 import time
+import traceback
+
+from PIL import Image, UnidentifiedImageError
 
 from . import ui
 from .control import Controller, Refused, classify
@@ -14,6 +18,25 @@ PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
 BUTTONS = ("home", "volumeUp", "volumeDown")
 SETTLE = 0.6  # seconds a screen gets to settle after an action, before the look that follows
+NOTE_PERSON = "a person used the phone since your last look."
+
+
+def _size(jpeg: bytes | None) -> list[int] | None:
+    """[width, height] in pixels of a JPEG, or None when there is no readable picture."""
+    if not jpeg:
+        return None
+    try:
+        with Image.open(io.BytesIO(jpeg)) as img:
+            return [img.width, img.height]
+    except (UnidentifiedImageError, OSError):
+        return None
+
+
+def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | None = None) -> dict:
+    """One tool answer (docs/AGENT-TOOLS.md §3): the lines as one text, a `Note: ` line per note,
+    and the picture, if any, with its size."""
+    text = "\n".join([*lines, *(f"Note: {n}" for n in notes or [])])
+    return {"text": text, "image": base64.b64encode(image).decode() if image else None, "image_size": _size(image)}
 
 
 def _target(a: dict) -> dict:
@@ -137,9 +160,17 @@ class Daemon:
             self._set_state("reconnecting", reason[:200])
         self._lost.set()
 
+    def _not_connected(self) -> Refused:
+        """No phone found or not set up: the agent can't fix that by waiting. Otherwise the link
+        is coming back."""
+        if self.state == "no-device":
+            return Refused("not_connected", f"no phone to drive ({self.detail}); fix that, then try again")
+        return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
+                                       "wait a few seconds, then look")
+
     def _require_connected(self) -> None:
         if not self._connected.is_set():
-            raise Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); try again")
+            raise self._not_connected()
 
     async def _connected_only(self, fn):
         """Run `fn` only if the line is up when its turn comes: a reconnect holds the queue,
@@ -149,12 +180,11 @@ class Daemon:
 
     async def wait_connected(self) -> None:
         if self.state == "no-device":
-            raise Refused("reconnecting", f"no phone to use: {self.detail}")
+            raise self._not_connected()
         try:
             await asyncio.wait_for(self._connected.wait(), self.ready_wait)
         except asyncio.TimeoutError:
-            raise Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
-                                          "try again") from None
+            raise self._not_connected() from None
 
     async def _connect(self) -> None:
         """A working WebDriverAgent session: a new WebDriverAgent if the tunnel still works,
@@ -228,27 +258,38 @@ class Daemon:
 
     # ---- agent tools ----
     async def run_tool(self, client_id: str, name: str, args: dict) -> dict:
-        """One agent tool call: {"texts": [...], "image": base64 JPEG or None, "notes": [...]}.
-        Raises Refused: busy, paused, stale, reconnecting, locked, unsupported."""
+        """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
+        Raises Refused with a code from errors.CODES; any other failure is `internal` (logged)."""
         self.last_request = time.monotonic()
+        try:
+            return await self._run_tool(client_id, name, args)
+        except Refused:
+            raise
+        except ValueError as e:
+            raise Refused("bad_params", str(e)) from e
+        except Exception as e:  # one failed step never takes the daemon down
+            self.log(f"{name} failed unexpectedly:\n{traceback.format_exc()}")
+            raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
+
+    async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
         if name not in ACTIONS and name not in READS:
-            raise Refused("unsupported", f"no tool named {name!r}")
+            raise Refused("unsupported", f"no tool named {name!r}; the tools are {', '.join([*READS, *ACTIONS])}")
         missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
         if missing:
-            raise Refused("unsupported", f"{name} needs {', '.join(missing)}")
+            raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         view = self.control.client(client_id)
-        notes = ["a person used the phone since your last look"] if view.seen < self.control.person_generation else []
+        notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
         await self.wait_connected()
         if name == "list_apps":
             apps = await self._read(self.session.apps)
             text = "\n".join(f"{a['bundle_id']}  {a['name']} {a['version']} ({a['build']})" for a in apps)
-            return {"texts": [text or "no apps"], "image": None, "notes": notes}
+            return _answer([text or "no apps"], notes)
         if name in ("look", "wait"):
             if name == "wait":
                 try:
                     seconds = float(args.get("seconds", 1.0))
                 except (TypeError, ValueError):
-                    raise Refused("unsupported", "seconds must be a number") from None
+                    raise Refused("bad_params", "seconds must be a number") from None
                 await asyncio.sleep(min(max(seconds, 0.2), 30.0))
             return await self._look(view, bool(args.get("screenshot", True)), [], notes)
         if self.state == "locked":
@@ -271,7 +312,12 @@ class Daemon:
                     await s.look(screenshot=False)
                     fresh[0] = True
             s.last_point = None
-            result = await call(s, args)
+            try:
+                result = await call(s, args)
+            except ui.NotFound as e:  # raised as a refusal: the screen didn't change, so refs stay current
+                raise Refused("not_found", str(e)) from None
+            except ValueError as e:
+                raise Refused("bad_params", str(e)) from None
             view.items = s.items
             return result
 
@@ -282,22 +328,16 @@ class Daemon:
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
-        except Refused:
-            raise
-        except ui.NotFound as e:
-            return {"texts": [f"not found: {e}"], "image": None, "notes": notes}
-        except Exception as e:  # one failed step never takes the daemon down
-            return {"texts": [f"error: {e}"], "image": None, "notes": notes}
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         look = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
         if not look:
-            return {"texts": [str(result)], "image": None, "notes": notes}
+            return _answer([str(result)], notes)
         await asyncio.sleep(settle)
         return await self._look(view, True, [str(result)], notes)
 
-    async def _look(self, view, screenshot: bool, texts: list, notes: list) -> dict:
+    async def _look(self, view, screenshot: bool, lines: list, notes: list) -> dict:
         async def read():
             text, image = await self.session.look(screenshot=screenshot)
             view.items, view.seen = self.session.items, self.control.generation
@@ -305,13 +345,10 @@ class Daemon:
         try:
             text, image = await self._read(read)
         except Exception as e:
-            if not texts:
-                if isinstance(e, Refused):
-                    raise
-                return {"texts": [f"error: {e}"], "image": None, "notes": notes}
-            return {"texts": texts + [f"(couldn't look afterwards: {e})"], "image": None, "notes": notes}
-        return {"texts": texts + [text], "image": base64.b64encode(image).decode() if image else None,
-                "notes": notes}
+            if not lines:
+                raise
+            return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
+        return _answer([*lines, text], notes, image)
 
     async def _read(self, fn):
         """A read through the queue; after a dropped line, once more when reconnected."""
