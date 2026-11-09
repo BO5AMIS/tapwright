@@ -215,3 +215,50 @@ def test_type_text_at_a_point_needs_an_input_there(phone):
     asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=20.0)))
     taps = [r for r in phone.requests if r[1].endswith("/actions")]
     assert taps and taps[0][2]["actions"][0]["actions"][0]["x"] == 110  # tapped the input's centre
+
+
+def _png(width: int) -> str:
+    import base64
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (width, 10)).save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_snapshot_is_the_tree_the_app_and_the_scale_and_sets_items(phone):
+    answers = {ui_module.SOURCE_PATH: {"value": SETTINGS_TREE},
+               "/wda/activeAppInfo": {"value": {"bundleId": "com.apple.Preferences", "name": "Settings"}},
+               "/session/S/wda/screen": {"value": {"scale": 2}}}
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path in answers:
+            return answers[path]
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    snap = asyncio.run(s.snapshot())
+    assert [e.line() for e in snap.tree.items] == ['e1 button "Wi-Fi" id=wifi @16,215 398x52 [tap]']
+    assert snap.app == ("Settings", "com.apple.Preferences") == s.app and snap.scale == 2.0
+    assert s.items is snap.tree.items
+    asyncio.run(s.reset())
+    assert s.app is None and s.scale is None
+
+
+def test_the_scale_comes_from_a_screenshot_when_the_screen_endpoint_has_none(phone):
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == "/session/S/wda/screen":
+            raise DeviceError("HTTP 404: unknown command")  # inside an app other than SpringBoard
+        if path == "/screenshot":
+            return {"value": _png(1290)}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    assert asyncio.run(s.read_scale()) == 3.0 and s.scale == 3.0  # 1290 px / 430 pt
+    count = len(phone.requests)
+    asyncio.run(s.read_scale())
+    assert len(phone.requests) == count  # read once

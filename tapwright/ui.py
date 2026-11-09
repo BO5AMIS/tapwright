@@ -152,6 +152,11 @@ def _rect(node: ET.Element) -> tuple[float, float, float, float]:
     return rect if all(math.isfinite(v) for v in rect) else (0.0, 0.0, 0.0, 0.0)  # type: ignore[return-value]
 
 
+def _same_rect(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    """Equal within a point: WebDriverAgent rounds frames to whole points."""
+    return all(abs(p - q) <= 1.0 for p, q in zip(a, b))
+
+
 def _clean(source: str) -> str:
     """The XML without characters XML 1.0 forbids."""
     def drop(m: re.Match) -> str:
@@ -176,7 +181,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     tree = Tree([])
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
-             in_alert: bool) -> None:
+             in_alert: bool, parent: Element | None = None) -> None:
         kind = _kind(node)
         x, y, w, h = rect = _rect(node)
         label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
@@ -205,19 +210,22 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             worth = True
         else:
             worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
+        listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
-            if len(tree.items) < MAX_ELEMENTS:
+            if parent and (parent.role, parent.label) == (role, label) and _same_rect(parent.rect, rect):
+                pass  # the same thing as its parent, exposed twice (React Native does): list it once
+            elif len(tree.items) < MAX_ELEMENTS:
                 enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
                 checked = (value == "1") if role == "switch" else None
-                tree.items.append(Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
-                                          "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind,
-                                          in_alert, False, name))
+                listed = Element(f"e{len(tree.items) + 1}", role, label, identifier, value, rect, enabled,
+                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name)
+                tree.items.append(listed)
             else:
                 tree.more += 1
         if kind in CLIPPING:
             clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
         for child in node:
-            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert)
+            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed)
 
     inf = math.inf
     try:
@@ -346,19 +354,19 @@ def _without_nested(hits: list[Element]) -> list[Element]:
     return [e for e in hits if id(e) not in drop]
 
 
-def resolve(items: list[Element], target: Target, refs: bool = True) -> Element | tuple[float, float]:
+def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are
-    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`.
-    `refs=False` (the list was read silently, so its numbers aren't the agent's) leaves refs out of the lines."""
+    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
     if target.point is not None:
         return target.point
     if target.ref is not None:
         for e in items:
             if e.ref == target.ref:
                 return e
-        hint = "look first" if not items else "look again for the current refs"
-        raise Refused("not_found", f"no {target.ref} on your last list; {hint}")
+        if not items:
+            raise Refused("not_found", f"no {target.ref}: you haven't looked yet; look first")
+        raise Refused("not_found", f"{target.ref} is no longer on the screen; look again")
     if target.id is not None:
         # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
         hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
@@ -384,10 +392,8 @@ def resolve(items: list[Element], target: Target, refs: bool = True) -> Element 
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}"
                       + (f", showing {len(shown)}" if len(hits) > len(shown) else "")
-                      + ("; use one of their refs, or add index (0 is the first). Candidates:\n" if refs else
-                         "; these come from a fresh read of the screen; add index, or use a more specific id, "
-                         "label or text, or look to get refs. Candidates:\n")
-                      + "\n".join(e.line(ref=refs) for e in shown))
+                      + "; use one of their refs, or add index (0 is the first). Candidates:\n"
+                      + "\n".join(e.line() for e in shown))
     return hits[0]
 
 

@@ -3,6 +3,7 @@ import asyncio
 
 from tapwright import ui
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
+from tapwright.session import Snapshot
 
 
 class Clock:
@@ -43,7 +44,6 @@ class FakeSession:
         self.screen = (400.0, 800.0)
         self.items: list = []
         self.last_point = None
-        self.refs = True
         self.sid = None
         self.calls: list = []
         self.fail: dict = {}
@@ -52,6 +52,7 @@ class FakeSession:
         self.ensure_delay = 0.0
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
         self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
+        self.app: tuple[str, str] | None = ("Example", "com.example.app")
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -90,6 +91,14 @@ class FakeSession:
         self.items = list(self.tree)
         return self.SCREEN_TEXT, (b"JPEG" if screenshot else None)
 
+    async def snapshot(self, keyboard=False):
+        self._record("snapshot")
+        self.items = list(self.tree)
+        return Snapshot(ui.Tree(self.items), self.app, 3.0)
+
+    async def read_scale(self):
+        return 3.0
+
     async def refresh(self):
         self._record("refresh")
         self.items = list(self.tree)
@@ -100,17 +109,17 @@ class FakeSession:
         return [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
 
     async def tap(self, target, hold_ms=60):
-        hit = ui.resolve(self.items, target, self.refs)  # a refused target never reaches the phone
+        hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
         self._record("tap")
         if isinstance(hit, tuple):
             self.last_point = hit
-            return f"tapped ({round(hit[0])}, {round(hit[1])})"
+            return f"Tapped ({round(hit[0])}, {round(hit[1])})."
         self.last_point = hit.center
-        return f"tapped {hit.line(ref=self.refs)}"
+        return f"Tapped {hit.line(actions=False)}."
 
     async def type_text(self, text, replace=False, submit=False, target=None):
         if target is not None:
-            ui.resolve(self.items, target, self.refs)  # a missing or ambiguous field is refused, as in Session
+            ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
         self._record("type_text")
         return f"typed {len(text)} characters"
 

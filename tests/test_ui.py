@@ -245,3 +245,40 @@ def test_a_real_identifier_wins_over_a_name_that_mirrors_a_label():
     real = one("StaticText", "Other", name="Settings")
     assert ui.resolve([mirror, real], ui.Target(id="Settings")) is real
     assert ui.resolve([mirror], ui.Target(id="Settings")) is mirror  # with no real id, the mirror still matches
+
+
+def _wrapped(wrapper: ET.Element) -> list[ui.Element]:
+    return ui.elements(xml(node("Other", children=[wrapper])), SCREEN)
+
+
+def test_a_wrapper_and_its_text_with_the_same_label_and_rect_are_one_element():
+    """React Native exposes a wrapper and its text as two elements: list one."""
+    text = node("Button", "Sign in", rect=(10, 10, 200, 40))
+    [e] = _wrapped(node("Button", "Sign in", name="sign-in", rect=(10, 10, 200, 40), children=[text]))
+    assert e.line() == 'e1 button "Sign in" id=sign-in @10,10 200x40 [tap]'  # the ancestor stays
+    [e] = _wrapped(node("Button", "Sign in", rect=(10.4, 10, 200.9, 40), children=[text]))
+    assert e.ref == "e1"  # rects equal within 1 pt
+
+
+def test_a_different_role_is_no_duplicate_and_same_role_text_collapses():
+    [e] = _wrapped(node("StaticText", "Sign in", rect=(10, 10, 200, 40), children=[node("StaticText", "Sign in", rect=(10, 10, 200, 40))]))
+    assert (e.role, e.ref) == ("text", "e1")
+    inner = node("Button", "Sign in", rect=(10, 10, 200, 40))
+    [a, b] = _wrapped(node("StaticText", "Sign in", rect=(10, 10, 200, 40), children=[inner]))
+    assert (a.role, b.role) == ("text", "button")  # same actions are inferred from the role, so equal roles tie
+
+
+def test_different_labels_or_rects_are_kept():
+    items = _wrapped(node("Button", "Sign in", rect=(10, 10, 200, 40),
+                          children=[node("StaticText", "Sign in", rect=(10, 10, 200, 40)),
+                                    node("Button", "Sign in", rect=(10, 10, 200, 44)),
+                                    node("Button", "Sign up", rect=(10, 10, 200, 40))]))
+    assert [(e.role, e.label, e.rect[3]) for e in items] == [("button", "Sign in", 40), ("text", "Sign in", 40),
+                                                             ("button", "Sign in", 44), ("button", "Sign up", 40)]
+
+
+def test_dropped_duplicates_do_not_count_against_the_cap_or_the_numbers():
+    kids = [node("StaticText", f"Row {i}", rect=(10, 10 + i, 100, 20),
+                 children=[node("StaticText", f"Row {i}", rect=(10, 10 + i, 100, 20))]) for i in range(3)]
+    items = ui.elements(xml(node("Other", rect=(0, 0, 430, 932), children=kids)), SCREEN)
+    assert [e.ref for e in items] == ["e1", "e2", "e3"]

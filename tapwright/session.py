@@ -1,14 +1,23 @@
-"""What an agent does with the phone: look, tap, type, swipe, launch apps. One Session
+﻿"""What an agent does with the phone: look, tap, type, swipe, launch apps. One Session
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
 import io
+from dataclasses import dataclass
 
 from . import store, ui
 from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
+
+
+@dataclass
+class Snapshot:
+    """One read of the screen: the tree, the foreground app, and the pixel scale."""
+    tree: ui.Tree
+    app: tuple[str, str] | None
+    scale: float | None
 
 
 class Session:
@@ -18,7 +27,7 @@ class Session:
         self.screen = (390.0, 844.0)
         self.scale: float | None = None  # pixels per point, read once; None until known
         self.items: list[ui.Element] = []
-        self.refs = True  # False while `items` is a silent re-read: its refs aren't the agent's, so lines omit them
+        self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
 
     async def ensure(self) -> None:
@@ -46,7 +55,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
-        self.scale = None
+        self.scale = self.app = None
         self.items = []
         self.last_point = None
 
@@ -75,7 +84,9 @@ class Session:
         bundle = str(info.get("bundleId") or "")
         return (str(info.get("name") or bundle), bundle) if bundle else None
 
-    async def _scale(self) -> float | None:
+    async def read_scale(self) -> float | None:
+        """Pixels per point, read once: from WebDriverAgent's screen info, else (it only answers in some
+        apps) from a screenshot's width against the screen's width in points (1290 / 430 = 3)."""
         if self.scale is None:
             try:
                 value = (await self._call("GET", "/session/{sid}/wda/screen")).get("value") or {}
@@ -83,15 +94,33 @@ class Session:
             except ConnectionLost:
                 raise
             except (DeviceError, KeyError, TypeError, ValueError):
-                pass  # the header just leaves out "@3x"
+                self.scale = await self._scale_from_screenshot()
         return self.scale
 
-    async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
-        """(text, jpeg bytes or None): the screen as elements, and as a picture."""
+    async def _scale_from_screenshot(self) -> float | None:
+        try:
+            png = base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
+            from PIL import Image
+            with Image.open(io.BytesIO(png)) as img:
+                scale = img.width / self.screen[0]
+        except ConnectionLost:
+            raise
+        except Exception:
+            return None  # the header just leaves out "@3x"
+        return float(round(scale)) if scale >= 1 else None
+
+    async def snapshot(self, keyboard: bool = False) -> Snapshot:
+        """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
         tree = ui.read(source, self.screen, keyboard=keyboard)
         self.items = tree.items
-        app, scale = await self._app(), await self._scale()
+        self.app = await self._app()
+        return Snapshot(tree, self.app, await self.read_scale())
+
+    async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
+        """(text, jpeg bytes or None): the screen as elements, and as a picture."""
+        snap = await self.snapshot(keyboard)
+        tree, app, scale = snap.tree, snap.app, snap.scale
         image = None
         if screenshot:
             png = base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
@@ -113,18 +142,18 @@ class Session:
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:
         """(x, y, what to say) for a target, on the elements of the last look."""
-        hit = ui.resolve(self.items, target, self.refs)
+        hit = ui.resolve(self.items, target)
         if isinstance(hit, tuple):
             return hit[0], hit[1], f"({round(hit[0])}, {round(hit[1])})"
         cx, cy = hit.center
-        return cx, cy, hit.line(ref=self.refs)
+        return cx, cy, hit.line(actions=False)
 
     # ---- acting ----
     async def tap(self, target: ui.Target, hold_ms: int = 60) -> str:
         x, y, what = self._target(target)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
         self.last_point = (x, y)
-        return f"{'long-pressed' if hold_ms > 300 else 'tapped'} {what}"
+        return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False,
                         target: ui.Target | None = None) -> str:

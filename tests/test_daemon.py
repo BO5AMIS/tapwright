@@ -59,11 +59,11 @@ def test_look_then_act_by_ref():
         assert r["text"].startswith("Screen 400x800") and r["image"] == base64.b64encode(b"JPEG").decode()
         assert r["image_size"] is None  # b"JPEG" isn't a picture
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert r == {"text": 'tapped e1 button "OK" id=ok-button @10,10 100x40 [tap]', "image": None, "image_size": None}
+        assert r == {"text": 'Tapped e1 button "OK" id=ok-button @10,10 100x40.', "image": None, "image_size": None}
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
-        assert r["text"].startswith("tapped e1")
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with the look after it
-        assert r["text"].splitlines()[1].startswith("Screen") and r["image"]
+        assert r["text"].startswith("Tapped e1")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with what changed after it
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."] and r["image"] is None
         await finish(stop, task)
     run(go)
 
@@ -78,7 +78,7 @@ def test_a_person_makes_refs_stale_and_ids_are_looked_up_again():
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert e.value.code == "stale"
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
-        assert r["text"].startswith("tapped button") and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith("Tapped e1 button") and d.session.calls.count("refresh") == 1
         assert r["text"].endswith("\nNote: a person used the phone since your last look.")
         with pytest.raises(Refused) as e:  # the silent re-read isn't a look: the agent's refs are still stale
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
@@ -99,7 +99,7 @@ def test_pause_refuses_agents():
             await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
         assert e.value.code == "paused" and d.status()["paused"] is True
         await d.viewer_message({"type": "pause", "on": False})
-        assert (await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False}))["text"] == "tapped (5, 5)"
+        assert (await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False}))["text"] == "Tapped (5, 5)."
         await finish(stop, task)
     run(go)
 
@@ -274,7 +274,7 @@ def test_a_coordinate_action_does_not_refresh_stale_refs():
         await d.run_tool("a", "look", {})
         await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
-        assert r["text"] == "tapped (5, 5)\nNote: a person used the phone since your last look."
+        assert r["text"] == "Tapped (5, 5).\nNote: a person used the phone since your last look."
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert e.value.code == "stale"
@@ -391,7 +391,7 @@ def test_a_target_that_is_not_there_is_an_error_and_keeps_refs_current():
             await d.run_tool("a", "tap", {"target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
         assert d.control.generation == generation  # nothing happened on the phone
-        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"].startswith("tapped e1")
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"].startswith("Tapped e1")
         await finish(stop, task)
     run(go)
 
@@ -471,9 +471,9 @@ def test_a_look_that_fails_after_an_action_is_a_note():
     async def go():
         d = make()
         stop, task = await started(d)
-        d.session.fail["look"] = RuntimeError("boom")
+        d.session.fail["snapshot"] = RuntimeError("boom")
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
-        assert r["text"] == "tapped (5, 5)\nNote: couldn't look afterwards: boom."
+        assert r["text"] == "Tapped (5, 5).\nNote: couldn't look afterwards: boom."
         await finish(stop, task)
     run(go)
 
@@ -529,12 +529,12 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
         assert e.value.code == "ambiguous" and str(e.value).endswith('e2 button "7" id=seven-again @10,60 100x40 [tap]')
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
-        assert r["text"].startswith('tapped e2 button "7" id=seven-again')
+        assert r["text"].startswith('Tapped e2 button "7" id=seven-again')
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
         assert e.value.code == "not_found"
         r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
-        assert r["text"].startswith('tapped button "8"')
+        assert r["text"].startswith('Tapped e3 button "8"')
         await finish(stop, task)
     run(go)
 
@@ -559,12 +559,12 @@ def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
         d.session.tree = [button("e1", "Done", "done-button")]  # the screen changed behind the agent's back
         d.control.clock.t += 5.0  # older than LIVE_AGE
         r = await d.run_tool("a", "tap", {"target": {"id": "done-button"}, "look": False})
-        assert r["text"].startswith('tapped button "Done"') and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith('Tapped e2 button "Done"') and d.session.calls.count("refresh") == 1  # e1 is gone
         # an action that returned no list: the screen has probably changed
         d.session.tree = [button("e1", "Back", "back-button")]
         r = await d.run_tool("a", "tap", {"target": {"label": "back"}, "look": False})
-        assert r["text"].startswith('tapped button "Back"') and d.session.calls.count("refresh") == 2
-        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"]  # refs don't re-read
+        assert r["text"].startswith('Tapped e3 button "Back"') and d.session.calls.count("refresh") == 2
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e3"}, "look": False}))["text"]  # refs don't re-read
         assert d.session.calls.count("refresh") == 2
         await d.run_tool("a", "look", {"screenshot": False})  # a look makes it current again
         await d.run_tool("a", "tap", {"target": {"id": "back-button"}, "look": False})
@@ -597,7 +597,7 @@ def test_a_person_makes_a_ref_stale_but_not_an_id_text_or_label():
             await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
             before = d.session.calls.count("refresh")
             r = await d.run_tool("a", "tap", {"target": target, "look": False})
-            assert r["text"].startswith("tapped button") and d.session.calls.count("refresh") == before + 1
+            assert r["text"].startswith("Tapped e1 button") and d.session.calls.count("refresh") == before + 1
         await finish(stop, task)
     run(go)
 
@@ -617,17 +617,33 @@ def test_type_text_takes_the_same_target_or_none():
     run(go)
 
 
-def test_a_silent_re_read_does_not_renumber_the_agents_refs():
+def test_a_silent_re_read_keeps_the_agents_refs_on_the_same_elements():
     async def go():
         d = make()
         stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})  # the agent's list: e1 = OK
-        d.session.tree = [button("e1", "Other", "other-button"), button("e2", "OK", "ok-button")]
+        await d.run_tool("a", "look", {"screenshot": False})  # the agent's list: e1 = OK at (10,10)
+        d.session.tree = [button("e1", "Other", "other-button"), button("e2", "OK", "ok-button", rect=(10, 300, 100, 40))]
         d.control.clock.t += 5.0
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
-        assert r["text"].startswith('tapped button "OK"') and d.session.calls.count("refresh") == 1
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # still the agent's own list
-        assert r["text"].startswith('tapped e1 button "OK"')
+        assert r["text"].startswith('Tapped e1 button "OK" id=ok-button @10,300') and d.session.calls.count("refresh") == 1
+        assert [e.ref for e in d.control.client("a").items] == ["e2", "e1"]  # Other is new: e2
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # the old ref taps OK's new place
+        assert r["text"].startswith('Tapped e1 button "OK"') and d.session.last_point == (60.0, 320.0)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_ref_whose_element_is_gone_after_a_re_read_is_not_found():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "Other", "other-button")]
+        d.control.clock.t += 5.0
+        await d.run_tool("a", "tap", {"target": {"id": "other-button"}, "look": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "not_found" and str(e.value).startswith("e1 is no longer on the screen; look again")
         await finish(stop, task)
     run(go)
 
@@ -649,7 +665,7 @@ def test_a_failed_look_after_an_action_makes_the_next_lookup_read_again():
         d = make()
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        d.session.fail["look"] = DeviceError("boom")
+        d.session.fail["snapshot"] = DeviceError("boom")
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert "couldn't look afterwards" in r["text"]
         await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
@@ -692,21 +708,19 @@ def test_a_list_is_current_until_exactly_live_age():
     run(go)
 
 
-def test_after_a_re_read_the_lines_show_no_refs():
+def test_after_a_re_read_the_lines_carry_the_agents_refs():
     async def go():
         d = make()
         stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "look", {"screenshot": False})  # e1 = OK
         d.session.tree = [button("e1", "7"), button("e2", "7", rect=(10, 60, 100, 40)), button("e3", "Done", "done")]
         d.control.clock.t += 5.0
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
-        assert e.value.code == "ambiguous" and "e1" not in str(e.value) and "fresh read" in str(e.value)
-        r = await d.run_tool("a", "tap", {"target": {"id": "done"}, "look": False})
-        assert r["text"].startswith('tapped button "Done"')  # no ref: the agent's list numbers differently
-        await d.run_tool("a", "look", {"screenshot": False})  # a current list shows refs as before
-        r = await d.run_tool("a", "tap", {"target": {"id": "done"}, "look": False})
-        assert r["text"].startswith("tapped e3 button")
+        assert e.value.code == "ambiguous" and 'e2 button "7"' in str(e.value) and "use one of their refs" in str(e.value)
+        assert 'e3 button "7"' in str(e.value)  # e1 (OK) is gone; the new elements count on from it
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e3"}, "look": False})  # the refs in the candidates work
+        assert r["text"].startswith('Tapped e3 button "7"')
         await finish(stop, task)
     run(go)
 
@@ -719,5 +733,152 @@ def test_a_dropped_connection_makes_an_id_target_re_read():
         d.control.clients["a"].dropped = True
         await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
         assert d.session.calls.count("refresh") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_action_answers_with_what_changed_and_the_refs_stay():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done-button", rect=(10, 60, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"] == ('Tapped e1 button "OK" id=ok-button @10,10 100x40.\n'
+                             "Same screen. Changes:\n"
+                             '+ e2 button "Done" id=done-button @10,60 100x40 [tap]')
+        assert r["image"] is None  # a screenshot only when asked
+        d.session.tree = [button("e1", "OK", "ok-button")]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '- button "Done"']
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "More", "more", rect=(10, 60, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert '+ e3 button "More"' in r["text"]  # e2 went away once: its number is not reused
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_new_app_or_a_screen_the_agent_has_not_seen_gets_the_full_list():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})  # no look yet
+        assert r["text"].splitlines()[1:4] == ["Screen 400x800 pt @3x · 1 elements", "App: Example (com.example.app)",
+                                               'e1 button "OK" id=ok-button @10,10 100x40 [tap]']
+        d.session.app = ("Settings", "com.apple.Preferences")
+        d.session.tree = [button("e1", "Wi-Fi"), button("e2", "Bluetooth", rect=(10, 60, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"text": "OK"}})
+        assert r["text"].splitlines()[1:3] == ["Screen 400x800 pt @3x · 2 elements",
+                                               "App: Settings (com.apple.Preferences)"]
+        d.session.tree = [button("e1", "Wi-Fi")]  # the app didn't change: a change list, e2 is gone
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '- button "Bluetooth"']
+        await finish(stop, task)
+    run(go)
+
+
+def test_after_a_person_acted_the_answer_is_the_full_list_with_the_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        lines = r["text"].splitlines()
+        assert lines[1].startswith("Screen 400x800") and lines[-1] == "Note: a person used the phone since your last look."
+        await finish(stop, task)
+    run(go)
+
+
+def test_after_a_dropped_connection_the_answer_is_the_full_list():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.control.clients["a"].dropped = True
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})
+        assert r["text"].splitlines()[1].startswith("Screen 400x800")
+        assert d.control.clients["a"].dropped is False
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_look_renumbers_and_a_live_reread_keeps_the_refs():
+    async def go():
+        d = make()
+        d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 60, 100, 40))]
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        view = d.control.client("a")
+        assert [e.ref for e in view.items] == ["e1", "e2"] and view.top_ref == 2
+        d.session.tree = [button("e1", "C", "c"), button("e2", "B", "b", rect=(10, 60, 100, 40))]
+        d.control.clock.t += 5.0
+        r = await d.run_tool("a", "tap", {"target": {"id": "b"}, "look": False})
+        assert r["text"].startswith('Tapped e2 button "B"')  # the read numbers it e2 again; C is the new e3
+        assert [e.ref for e in view.items] == ["e3", "e2"] and view.top_ref == 3
+        d.session.tree = [button("e1", "D", "d")]
+        await d.run_tool("a", "look", {"screenshot": False})  # a look renumbers from e1
+        assert [e.ref for e in view.items] == ["e1"] and view.top_ref == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_changes_are_measured_against_the_last_answer_not_the_last_full_list():
+    """Tapline's bug: scroll down answered a move, scroll back answered "No visible change."."""
+    async def go():
+        d = make()
+        d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 60, 100, 40))]
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 160, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,160 100x40 [tap]']
+        d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 60, 100, 40))]  # back where the look had it
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,60 100x40 [tap]']
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # and now nothing moved
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_silent_re_read_does_not_hide_what_changed_from_the_agent():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})  # the agent knows: e1 = OK
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Late", "late", rect=(10, 60, 100, 40))]
+        d.control.clock.t += 5.0
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})  # re-reads, then answers
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", '+ e2 button "Late" id=late @10,60 100x40 [tap]']
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_action_that_leaves_nothing_on_screen_answers_with_the_full_list_and_a_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tree = []
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert r["text"].splitlines()[1:] == [
+            "Screen 400x800 pt @3x · 0 elements", "App: Example (com.example.app)",
+            "(nothing visible; the app may still be loading)",
+            "Note: something outside the app (a system sheet or browser) may cover it."]
+        view = d.control.client("a")
+        assert view.items == [] and view.top_ref == 0
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_empty_screen_before_and_after_is_no_change_not_a_note():
+    async def go():
+        d = make()
+        d.session.tree = []
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        assert r["text"].splitlines()[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)

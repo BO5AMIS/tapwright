@@ -10,7 +10,7 @@ import traceback
 
 from PIL import Image, UnidentifiedImageError
 
-from . import ui
+from . import changes, ui
 from .control import Controller, Refused, classify
 from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
 from .stream import PRESETS, FrameHub, StreamPump
@@ -21,6 +21,7 @@ BUTTONS = ("home", "volumeUp", "volumeDown")
 SETTLE = 0.6  # seconds a screen gets to settle after an action, before the look that follows
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 NOTE_PERSON = "a person used the phone since your last look."
+NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
 
 def _size(jpeg: bytes | None) -> list[int] | None:
@@ -235,6 +236,7 @@ class Daemon:
             else:
                 await s.ensure()
             await s.settings(PRESETS[self.preset])
+            await s.read_scale()  # once per connection, so every header says @3x, not only SpringBoard's
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
@@ -332,30 +334,30 @@ class Daemon:
         by_lookup = target is not None and (target.kind in ("id", "label", "text")
                                             or (name == "type_text" and target.kind == "point"))
 
-        fresh = [True]
+        fresh, full = [True], [False]
 
         async def act():
             self._require_connected()
             s = self.session
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
+            # never looked, a person acted, or the line dropped: the agent's list may be anything
+            full[0] = not fresh[0] or view.dropped or view.read_at == float("-inf")
             if by_ref and view.dropped:
                 raise Refused("stale", "the connection to the phone dropped since your last look; look again")
             if by_ref and not fresh[0]:
                 raise Refused("stale", "the screen changed since your last look (someone else used the "
                                        "phone); look again")
-            reread = by_lookup and not self._current(view)
-            if reread:
-                # Resolve on the live tree, held only in the session: view.items stays the list the
-                # agent was last shown, so its refs keep pointing where it thinks (Task 4 carries refs
-                # across re-reads). Nothing about the view's freshness changes either.
+            if by_lookup and not self._current(view):
+                # Resolve on the live tree. The agent's refs follow their elements onto it, so `e3` still
+                # means the same element when it moved. The view's freshness doesn't change: a person's
+                # action still makes refs stale, and `view.shown` (what the agent was told) stays put.
                 await s.refresh()
-            s.refs = not reread
+                view.items = changes.carry_refs(view.items, s.items, view.top_ref)
+                view.top_ref = max(view.top_ref, changes.highest(view.items))
+                s.items = view.items
             s.last_point = None
-            result = await call(s, args)
-            if not reread:
-                view.items = s.items
-            return result
+            return await call(s, args)
 
         try:
             result = await self.control.agent(act)
@@ -372,12 +374,13 @@ class Daemon:
         if not looks:
             return _answer([str(result)], notes)
         await asyncio.sleep(settle)
-        return await self._look(view, True, [str(result)], notes)
+        return await self._after(view, str(result), notes, full=full[0])
 
     async def _look(self, view, screenshot: bool, lines: list, notes: list) -> dict:
         async def read():
             text, image = await self.session.look(screenshot=screenshot)
-            view.items, view.seen = self.session.items, self.control.generation
+            view.items = view.shown = self.session.items
+            view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             return text, image
         try:
@@ -388,6 +391,33 @@ class Daemon:
             view.moved = True  # no list came back: the screen has probably changed
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return _answer([*lines, text], notes, image)
+
+    async def _after(self, view, result: str, notes: list, full: bool) -> dict:
+        """An action's answer: its result line, then what changed on screen since the agent's last answer
+        (`view.shown`), or the full list when the app changed or `full`. Refs follow their elements."""
+        s = self.session
+
+        async def read():
+            snap = await s.snapshot()
+            app_changed = snap.app is not None and view.app is not None and snap.app != view.app
+            up = changes.update([] if full else view.items, snap.tree.items, app_changed, view.top_ref,
+                                None if full else view.shown)
+            return snap, up
+        try:
+            snap, up = await self._read(read)
+        except Exception as e:
+            view.moved = True  # no list came back: the screen has probably changed
+            return _answer([result], [*notes, f"couldn't look afterwards: {e}."])
+        covered = up.full and not up.items and bool(view.shown) and not full
+        s.items = view.items = view.shown = up.items
+        view.top_ref, view.app = up.top, snap.app or view.app
+        view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
+                                                             False, False)
+        if up.full:
+            tree = snap.tree
+            head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more)
+            return _answer([result, head], [*notes, *([NOTE_COVERED] if covered else [])])
+        return _answer([result, *up.lines], notes)
 
     def _current(self, view) -> bool:
         """Is the agent's last list still the screen? Not if a person or another agent acted since

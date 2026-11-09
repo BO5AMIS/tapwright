@@ -112,7 +112,7 @@ def test_agent_api():
         look = c.post("/api/look", headers=AUTH, json={"screenshot": False})
         assert look.status_code == 200 and look.json()["text"].startswith("Screen")
         tap = c.post("/api/tap", headers=AUTH, json={"target": {"ref": "e1"}, "look": False})
-        assert tap.json()["text"].startswith("tapped e1")
+        assert tap.json()["text"].startswith("Tapped e1")
         d.control.set_paused(True)
         refused = c.post("/api/tap", headers=AUTH, json={"target": {"x": 1, "y": 1}})
         assert refused.status_code == 409 and refused.json()["error"]["code"] == "paused"
