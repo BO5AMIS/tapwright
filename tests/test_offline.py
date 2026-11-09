@@ -185,7 +185,7 @@ def test_mcp_server_lists_its_tools():
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = {t["name"] for t in json.loads(proc.stdout.readline())["result"]["tools"]}
-        assert {"look", "list_apps", "launch_app", "tap", "type_text", "scroll", "swipe", "alert"} <= tools
+        assert {"look", "apps", "open_app", "tap", "type_text", "scroll", "swipe", "alert"} <= tools
     finally:
         proc.kill()
 

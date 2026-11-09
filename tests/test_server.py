@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from tapwright.control import Controller
 from tapwright.daemon import Daemon
 from tapwright.server import COOKIE, create_app
+from tapwright.stream import MjpegParser
 
 
 def test_viewer_page_is_packaged():
@@ -130,8 +131,25 @@ def test_stream_sends_the_newest_frame_with_its_headers():
         r = c.get("/stream", headers=AUTH)
     assert r.status_code == 200 and r.headers["content-type"].startswith("multipart/x-mixed-replace")
     body = r.content
-    assert body.count(b"--frame") == 1 and b"\xff\xd8new" in body and b"X-Seq: 2\r\n" in body
+    assert body.count(b"Content-Type: image/jpeg") == 1 and b"\xff\xd8new" in body and b"X-Seq: 2\r\n" in body
     assert b"X-Source: wda\r\n" in body and b"X-Coverage: screen\r\n" in body and b"X-Size: 400x800\r\n" in body
+
+
+def test_stream_closes_each_part_with_the_next_boundary():
+    """A browser <img> shows a frame when the next boundary arrives, so it must follow the JPEG at once."""
+    app, d = app_and_daemon()
+    d.hub.publish(b"\xff\xd8one")
+    d.hub.close()
+    with TestClient(app) as c:
+        with c.stream("GET", "/stream", headers=AUTH) as r:
+            chunks = list(r.iter_raw())
+    body = b"".join(chunks)
+    assert body.startswith(b"--frame\r\n") and body.endswith(b"\xff\xd8one\r\n--frame\r\n")
+    assert body.count(b"--frame") == 2
+    parser = MjpegParser()
+    assert parser.feed(body) == [b"\xff\xd8one"]
+    for chunk in chunks[1:]:
+        assert chunk.endswith(b"\r\n--frame\r\n")
 
 
 def test_websocket_status_pause_and_input():

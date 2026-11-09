@@ -126,6 +126,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         async def parts():
             async with daemon.pump.watching() as hub:
                 seq = 0
+                yield b"--frame\r\n"  # each part then ends with the next boundary, so a browser shows it at once
                 while True:
                     frame = await hub.next_after(seq, timeout=15)
                     if frame is None:
@@ -134,10 +135,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                         continue
                     seq = frame.seq
                     w, h = daemon.session.screen
-                    head = (f"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {len(frame.jpeg)}\r\n"
+                    head = (f"Content-Type: image/jpeg\r\nContent-Length: {len(frame.jpeg)}\r\n"
                             f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\nX-Coverage: screen\r\n"
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")
-                    yield head.encode() + frame.jpeg + b"\r\n"
+                    yield head.encode() + frame.jpeg + b"\r\n--frame\r\n"
 
         return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame",
                                  headers={"Cache-Control": "no-store"})

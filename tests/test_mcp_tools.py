@@ -1,0 +1,170 @@
+"""The MCP tool set is exactly the shared interface: names, arguments, defaults, hints, round trips."""
+import asyncio
+
+import pytest
+
+from tapwright import client, mcp_server
+
+EXPECTED = {
+    "look": {"screenshot", "width", "labels"},
+    "tap": {"target", "force", "look", "screenshot"},
+    "long_press": {"target", "seconds", "force", "look", "screenshot"},
+    "type_text": {"text", "target", "replace", "submit", "look", "screenshot"},
+    "scroll": {"direction", "amount", "to", "target", "look", "screenshot"},
+    "toggle": {"target", "value", "force", "look", "screenshot"},
+    "back": {"look", "screenshot"},
+    "open_url": {"url", "look", "screenshot"},
+    "wait": {"seconds", "look", "screenshot"},
+    "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot"},
+    "apps": set(),
+    "open_app": {"app", "look", "screenshot"},
+    "viewer": set(),
+    "close_app": {"app"},
+    "alert": {"action", "look", "screenshot"},
+    "press_button": {"name", "look", "screenshot"},
+    "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot"},
+}
+REQUIRED = {"tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
+            "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
+            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"]}
+DEFAULTS = {
+    "look": {"screenshot": True, "width": 600, "labels": False},
+    "tap": {"force": False, "look": True, "screenshot": False},
+    "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False},
+    "type_text": {"target": None, "replace": True, "submit": False, "look": True, "screenshot": False},
+    "scroll": {"direction": "down", "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False},
+    "toggle": {"value": None, "force": False, "look": True, "screenshot": False},
+    "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
+    "swipe": {"seconds": 0.35, "look": True, "screenshot": False},
+}
+READ_ONLY = {"look", "apps", "viewer", "wait", "wait_for"}
+
+
+def listed() -> dict:
+    return {t.name: t for t in asyncio.run(mcp_server.server.list_tools())}
+
+
+def test_the_tool_set_is_exactly_the_shared_interface():
+    tools = listed()
+    assert set(tools) == set(EXPECTED)
+    for name, tool in tools.items():
+        assert set(tool.input_schema.get("properties", {})) == EXPECTED[name], name
+        assert sorted(tool.input_schema.get("required", [])) == sorted(REQUIRED.get(name, [])), name
+
+
+def test_defaults_match_the_daemons():
+    tools = listed()
+    for name, defaults in DEFAULTS.items():
+        props = tools[name].input_schema["properties"]
+        for arg, value in defaults.items():
+            if value is None:
+                assert props[arg].get("default") is None and arg not in tools[name].input_schema.get("required", []), (name, arg)
+            else:
+                assert props[arg]["default"] == value, (name, arg)
+
+
+def test_enums_are_literals():
+    tools = listed()
+    def enum(tool, arg):
+        prop = tools[tool].input_schema["properties"][arg]
+        return set(prop.get("enum") or [v for part in prop.get("anyOf", []) for v in part.get("enum", [])])
+    assert enum("alert", "action") == {"accept", "dismiss", "text"}
+    assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
+    assert enum("scroll", "direction") == {"up", "down", "left", "right"}
+    assert enum("scroll", "to") == {"start", "end"}
+
+
+def test_read_only_tools_say_so():
+    for name, tool in listed().items():
+        flag = tool.annotations.read_only_hint if tool.annotations else None
+        assert (flag is True) == (name in READ_ONLY), name
+
+
+def test_the_target_is_one_typed_object_with_exactly_one_kind():
+    target = listed()["tap"].input_schema["$defs"]["Target"]
+    assert set(target["properties"]) == {"ref", "id", "label", "text", "x", "y", "index"}
+    assert target["additionalProperties"] is False
+    assert target["oneOf"] == [{"required": ["ref"]}, {"required": ["id"]}, {"required": ["label"]},
+                               {"required": ["text"]}, {"required": ["x", "y"]}]
+    for name in ("long_press", "toggle", "type_text", "scroll"):
+        assert "Target" in listed()[name].input_schema["$defs"], name
+
+
+def test_an_unknown_key_in_a_target_is_bad_params(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    out = asyncio.run(mcp_server.server.call_tool("tap", {"target": {"zzz": 1}}))
+    assert out.is_error and out.content[0].text.startswith("Error bad_params: ")
+
+
+def test_tools_forward_their_arguments_to_the_daemon(monkeypatch):
+    seen = []
+
+    def fake_call(tool, args, client_id, timeout=120.0):
+        seen.append((tool, args))
+        return {"text": "ok", "image": None, "image_size": None}
+    monkeypatch.setattr(client, "call", fake_call)
+    asyncio.run(mcp_server.tap(target=mcp_server.Target(label="Log in", index=1)))
+    asyncio.run(mcp_server.look())
+    asyncio.run(mcp_server.scroll(to="end"))
+    asyncio.run(mcp_server.wait(seconds=1.5))
+    asyncio.run(mcp_server.wait_for(text="Done", gone=True))
+    asyncio.run(mcp_server.open_app(app="Settings"))
+    assert seen == [
+        ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "screenshot": False}),
+        ("look", {"screenshot": True, "width": 600, "labels": False}),
+        ("scroll", {"direction": "down", "amount": 0.8, "to": "end", "target": None, "look": True,
+                    "screenshot": False}),
+        ("wait", {"seconds": 1.5, "look": True, "screenshot": False}),
+        ("wait_for", {"text": "Done", "id": None, "label": None, "gone": True, "timeout": 10.0, "look": True,
+                      "screenshot": False}),
+        ("open_app", {"app": "Settings", "look": True, "screenshot": False}),
+    ]
+
+
+def test_round_trip_through_the_server(monkeypatch):
+    seen = []
+
+    def fake_call(tool, args, client_id, timeout=120.0):
+        seen.append((tool, args))
+        return {"text": f"did {tool}", "image": None, "image_size": None}
+    monkeypatch.setattr(client, "call", fake_call)
+    out = asyncio.run(mcp_server.server.call_tool("toggle", {"target": {"id": "wifi"}, "value": True}))
+    assert not out.is_error and out.content[0].text == "did toggle"
+    out = asyncio.run(mcp_server.server.call_tool("press_button", {"name": "home", "look": False}))
+    assert not out.is_error and out.content[0].text == "did press_button"
+    assert seen == [
+        ("toggle", {"target": {"id": "wifi"}, "value": True, "force": False, "look": True, "screenshot": False}),
+        ("press_button", {"name": "home", "look": False, "screenshot": False}),
+    ]
+    bad = asyncio.run(mcp_server.server.call_tool("press_button", {"name": "power"}))
+    assert bad.is_error and bad.content[0].text.startswith("Error bad_params: ") and len(seen) == 2
+
+
+def test_the_old_tool_names_are_gone(monkeypatch):
+    monkeypatch.setattr(client, "call", lambda *a, **k: pytest.fail("the daemon must not be called"))
+    for name in ("list_apps", "launch_app", "terminate_app"):
+        out = asyncio.run(mcp_server.server.call_tool(name, {}))
+        assert out.is_error and out.content[0].text.startswith("Error unsupported: ")
+
+
+def test_viewer_answers_with_the_live_views_link(monkeypatch):
+    monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "T"})
+    out = asyncio.run(mcp_server.viewer())
+    lines = out.content[0].text.splitlines()
+    assert not out.is_error and lines[0] == "Live view: http://127.0.0.1:8417/?token=T"
+    assert len(lines) == 2 and "key" in lines[1] and "user" in lines[1]
+
+
+def test_viewer_never_logs_the_token(monkeypatch, caplog):
+    monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "SECRET"})
+    with caplog.at_level("DEBUG"):
+        asyncio.run(mcp_server.viewer())
+    assert "SECRET" not in caplog.text
+
+
+def test_viewer_when_the_daemon_cannot_start(monkeypatch):
+    def broken(wait=60.0):
+        raise client.DaemonError("not_connected", "tapwright serve didn't start; see ~/.tapwright/serve.log")
+    monkeypatch.setattr(client, "find_or_start", broken)
+    out = asyncio.run(mcp_server.viewer())
+    assert out.is_error and out.content[0].text.startswith("Error not_connected: ")

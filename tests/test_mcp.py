@@ -30,7 +30,7 @@ def test_tools_call_the_daemon(monkeypatch):
 
 def test_an_answer_without_a_picture_is_one_text_item(monkeypatch):
     monkeypatch.setattr(client, "call", lambda *a, **k: {"text": "closed x", "image": None, "image_size": None})
-    out = asyncio.run(mcp_server.terminate_app(bundle_id="x"))
+    out = asyncio.run(mcp_server.close_app(app="x"))
     assert out.is_error is False and [c.text for c in out.content] == ["closed x"]
 
 
