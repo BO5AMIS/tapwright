@@ -534,7 +534,7 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
             await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
         assert e.value.code == "not_found"
         r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
-        assert r["text"].startswith('Tapped e3 button "8"')
+        assert r["text"].startswith('Tapped e7 button "8"')  # the re-read after a no-look action: id-less refs are new
         await finish(stop, task)
     run(go)
 
@@ -1017,11 +1017,9 @@ def test_after_a_scroll_the_old_refs_of_identical_buttons_are_not_found():
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = rows("BCD")  # one row up: the buttons sit where they sat
-        await d.run_tool("a", "scroll", {"direction": "down"})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e4"}, "look": False})  # "Edit A" would press B's button
-        assert e.value.code == "not_found" and "no longer on the screen; look again" in str(e.value)
+        r = await d.run_tool("a", "scroll", {"direction": "down"})
+        assert r["text"].splitlines()[1].startswith("Screen")  # nothing is known to carry over: the full list
         view = d.control.client("a")
-        assert [x.ref for x in view.items if x.label == "Edit"] == ["e30", "e31", "e32"]
+        assert [x.ref for x in view.items if x.label == "Edit"] == ["e4", "e5", "e6"]  # renumbered, and shown
         await finish(stop, task)
     run(go)

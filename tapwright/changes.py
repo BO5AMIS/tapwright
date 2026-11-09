@@ -39,14 +39,16 @@ def _moved_by(a: Element, b: Element, shift: tuple[float, float]) -> bool:
 
 def _content_shift(pairs: list[tuple[Element, Element]]) -> tuple[float, float] | None:
     """How far the content moved: the displacement most unique elements with an identifier or text agree on
-    (within a point), if at least three do; else None."""
+    (within a point), if at least three do and it is a real move; else None."""
     shifts = [_shift(a, b) for a, b in pairs if a.identifier or a.text]
     best = max(shifts, key=lambda s: sum(abs(s[0] - t[0]) <= MOVE_PT and abs(s[1] - t[1]) <= MOVE_PT for t in shifts),
                default=None)
     if best is None:
         return None
     agreeing = sum(abs(best[0] - t[0]) <= MOVE_PT and abs(best[1] - t[1]) <= MOVE_PT for t in shifts)
-    return (round(best[0]), round(best[1])) if agreeing >= 3 else None
+    if agreeing < 3 or (abs(best[0]) <= MOVE_PT and abs(best[1]) <= MOVE_PT):
+        return None  # too few agree, or they all stayed (fixed bars): nothing says the content moved
+    return round(best[0]), round(best[1])
 
 
 def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_content: bool = False) -> list[Element]:
@@ -74,8 +76,8 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_cont
     for was, now in pairs:
         if moves_content and not was.identifier:
             # no identifier: a same-named element elsewhere may be another row's. It keeps its ref only
-            # if it moved the way the content did (or, without an estimate, stayed put).
-            ok = _stayed(was, now) if shift is None else _moved_by(was, now, shift)
+            # if it moved the way the content did; with no estimate of that, never.
+            ok = shift is not None and _moved_by(was, now, shift)
         else:
             ok = bool(_key(was)[1] == "id" or was.text or _stayed(was, now))
         if ok:

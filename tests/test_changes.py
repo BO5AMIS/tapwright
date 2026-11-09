@@ -273,10 +273,8 @@ def test_the_same_layout_after_an_action_that_moved_nothing_keeps_the_duplicate_
 def test_a_scroll_refreshes_duplicates_even_when_nothing_seems_to_have_moved():
     old = _rows("ABC")
     carried = changes.carry_refs(old, _rows("ABC"), moves_content=True)
-    assert refs(carried)[:3] == ["e1", "e2", "e3"]  # unique rows keep theirs
-    assert refs(carried)[3:] == ["e7", "e8", "e9"]  # the Edit buttons are all new
-    up = changes.update(old, _rows("ABC"), moves_content=True)
-    assert refs(up.items)[3:] == ["e7", "e8", "e9"]
+    assert refs(carried) == ["e7", "e8", "e9", "e10", "e11", "e12"]  # nothing says the content moved: all new
+    assert changes.update(old, _rows("ABC"), moves_content=True).full  # so much is new that the full list is the answer
 
 
 def test_an_idless_button_that_stayed_put_while_the_content_scrolled_gets_a_fresh_ref():
@@ -299,11 +297,11 @@ def test_elements_that_scrolled_together_keep_their_refs_and_show_as_moved():
     assert changes.diff(old, carried)[0] == '↕ e1 button "General" @0,150 100x40 [tap]'
 
 
-def test_too_few_agreeing_pairs_means_an_idless_element_must_have_stayed_put():
+def test_too_few_agreeing_pairs_means_no_idless_element_keeps_its_ref():
     old = [el("e1", label="General", y=300), el("e2", label="Wi-Fi", y=400), el("e3", label="Stays", y=0)]
     new = [replace(old[0], rect=(0, 150, 100, 40)), replace(old[1], rect=(0, 250, 100, 40)), old[2]]
     carried = changes.carry_refs(old, new, moves_content=True)
-    assert refs(carried) == ["e4", "e5", "e3"]  # only 2 pairs agree: no estimate; the two that moved are new
+    assert refs(carried) == ["e4", "e5", "e6"]  # only 2 pairs agree: no estimate, so no id-less element keeps one
     with_id = [replace(old[0], identifier="gen")]
     assert refs(changes.carry_refs(with_id, [replace(with_id[0], rect=(0, 150, 100, 40))], moves_content=True)) == ["e1"]
 
@@ -313,3 +311,13 @@ def test_back_to_a_screen_with_a_done_button_elsewhere_gets_a_fresh_ref():
     new = [el("e1", label="Done", y=500)]
     assert refs(changes.carry_refs(old, new, moves_content=True)) == ["e2"]
     assert refs(changes.carry_refs(old, new, moves_content=False)) == ["e1"]  # a tap: a move is news, not a swap
+
+
+def test_fixed_elements_do_not_make_a_stay_look_like_a_match():
+    """A nav title and tab items outnumber the scrolled elements: the estimate is zero, so there is none."""
+    fixed = [el(f"e{i + 1}", role="text", label=f"Fixed {i}", y=i * 5) for i in range(3)]
+    old = [*fixed, el("e4", label="Edit", x=200, y=300)]  # row A's button
+    new = [*fixed, el("e4", label="Edit", x=200, y=300)]  # row C's, one row of scrolling later
+    carried = changes.carry_refs(old, new, moves_content=True)
+    assert "e4" not in refs(carried)
+    assert changes.carry_refs(old, new)[3].ref == "e4"  # after a tap it is the same button
