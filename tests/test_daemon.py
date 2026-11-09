@@ -2178,3 +2178,30 @@ def test_a_missing_target_on_a_still_screen_is_not_read_twice():
         await feeder.stop()
         await finish(stop, task)
     run(go)
+
+
+def test_an_unsettled_action_by_one_client_makes_every_client_settle_first():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("b", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        caps = _recording_settles(d)
+        await d.run_tool("b", "look", {"screenshot": False})
+        assert caps[0] == daemon_module.RESOLVE_SETTLE
+        await finish(stop, task)
+    run(go)
+
+
+def test_reading_alert_text_does_not_leave_the_screen_unsettled():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "alert", {"action": "text"})
+        caps = _recording_settles(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert caps == []
+        await finish(stop, task)
+    run(go)

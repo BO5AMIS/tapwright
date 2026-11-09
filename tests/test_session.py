@@ -216,6 +216,7 @@ def test_type_text_at_a_point_needs_an_input_there(phone):
         asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=120.0)))  # over a button
     assert e.value.code == "not_actionable" and str(e.value).startswith("no_action: Nothing at (20, 120)")
     _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
     asyncio.run(s.type_text("hi", target=ui_module.Target(x=20.0, y=20.0)))
     taps = [r for r in phone.requests if r[1].endswith("/actions")]
     assert taps and taps[0][2]["actions"][0]["actions"][0]["x"] == 110  # tapped the input's centre
@@ -241,12 +242,33 @@ def _keyboard_after(phone, polls: int, monkeypatch=None):
     return reads
 
 
+FIELD_RECT = (10, 10, 200, 40)
+
+
+def _focus(phone, rects):
+    """element/active answers each rect in turn (the last repeats): who has focus, as WebDriverAgent says it."""
+    asked = []
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/element/active"):
+            asked.append(1)
+            return {"value": {"ELEMENT": f"f{min(len(asked), len(rects)) - 1}"}}
+        if "/element/f" in path and path.endswith("/rect"):
+            x, y, w, h = rects[int(path.split("/element/f")[1].split("/")[0])]
+            return {"value": {"x": x, "y": y, "width": w, "height": h}}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    return asked
+
+
 FIELD = [ui_module.Element("e1", "input", "Email", rect=(10, 10, 200, 40), actions=("tap", "type"))]
 
 
 def test_typing_waits_for_the_keyboard_to_come_up(phone, monkeypatch):
     monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
     reads = _keyboard_after(phone, 2)  # the second read shows it
+    _focus(phone, [FIELD_RECT])
     s = Session(phone)
     s.items = list(FIELD)
     assert asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1"))) == "typed 2 characters"
@@ -257,6 +279,7 @@ def test_typing_into_a_field_that_never_gets_the_keyboard_is_refused(phone, monk
     monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
     monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
     _keyboard_after(phone, 10 ** 9)
+    _focus(phone, [FIELD_RECT])
     s = Session(phone)
     s.items = list(FIELD)
     with pytest.raises(Refused) as e:
@@ -271,7 +294,7 @@ def test_replace_says_when_the_focused_field_could_not_be_found(phone, monkeypat
     _keyboard_after(phone, 1)
     s = Session(phone)
     s.items = list(FIELD)
-    text = asyncio.run(s.type_text("hi", replace=True, target=ui_module.Target(ref="e1")))
+    text = asyncio.run(s.type_text("hi", replace=True))  # into whatever has focus: none has
     assert text.startswith("typed 2 characters") and "couldn't find the focused field to clear" in text
 
 
@@ -423,3 +446,27 @@ def test_springboard_is_the_home_screen_and_an_unknown_app_rereads_the_list(phon
     assert len(reads) == 3  # asked once for it, then remembered as not installed by you
     asyncio.run(s.snapshot())
     assert len(reads) == 3
+
+
+def test_typing_waits_until_the_target_not_the_old_field_has_focus(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    _keyboard_after(phone, 1)  # the keyboard is already up, for another field
+    asked = _focus(phone, [(10, 300, 200, 40), (10, 300, 200, 40), (11, 11, 199, 41)])  # old, old, then the target
+    s = Session(phone)
+    s.items = list(FIELD)
+    asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+    assert len(asked) == 3 and phone.requests[-1][1].endswith("/wda/keys")
+
+
+def test_typing_when_focus_never_moves_to_the_target_types_nothing(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "KEYBOARD_POLL", 0.01)
+    monkeypatch.setattr(session_module, "KEYBOARD_WAIT", 0.1)
+    _keyboard_after(phone, 1)
+    _focus(phone, [(10, 300, 200, 40)])
+    s = Session(phone)
+    s.items = list(FIELD)
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+    assert e.value.code == "not_actionable"
+    assert str(e.value) == "no_action: e1 input \"Email\" @10,10 200x40 didn't take focus."
+    assert not any(r[1].endswith("/wda/keys") for r in phone.requests)

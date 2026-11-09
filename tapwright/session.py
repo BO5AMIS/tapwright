@@ -10,7 +10,6 @@ from .control import Refused
 from .device import ConnectionLost, Device, DeviceError, NotSetUp
 
 KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for the keyboard
-KEYBOARD_POLL, KEYBOARD_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for the keyboard
 KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
@@ -220,16 +219,38 @@ class Session:
             await self.tap(target)
             if not await self._keyboard_comes_up():
                 raise Refused("not_actionable", f"no_action: {what} didn't take focus (no keyboard came up).")
+            hit = ui.resolve(self.items, target)
+            if not isinstance(hit, tuple) and not await self._has_focus(hit.rect):
+                raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
         note = ""
         if replace:
-            focused = await self._call("GET", "/session/{sid}/element/active")
-            element = (focused.get("value") or {}).get("ELEMENT") or next(iter((focused.get("value") or {}).values()), None)
+            element = await self._active_element()
             if element:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
                 note = " (couldn't find the focused field to clear, so the old text may remain)"
         await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text + ("\n" if submit else ""))})
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
+
+    async def _active_element(self) -> str | None:
+        focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
+        return focused.get("ELEMENT") or next(iter(focused.values()), None)
+
+    async def _has_focus(self, rect: tuple[float, float, float, float]) -> bool:
+        """Wait until the active element sits where the target does (within 2 pt): with the keyboard already up
+        for another field, the keys would otherwise land in the old one."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + KEYBOARD_WAIT
+        while True:
+            element = await self._active_element()
+            if element:
+                box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
+                got = tuple(box.get(k, float("inf")) for k in ("x", "y", "width", "height"))
+                if all(abs(a - b) <= 2 for a, b in zip(got, rect)):
+                    return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(KEYBOARD_POLL)
 
     async def _keyboard_comes_up(self) -> bool:
         """Poll the tree (fast XML) until it shows the keyboard, for at most KEYBOARD_WAIT seconds."""

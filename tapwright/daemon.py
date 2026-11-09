@@ -209,6 +209,7 @@ class Daemon:
         self.session = session
         # screenshots: how long to wait for a stream frame before asking the phone, and how old one may be
         self.shot_wait, self.shot_fresh = shot_wait, shot_fresh
+        self.unsettled = False  # the last action returned without a settle: the screen may still be moving, for every client
         # settle: how long a still screen is quiet, how long to wait for a first frame, and the
         # blind sleep used when the stream gives no frames at all
         self.settle_still, self.settle_first_frame, self.settle_fallback = settle_still, settle_first_frame, settle_fallback
@@ -429,7 +430,7 @@ class Daemon:
         if name == "wait":
             return await self._wait(view, args, notes, shot)
         if name == "look":
-            await self._settle_pending(view)
+            await self._settle_pending()
             return await self._look(view, shot, [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
@@ -445,7 +446,7 @@ class Daemon:
             self._require_connected()
             s = self.session
             if not (by_lookup and not self._current(view)):  # a silent re-read settles for itself
-                await self._settle_pending(view)
+                await self._settle_pending()
             s.items = view.items
             fresh[0] = view.seen == self.control.generation
             # never looked, a person acted, or the line dropped: the agent's list may be anything
@@ -478,9 +479,11 @@ class Daemon:
             view.seen = self.control.generation
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
             return _answer([str(result)], notes)
-        looks = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
+        reads_only = name == "alert" and args.get("action") == "text"  # it changes nothing on the phone
+        looks = settle is not None and args.get("look", True) and not reads_only
         view.moved = view.moved or not looks
-        view.unsettled = not looks
+        if not reads_only:
+            self.unsettled = not looks
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
             return _answer([str(result)], notes)
@@ -619,12 +622,12 @@ class Daemon:
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
-    async def _settle_pending(self, view) -> None:
+    async def _settle_pending(self) -> None:
         """XCTest no longer waits for the app to go idle, so after an action that wasn't settled (`look: false`)
         nothing may act or read until the screen is still (cap RESOLVE_SETTLE)."""
-        if view.unsettled:
+        if self.unsettled:
             await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
-            view.unsettled = False
+            self.unsettled = False
 
     async def _silent_read(self, view) -> bool:
         """Read the live tree for target resolution, once the screen is still (cap RESOLVE_SETTLE; with no
@@ -632,7 +635,7 @@ class Daemon:
         True when a re-read could show something else: the stream moved, ended capped, or has no frames."""
         s = self.session
         done = await self._settle(self._mark()[0], cap=RESOLVE_SETTLE)
-        view.unsettled = False
+        self.unsettled = False
         mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
         await s.refresh()
         known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
