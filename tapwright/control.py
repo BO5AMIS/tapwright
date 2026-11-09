@@ -5,6 +5,7 @@ phone, no network."""
 import asyncio
 import math
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 PERSON_IDLE_S = 3.0  # a person counts as driving until idle this long
@@ -104,6 +105,12 @@ class Controller:
                     if not refused:
                         self.generation += 1
                         self._agent_at = self.clock()
+
+    @asynccontextmanager
+    async def exclusive(self):
+        """Work that must not overlap any action or read: reconnecting."""
+        async with self._lock:
+            yield
 
     async def read(self, fn):
         """A read (a look, the app list, settings): queued with actions, never refused or delayed."""

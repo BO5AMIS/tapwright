@@ -2,7 +2,7 @@
 import asyncio
 
 from tapwright import ui
-from tapwright.device import ConnectionLost, NotSetUp
+from tapwright.device import ConnectionLost, DeviceError, NotSetUp
 
 
 class Clock:
@@ -42,6 +42,8 @@ class FakeSession:
         self.fail: dict = {}
         self.is_locked = False
         self.not_set_up = False
+        self.ensure_delay = 0.0
+        self.locked_errors = 0  # the next N locked() calls raise a DeviceError
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -56,6 +58,8 @@ class FakeSession:
         self._record("ensure")
         if self.not_set_up:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
+        if self.ensure_delay:
+            await asyncio.sleep(self.ensure_delay)
         self.device.rsd = "tunnel"
         self.sid = "S"
 
@@ -68,6 +72,9 @@ class FakeSession:
 
     async def locked(self):
         self._record("locked")
+        if self.locked_errors:
+            self.locked_errors -= 1
+            raise DeviceError("HTTP 500: boom")
         return self.is_locked
 
     async def look(self, screenshot=True):

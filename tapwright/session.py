@@ -53,6 +53,11 @@ class Session:
         except ConnectionLost:
             self.sid = None  # the next call starts WebDriverAgent again
             raise
+        except DeviceError as e:
+            if "invalid session" in str(e).lower():  # WebDriverAgent restarted: the session is gone
+                self.sid = None
+                raise ConnectionLost(str(e)) from e
+            raise
 
     # ---- seeing ----
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):

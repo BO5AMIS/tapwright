@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from tapwright import session as session_module
-from tapwright.device import ConnectionLost, NotSetUp
+from tapwright.device import ConnectionLost, DeviceError, NotSetUp
 from tapwright.session import Session
 
 
@@ -102,6 +102,19 @@ def test_dead_line_starts_a_new_session_on_the_next_call(phone):
     assert s.sid is None
     assert asyncio.run(s.locked()) is True
     assert phone.started == ["runner", "runner"] and s.sid == "S"
+
+
+def test_invalid_session_counts_as_a_dead_line(phone):
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.fail["/wda/locked"] = DeviceError("HTTP 404: invalid session id")
+    with pytest.raises(ConnectionLost):
+        asyncio.run(s.locked())
+    assert s.sid is None
+    phone.fail["/wda/locked"] = DeviceError("HTTP 500: something else")
+    with pytest.raises(DeviceError) as e:
+        asyncio.run(s.locked())
+    assert not isinstance(e.value, ConnectionLost)
 
 
 def test_failed_window_size_leaves_no_session(phone):

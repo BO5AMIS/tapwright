@@ -43,6 +43,9 @@ ACTIONS = {
     "open_url": (lambda s, a: s.open_url(a["url"]), 1.5),
 }
 READS = ("look", "list_apps", "wait")
+REQUIRED = {"launch_app": ("bundle_id",), "terminate_app": ("bundle_id",), "type_text": ("text",),
+            "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
+            "open_url": ("url",)}
 
 
 async def _first(timeout: float, *events: asyncio.Event) -> None:
@@ -69,6 +72,7 @@ class Daemon:
         self.preset = "balanced"
         self.ws_clients = 0
         self.last_request = time.monotonic()
+        self._ever_connected = False
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
         self._queues: set = set()
@@ -133,7 +137,19 @@ class Daemon:
             self._set_state("reconnecting", reason[:200])
         self._lost.set()
 
+    def _require_connected(self) -> None:
+        if not self._connected.is_set():
+            raise Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); try again")
+
+    async def _connected_only(self, fn):
+        """Run `fn` only if the line is up when its turn comes: a reconnect holds the queue,
+        and whatever waited for it must not reconnect on its own."""
+        self._require_connected()
+        return await fn()
+
     async def wait_connected(self) -> None:
+        if self.state == "no-device":
+            raise Refused("reconnecting", f"no phone to use: {self.detail}")
         try:
             await asyncio.wait_for(self._connected.wait(), self.ready_wait)
         except asyncio.TimeoutError:
@@ -143,27 +159,27 @@ class Daemon:
     async def _connect(self) -> None:
         """A working WebDriverAgent session: a new WebDriverAgent if the tunnel still works,
         otherwise everything from scratch."""
-        s = self.session
-        if s.device.rsd is not None:
-            s.sid = None
-            try:
+        async with self.control.exclusive():
+            s = self.session
+            if s.device.rsd is not None:
+                s.sid = None
+                try:
+                    await s.ensure()
+                except NotSetUp:
+                    raise
+                except Exception as e:
+                    self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
+                    await s.reset()
+                    await s.ensure()
+            else:
                 await s.ensure()
-            except NotSetUp:
-                raise
-            except Exception as e:
-                self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
-                await s.reset()
-                await s.ensure()
-        else:
-            await s.ensure()
-        await s.settings({**PRESETS[self.preset], "mjpegFixOrientation": True})
+            await s.settings({**PRESETS[self.preset], "mjpegFixOrientation": True})
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
-        attempt = 0
+        attempt = failures = 0
         while not stop.is_set():
             if self.state not in ("live", "locked"):
-                self._lost.clear()
                 try:
                     await self._connect()
                 except NotSetUp as e:
@@ -171,9 +187,11 @@ class Daemon:
                 except PhoneNotFound:
                     self._set_state("no-device", "phone not found: plug it in and unlock it")
                 except Exception as e:
-                    self._set_state("reconnecting" if attempt else "connecting", str(e)[:200])
+                    self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
                 else:
-                    attempt = 0
+                    attempt = failures = 0
+                    self._ever_connected = True
+                    self._lost.clear()  # a drop noticed while reconnecting is already dealt with
                     self._set_state("live")
                     self.log(f"connected over {self.session.device.via}")
                     continue
@@ -181,19 +199,32 @@ class Daemon:
                 attempt += 1
                 continue
             await _first(self.heartbeat, stop, self._lost)
-            if stop.is_set() or self._lost.is_set():
+            if stop.is_set():
+                break
+            if self._lost.is_set():
+                self._lost.clear()
+                if self.state in ("live", "locked"):
+                    self._set_state("reconnecting", "connection lost")
                 continue
             try:
-                locked = await self.control.read(self.session.locked)
+                locked = await self.control.read(lambda: self._connected_only(self.session.locked))
             except ConnectionLost as e:
                 self.lost(str(e))
+            except Refused:
+                pass
             except Exception as e:
+                failures += 1
                 self.log(f"heartbeat: {e}")
+                if failures >= 3:
+                    failures = 0
+                    self.lost(f"WebDriverAgent keeps failing: {e}")
             else:
-                if locked:
-                    self._set_state("locked", "unlock the phone")
-                else:
-                    self._set_state("live")
+                failures = 0
+                if not self._lost.is_set() and self.state in ("live", "locked"):
+                    if locked:
+                        self._set_state("locked", "unlock the phone")
+                    else:
+                        self._set_state("live")
 
     # ---- agent tools ----
     async def run_tool(self, client_id: str, name: str, args: dict) -> dict:
@@ -202,6 +233,9 @@ class Daemon:
         self.last_request = time.monotonic()
         if name not in ACTIONS and name not in READS:
             raise Refused("unsupported", f"no tool named {name!r}")
+        missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
+        if missing:
+            raise Refused("unsupported", f"{name} needs {', '.join(missing)}")
         view = self.control.client(client_id)
         notes = ["a person used the phone since your last look"] if view.seen < self.control.person_generation else []
         await self.wait_connected()
@@ -211,22 +245,31 @@ class Daemon:
             return {"texts": [text or "no apps"], "image": None, "notes": notes}
         if name in ("look", "wait"):
             if name == "wait":
-                await asyncio.sleep(min(max(float(args.get("seconds", 1.0)), 0.2), 30.0))
+                try:
+                    seconds = float(args.get("seconds", 1.0))
+                except (TypeError, ValueError):
+                    raise Refused("unsupported", "seconds must be a number") from None
+                await asyncio.sleep(min(max(seconds, 0.2), 30.0))
             return await self._look(view, bool(args.get("screenshot", True)), [], notes)
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
         by_ref, by_lookup = bool(args.get("ref")), bool(args.get("id") or args.get("label"))
 
+        fresh = [True]
+
         async def act():
+            self._require_connected()
             s = self.session
             s.items = view.items
-            if view.seen != self.control.generation:
+            fresh[0] = view.seen == self.control.generation
+            if not fresh[0]:
                 if by_ref:
                     raise Refused("stale", "the screen changed since your last look (someone else used the "
                                            "phone); look again")
                 if by_lookup:
                     await s.look(screenshot=False)
+                    fresh[0] = True
             s.last_point = None
             result = await call(s, args)
             view.items = s.items
@@ -245,7 +288,8 @@ class Daemon:
             return {"texts": [f"not found: {e}"], "image": None, "notes": notes}
         except Exception as e:  # one failed step never takes the daemon down
             return {"texts": [f"error: {e}"], "image": None, "notes": notes}
-        view.seen = self.control.generation  # its own action: what it knew is still current
+        if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
+            view.seen = self.control.generation
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         look = settle is not None and args.get("look", True) and not (name == "alert" and args.get("action") == "text")
         if not look:
@@ -273,7 +317,7 @@ class Daemon:
         """A read through the queue; after a dropped line, once more when reconnected."""
         for attempt in (1, 2):
             try:
-                return await self.control.read(fn)
+                return await self.control.read(lambda: self._connected_only(fn))
             except ConnectionLost as e:
                 self.lost(str(e))
                 if attempt == 2:
@@ -295,14 +339,15 @@ class Daemon:
                 return None
             if kind not in ("gesture", "scroll", "text", "key", "button"):
                 return None  # "overlay" comes in part 2; anything else is unknown
-            if self.state != "live":
-                code = "locked" if self.state == "locked" else "reconnecting"
-                return {"type": "error", "code": code,
+            if self.state == "locked":
+                return {"type": "error", "code": "locked",
                         "message": f"not connected to the phone ({self.detail or self.state})"}
             run, action, point = self._person_action(kind, message)
-            await self.control.person(run)
+            await self.control.person(lambda: self._connected_only(run))
             self._announce("person", action, point=self._point(point))
             return None
+        except Refused as e:
+            return {"type": "error", "code": e.code, "message": str(e)}
         except ConnectionLost as e:
             self.lost(str(e))
             return {"type": "error", "code": "reconnecting",

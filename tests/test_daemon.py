@@ -204,3 +204,112 @@ def test_other_tools():
         assert e.value.code == "unsupported"
         await finish(stop, task)
     run(go)
+
+
+def test_a_drop_noticed_while_reconnecting_does_not_spin():
+    async def go():
+        s = FakeSession()
+        s.ensure_delay = 0.1
+        d = make(s)
+        stop, task = await started(d)
+        s.ensure_delay = 0.1
+        d.lost("first")
+        await asyncio.sleep(0.03)  # the reconnect is running
+        d.lost("second")
+        for _ in range(300):
+            if d.state == "live":
+                break
+            await asyncio.sleep(0.01)
+        assert d.state == "live"
+        ensures = s.calls.count("ensure")
+        before = s.calls.count("locked")
+        await asyncio.sleep(0.2)
+        assert s.calls.count("locked") > before + 2 and s.calls.count("ensure") == ensures
+        await finish(stop, task)
+    run(go)
+
+
+def test_input_queued_during_a_reconnect_waits_for_it():
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        s.ensure_delay = 0.1
+        d.lost("gone")
+        await asyncio.sleep(0.03)
+        assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
+        calls = s.calls
+        assert max(i for i, c in enumerate(calls) if c == "ensure") < max(i for i, c in enumerate(calls) if c == "tap")
+        assert calls.count("tap") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_coordinate_action_does_not_refresh_stale_refs():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        r = await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+        assert r["notes"] == ["a person used the phone since your last look"]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"ref": "e1", "look": False})
+        assert e.value.code == "stale"
+        await finish(stop, task)
+    run(go)
+
+
+def test_busy_while_a_person_drives():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.control.person_active = lambda: True
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"x": 5, "y": 5, "look": False})
+        assert e.value.code == "busy"
+        await finish(stop, task)
+    run(go)
+
+
+def test_three_failing_heartbeats_lead_to_a_reconnect():
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        ensures = s.calls.count("ensure")
+        s.locked_errors = 3
+        for _ in range(300):
+            if s.calls.count("ensure") > ensures:
+                break
+            await asyncio.sleep(0.01)
+        assert s.calls.count("ensure") > ensures
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_missing_argument_is_refused_up_front():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        generation = d.control.generation
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "launch_app", {})
+        assert e.value.code == "unsupported" and "bundle_id" in str(e.value)
+        assert d.control.generation == generation and "launch" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_phone_fails_fast():
+    async def go():
+        s = FakeSession()
+        s.not_set_up = True
+        d = make(s, ready_wait=2.0)
+        stop, task = await started(d)
+        t0 = asyncio.get_running_loop().time()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {})
+        assert e.value.code == "reconnecting" and asyncio.get_running_loop().time() - t0 < 0.5
+        await finish(stop, task)
+    run(go)
