@@ -71,8 +71,49 @@ def test_pump_reads_reopens_and_stops_when_nobody_watches():
                     break
                 await asyncio.sleep(0.01)
         assert len(opened) >= 2  # the stream ended and was opened again
-        await asyncio.sleep(0.3)
-        assert pump._task.done()  # nobody watching any more: the connection is gone
+        await asyncio.wait_for(pump._task, 2)  # nobody watching any more: the connection is gone
+    asyncio.run(go())
+
+
+class Silent:
+    """A stream connection that never delivers anything."""
+
+    async def recv_any(self, n=65536):
+        await asyncio.sleep(3600)
+
+    async def close(self):
+        pass
+
+
+def test_pump_survives_failing_and_stalled_opens():
+    async def go():
+        hub, calls = FrameHub(), []
+
+        async def open_stream():
+            calls.append(1)
+            if len(calls) <= 2:
+                raise OSError("phone not ready")
+            return Silent()
+        pump = StreamPump(open_stream, hub, linger=0.05, retry=0.01, stall=0.05, log=lambda *a: None)
+        async with pump.watching():
+            for _ in range(200):
+                if len(calls) >= 4:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(calls) >= 4  # failed opens and a stalled stream both lead to a reopen
+        await asyncio.wait_for(pump._task, 2)
+    asyncio.run(go())
+
+
+def test_stop_cancels_the_pump():
+    async def go():
+        async def open_stream():
+            return Silent()
+        pump = StreamPump(open_stream, FrameHub(), log=lambda *a: None)
+        async with pump.watching():
+            await asyncio.sleep(0.05)
+            await pump.stop()
+            assert pump._task.done()
     asyncio.run(go())
 
 

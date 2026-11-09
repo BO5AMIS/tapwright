@@ -122,7 +122,7 @@ class StreamPump:
         delay = self.retry
         while not self._unwatched():
             try:
-                conn = await self.open_stream()
+                conn = await asyncio.wait_for(self.open_stream(), self.stall)
             except Exception as e:
                 self.log(f"stream: can't open it yet ({e})")
                 await asyncio.sleep(delay)
@@ -146,12 +146,11 @@ class StreamPump:
                     await conn.close()
                 except Exception:
                     pass
+            if self._unwatched():
+                return
             await asyncio.sleep(delay)
 
     async def stop(self) -> None:
         if self._task is not None and not self._task.done():
             self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await asyncio.gather(self._task, return_exceptions=True)
