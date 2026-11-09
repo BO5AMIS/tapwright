@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tapwright live view</title>
+<style>
+  :root {
+    --bg: #f4f4f5; --panel: #ffffff; --fg: #18181b; --muted: #52525b; --line: #d4d4d8;
+    --agent: #2563eb; --person: #d97706; --bad: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #09090b; --panel: #18181b; --fg: #e4e4e7; --muted: #a1a1aa; --line: #3f3f46;
+            --agent: #60a5fa; --person: #fbbf24; --bad: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;
+           padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  button, select, label.toggle { font: inherit; color: var(--fg); background: var(--bg);
+           border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  label.toggle { display: inline-flex; align-items: center; gap: 6px; }
+  [hidden] { display: none !important; }
+  #status { padding: 6px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0 16px 16px; }
+  #phone { position: relative; line-height: 0; }
+  #screen { display: block; border-radius: 16px; border: 1px solid var(--line); background: #000;
+            touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer; }
+  #marks { position: absolute; left: 0; top: 0; pointer-events: none; }
+  #toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: calc(100% - 32px);
+           padding: 8px 14px; border-radius: 8px; background: var(--bad); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <button type="button" data-accept="home" data-button="home">Home</button>
+  <button type="button" data-accept="volume" data-button="volumeDown" aria-label="Volume down">Volume −</button>
+  <button type="button" data-accept="volume" data-button="volumeUp" aria-label="Volume up">Volume +</button>
+  <label class="toggle"><input type="checkbox" id="pause"> Pause agent</label>
+  <select id="quality" data-accept="quality" aria-label="Stream quality">
+    <option value="sharp">Sharp</option>
+    <option value="balanced" selected>Balanced</option>
+    <option value="light">Light</option>
+  </select>
+</header>
+<div id="status" aria-live="polite">Connecting…</div>
+<main><div id="phone"><img id="screen" alt="The phone's screen, live" draggable="false"><canvas id="marks"></canvas></div></main>
+<div id="toast" role="alert" hidden></div>
+<script>
+"use strict";
+const img = document.getElementById("screen");
+const marks = document.getElementById("marks");
+const ctx = marks.getContext("2d");
+const statusEl = document.getElementById("status");
+const toastEl = document.getElementById("toast");
+const pauseEl = document.getElementById("pause");
+const qualityEl = document.getElementById("quality");
+const mainEl = document.querySelector("main");
+const STATES = { live: "Live", connecting: "Connecting", reconnecting: "Reconnecting", locked: "Phone locked", "no-device": "No phone" };
+const VIA = { usb: "USB", wifi: "Wi-Fi", tailscale: "Tailscale" };
+const DRIVERS = { agent: "Agent driving", person: "You're driving" };
+let ws = null;
+let wsDelay = 500;
+
+// ---- the picture ----
+function startStream() { img.src = "/stream?t=" + Date.now(); }
+img.addEventListener("error", () => setTimeout(startStream, 1000));
+function fit() {
+  const w = img.naturalWidth || 9, h = img.naturalHeight || 19.5;
+  const box = mainEl.getBoundingClientRect();
+  const scale = Math.max(0.05, Math.min((box.width - 32) / w, (box.height - 16) / h));
+  const cw = Math.floor(w * scale), ch = Math.floor(h * scale);
+  if (img.clientWidth !== cw || img.clientHeight !== ch) {
+    img.style.width = cw + "px";
+    img.style.height = ch + "px";
+    const d = window.devicePixelRatio || 1;
+    marks.width = cw * d;
+    marks.height = ch * d;
+    marks.style.width = cw + "px";
+    marks.style.height = ch + "px";
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+}
+new ResizeObserver(fit).observe(mainEl);
+setInterval(fit, 500);
+startStream();
+
+// ---- status, actions, errors (server text goes in as textContent only) ----
+function showStatus(s) {
+  const accepts = new Set(s.accepts || []);
+  document.querySelectorAll("[data-accept]").forEach((el) => { el.hidden = !accepts.has(el.dataset.accept); });
+  if (document.activeElement !== pauseEl) pauseEl.checked = !!s.paused;
+  if (s.quality && document.activeElement !== qualityEl) qualityEl.value = s.quality;
+  const parts = [STATES[s.state] || String(s.state)];
+  if (s.via) parts.push(VIA[s.via] || String(s.via));
+  if (s.state === "live") parts.push(Math.round(s.fps || 0) + " fps");
+  parts.push(s.paused ? "Agent paused" : (DRIVERS[s.driver] || "Idle"));
+  if (s.detail) parts.push(String(s.detail));
+  statusEl.textContent = parts.join(" · ");
+}
+let toastTimer = 0;
+function toast(text) {
+  toastEl.textContent = text;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 4000);
+}
+function color(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+let clearTimer = 0;
+function clearSoon(ms) {
+  clearTimeout(clearTimer);
+  clearTimer = setTimeout(() => ctx.clearRect(0, 0, marks.width, marks.height), ms);
+}
+function showAction(a) {
+  if (!a.point) return;
+  ctx.beginPath();
+  ctx.arc(a.point.x * img.clientWidth, a.point.y * img.clientHeight, 14, 0, Math.PI * 2);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = a.ok === false ? color("--bad") : color(a.by === "person" ? "--person" : "--agent");
+  ctx.stroke();
+  clearSoon(700);
+}
+function handle(m) {
+  if (m.type === "status") showStatus(m);
+  else if (m.type === "action") showAction(m);
+  else if (m.type === "error") toast(String(m.message || m.code || "Something went wrong"));
+}
+
+// ---- the connection for input and status ----
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => { wsDelay = 500; };
+  ws.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { /* skip what we can't read */ } };
+  ws.onclose = () => {
+    statusEl.textContent = "Not connected to tapwright serve; retrying…";
+    setTimeout(connect, wsDelay);
+    wsDelay = Math.min(wsDelay * 2, 5000);
+  };
+}
+function send(m) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); }
+connect();
+
+// ---- pointer: taps, long presses, drags ----
+let path = null;
+let t0 = 0;
+function point(e) {
+  const r = img.getBoundingClientRect();
+  const x = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+  const y = Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1);
+  return [Math.round(performance.now() - t0), +x.toFixed(4), +y.toFixed(4)];
+}
+function drawTrail() {
+  const w = img.clientWidth, h = img.clientHeight;
+  ctx.clearRect(0, 0, marks.width, marks.height);
+  ctx.beginPath();
+  path.forEach(([, x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = color("--person");
+  ctx.stroke();
+}
+img.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  img.setPointerCapture(e.pointerId);
+  t0 = performance.now();
+  path = [point(e)];
+  clearTimeout(clearTimer);
+});
+img.addEventListener("pointermove", (e) => {
+  if (!path) return;
+  const p = point(e);
+  if (p[0] - path[path.length - 1][0] >= 16) { path.push(p); drawTrail(); }
+});
+img.addEventListener("pointerup", (e) => {
+  if (!path) return;
+  path.push(point(e));
+  send({ type: "gesture", points: path });
+  drawTrail();
+  clearSoon(400);
+  path = null;
+});
+img.addEventListener("pointercancel", () => { path = null; clearSoon(0); });
+img.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ---- wheel: scrolls ----
+let wheel = null;
+const clampShare = (v) => Math.max(-0.8, Math.min(0.8, v));
+img.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = img.getBoundingClientRect();
+  const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? r.height : 1;
+  if (!wheel) {
+    const [, x, y] = point(e);
+    wheel = { x, y, dx: 0, dy: 0 };
+    setTimeout(() => {
+      const w = wheel;
+      wheel = null;
+      send({ type: "scroll", x: w.x, y: w.y, dx: +clampShare(w.dx).toFixed(4), dy: +clampShare(w.dy).toFixed(4) });
+    }, 150);
+  }
+  wheel.dx += (e.deltaX * unit) / r.width;
+  wheel.dy += (e.deltaY * unit) / r.height;
+}, { passive: false });
+
+// ---- keyboard: typing into the phone's focused field ----
+let typed = "";
+let typeTimer = 0;
+function flushText() {
+  clearTimeout(typeTimer);
+  if (typed) { send({ type: "text", text: typed }); typed = ""; }
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("header")) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return; // shortcuts; pasting arrives as a paste event
+  if (e.key === "Backspace" || e.key === "Enter") {
+    e.preventDefault();
+    flushText();
+    send({ type: "key", key: e.key === "Enter" ? "enter" : "backspace" });
+  } else if (e.key.length === 1) {
+    e.preventDefault();
+    typed += e.key;
+    clearTimeout(typeTimer);
+    typeTimer = setTimeout(flushText, 150);
+  }
+});
+document.addEventListener("paste", (e) => {
+  const text = e.clipboardData ? e.clipboardData.getData("text") : "";
+  if (text) { e.preventDefault(); flushText(); send({ type: "text", text }); }
+});
+
+// ---- toolbar (buttons let go of focus so typing keeps reaching the phone) ----
+document.querySelectorAll("[data-button]").forEach((b) => b.addEventListener("click", () => {
+  send({ type: "button", name: b.dataset.button });
+  b.blur();
+}));
+pauseEl.addEventListener("change", () => { send({ type: "pause", on: pauseEl.checked }); pauseEl.blur(); });
+qualityEl.addEventListener("change", () => { send({ type: "quality", preset: qualityEl.value }); qualityEl.blur(); });
+</script>
+</body>
+</html>

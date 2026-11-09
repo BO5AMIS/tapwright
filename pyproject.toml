@@ -24,3 +24,6 @@ tapwright = "tapwright.cli:main"
 
 [tool.setuptools]
 packages = ["tapwright"]
+
+[tool.setuptools.package-data]
+tapwright = ["viewer.html"]
