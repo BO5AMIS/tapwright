@@ -16,6 +16,7 @@ def test_viewer_page_is_packaged():
     assert page.is_file()
     text = page.read_text(encoding="utf-8")
     assert "<title>Tapwright live view</title>" in text and 'id="screen"' in text and "new WebSocket" in text
+    assert "history.replaceState" in text  # the token leaves the address bar
     assert "innerHTML" not in text  # server text only ever goes in as textContent
 
 
@@ -85,13 +86,24 @@ def test_page_moves_the_token_into_a_cookie():
     app, _ = app_and_daemon()
     with TestClient(app) as c:
         r = c.get(f"/?token={TOKEN}", follow_redirects=False)
-        assert r.status_code == 303 and r.headers["location"] == "/"
+        assert r.status_code == 200 and "Tapwright live view" in r.text  # the page itself, no redirect
+        assert r.headers["referrer-policy"] == "no-referrer" and r.headers["cache-control"] == "no-store"
         cookie = r.headers["set-cookie"].lower()
         assert cookie.startswith(f"{COOKIE}=") and "httponly" in cookie and "samesite=strict" in cookie
         page = c.get("/")
         assert page.status_code == 200 and "Tapwright live view" in page.text
+        assert page.headers["referrer-policy"] == "no-referrer"
     with TestClient(app) as stranger:
         assert stranger.get("/").status_code == 401
+
+
+def test_token_link_clicked_on_another_site_still_works():
+    app, _ = app_and_daemon()
+    with TestClient(app) as c:
+        r = c.get(f"/?token={TOKEN}", headers={"sec-fetch-site": "cross-site"})
+        assert r.status_code == 200 and "httponly" in r.headers["set-cookie"].lower()
+        assert c.get("/", headers={"sec-fetch-site": "same-origin"}).status_code == 200
+        assert c.get("/", headers={"sec-fetch-site": "cross-site"}).status_code == 403
 
 
 def test_agent_api():

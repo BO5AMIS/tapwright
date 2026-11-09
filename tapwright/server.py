@@ -12,7 +12,7 @@ from importlib.resources import files
 from logging.handlers import RotatingFileHandler
 
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
@@ -20,6 +20,7 @@ from . import store
 from .control import Refused
 
 COOKIE = "tapwright_token"
+PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 HTTP_STATUS = {"busy": 409, "paused": 409, "stale": 409, "reconnecting": 503, "locked": 503, "unsupported": 400}
 DEFAULT_PORT = 8417
@@ -74,14 +75,17 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         if not _host_ok(request, hosts):
             return Response("unknown host", status_code=403)
         if _same(request.query_params.get("token", ""), token):
-            response = RedirectResponse("/", status_code=303)  # the token leaves the address bar and history
+            # Answer with the page itself: a link clicked on another site arrives cross-site, and a
+            # redirected request would too, so Chrome would withhold the Strict cookie. The page
+            # drops the token from the address bar with history.replaceState.
+            response = HTMLResponse(page, headers=PAGE_HEADERS)
             response.set_cookie(COOKIE, token, httponly=True, samesite="strict")
             return response
         if not (_bearer_ok(request, token) or _cookie_present(request, token)):
             return HTMLResponse("<p>Open the link that <code>tapwright view</code> prints.</p>", status_code=401)
         if not _bearer_ok(request, token) and not _cookie_ok(request, token):
             return HTMLResponse("cross-site request refused", status_code=403)
-        return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(page, headers=PAGE_HEADERS)
 
     async def health(request):
         return denied(request) or JSONResponse(daemon.status())

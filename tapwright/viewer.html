@@ -52,6 +52,7 @@
 <div id="toast" role="alert" hidden></div>
 <script>
 "use strict";
+if (location.search) history.replaceState(null, "", location.pathname);
 const img = document.getElementById("screen");
 const marks = document.getElementById("marks");
 const ctx = marks.getContext("2d");
