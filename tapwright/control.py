@@ -17,6 +17,8 @@ AGENT_MAX_WAIT_S = 30.0  # an agent action waits at most this long for a person 
 LONG_PRESS_MS = 500
 # A tap's finger rests this long: the result showed 75 ms sooner than with 60 ms, and the call took as long
 # (an iPhone 14 Pro Max, iOS 26.5, 2026-11-09). A person's tap is over when it reaches the phone: replayed quick.
+# Through the live view a 20 ms tap showed in 0.27-0.30 s and 60 ms in 0.30-0.38 s; the button's press highlight
+# landed in a frame about as often (6 and 4 of 10), so persons get 20 ms too.
 TAP_MS = 20
 TAP_MOVE_PT = 10.0
 PATH_POINTS = 20  # a drag is replayed through at most this many points
