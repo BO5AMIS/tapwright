@@ -104,9 +104,12 @@ def _checked(name: str, args: dict) -> dict:
         checked["target"] = ui.parse_target(args["target"])  # bad_params, with an example of a target
     if name == "scroll" and checked.get("direction", "down") not in ("up", "down", "left", "right"):
         raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
+    for key in ("look", "screenshot", "labels"):
+        if key in args and not isinstance(args[key], bool):
+            raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
     if name == "wait":
-        seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, not to an agent
-        if isinstance(seconds, bool) or not WAIT_MIN <= checked["seconds"] <= WAIT_MAX:
+        seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, a string isn't one to us
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not WAIT_MIN <= seconds <= WAIT_MAX:
             raise Refused("bad_params", f"seconds must be a number from {WAIT_MIN:g} to {WAIT_MAX:g}, not {seconds!r}")
     if name in ("open_app", "close_app") and (not isinstance(args["app"], str) or not args["app"].strip()):
         raise Refused("bad_params", f"app must be a bundle id or an app's name, not {args['app']!r}")
@@ -121,8 +124,29 @@ class Unchanged(str):
 
 
 class Toggled(str):
-    """`toggle`'s result: the answer's first line is rewritten from the element's line after the tap."""
+    """`toggle`'s result, `Tapped <line>.` until the tree is read: then the first line says what the switch did."""
     ref: str = ""
+    before: ui.Element = ui.Element("", "switch")  # the switch as it was tapped
+    want: bool | None = None  # the `value` asked for
+    flipped: bool | None = None  # where a tap should have taken it
+
+    def verdict(self, now: ui.Element, alert: bool) -> str:
+        """The first line from the switch as it reads after the tap. Raises when a wanted value wasn't reached
+        (unless an alert is up: it may be asking to confirm)."""
+        line = now.line(actions=False)
+        if now.checked == self.flipped:
+            return f"Toggled {line}."
+        if self.want is not None and not alert:
+            raise Refused("not_actionable", f"no_action: {line} didn't change")
+        return f"Tapped {line}, but it is still checked={'true' if now.checked else 'false'}."
+
+
+# What `open_app "Settings"` means: the built-in apps aren't in the installed list.
+SYSTEM_APPS = {"Settings": "com.apple.Preferences", "Safari": "com.apple.mobilesafari",
+               "Calculator": "com.apple.calculator", "Camera": "com.apple.camera",
+               "Photos": "com.apple.mobileslideshow", "Messages": "com.apple.MobileSMS",
+               "Mail": "com.apple.mobilemail", "Maps": "com.apple.Maps", "App Store": "com.apple.AppStore",
+               "Clock": "com.apple.mobiletimer", "Notes": "com.apple.mobilenotes"}
 
 
 def app_line(a: dict) -> str:
@@ -465,17 +489,23 @@ class Daemon:
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:
-            raise Refused("not_actionable", "no_action: Nothing to go back to.")
-        if not done.changed and not (full[0] or view.moved) and mark[1] == view.read_mark[1]:
+            raise Refused("not_actionable", "no_action: nothing changed after back.")
+        # a toggle that changed nothing on the stream is not trusted: the tree says whether the switch flipped
+        if (not done.changed and name != "toggle" and not (full[0] or view.moved)
+                and mark[1] == view.read_mark[1]):
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
-        if isinstance(result, Toggled) and (now := next((e for e in view.items if e.ref == result.ref), None)):
-            # the first line shows the state the switch has now, as the new list reads it
-            answer["text"] = answer["text"].replace(str(result), f"Toggled {now.line(actions=False)}.", 1)
+        if isinstance(result, Toggled):
+            # say only what the new list shows; if the switch can't be found again, claim nothing
+            old = result.before
+            now = next((e for e in view.items if e.ref == result.ref and (e.role, e.label, e.identifier)
+                        == (old.role, old.label, old.identifier)), None)
+            if now is not None:
+                answer["text"] = answer["text"].replace(str(result), result.verdict(now, bool(view.alert)), 1)
         return await self._add_shot(answer, view, shot)
 
     async def _apps(self, notes: list) -> dict:
@@ -491,20 +521,27 @@ class Daemon:
         lines = [app_line(a) + (" *" if a["bundle_id"] == front else "") for a in apps]
         return _answer([*lines, "* = in front."], notes)
 
-    async def _app(self, query: str) -> tuple[str, str]:
-        """(bundle id, how to show it) for what the agent named. An exact bundle id wins as given (system
-        apps such as Settings aren't in `apps`); otherwise a name, ignoring case, against the installed
-        apps: an exact name first, then part of one."""
+    async def _app(self, query: str, partial: bool = True) -> tuple[str, str]:
+        """(bundle id, how to show it) for what the agent named, in this order: an installed bundle id; a
+        name, ignoring case, among the installed apps (exact, then, if `partial`, the start of a name); a
+        built-in app's name; a bundle-id-looking string as given (built-in apps aren't in `apps`). Parts
+        of bundle ids and of later words never match, so "Notes" doesn't hit "Sticky Notes"."""
         q = query.strip()
-        names = self.session.app_names
-        if BUNDLE_ID.match(q):
-            return q, f"{names[q]} ({q})" if q in names else q
         apps = await self.session.apps()
         low = q.lower()
-        hits = ([a for a in apps if a["name"].lower() == low]
-                or [a for a in apps if low in a["name"].lower() or low in a["bundle_id"].lower()])
+        for a in apps:
+            if a["bundle_id"] == q:
+                return q, f"{a['name']} ({q})"
+        hits = [a for a in apps if a["name"].lower() == low]
+        builtin = next((n for n in SYSTEM_APPS if n.lower() == low), None)
+        if not hits and builtin:
+            return SYSTEM_APPS[builtin], f"{builtin} ({SYSTEM_APPS[builtin]})"
+        if not hits and partial:
+            hits = [a for a in apps if a["name"].lower().startswith(low)]
         if not hits:
-            raise Refused("not_found", f'no installed app matches "{q}"; call apps to see them')
+            if BUNDLE_ID.match(q):
+                return q, q  # launching it says whether it exists
+            raise Refused("not_found", f'no installed app is named "{q}"; call apps to see them')
         if len(hits) > 1:
             raise Refused("ambiguous", f'{len(hits)} installed apps match "{q}". Pick one by its bundle id:\n'
                                        + "\n".join(app_line(a) for a in hits[:10]))
@@ -521,7 +558,7 @@ class Daemon:
         return f"Opened {shown}."
 
     async def _close_app(self, view, a: dict) -> str:
-        bundle_id, shown = await self._app(a["app"])
+        bundle_id, shown = await self._app(a["app"], partial=False)
         await self.session.terminate(bundle_id)
         return f"Closed {shown}."
 
@@ -544,7 +581,7 @@ class Daemon:
             if found is None:
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes a toggle.")
         else:
-            found = ui.resolve(view.items, target)
+            found = self._switch_first(view.items, target)
         line = found.line(actions=False)
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
@@ -552,19 +589,35 @@ class Daemon:
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
         await self.session.tap(ui.Target(ref=found.ref))
-        done = Toggled(f"Toggled {dataclasses.replace(found, checked=not found.checked).line(actions=False)}.")
-        done.ref = found.ref
+        # Until the tree is read, claim no new state: the first line is the verdict's to write
+        done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}.")
+        done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
         return done
 
+    @staticmethod
+    def _switch_first(items: list[ui.Element], target: ui.Target) -> ui.Element:
+        """The element a target names, preferring a switch: a row and its switch often share a label."""
+        if target.ref is None:
+            try:
+                return ui.resolve([e for e in items if e.role == "switch"], target)
+            except Refused as e:
+                if e.code != "not_found":
+                    raise  # several switches match: the agent picks one
+        return ui.resolve(items, target)
+
     async def _back(self, view, a: dict) -> str:
+        """Tap the navigation bar's back button. A bar without one is a root screen (or has only Cancel,
+        Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
-        point = await s.back_point()
-        if point is not None:
-            await s.tap(ui.Target(x=point[0], y=point[1]))
-            return "Went back by tapping the back button."
+        back = await s.back_point()
+        if back.point is not None:
+            await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
+            return "Tapped the back button."
+        if back.bar:
+            raise Refused("not_actionable", "no_action: the navigation bar has no back button")
         width, height = s.screen
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
-        return "Went back by swiping from the left edge."
+        return "Swiped from the left edge."
 
     async def settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                      since: bytes | None = None) -> tuple[float, bool]:

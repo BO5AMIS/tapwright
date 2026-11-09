@@ -10,6 +10,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
 from .control import Refused
@@ -412,10 +413,20 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
     return hits[0]
 
 
-def back_button(source: str, screen: tuple[float, float]) -> tuple[float, float] | None:
-    """The centre of the back button of the top NavigationBar in WebDriverAgent's XML: its first Button
-    left of the bar's centre. NavigationBar is a container, so it isn't in the element list. None when
-    no bar is on screen, or it has no such button."""
+class Back(NamedTuple):
+    bar: bool  # a NavigationBar is on screen
+    point: tuple[float, float] | None  # the centre of its back button, if it has one
+
+
+# Buttons that sit at a bar's left edge but do something other than go back.
+NOT_BACK = {"cancel", "close", "done", "save", "edit", "delete", "clear", "discard", "menu", "sign out"}
+
+
+def back_button(source: str, screen: tuple[float, float]) -> Back:
+    """Where to tap to go back, from WebDriverAgent's XML. NavigationBar is a container, so it isn't in
+    the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
+    leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
+    does something else; else no point (a bar without a back button is usually a root screen)."""
     try:
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
@@ -427,14 +438,24 @@ def back_button(source: str, screen: tuple[float, float]) -> tuple[float, float]
 
     bars = [n for n in root.iter() if _kind(n) == "NavigationBar" and on_screen(_rect(n))]
     if not bars:
-        return None
+        return Back(False, None)
     bar = min(bars, key=lambda n: _rect(n)[1])
     bar_x, _, bar_w, _ = _rect(bar)
-    for node in bar.iter():  # document order: the first one is the leftmost in a left-to-right bar
-        x, y, w, h = _rect(node)
-        if _kind(node) == "Button" and on_screen((x, y, w, h)) and x + w / 2 < bar_x + bar_w / 2:
-            return x + w / 2, y + h / 2
-    return None
+    buttons = [n for n in bar.iter() if _kind(n) == "Button" and on_screen(_rect(n))]
+
+    def centre(n: ET.Element) -> tuple[float, float]:
+        x, y, w, h = _rect(n)
+        return x + w / 2, y + h / 2
+
+    for n in buttons:
+        if _text(n.get("name")) == "BackButton" or _text(n.get("label")).lower() == "back":
+            return Back(True, centre(n))
+    left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
+    left.sort(key=lambda n: centre(n)[0])
+    for n in left[:1]:
+        if (_text(n.get("label")) or _text(n.get("name"))).lower() not in NOT_BACK:
+            return Back(True, centre(n))
+    return Back(True, None)
 
 
 def at_point(items: list[Element], point: tuple[float, float], role: str) -> Element | None:

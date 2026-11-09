@@ -176,8 +176,8 @@ class Session:
             image = buf.getvalue()
         return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more), image
 
-    async def back_point(self) -> tuple[float, float] | None:
-        """Where the top navigation bar's back button is, in points; None when there isn't one."""
+    async def back_point(self) -> ui.Back:
+        """The top navigation bar: whether there is one, and where its back button is, in points."""
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
         return ui.back_button(source, self.screen)
 

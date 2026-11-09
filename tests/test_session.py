@@ -328,7 +328,7 @@ def test_back_point_and_foreground_come_from_the_phones_tree(phone):
     with_answers(phone, {ui_module.SOURCE_PATH: {"value": NAV_TREE},
                          "/wda/activeAppInfo": {"value": {"bundleId": "com.apple.Preferences", "name": "Settings"}}})
     s = Session(phone)
-    assert asyncio.run(s.back_point()) == (48.0, 81.0)
+    assert asyncio.run(s.back_point()) == ui_module.Back(True, (48.0, 81.0))
     assert asyncio.run(s.foreground_bundle_id()) == "com.apple.Preferences"
 
 

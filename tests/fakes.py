@@ -96,6 +96,7 @@ class FakeSession:
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
+        self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.launched: list = []
         self.closed: list = []
 
@@ -166,7 +167,7 @@ class FakeSession:
         return self.foreground
 
     async def back_point(self):
-        return self.back_at
+        return ui.Back(self.has_nav_bar or self.back_at is not None, self.back_at)
 
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone

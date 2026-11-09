@@ -1844,23 +1844,37 @@ def test_back_taps_the_navigation_bars_back_button():
         stop, task = await started(d)
         d.session.back_at = (48.0, 81.0)
         r = await d.run_tool("a", "back", {})
-        assert d.session.last_point == (48.0, 81.0) and r["text"].startswith("Went back by tapping the back button.")
+        assert d.session.last_point == (48.0, 81.0) and r["text"].startswith("Tapped the back button.")
         await finish(stop, task)
     run(go)
 
 
-def test_back_swipes_from_the_left_edge_when_there_is_no_button():
+def test_back_swipes_from_the_left_edge_only_when_there_is_no_navigation_bar():
     async def go():
         d = make()
         stop, task = await started(d)
         r = await d.run_tool("a", "back", {})
         assert "swipe" in d.session.calls and d.session.last_point == (2, 400.0)
-        assert r["text"].startswith("Went back by swiping from the left edge.")
+        assert r["text"].startswith("Swiped from the left edge.") and "went back" not in r["text"].lower()
+        assert "Same screen. Changes:" in r["text"] or "Screen" in r["text"]
         await finish(stop, task)
     run(go)
 
 
-def test_back_with_nothing_to_go_back_to_is_no_action():
+def test_back_does_nothing_when_the_bar_has_no_back_button():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.has_nav_bar = True  # a root screen, or a Cancel on the left
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("no_action:")
+        assert "swipe" not in d.session.calls and "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_no_visible_change_says_a_gesture_was_sent():
     async def go():
         d = make()
         stop, task = await started(d)
@@ -1868,7 +1882,152 @@ def test_back_with_nothing_to_go_back_to_is_no_action():
         feeder = FrameFeeder(d.hub).start(then=b"A")  # the swipe changes nothing on the screen
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "back", {})
-        assert e.value.code == "not_actionable" and str(e.value) == "no_action: Nothing to go back to."
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: nothing changed after back."
         await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_that_did_not_flip_says_so_and_a_wanted_value_not_reached_is_refused():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        off = ui.Element("e1", "switch", "Wi-Fi", value="0", rect=(300, 100, 60, 30), enabled=False, checked=False,
+                         actions=("toggle",), type="Switch")
+        await looked(d, [off])  # a disabled switch: the tap changes nothing
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "force": True})
+        assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" disabled checked=false @300,100 60x30, but it is still checked=false.'
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == 'no_action: e1 switch "Wi-Fi" disabled checked=false @300,100 60x30 didn\'t change'
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_with_no_frame_change_still_reads_the_tree():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await looked(d, [switch(False)])
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert d.session.calls.count("snapshot") == reads + 1  # the tree was read, not skipped
+        assert "but it is still checked=false." in r["text"].splitlines()[0]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_followed_by_a_confirm_alert_is_not_refused():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [switch(True)])
+        d.session.last_alert = ui.Alert("Turn off Wi-Fi?", ("Cancel", "Turn Off"), (50, 300, 300, 150))
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": False})
+        lines = r["text"].splitlines()
+        assert lines[0].endswith("but it is still checked=true.") and any(line.startswith("Alert:") for line in lines)
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_without_a_look_claims_no_new_state():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [switch(False)])
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
+        assert r["text"] == 'Tapped e1 switch "Wi-Fi" @300,100 60x30.'
+        await finish(stop, task)
+    run(go)
+
+
+def test_toggle_prefers_the_switch_when_a_row_shares_its_label():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        row = ui.Element("e1", "cell", "Wi-Fi", rect=(0, 90, 400, 50), actions=("tap",), type="Cell")
+        await looked(d, [row, switch(False, "e2")])
+        d.session.tree = [row, switch(True, "e2")]
+        r = await d.run_tool("a", "toggle", {"target": {"label": "Wi-Fi"}})
+        assert d.session.last_point == (330.0, 115.0) and r["text"].startswith("Toggled e2 switch")
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_falls_back_from_an_uninstalled_bundle_id_to_a_name():
+    async def go():
+        d = make()
+        d.session.installed.append({"bundle_id": "com.example.notes", "name": "com.example.old", "version": "1", "build": "1"})
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.old"})  # looks like an id, is a name
+        assert d.session.launched == ["com.example.notes"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_partial_names_are_prefixes_of_names_only():
+    async def go():
+        d = make()
+        d.session.installed += [{"bundle_id": "com.example.sticky", "name": "Sticky Notes", "version": "1", "build": "1"},
+                                {"bundle_id": "com.example.nb", "name": "Notebook", "version": "1", "build": "1"}]
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "note"})  # a prefix of Notebook, not of Sticky Notes
+        assert d.session.launched == ["com.example.nb"]
+        d.session.installed[0]["bundle_id"] = "com.example.zzz-demo"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_app", {"app": "zzz"})
+        assert e.value.code == "not_found"
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_needs_an_exact_name_or_bundle_id():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "close_app", {"app": "Exam"})
+        assert e.value.code == "not_found" and not d.session.closed
+        await d.run_tool("a", "close_app", {"app": "example"})
+        assert d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_system_apps_open_by_name():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        table = {"Settings": "com.apple.Preferences", "Safari": "com.apple.mobilesafari",
+                 "Calculator": "com.apple.calculator", "Camera": "com.apple.camera",
+                 "Photos": "com.apple.mobileslideshow", "Messages": "com.apple.MobileSMS",
+                 "Mail": "com.apple.mobilemail", "Maps": "com.apple.Maps", "App Store": "com.apple.AppStore",
+                 "Clock": "com.apple.mobiletimer", "Notes": "com.apple.mobilenotes"}
+        for name, bundle in table.items():
+            r = await d.run_tool("a", "open_app", {"app": name.lower()})
+            assert d.session.launched[-1] == bundle and r["text"].startswith(f"Opened {name} ({bundle}).")
+        await d.run_tool("a", "close_app", {"app": "Settings"})
+        assert d.session.closed == ["com.apple.Preferences"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_wait_wants_a_number_and_flags_must_be_booleans():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait", {"seconds": "5"})
+        assert e.value.code == "bad_params" and "a number" in str(e.value)
+        for tool, args in (("wait", {"seconds": 1, "look": "no"}), ("wait", {"seconds": 1, "screenshot": 1}),
+                           ("tap", {"target": {"x": 1, "y": 1}, "look": "yes"}),
+                           ("look", {"screenshot": "false"}), ("look", {"labels": "yes"})):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, args)
+            assert e.value.code == "bad_params" and "true or false" in str(e.value), (tool, args)
         await finish(stop, task)
     run(go)
