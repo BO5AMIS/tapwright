@@ -13,6 +13,9 @@ dependencies = [
     "pymobiledevice3>=11.50,<12",  # Apple's device protocols; device.py relies on its user-space tunnel
     "mcp>=2.3",
     "anyio>=4.5",  # runs everything on the event loop pymobiledevice3 needs (device.run)
+    "starlette>=1.0",  # the daemon's HTTP and WebSocket app
+    "uvicorn>=0.30",
+    "wsproto>=1.2",  # uvicorn's WebSocket implementation (server.py uses ws="wsproto")
     "pillow",
 ]
 

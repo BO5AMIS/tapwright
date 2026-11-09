@@ -249,15 +249,25 @@ def stop_daemon() -> int:
         print("tapwright serve isn't running")
         return 0
     client.shutdown(info)
-    print("stopped")
-    return 0
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if client.healthy(store.read_serve_info()) is None:
+            print("stopped")
+            return 0
+        time.sleep(0.3)
+    print("asked it to stop; it's still running, see ~/.tapwright/serve.log")
+    return 1
 
 
 def view() -> int:
     import webbrowser
 
     from . import client
-    url = client.viewer_url(client.find_or_start())
+    try:
+        url = client.viewer_url(client.find_or_start())
+    except client.DaemonError as e:
+        print(f"couldn't start the live view: {e}")
+        return 1
     print(f"Tapwright live view: {url}")
     webbrowser.open(url)
     return 0

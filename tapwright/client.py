@@ -84,6 +84,9 @@ def find_or_start(wait: float = 60.0) -> dict:
         if healthy(info):
             return info
         if proc is not None and proc.poll() is not None:
+            info = store.read_serve_info()  # exit code 0 means "already running"
+            if healthy(info):
+                return info
             raise DaemonError("reconnecting", "tapwright serve exited at start; see ~/.tapwright/serve.log")
     raise DaemonError("reconnecting", "tapwright serve didn't start; see ~/.tapwright/serve.log")
 

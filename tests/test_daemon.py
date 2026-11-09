@@ -3,7 +3,7 @@ import asyncio
 import base64
 
 import pytest
-from fakes import Clock, FakeSession
+from fakes import Clock, FakeDevice, FakeSession
 
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
@@ -314,6 +314,50 @@ def test_a_missing_argument_is_refused_up_front():
         assert e.value.code == "unsupported" and "bundle_id" in str(e.value)
         assert d.control.generation == generation and "launch" not in d.session.calls
         await finish(stop, task)
+    run(go)
+
+
+class OneFrameConnection:
+    FRAME = b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 4\r\n\r\nJPEG\r\n"
+
+    def __init__(self) -> None:
+        self.sent = False
+
+    async def recv_any(self, n):
+        if not self.sent:
+            self.sent = True
+            return self.FRAME
+        await asyncio.sleep(30)
+
+    async def close(self):
+        pass
+
+
+class StreamingDevice(FakeDevice):
+    async def open_stream(self):
+        return OneFrameConnection()
+
+
+def test_a_viewer_who_starts_during_the_connect_gets_a_frame_soon_after_live():
+    async def go():
+        s = FakeSession()
+        s.device = StreamingDevice()
+        s.ensure_delay = 0.3
+        d = make(s, stream_retry=5.0)  # a pump that gave up and backed off would miss the bound
+        stop = asyncio.Event()
+        task = asyncio.create_task(d.supervise(stop))
+        try:
+            async with d.pump.watching() as hub:
+                assert d.state != "live"
+                while d.state != "live":
+                    await asyncio.sleep(0.01)
+                t_live = asyncio.get_running_loop().time()
+                frame = await hub.next_after(0, timeout=5)
+                assert frame is not None and frame.jpeg == b"JPEG"
+                assert asyncio.get_running_loop().time() - t_live < 1.0
+        finally:
+            await d.pump.stop()
+            await finish(stop, task)
     run(go)
 
 

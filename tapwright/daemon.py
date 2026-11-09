@@ -60,7 +60,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
 
 class Daemon:
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
-                 backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 30.0,
+                 backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0) -> None:
         self.session = session
         self.control = control or Controller()
@@ -395,8 +395,10 @@ class Daemon:
 
     # ---- the stream and shutting down ----
     async def _open_stream(self):
-        if self.state not in ("live", "locked"):
-            raise ConnectionLost("not connected to the phone yet")
+        try:
+            await asyncio.wait_for(self._connected.wait(), 30)
+        except asyncio.TimeoutError:
+            raise ConnectionLost("not connected to the phone yet") from None
         return await self.session.device.open_stream()
 
     async def close(self) -> None:

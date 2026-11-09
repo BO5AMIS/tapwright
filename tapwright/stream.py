@@ -96,9 +96,10 @@ class StreamPump:
     `linger` seconds after the last viewer leaves (streaming costs the phone battery)."""
 
     def __init__(self, open_stream, hub: FrameHub, linger: float = 30.0, retry: float = 1.0,
-                 stall: float = 5.0, log=print) -> None:
+                 stall: float = 5.0, log=print, open_timeout: float = 35.0) -> None:
         self.open_stream = open_stream  # async () -> a connection with recv_any(n) and close()
         self.hub, self.linger, self.retry, self.stall, self.log = hub, linger, retry, stall, log
+        self.open_timeout = open_timeout  # opening may wait for a cold connect
         self.viewers = 0
         self._left_at = time.monotonic()
         self._task: asyncio.Task | None = None
@@ -122,7 +123,7 @@ class StreamPump:
         delay = self.retry
         while not self._unwatched():
             try:
-                conn = await asyncio.wait_for(self.open_stream(), self.stall)
+                conn = await asyncio.wait_for(self.open_stream(), self.open_timeout)
             except Exception as e:
                 self.log(f"stream: can't open it yet ({e})")
                 await asyncio.sleep(delay)
@@ -143,7 +144,7 @@ class StreamPump:
                 self.log(f"stream: dropped ({e}); opening it again")
             finally:
                 try:
-                    await conn.close()
+                    await asyncio.wait_for(conn.close(), 2)
                 except Exception:
                     pass
             if self._unwatched():

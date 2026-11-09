@@ -293,13 +293,18 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
     lock = _lock_instance()
     if lock is None:  # another daemon is starting, or stuck
         deadline = time.monotonic() + wait_for_other
-        while time.monotonic() < deadline:
+        while lock is None and time.monotonic() < deadline:
             await asyncio.sleep(0.5)
+            lock = _lock_instance()  # a stopping daemon frees it last; take over as soon as it does
+            if lock is not None:
+                info = store.read_serve_info()
+                break
             info = store.read_serve_info()
             if await asyncio.to_thread(healthy, info):
                 return running(info)
-        print("another tapwright serve is starting or stuck; see ~/.tapwright/serve.log", flush=True)
-        return 1
+        if lock is None:
+            print("another tapwright serve is starting or stuck; see ~/.tapwright/serve.log", flush=True)
+            return 1
     log = logging.getLogger("tapwright")
     daemon = server = sock = serving = stopping = None
     helpers: list[asyncio.Task] = []

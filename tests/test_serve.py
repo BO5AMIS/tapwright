@@ -125,6 +125,44 @@ def test_the_lock_keeps_a_second_daemon_out(home):
     again.close()
 
 
+def test_a_restart_right_after_a_stop_takes_over(home):
+    made, first, second = [], {}, {}
+    thread, info = start_serve(make_factory(made), first)
+    assert client.healthy(info)
+    thread2 = None
+    try:
+        client.shutdown(info)
+        for _ in range(100):  # gone from the network, but maybe still holding the lock
+            if client.healthy(store.read_serve_info()) is None:
+                break
+            time.sleep(0.05)
+
+        def again():
+            try:
+                second.update(code=run(lambda: server.serve(port=0, make_daemon=make_factory(made),
+                                                            wait_for_other=15)))
+            except BaseException as e:
+                second.update(error=e)
+        thread2 = threading.Thread(target=again, daemon=True)
+        thread2.start()
+        info2 = {}
+        for _ in range(150):
+            info2 = store.read_serve_info()
+            if client.healthy(info2):
+                break
+            time.sleep(0.1)
+        assert client.healthy(info2)
+        assert len(made) == 2
+    finally:
+        current = store.read_serve_info()
+        if client.healthy(current):
+            client.shutdown(current)
+        thread.join(10)
+        if thread2 is not None:
+            thread2.join(10)
+    assert "error" not in first and "error" not in second and second["code"] == 0
+
+
 class Slow(http.server.BaseHTTPRequestHandler):
     seen = 0
 
