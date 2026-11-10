@@ -10,6 +10,7 @@ over:
 """
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -18,6 +19,7 @@ from . import store
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
 MIN_TIMEOUT = 0.5  # seconds: the least any one request to WebDriverAgent is given
+KEEP_IDLE = 2.0  # seconds a kept connection may sit idle and still carry an action (see Device._on_kept)
 STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
@@ -114,6 +116,11 @@ class Device:
         self.tunnel = None
         self.rsd = None
         self.via = None
+        # One connection kept open to WebDriverAgent (see _on_kept). Off unless TAPWRIGHT_KEEP=1: built with a
+        # simulated phone, timed on the real one, not yet run through the suites.
+        self.keep = os.environ.get("TAPWRIGHT_KEEP", "0") == "1"
+        self._kept: tuple | None = None
+        self._kept_lock = asyncio.Lock()
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
         self.awaiting_passcode = False  # the last start stopped at iOS's passcode screen (see PasscodeNeeded)
         self._launched_at = 0.0  # when the test runner was last started (monotonic clock)
@@ -334,20 +341,27 @@ class Device:
 
     async def _http(self, method: str, path: str, payload: dict | None) -> dict:
         body = json.dumps(payload).encode() if payload is not None else b""
-        head = [f"{method} {path} HTTP/1.1", "Host: localhost", "Connection: close",
-                f"Content-Length: {len(body)}"] + (["Content-Type: application/json"] if payload is not None else [])
-        try:
-            conn = await self.rsd.create_service_connection(WDA_PORT)
-        except Exception as e:
-            raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
-        try:
-            status, rest = await self._exchange(conn, ("\r\n".join(head) + "\r\n\r\n").encode() + body)
-        except DeviceError:
-            raise
-        except Exception as e:  # reset, closed, or cut off mid-answer
-            raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
-        finally:
-            await self._close(conn)
+
+        def request(keep: bool) -> bytes:
+            head = [f"{method} {path} HTTP/1.1", "Host: localhost", f"Connection: {'keep-alive' if keep else 'close'}",
+                    f"Content-Length: {len(body)}"] + (["Content-Type: application/json"] if payload is not None else [])
+            return ("\r\n".join(head) + "\r\n\r\n").encode() + body
+        kept = await self._on_kept(request(True), again=method == "GET") if self.keep else None
+        if kept is not None:
+            status, rest = kept
+        else:
+            try:
+                conn = await self.rsd.create_service_connection(WDA_PORT)
+            except Exception as e:
+                raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
+            try:
+                status, rest = await self._exchange(conn, request(False))
+            except DeviceError:
+                raise
+            except Exception as e:  # reset, closed, or cut off mid-answer
+                raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
+            finally:
+                await self._close(conn)
         try:
             data = json.loads(rest or b"{}")
         except ValueError:
@@ -359,9 +373,49 @@ class Device:
             raise DeviceError(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
         return data
 
+    async def _on_kept(self, request: bytes, again: bool) -> tuple[int, bytes] | None:
+        """One request on the connection kept open to WebDriverAgent (it keeps one open, measured 2026-11-10: a
+        small request takes 6 ms over USB against 17 ms with a new connection each time, and over Wi-Fi the phone's
+        dozing radio is paid once, not once more for the handshake). None when this request should go the old way,
+        on a connection of its own: another request is using the kept one, or the kept one has been idle for
+        KEEP_IDLE seconds and this is an action (a connection the phone has dropped meanwhile would lose it, and an
+        action can't be sent twice; a question (`again`) simply is asked on a new connection).
+        Whatever goes wrong, the kept connection is closed: its state isn't known any more."""
+        if self._kept_lock.locked():
+            return None
+        async with self._kept_lock:
+            held = self._kept  # (the tunnel it belongs to, the connection, when it last answered)
+            if held is not None and held[0] is not self.rsd:
+                await self._close(held[1])
+                held = self._kept = None
+            if held is not None and not again and time.monotonic() - held[2] > KEEP_IDLE:
+                return None
+            reused = held is not None
+            try:
+                if held is None:
+                    try:
+                        held = (self.rsd, await self.rsd.create_service_connection(WDA_PORT), time.monotonic())
+                    except Exception as e:
+                        raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
+                self._kept = None  # in use: nothing else finds it half-read
+                status, rest = await self._exchange(held[1], request, keep=True)
+            except BaseException as e:  # also a timeout's cancellation: the answer may be half-read
+                if held is not None:
+                    await asyncio.shield(self._close(held[1]))
+                if isinstance(e, DeviceError) and not isinstance(e, ConnectionLost):
+                    raise
+                if reused and again and isinstance(e, Exception):
+                    return None  # the phone had dropped it: ask on a connection of its own
+                if isinstance(e, (ConnectionLost, asyncio.CancelledError)) or not isinstance(e, Exception):
+                    raise
+                raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
+            self._kept = (held[0], held[1], time.monotonic())
+            return status, rest
+
     @staticmethod
-    async def _exchange(conn, request: bytes) -> tuple[int, bytes]:
-        """Send one HTTP request; the status code and the body."""
+    async def _exchange(conn, request: bytes, keep: bool = False) -> tuple[int, bytes]:
+        """Send one HTTP request; the status code and the body. With `keep` the answer must say how long it is
+        (one read to the end of the connection would never return)."""
         await conn.sendall(request)
         raw = b""
         while b"\r\n\r\n" not in raw:
@@ -380,6 +434,8 @@ class Device:
                 rest += await conn.recvall(length - len(rest))
                 if len(rest) < length:
                     raise ConnectionLost("WebDriverAgent cut the answer short")
+        elif keep:
+            raise ConnectionLost("WebDriverAgent sent an answer without its length on a kept connection")
         else:
             while chunk := await conn.recv_any(65536):
                 rest += chunk

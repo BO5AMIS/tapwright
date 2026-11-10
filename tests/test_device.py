@@ -59,6 +59,104 @@ def test_no_answer_is_a_dead_line():
     assert conn.closed
 
 
+def answer(value) -> bytes:
+    body = json.dumps({"value": value}).encode()
+    return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+
+
+class Line(Conn):
+    """A connection that answers one request after another, as WebDriverAgent's does when it is kept open."""
+
+    def __init__(self, answers: list, hang: bool = False):
+        super().__init__(b"", hang=hang)
+        self.answers = list(answers)
+
+    async def sendall(self, data):
+        self.sent += data
+        self.response = self.answers.pop(0) if self.answers else b""  # nothing left: the phone has dropped it
+
+
+class Lines:
+    """An rsd that opens the next scripted connection each time one is asked for."""
+
+    def __init__(self, *lines):
+        self.lines, self.opened = list(lines), []
+
+    async def create_service_connection(self, port):
+        self.opened.append(self.lines.pop(0))
+        return self.opened[-1]
+
+
+def keeping(*lines) -> Device:
+    d = Device(log=lambda *a: None)
+    d.keep, d.rsd = True, Lines(*lines)
+    return d
+
+
+def test_a_kept_connection_carries_one_request_after_another():
+    """Measured on the phone 2026-11-10: 6 ms a small request over USB on a kept connection, 17 ms with a new one
+    each time; over Wi-Fi the phone's dozing radio is paid for once."""
+    d = keeping(Line([answer(1), answer(2), answer(3)]))
+
+    async def go():
+        return [(await d.http("GET", "/status"))["value"], (await d.http("POST", "/tap", {}))["value"],
+                (await d.http("GET", "/status"))["value"]]
+    assert asyncio.run(go()) == [1, 2, 3]
+    assert len(d.rsd.opened) == 1 and d.rsd.opened[0].sent.count(b"Connection: keep-alive") == 3
+    assert not d.rsd.opened[0].closed
+
+
+def test_a_question_on_a_kept_connection_the_phone_dropped_is_asked_on_a_new_one():
+    d = keeping(Line([answer(1)]), Conn(answer(2)))
+
+    async def go():
+        return [(await d.http("GET", "/status"))["value"], (await d.http("GET", "/status"))["value"]]
+    assert asyncio.run(go()) == [1, 2]
+    first, second = d.rsd.opened
+    assert first.closed and b"Connection: close" in second.sent  # the second went the old way, on its own connection
+
+
+def test_an_action_never_rides_a_kept_connection_that_sat_idle(monkeypatch):
+    """A connection the phone dropped while it sat idle would lose the action, and an action can't be sent twice."""
+    d = keeping(Line([answer(1)]), Conn(answer(2)))
+    monkeypatch.setattr(device_module, "KEEP_IDLE", 0.0)
+
+    async def go():
+        await d.http("GET", "/status")
+        await asyncio.sleep(0.01)
+        return (await d.http("POST", "/tap", {}))["value"]
+    assert asyncio.run(go()) == 2
+    kept, own = d.rsd.opened
+    assert b"POST /tap" not in kept.sent and b"POST /tap" in own.sent and not kept.closed
+
+
+def test_a_kept_connection_that_got_no_answer_in_time_is_closed():
+    d = keeping(Line([answer(1)], hang=True), Line([answer(2)]))
+
+    async def go():
+        with pytest.raises(ConnectionLost, match="didn't answer"):
+            await d.http("POST", "/tap", {}, timeout=0.5)
+        return (await d.http("GET", "/status"))["value"]
+    assert asyncio.run(go()) == 2
+    assert d.rsd.opened[0].closed and len(d.rsd.opened) == 2
+
+
+def test_two_requests_at_once_don_t_share_the_kept_connection():
+    slow, own = Line([answer(1)]), Conn(answer(2))
+    d = keeping(slow, own)
+    real = slow.recv_any
+
+    async def recv_any(n=65536):
+        await asyncio.sleep(0.05)
+        return await real(n)
+    slow.recv_any = recv_any
+
+    async def go():
+        return await asyncio.gather(d.http("GET", "/a"), d.http("GET", "/b"))
+    assert sorted(r["value"] for r in asyncio.run(go())) == [1, 2]
+    assert b"GET /a" in slow.sent and b"GET /b" in own.sent
+
+
 def test_a_reset_is_a_dead_line():
     conn = Conn(fail=ConnectionResetError("reset by peer"))
     with pytest.raises(ConnectionLost):
