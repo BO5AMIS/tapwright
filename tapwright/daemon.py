@@ -1015,8 +1015,18 @@ class Daemon:
         else:
             self._guard(view, field)
             at = self._touch_point(field)
-        await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
-                                     target=ui.Target(ref=field.ref), at=at)
+        async def typed() -> None:
+            await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
+                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
+        try:
+            await typed()
+        except Refused as e:
+            # The keyboard was left up for the tap on another input, and this app gave that tap to the keyboard
+            # (it closed it, or nothing happened): close it the old way and tap again. Nothing was typed.
+            if not (view.read_keyboard and "didn't take focus" in str(e)):
+                raise
+            await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
+            await typed()
         done = Typed(f"Typed into {field.line(actions=False)}.")
         done.field, done.note = field, forced
         return done
@@ -1143,10 +1153,14 @@ class Daemon:
         done.note = note
         return done
 
-    async def _outside_focus(self, view, name: str, target: ui.Target, keyboard_top: float) -> bool:
+    async def _outside_focus(self, view, name: str, target: ui.Target, keyboard_top: float,
+                             shown_inputs: bool = False) -> bool:
         """Is the touch's target something other than the focused input, so the keyboard is in the way of it
         (AGENT-TOOLS v1.4)? False for the focused input itself, an element in an OS alert, a point on the
-        keyboard (a key), and whatever the tool is about to refuse (nothing is touched then)."""
+        keyboard (a key), and whatever the tool is about to refuse (nothing is touched then). False too for
+        `type_text` into another input that shows above the keyboard: a tap there moves the focus, as a person's
+        does when filling a form, and closing the keyboard between two fields cost two seconds a field (measured
+        on the phone 2026-11-10: 3.4 s against 1.7 s). `shown_inputs` asks about those as well."""
         items = view.items
         if target.point is not None:
             x, y = target.point
@@ -1164,9 +1178,11 @@ class Daemon:
                 return False
         if name == "type_text" and (field is None or field.role != "input"):
             return False  # it refuses typing into this itself
+        if name == "type_text" and not shown_inputs and field.y + field.height <= keyboard_top:
+            return False
         return field is None or not await self.session.is_focused(field)  # a non-input is outside by definition
 
-    async def _close_keyboard(self, view, name: str, target: ui.Target | None) -> str:
+    async def _close_keyboard(self, view, name: str, target: ui.Target | None, shown_inputs: bool = False) -> str:
         """Before a touch (or a focusing tap) on something other than the focused input while the keyboard is up:
         close it the way a person does, since the first tap outside the field only closes it and the keyboard
         covers what is near the bottom. One touch where nothing responds, then WebDriverAgent's own dismissal
@@ -1178,7 +1194,7 @@ class Daemon:
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
-        if not await self._outside_focus(view, name, target, bottom):
+        if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
         if (blank := ui.blank_point(view.items, s.screen, top, bottom)) is not None:
             await s.tap(ui.Target(x=blank[0], y=blank[1]))

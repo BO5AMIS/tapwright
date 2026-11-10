@@ -393,7 +393,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             worth = True
         else:
             worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
-        worth = worth and node not in keyboard_holders
+        # ...nor is a view of that window that reaches down into the keys (`inputView` on the phone, around the
+        # keys but not above them in the tree); a bar that ends where the keys begin is the app's
+        worth = worth and node not in keyboard_holders and not (
+            keys_top is not None and not in_keyboard and y + h > keys_top + 1)
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits

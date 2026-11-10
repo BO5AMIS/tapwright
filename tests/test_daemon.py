@@ -3815,17 +3815,29 @@ def test_a_touch_outside_the_focused_input_closes_the_keyboard_first(tool, args,
     run(go)
 
 
-def test_type_text_into_another_input_closes_the_keyboard_but_not_into_the_focused_one():
+def test_type_text_into_another_input_above_the_keyboard_leaves_the_keyboard_up():
+    """Measured on the phone 2026-11-10: closing the keyboard between two fields made the second type_text take
+    3.4 s against 1.7 s. A person filling a form taps the next field; so does the tool."""
     async def go():
         d, stop, task = await keyboard_up()
         r = await d.run_tool("a", "type_text", {"target": {"id": "a"}, "text": "x"})
         assert d.session.tap_points == [] and KEYBOARD_NOTE not in r["text"]  # field A: the fast path, no blank tap
         r = await d.run_tool("a", "type_text", {"target": {"id": "b"}, "text": "y"})
-        assert d.session.tap_points[0] == (60.0, 80.0)  # closed first, as before any touch outside the field
-        # ...but with no note: typing focuses field B, so the keyboard is up again as the call answers, and
-        # "closed the keyboard" beside `Keyboard: shown` read as a contradiction to a first-time agent
+        assert d.session.tap_points == [] and "dismiss_keyboard" not in d.session.calls  # nothing closed it
         assert KEYBOARD_NOTE not in r["text"]
         assert [t[0] for t in d.session.typed] == ["x", "y"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_closes_the_keyboard_after_all_when_the_other_input_did_not_take_focus():
+    """Some apps give the first tap outside the focused field to the keyboard: then the old way, and a second tap."""
+    async def go():
+        d, stop, task = await keyboard_up()
+        d.session.fail["type_text"] = Refused("not_actionable", "no_action: input \"Field B\" didn't take focus.")
+        r = await d.run_tool("a", "type_text", {"target": {"id": "b"}, "text": "y"})
+        assert d.session.tap_points == [(60.0, 80.0)]  # the touch where nothing responds, which closes it
+        assert [t[0] for t in d.session.typed] == ["y"] and KEYBOARD_NOTE not in r["text"]
         await finish(stop, task)
     run(go)
 
