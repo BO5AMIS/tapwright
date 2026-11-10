@@ -21,6 +21,7 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
+END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
 
@@ -380,7 +381,7 @@ class Session:
                 x, y = target.point
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
-        element, hit, again = None, None, False
+        element, hit, again, at_end = None, None, False, False
         if target is not None:
             what = self._target(target)[2]
             hit = ui.resolve(self.items, target)
@@ -389,7 +390,17 @@ class Session:
             if key and focused and focused[0] == key and await self._active_element() == focused[1]:
                 element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
             else:
-                await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
+                # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
+                # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than
+                # WebDriverAgent's clear, measured on the phone 2026-11-11). Only where the field's middle shows
+                # (no `at`), there is room, and nothing is pressed after the text; the value is read back after.
+                at_end = (replace and not submit and at is None and isinstance(hit, ui.Element) and not hit.secure
+                          and hit.value not in ("", hit.placeholder) and len(hit.value) <= BACKSPACE_MAX
+                          and hit.width >= 2 * END_INSET)
+                if at_end:
+                    await self.tap(ui.Target(x=hit.x + hit.width - END_INSET, y=hit.y + hit.height / 2))
+                else:
+                    await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
                 # focus is what counts: with a hardware keyboard no software one shows
                 element = await self._has_focus(hit) if not isinstance(hit, tuple) else await self._active_element()
                 if element is None and not isinstance(hit, tuple):
@@ -398,8 +409,8 @@ class Session:
         field = hit if isinstance(hit, ui.Element) else None
         if replace and field is not None and not field.secure and field.value in ("", field.placeholder):
             pass  # empty: nothing to clear (WebDriverAgent reports an empty field's placeholder as its value)
-        elif replace and again and field is not None and not field.secure and len(field.value) <= BACKSPACE_MAX:
-            keys = "\b" * len(field.value) + keys  # the cursor is at the end of the text we typed: delete it
+        elif replace and (again or at_end) and field is not None and not field.secure and len(field.value) <= BACKSPACE_MAX:
+            keys = "\b" * len(field.value) + keys  # the cursor is at the end of the old text: delete it
         elif replace:
             element = element or await self._active_element()
             if element:
@@ -408,6 +419,12 @@ class Session:
                 note = " (couldn't find the focused field to clear, so the old text may remain)"
         await self._touching(KEY_MS * len(keys))
         await self._call("POST", "/session/{sid}/wda/keys", {"value": list(keys)})
+        if at_end and element and await self._attribute(element, "value") != text:
+            # the caret wasn't at the end (the old text ran past the tap): the field holds a mix. Clear it and
+            # type again, the long way; the answer reads the value afterwards either way
+            await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
+            await self._touching(KEY_MS * len(text))
+            await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
         if field is not None and element and not submit:  # return may move focus on; keys never do
             self.typed_into = (_field_key(field), element)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note

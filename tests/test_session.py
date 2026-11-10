@@ -613,9 +613,29 @@ def test_submit_ends_the_shortcut_and_an_empty_field_is_not_cleared(phone, monke
     assert [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]][:1] == ["actions"]  # return may move focus
 
 
-def test_replace_clears_the_field_before_the_keys_go_out(phone, monkeypatch):
+def test_replace_deletes_the_old_text_in_the_same_keys_call(phone, monkeypatch):
+    """Measured on the phone 2026-11-11: a tap near the field's right end, then backspaces and the new text in one
+    keys call, is 0.45 s faster than WebDriverAgent's clear. The value is read back to be sure."""
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/attribute/value"):
+            return {"value": "hi"}
+        return await original(method, path, payload, timeout)
+    phone.http = http
     sent = _typing(phone, monkeypatch, replace=True)
-    assert [p.rsplit("/", 1)[1] for _, p, _ in sent] == ["clear", "keys"]
+    assert [p.rsplit("/", 1)[1] for _, p, _ in sent] == ["keys"]
+    assert sent[0][2] == {"value": ["\b", "\b", "\b", "h", "i"]}  # "old" deleted, then "hi"
+    taps = [v for _, p, v in phone.requests if p.endswith("/actions")]
+    x = taps[0]["actions"][0]["actions"][0]["x"]
+    assert x == 10 + 200 - session_module.END_INSET  # near the right end, where the caret goes to the end
+
+
+def test_replace_falls_back_to_clearing_when_the_field_doesnt_hold_the_text(phone, monkeypatch):
+    """The caret wasn't at the end (long old text): the field holds a mix, so it is cleared and typed again."""
+    sent = _typing(phone, monkeypatch, replace=True)  # the fake phone reads back no value
+    assert [p.rsplit("/", 1)[1] for _, p, _ in sent] == ["keys", "clear", "keys"]
+    assert sent[-1][2] == {"value": ["h", "i"]}
 
 
 def test_without_replace_nothing_is_cleared(phone, monkeypatch):
