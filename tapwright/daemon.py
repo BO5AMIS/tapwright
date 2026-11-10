@@ -84,6 +84,8 @@ NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
+# v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
+NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -197,12 +199,17 @@ def _checked(name: str, args: dict) -> dict:
     return checked
 
 
+class Noted(str):
+    """A handler's result line with a note for the answer's end."""
+    note: str = ""
+
+
 class Unchanged(str):
     """A handler's result that did nothing on the phone (`toggle` to the state it's already in): it is
     the whole answer, with no change block."""
 
 
-class Toggled(str):
+class Toggled(Noted):
     """`toggle`'s result, `Tapped <line>.` until the tree is read: then the first line says what the switch did."""
     ref: str = ""
     before: ui.Element = ui.Element("", "switch")  # the switch as it was tapped
@@ -220,7 +227,7 @@ class Toggled(str):
         return f"Tapped {line}, but it is still checked={'true' if now.checked else 'false'}."
 
 
-class Typed(str):
+class Typed(Noted):
     """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
     field: ui.Element = ui.Element("", "input")  # the input as it was when typed into
 
@@ -238,9 +245,8 @@ class Typed(str):
         return f"Typed into {line}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
 
 
-class Scrolled(str):
+class Scrolled(Noted):
     """`scroll`'s result, with a note for the answer when it stopped early."""
-    note: str = ""
 
 
 # What `open_app "Settings"` means: the built-in apps aren't in the installed list.
@@ -763,7 +769,7 @@ class Daemon:
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
-        if isinstance(result, Scrolled) and result.note:
+        if isinstance(result, Noted) and result.note:
             notes = [*notes, result.note]
         # The keyboard note is given only when the keyboard is still closed as the call answers (AGENT-TOOLS
         # v1.4): type_text focuses its input, so the keyboard is up again and the note would contradict the header
@@ -961,14 +967,16 @@ class Daemon:
                 raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
         # the focusing tap is a touch: refused where tap would be, and made where it shows; `force` as for tap
         self._refuse_disabled(field)
-        at = None
-        if not a.get("force"):
+        forced, at = "", None
+        if a.get("force"):
+            forced = self._forced(view, field)
+        else:
             self._guard(view, field)
             at = self._touch_point(field)
         await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
                                      target=ui.Target(ref=field.ref), at=at)
         done = Typed(f"Typed into {field.line(actions=False)}.")
-        done.field = field
+        done.field, done.note = field, forced
         return done
 
     async def _scroll(self, view, a: dict) -> Scrolled:
@@ -1058,6 +1066,8 @@ class Daemon:
             before = element.rect
             await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
             await self._silent_read(view)  # once the screen is still: where the element is now
+        if before is None:  # nothing was dragged: "Scrolled" would read as if the layout had moved
+            return Scrolled(f"{element.line(ref=bool(element.ref), actions=False)} is already on screen.")
         done = Scrolled(f"Scrolled {where} to {element.line(ref=bool(element.ref), actions=False)}.")
         done.note = note
         return done
@@ -1198,12 +1208,34 @@ class Daemon:
             return await s.tap(target, hold_ms=hold_ms)
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
-            return await s.tap(target, hold_ms=hold_ms)
+            done = Noted(await s.tap(target, hold_ms=hold_ms))  # at its centre, whatever is drawn there
+            done.note = self._forced(view, found)
+            return done
         self._guard(view, found)
         if (point := self._touch_point(found)) is None:
             return await s.tap(target, hold_ms=hold_ms)
         await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
         return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
+
+    def _forced(self, view, element: ui.Element) -> str:
+        """The note for a touch made with `force` at the centre of an element that the checks would have refused,
+        or whose centre a bar is drawn over (there the unforced touch goes to the part that shows): with a real
+        touch, `force` doesn't make the hidden element act. Empty when nothing was in the way."""
+        reason = ""
+        try:
+            if not element.in_alert:
+                self._refuse_behind_alert(view)
+        except Refused as e:
+            reason = str(e).split(":", 1)[0]
+        try:
+            if not reason and self._touch_point(element) is not None:
+                centre = element.center
+                over = [b for b in element.covered_by if b.rect[0] <= centre[0] < b.rect[0] + b.rect[2]
+                        and b.rect[1] <= centre[1] < b.rect[1] + b.rect[3]]
+                reason = "under_tab_bar" if over and over[0].kind == "TabBar" else "covered"
+        except Refused as e:
+            reason = str(e).split(":", 1)[0]
+        return NOTE_FORCED.format(reason=reason) if reason else ""
 
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)
@@ -1224,8 +1256,10 @@ class Daemon:
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
         self._refuse_disabled(found)
-        point = None
-        if not a.get("force"):
+        forced, point = "", None
+        if a.get("force"):
+            forced = self._forced(view, found)
+        else:
             self._guard(view, found)
             point = self._touch_point(found)
         want = a.get("value")
@@ -1236,6 +1270,7 @@ class Daemon:
         where = "" if point is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
         done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}{where}.")
         done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
+        done.note = forced
         return done
 
     @staticmethod

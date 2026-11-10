@@ -18,7 +18,7 @@ _CORE = (
     '\n'
     'Answers\n'
     '- The first line says what was done, like `Tapped e3 button "Log in" id=login-button @24,610 354x48.`\n'
-    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements; or `No visible change.`; or the full list when the screen changed or most of it did. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
+    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements (a `~` line marked `off screen` is a change out of view, and has no ref); or `No visible change.`; or the full list when the screen changed or most of it did. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
     '- `Alert:`, `Keyboard:` and similar header lines come first when they changed.\n'
     '- `Settled in 0.31 s.` is how long the screen took to settle. `wait` answers `Waited 1.0 s.` instead.\n'
     '- `Note:` lines come last. Read them.\n'
@@ -27,7 +27,7 @@ _CORE = (
     'Errors: `Error <code>: <message>`. The message says what to do next.\n'
     '- `not_found`: nothing matches. `look`, then pick another target.\n'
     "- `ambiguous`: several match. Retry with one candidate's ref, or add `index`.\n"
-    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause (scroll, close the alert) or pass `force: true`. For `no_action`, pick another element or tool.\n'
+    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause (`scroll` with `to: "target"`, close the alert) or pass `force: true`. For `no_action`, pick another element or tool.\n'
     '- `stale`: a person changed the screen since your list. `look` again.\n'
     '- `busy`: a person is using the app. Wait a few seconds, retry.\n'
     '- `paused`: the user paused you. Ask them to resume.\n'

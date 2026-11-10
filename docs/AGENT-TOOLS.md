@@ -13,7 +13,9 @@ an open sheet hides, numbering that carries through full lists, the code `not_an
 into: the header counts what lies off screen, text is cut at 200 characters and a cut says how
 much is missing, a match in the alert in front wins over matches behind it, a person's touch on
 the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
-apps an agent was given answers `not_allowed`. Each repo keeps an
+apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds what a second first-time agent ran into: `scroll` with
+`to: "target"` brings an element onto the screen, changes off screen are shown, a note says when a
+change block covers more than one action, and a forced action says so. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -103,12 +105,26 @@ Settled in 0.31 s.
   - `~ <element line> (was "<old>")` when exactly one field changed. When several changed:
     `(was text="…", value="…")`, naming each one. The fields are text, label, value,
     checked, selected, disabled and actions. **A frame never appears in `~`**;
+  - `~ <element line without a ref> (off screen; was "<old>")` for an element that lies above
+    or below the screen, before and now, whose text, label, value, checked, selected or
+    disabled changed (v1.6): the effect of a tap that is scrolled out of view. Off-screen
+    elements that are new, gone or moved aren't listed (a scroll moves all of them). Up to 5
+    are listed, then `~ N more changed off screen`. What an open sheet hides is left out.
+    Tapwright matches an element off screen by its identifier, or by its role and place; a
+    changed text with neither isn't shown;
   - `↕ <element line>` for a frame-only change of more than 1 pt in x, y, width or height,
     size included. Up to 5 are listed; more become the single line `↕ N elements moved`;
-  - `No visible change.` when nothing changed.
+  - `No visible change.` when nothing changed, on screen or (v1.6) off it.
 - **The baseline** is the agent's list as of its last answer: the last `look`, or the list
   carried through every action answer since. It's never just the last full list. Scroll
   down and then back up gives `↕` both times.
+  - **When the block covers more than this action (v1.6).** An answer without a list (an
+    action, a `wait` or a `wait_for` with `look: false`) leaves the baseline where it was, so
+    the next change block covers that action too: a sheet opened by one tap and closed by the
+    next reads `No visible change.`. That answer then ends
+    `Note: changes are since your last list, 2 actions ago.` The count is the answers without a
+    list since the last list or change block, plus this one. An answer that carries the full
+    list has no such note.
 - **The change block is a literal diff,** including the element just acted on: typing
   "eggs" into a field that held "egg" shows `~ … value="eggs" … (was "egg")`. Typing the
   same text again is `No visible change.`.
@@ -268,6 +284,19 @@ text items.
   without a new field: `disabled`, `off_screen`, `covered`, `under_tab_bar`,
   `behind_alert` or `no_action`. For example:
   `Error not_actionable: covered: e47 button "Save" is covered by e45 button "Cancel"; close it or pass force: true.`
+- **Where scrolling is the fix (v1.6),** the message names the one call that does it, in these
+  words: `(scroll with this target and to: "target")`. That is `off_screen`, `under_tab_bar`,
+  and `covered` by a bar. Tapline:
+  `… is off screen (at 16,-1903; the screen is 430x932). Scroll to it first (scroll with this target and to: "target"), or pass force: true to call its handler anyway.`
+  Tapwright, whose touch can't reach what is off screen even with `force`:
+  `…; scroll to it first (scroll with this target and to: "target").`
+- **A forced action says so (v1.6).** When `force: true` let through an action the checks would
+  have refused, the answer ends `Note: forced (<reason>): …` with the reason word
+  (`covered`, `off_screen`, `under_tab_bar`, `behind_alert`), then the tool's own sentence,
+  because `force` means different things:
+  - Tapline calls the element's handler: `Note: forced (covered): a person couldn't have done this.`
+  - Tapwright touches the element's centre: `Note: forced (covered): the touch may have landed on what is in front.`
+  A forced action the checks would have allowed has no note.
 - **Touch the visible part.** Before refusing with `covered` or `under_tab_bar`, a tool clips
   the element to the screen and to what's outside the bars and covers drawn over it. If the part
   left is at least 10 pt high and 10 pt wide, the tool touches its centre (Tapline hit-tests
@@ -329,7 +358,7 @@ text items.
 |---|---|---|---|
 | `not_found` | nothing matches the target, or the ref isn't on the last list | look, then pick another target | both |
 | `ambiguous` | several matches and no `index` | use one of the candidates' refs, or add `index` | both. **Change Tapwright:** it picks silently today |
-| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (scroll, close the alert), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
+| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (`scroll` with `to: "target"`, close the alert), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
 | `stale` | a `ref` from a list made before a person acted, from the viewer or (v1.5) with a finger on the phone | look again | both. **Change Tapline:** the host remembers "a person acted since the agent's last list". A look, or an action answer carrying a full list, clears it, and the next answer gets `Note: a person used the app since your last look.` (Tapwright says "the phone"). `id`, `label` and `text` targets keep working |
 | `busy` | a person drove for the whole ~30 s wait | wait a few seconds, retry | both (VIEWER-PROTOCOL "Control") |
 | `paused` | the user paused the agent | ask the user to resume | both |
@@ -354,7 +383,7 @@ text items.
 | `tap` | `target`, `force`, `look`, `screenshot` | **Change Tapline:** `press` becomes `tap`, to match the viewer protocol, Appium and Maestro, and "what a real tap would do" |
 | `long_press` | `target`, `seconds` (default 1.0), `force`, `look`, `screenshot` | Tapline ignores `seconds` and calls the handler |
 | `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `force`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
-| `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start` or `end`), `target`, `look`, `screenshot` | "down shows what's below". **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
+| `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start`, `end` or `target`), `target`, `look`, `screenshot` | "down shows what's below". **`to: "target"` (v1.6)** scrolls the scroll views that hold the `target` element until its whole rect is on screen and clear of the bars, 8 pt inside the edge it came in over (an element larger than that space is brought to its start). It answers `Scrolled <scroll view line> to <element line>.` and the changes. An element that is clear already: nothing is scrolled, the first line is `<element line> is already on screen.`, and the change block follows. Without a target, with a point as target, or with a `direction`, it is `bad_params`. When it stops before the element is clear: `Note: it doesn't scroll further: the target is as far into view as it gets.` (the end of the scroll view), or for Tapwright's drags `Note: the target wasn't reached in 12 s; scroll again to go on.` A tap still doesn't scroll by itself. A row a lazy list hasn't made yet is `not_found`. **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
 | `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`, and answers `no_action` when the Modal has none |
 | `open_url` | `url`, `look`, `screenshot` | Tapline opens it inside the app; Tapwright opens it on the phone, so another app may take it (the answer says which app came up) |

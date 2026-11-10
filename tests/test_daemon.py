@@ -1207,13 +1207,15 @@ def test_an_alert_appearing_changing_and_going_heads_the_change_block():
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[1:] == ["Same screen. Changes:", 'Alert: "Allow Notifications?" [Allow] [Don\'t Allow]']
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
-        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
+        assert unsettled(r)[1:3] == ["Same screen. Changes:", "No visible change."]  # the same alert: no news
+        # v1.6: the tool knew of the alert this time, and `force` went past it
+        assert unsettled(r)[3:] == ["Note: forced (behind_alert): the touch may have landed on what is in front."]
         d.session.last_alert = _alert("Allow Location?", ("OK",))
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
         assert unsettled(r)[2] == 'Alert: "Allow Location?" [OK]'
         d.session.last_alert = None
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
-        assert unsettled(r)[1:] == ["Same screen. Changes:", "Alert: gone"]
+        assert unsettled(r)[1:3] == ["Same screen. Changes:", "Alert: gone"]  # (and the forced note: it was up as the touch went)
         await finish(stop, task)
     run(go)
 
@@ -1242,7 +1244,7 @@ def test_a_look_records_the_alert_and_keyboard_so_they_are_not_news_afterwards()
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
-        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
+        assert unsettled(r)[1:3] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
     run(go)
 
@@ -3956,6 +3958,8 @@ def test_scroll_to_a_target_goes_up_as_well_and_does_nothing_when_it_is_already_
         before = len(d.session.scrolls)
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})  # already there
         assert len(d.session.scrolls) == before and "No visible change." in r["text"]
+        # nothing was dragged, so it doesn't say "Scrolled" (v1.6, at Tapline's ask)
+        assert r["text"].splitlines()[0].endswith('button "Row 30" id=row-30 @10,712 380x40 is already on screen.')
         await d.run_tool("a", "scroll", {"target": {"id": "row-2"}, "to": "target"})  # back up
         row = next(e for e in d.session.tree if e.identifier == "row-2")
         assert 60 <= row.y and row.y + row.height <= 760
@@ -4040,5 +4044,31 @@ def test_what_an_open_sheet_hides_off_screen_is_not_reported():
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+# ---- a forced touch says so (AGENT-TOOLS v1.6) ----
+def test_a_forced_touch_past_a_check_says_where_it_may_have_landed():
+    """With a real touch `force` doesn't make the hidden element act: the touch goes to its centre and lands on
+    whatever is drawn there. The answer says so; a forced touch nothing was in the way of says nothing."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        tabs = ui.Bar("TabBar", (0.0, 849.0, 430.0, 83.0), "tabbar @0,849 430x83")
+        nav = ui.Bar("NavigationBar", (0.0, 59.0, 430.0, 54.0), "navigationbar @0,59 430x54")
+        await looked(d, [el("e1", "button", "Low", "low", rect=(20, 860, 390, 60), covered_by=(tabs,)),
+                         el("e2", "button", "High", "high", rect=(20, 62, 390, 44), covered_by=(nav,)),
+                         el("e3", "switch", "Notify", "notify", rect=(20, 870, 390, 40), checked=False, covered_by=(tabs,)),
+                         el("e4", "button", "Free", "free", rect=(20, 400, 390, 44))])
+        r = await d.run_tool("a", "tap", {"target": {"id": "low"}, "force": True, "look": False})
+        assert r["text"].endswith("Note: forced (under_tab_bar): the touch may have landed on what is in front.")
+        r = await d.run_tool("a", "long_press", {"target": {"id": "high"}, "force": True, "look": False})
+        assert r["text"].endswith("Note: forced (covered): the touch may have landed on what is in front.")
+        r = await d.run_tool("a", "toggle", {"target": {"id": "notify"}, "force": True, "look": False})
+        assert r["text"].endswith("Note: forced (under_tab_bar): the touch may have landed on what is in front.")
+        r = await d.run_tool("a", "tap", {"target": {"id": "free"}, "force": True, "look": False})
+        assert "Note:" not in r["text"]
         await finish(stop, task)
     run(go)
