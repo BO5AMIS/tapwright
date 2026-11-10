@@ -803,9 +803,14 @@ class Daemon:
             # list was read against (nothing changed silently before it): no tree read, the list stays.
             # Not when something lies off screen: the action's effect may be there, and only a read shows it
             view.read_at, view.read_mark = self.control.clock(), self._mark()
+            view.unlooked = 0  # this block covers them: nothing changed since the list
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
-        answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
+        to_target = name == "scroll" and args.get("to") == "target"
+        # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
+        # move for the refs, though the content did move since the agent's last answer)
+        answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT and not to_target,
+                                   done.seconds, drifted=to_target)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -1032,9 +1037,12 @@ class Daemon:
         try:
             return ui.resolve(view.items, target)
         except Refused as e:
-            if e.code != "not_found":
+            if e.code != "not_found" or target.ref is not None:
                 raise
-            return ui.resolve(getattr(self.session, "offscreen", []), dataclasses.replace(target, index=0))
+            # on screen and off it together, in reading order: an `index` counts through both, and several
+            # matches without one are `ambiguous` (the first off-screen one may lie the other way)
+            everything = sorted([*view.items, *getattr(self.session, "offscreen", [])], key=lambda e: (e.y, e.x))
+            return ui.resolve(everything, target)
 
     async def _scroll_to(self, view, target: ui.Target) -> Scrolled:
         """`scroll` with `to: "target"` (AGENT-TOOLS v1.6): drag the scroll view that holds the element until the
@@ -1044,9 +1052,15 @@ class Daemon:
         (the end of the list), or at the limits `to: "end"` has. A row a lazy list hasn't made yet is `not_found`."""
         s = self.session
         loop = asyncio.get_running_loop()
-        began, note, before, where = loop.time(), "", None, None
+        began, note, where, clear = loop.time(), "", None, False
+        seen: list[tuple[float, ...]] = []  # where the element was before each drag
         for drags in range(MAX_SCROLL_SWIPES + 1):
-            element = self._anywhere(view, target)
+            try:
+                element = self._anywhere(view, target)
+            except Refused:
+                if seen:  # the screen has moved under the agent's list, and this answer carries none
+                    view.moved = True
+                raise
             area = ui.scroll_holding(view.items, element, s.screen)
             where = where or (area.line(actions=False) if area else "the screen")
             top, bottom = s.last_insets
@@ -1054,21 +1068,31 @@ class Daemon:
                     s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
             x, y, w, h = area.rect if area else (0.0, 0.0, *s.screen)
             y, h = max(y, band[0]), min(y + h, band[1]) - max(y, band[0])
-            move = ui.scroll_move(element.rect, (x, y, w, h))
-            if move == (0.0, 0.0) or h <= 0:
-                break
-            if before is not None and ui._same_rect(before, element.rect):
+            if h <= 0:  # the scroll view itself lies under the bars: nothing to drag in
                 note = "it doesn't scroll further: the target is as far into view as it gets."
                 break
-            if drags == MAX_SCROLL_SWIPES or loop.time() - began >= SCROLL_CAP:
+            move = ui.scroll_move(element.rect, (x, y, w, h))
+            # after a drag, inside the view is enough: chasing the last points of margin with a drag that can't
+            # be shorter than SCROLL_MIN_DRAG would go back and forth
+            if move == (0.0, 0.0) or (seen and ui.scroll_move(element.rect, (x, y, w, h), margin=0.0) == (0.0, 0.0)):
+                clear = True
+                break
+            if any(ui._same_rect(was, element.rect) for was in seen):
+                note = "it doesn't scroll further: the target is as far into view as it gets."
+                break
+            if loop.time() - began >= SCROLL_CAP:
                 note = f"the target wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
                 break
-            before = element.rect
+            if drags == MAX_SCROLL_SWIPES:
+                note = f"the target wasn't reached in {MAX_SCROLL_SWIPES} drags; scroll again to go on."
+                break
+            seen.append(element.rect)
             await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
             await self._silent_read(view)  # once the screen is still: where the element is now
-        if before is None:  # nothing was dragged: "Scrolled" would read as if the layout had moved
-            return Scrolled(f"{element.line(ref=bool(element.ref), actions=False)} is already on screen.")
-        done = Scrolled(f"Scrolled {where} to {element.line(ref=bool(element.ref), actions=False)}.")
+        line = element.line(ref=bool(element.ref), actions=False)
+        if clear and not seen:  # nothing was dragged: "Scrolled" would read as if the layout had moved
+            return Scrolled(f"{line} is already on screen.")
+        done = Scrolled(f"Scrolled {where} to {line}." if clear else f"Scrolled {where} toward {line}.")
         done.note = note
         return done
 
@@ -1487,7 +1511,7 @@ class Daemon:
         return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False,
-                     seconds: float | None = None, snap: Snapshot | None = None) -> dict:
+                     seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
         `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
@@ -1518,11 +1542,13 @@ class Daemon:
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)
         # what changed off screen (v1.6), against what lay there at the agent's last answer
-        off_was, view.shown_off = view.shown_off, self._off_screen_now()
+        off_was, view.shown_off = view.shown_off, self._off_screen_of(snap.tree)
         # ...unless the old list is no baseline: another app is in front now, or the full list was forced (a
-        # person acted, the line dropped, the agent had never looked)
+        # person acted, the line dropped, the agent had never looked). A place only says "the same element" when
+        # nothing can have moved the content since the agent's last answer.
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
-        off = changes.off_screen(off_was, view.shown_off, by_place=not moves_content) if same_app and not full else []
+        still = not (moves_content or drifted or view.unlooked)
+        off = changes.off_screen(off_was, view.shown_off, by_place=still) if same_app and not full else []
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
@@ -1539,10 +1565,19 @@ class Daemon:
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
-        """What the last read found off screen, without what an open sheet hides (as in the header's counts)."""
+        """What the session's last read found off screen, without what an open sheet hides (as in the header's
+        counts). Only right inside the read itself: another client's read may come next."""
         s = self.session
         hidden = {id(e) for e, _ in getattr(s, "behind", [])}
         return [e for e in getattr(s, "offscreen", []) if id(e) not in hidden]
+
+    def _off_screen_of(self, tree: ui.Tree) -> list[ui.Element]:
+        """The same from one read's own tree. (A tree a test made by hand has no off-screen list of its own: the
+        session's stands in.)"""
+        if not tree.offscreen and not tree.behind:
+            return self._off_screen_now()
+        hidden = {id(e) for e, _ in tree.behind}
+        return [e for e in tree.offscreen if id(e) not in hidden]
 
     def _current(self, view) -> bool:
         """Is the agent's last list still the screen? Not if a person or another agent acted since

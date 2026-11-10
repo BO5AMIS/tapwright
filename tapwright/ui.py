@@ -1009,11 +1009,21 @@ def scroll_holding(items: list[Element], element: Element, screen: tuple[float, 
     """The scroll view that brings an element into view: the one around it; else, for an element above or below
     the screen, the largest scroll view in its column (the page; a carousel in that column isn't its parent);
     else, for one to the left or right, the smallest in its row. None when there is none."""
+    cx, cy = element.center
+    scrolls = [e for e in items if e.role == "scroll"]
+    if not element.ref and 0 <= cx < screen[0] and 0 <= cy < screen[1]:
+        # Not listed, though its centre is on the screen: a scroll view inside the screen cuts it off (a card
+        # peeking in at a carousel's edge). That one holds it: the smallest whose row or column it lies in while
+        # its centre is outside.
+        def cuts(e: Element) -> bool:
+            in_x, in_y = e.x <= cx <= e.x + e.width, e.y <= cy <= e.y + e.height
+            return in_x != in_y
+        cutting = [e for e in scrolls if cuts(e)]
+        if cutting:
+            return min(cutting, key=lambda e: e.width * e.height)
     inside = scroll_of(items, element)
     if inside is not None:
         return inside
-    cx, cy = element.center
-    scrolls = [e for e in items if e.role == "scroll"]
     if 0 <= cx < screen[0]:
         column = [e for e in scrolls if e.x <= cx <= e.x + e.width]
         return max(column, key=lambda e: e.width * e.height, default=None)

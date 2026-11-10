@@ -54,7 +54,7 @@ nested form wins: the schema enforces "exactly one", and every tool uses the sam
 |---|---|---|
 | `{ref: "e3"}` | an element of the agent's last list | refused with `stale` if someone else changed the screen since that list (§4) |
 | `{id: "login-button"}` | exact identifier | React Native's `testID` is the iOS accessibility identifier, so the same value works in both tools. **Change Tapline:** the key `testID` becomes `id` |
-| `{label: "Log in"}` | the accessibility label, exact, ignoring case | **Change Tapwright:** no substring fallback here; that's `text` |
+| `{label: "Log in"}` | the accessibility label, exact, ignoring case | **Change Tapwright:** no substring fallback here; that's `text`. Tapline: an element without a label of its own matches by its text, the way iOS forms its label (v1.6), so the same call finds a button that only shows "OK" in both tools |
 | `{text: "Log in"}` | visible text: an exact match first, then a substring; Tapwright matches the label or the value | |
 | `{x, y}` | what a touch at that point would hit, in points | Tapwright touches the screen there. Tapline can't touch, so it hit-tests: a point in the iOS tab bar's area is the tab under it, and with a React Native `Modal` open, the modal's content is tested first and what's behind it counts as covered. Later this goes through Fabric's hit test. For `toggle`, `type_text` and `scroll`, it's the element of the right kind under the point. When there's none: `not_actionable: no_action: Nothing at (x, y) takes <a tap, typing, a toggle, a scroll>.` |
 
@@ -110,8 +110,9 @@ Settled in 0.31 s.
     disabled changed (v1.6): the effect of a tap that is scrolled out of view. Off-screen
     elements that are new, gone or moved aren't listed (a scroll moves all of them). Up to 5
     are listed, then `~ N more changed off screen`. What an open sheet hides is left out.
-    Tapwright matches an element off screen by its identifier, or by its role and place; a
-    changed text with neither isn't shown;
+    An element off screen counts as the same element when it has the same identifier, or the
+    same role in the same place; a changed text with neither isn't shown (a list that reuses
+    its cells hands an off-screen cell to another row, and that is no change);
   - `↕ <element line>` for a frame-only change of more than 1 pt in x, y, width or height,
     size included. Up to 5 are listed; more become the single line `↕ N elements moved`;
   - `No visible change.` when nothing changed, on screen or (v1.6) off it.
@@ -136,6 +137,11 @@ Settled in 0.31 s.
     add what to do next; Tapline adds `Tapline can't see it: ask the user, or use Tapwright.`
 
   The full list starts with the header (§3.2).
+  - **Off-screen changes follow the full list too (v1.6):** the same `~ … (off screen; was "…")`
+    lines, after the list and before `Settled in`. Only when the list came because most of the
+    same screen changed. Not when the screen or route changed, another app is in front, a
+    person acted, the link dropped, or the agent had never looked: there the old off-screen
+    elements are no baseline to compare with.
 - **The last line** gives how long the tool waited for the screen to settle:
   `Settled in 0.31 s.` (§6). `wait` answers `Waited 1.0 s.` and the change block instead,
   with no settle line.

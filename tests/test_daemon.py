@@ -3901,8 +3901,10 @@ class LongList:
     """A list of rows in a scroll view that fills the screen. A drag moves the rows by the finger's distance,
     between the list's two ends; the tree and the off-screen list follow, as the phone's would."""
 
-    def __init__(self, d, rows: int = 40, pitch: float = 100.0, screen=(400.0, 800.0)) -> None:
+    def __init__(self, d, rows: int = 40, pitch: float = 100.0, screen=(400.0, 800.0), ids: bool = True,
+                 height: float = 40.0, labels=None) -> None:
         self.s, self.screen, self.pitch, self.rows, self.offset = d.session, screen, pitch, rows, 0.0
+        self.ids, self.height, self.labels = ids, height, labels or (lambda i: f"Row {i}")
         self.lowest = -(rows * pitch - screen[1])
         real = self.s.scroll
 
@@ -3917,7 +3919,8 @@ class LongList:
         shown = [el("e1", "scroll", "", "list", rect=(0, 0, *self.screen))]
         off = []
         for i in range(self.rows):
-            row = el("", "button", f"Row {i}", f"row-{i}", rect=(10, i * self.pitch + self.offset, 380, 40))
+            row = el("", "button", self.labels(i), f"row-{i}" if self.ids else "",
+                     rect=(10, i * self.pitch + self.offset, 380, self.height))
             (shown if 0 <= row.center[1] < self.screen[1] else off).append(row)
         for n, e in enumerate(shown[1:], 2):
             e.ref = f"e{n}"
@@ -4095,5 +4098,58 @@ def test_off_screen_changes_follow_a_full_list_that_came_because_most_of_the_scr
         assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
         assert unsettled(r)[1].startswith("Screen ") and "off screen" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- what a review of scroll-to-target and the off-screen lines found (2026-11-10) ----
+def test_scroll_to_a_target_by_label_keeps_the_ref_its_first_line_gave():
+    """The answer's first line named the row with one ref and the list under it gave every row without an
+    identifier another: the list had been read after each drag, and the read after the last one counted as a move."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d, ids=False)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"target": {"label": "Row 30"}, "to": "target"})
+        lines = r["text"].splitlines()
+        ref = re.search(r" to (e\d+) button \"Row 30\"", lines[0]).group(1)
+        assert any(line.startswith(f'{ref} button "Row 30"') for line in lines[1:]), r["text"]
+        r = await d.run_tool("a", "tap", {"target": {"ref": ref}, "look": False})
+        assert r["text"].startswith(f'Tapped {ref} button "Row 30"')
+        r = await d.run_tool("a", "scroll", {"target": {"label": "Row 30"}, "to": "target"})  # there already
+        assert r["text"].splitlines()[0].startswith(f'{ref} button "Row 30"') and "No visible change." in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_a_target_that_several_elements_off_screen_match_is_ambiguous_and_takes_an_index():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d, ids=False, labels=lambda i: "Delete" if i in (20, 30) else f"Row {i}")
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "scroll", {"target": {"label": "Delete"}, "to": "target"})
+        assert e.value.code == "ambiguous" and d.session.scrolls == []
+        await d.run_tool("a", "scroll", {"target": {"label": "Delete", "index": 1}, "to": "target"})
+        rows = [e for e in d.session.tree if e.label == "Delete"]
+        assert len(rows) == 1 and 60 <= rows[0].y and rows[0].y + rows[0].height <= 760  # the second: row 30
+        assert any(e.label == "Row 29" for e in d.session.tree)
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_a_target_nearly_as_tall_as_the_view_does_not_go_back_and_forth():
+    """690 points in a view of 700: the last 5 points of margin can't be had with a drag of at least 20."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d, rows=12, pitch=800.0, height=690.0)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"target": {"id": "row-5"}, "to": "target"})
+        row = next(e for e in d.session.tree if e.identifier == "row-5")
+        assert 60 <= row.y and row.y + row.height <= 760 and len(d.session.scrolls) < 12
+        assert "Note:" not in r["text"] and r["text"].startswith("Scrolled ") and " to e" in r["text"].splitlines()[0]
         await finish(stop, task)
     run(go)

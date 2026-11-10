@@ -193,6 +193,13 @@ def off_screen(old: list[Element], new: list[Element], by_place: bool = True) ->
         return (e.role, e.identifier, *(round(v) for v in e.rect))
     named, placed = unique(old), {place(e): e for e in old}
     now_named = unique(new)
+    # Another screen of the same app can reuse an identifier ("title", "footer"): when fewer than half of the
+    # identifiers that were off screen still are, this isn't the same content, and nothing is said about it.
+    if named and len(named.keys() & now_named.keys()) * 2 < len(named):
+        return []
+    # A place names an element only while every element off screen is where it was. A row added or removed, or a
+    # form that slid up for the keyboard, moves them all by one row, and each would look like its neighbour changed.
+    by_place = by_place and placed.keys() == {place(e) for e in new}
     lines = []
     for e in new:
         key = (e.role, e.identifier)

@@ -404,3 +404,23 @@ def test_off_screen_lists_five_and_counts_the_rest_and_new_or_gone_elements_are_
     switch = [el("", role="switch", label="Wi-Fi", identifier="wifi", y=1400, checked=False)]
     flipped = [el("", role="switch", label="Wi-Fi", identifier="wifi", y=1400, checked=True)]
     assert changes.off_screen(switch, flipped)[0].endswith('(off screen; was "false")')
+
+
+def test_a_row_removed_off_screen_does_not_make_every_row_below_it_look_changed():
+    """A review's case: row 5 deleted, the rows below move up by one: by place each would read as its neighbour
+    changed. A place counts only while every element off screen is where it was."""
+    old = [el("", role="text", label=f"Row {i}", y=1000 + 60 * i) for i in range(5, 12)]
+    new = [el("", role="text", label=f"Row {i}", y=1000 + 60 * (i - 1)) for i in range(6, 12)]
+    assert changes.off_screen(old, new) == []
+    grown = [*old, el("", role="text", label="Row 12", y=1000 + 60 * 12)]
+    assert changes.off_screen(old, grown) == []  # one more row at the end: the places are no longer the same set
+
+
+def test_another_screen_that_reuses_an_identifier_is_not_a_change_off_screen():
+    old = [el("", role="text", label=f"Old {i}", identifier=name, y=1000 + 60 * i)
+           for i, name in enumerate(("title", "footer", "total", "note"))]
+    other = [el("", role="text", label="Other footer", identifier="footer", y=1300),
+             el("", role="text", label="Help", identifier="help", y=1400)]
+    assert changes.off_screen(old, other, by_place=False) == []  # one identifier of four is left: another screen
+    same = [replace(old[0], label="New 0"), *old[1:]]
+    assert len(changes.off_screen(old, same, by_place=False)) == 1

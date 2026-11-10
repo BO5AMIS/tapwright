@@ -724,3 +724,14 @@ def test_the_scroll_view_that_holds_an_element_off_screen_is_the_page_not_a_caro
     assert ui.scroll_holding(items, below, (400, 800)) is page
     assert ui.scroll_holding(items, beside, (400, 800)) is carousel
     assert ui.scroll_holding([inside], below, (400, 800)) is None
+
+
+def test_a_card_cut_off_by_a_carousel_inside_the_screen_is_held_by_the_carousel():
+    """A review's case: the carousel is narrower than the page, and a card peeks in at its edge. The card's rect
+    lies inside the page's, so the page looked like its scroll view, and nothing needed scrolling."""
+    page = ui.Element("e1", "scroll", rect=(0, 0, 400, 800))
+    carousel = ui.Element("e2", "scroll", rect=(20, 200, 300, 120))
+    peeking = ui.Element("", "button", label="Card 4", rect=(300, 220, 100, 80))  # centre at x=350, past its edge
+    assert ui.scroll_holding([page, carousel], peeking, (400, 800)) is carousel
+    listed = ui.Element("e3", "button", label="Card 2", rect=(100, 220, 100, 80))
+    assert ui.scroll_holding([page, carousel, listed], listed, (400, 800)) is carousel
