@@ -1517,7 +1517,7 @@ class Daemon:
         `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
         s = self.session
         tail = [] if seconds is None else [settled_line(seconds)]
-        app_before = view.app
+        app_before, listed_before = view.app, view.shown
 
         async def read():
             self._mark_read(view)
@@ -1548,7 +1548,8 @@ class Daemon:
         # nothing can have moved the content since the agent's last answer.
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
         still = not (moves_content or drifted or view.unlooked)
-        off = changes.off_screen(off_was, view.shown_off, by_place=still) if same_app and not full else []
+        off = (changes.off_screen(off_was, view.shown_off, by_place=still, listed=listed_before)
+               if same_app and not full else [])
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0

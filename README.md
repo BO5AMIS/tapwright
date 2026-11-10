@@ -89,6 +89,19 @@ on my phone, sign up with a test email, and tell me if anything looks broken."*
 [AGENTS.md](AGENTS.md) is the agent's guide; point your agent at it.
 [docs/quickstart.md](docs/quickstart.md) walks through a first test.
 
+**Give your agent the skill.** It teaches an agent how to test with Tapwright: the loop, how
+to read an answer, what to do on each error, how to report, and the mistakes agents make.
+
+```sh
+tapwright skill install               # for you: ~/.claude/skills and ~/.agents/skills
+tapwright skill install --project .   # for one project
+```
+
+Claude Code reads `.claude/skills`; Codex and other agents read `.agents/skills`. The skill
+is [skills/tapwright](skills/tapwright/SKILL.md), in the open
+[Agent Skills](https://agentskills.io) format, so skill installers can take it from this
+repository too.
+
 ## Tools
 
 | Tool | What it does |

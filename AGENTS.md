@@ -24,6 +24,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 6. Add the MCP server to your host with the apps the user wants tested (Claude Code:
    `claude mcp add tapwright -- tapwright mcp --apps <bundle id>`). Without `--apps` every
    call is refused. `--dedicated` is only for a phone kept for testing.
+7. `tapwright skill install` puts the Tapwright skill where Claude Code, Codex and other
+   agents look for skills (`--project DIR` for one project). The skill is
+   [skills/tapwright/SKILL.md](skills/tapwright/SKILL.md): how to test well with these tools.
 
 ## Testing an app
 

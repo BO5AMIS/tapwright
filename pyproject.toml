@@ -30,4 +30,4 @@ tapwright = "tapwright.cli:main"
 packages = ["tapwright"]
 
 [tool.setuptools.package-data]
-tapwright = ["viewer.html"]
+tapwright = ["viewer.html", "skill/*.md", "skill/references/*.md", "skill/agents/*.yaml"]

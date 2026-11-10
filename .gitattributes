@@ -1,2 +1,5 @@
 # The viewer page is one file shared byte for byte with Tapline: keep its line endings as they are.
 tapwright/viewer.html text eol=lf
+# The agent skill ships twice (skills/ for installers, tapwright/skill/ in the package): one set of bytes.
+skills/** text eol=lf
+tapwright/skill/** text eol=lf

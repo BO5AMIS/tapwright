@@ -173,7 +173,8 @@ def _changes(old: list[Element], new: list[Element]) -> tuple[list[str], int]:
 OFF_LISTED = 5  # up to this many changed off-screen elements get a line each; more become a count
 
 
-def off_screen(old: list[Element], new: list[Element], by_place: bool = True) -> list[str]:
+def off_screen(old: list[Element], new: list[Element], by_place: bool = True,
+               listed: list[Element] | None = None) -> list[str]:
     """`~` lines for the elements off screen whose text, value, checked, selected or disabled changed between two
     reads (AGENT-TOOLS v1.6): a tap whose effect lands on something scrolled out of view answered "No visible
     change.", which read as "nothing happened". No refs (what is off screen has none), and only `~`: off-screen
@@ -181,7 +182,10 @@ def off_screen(old: list[Element], new: list[Element], by_place: bool = True) ->
 
     Off screen an element is the same one when its identifier is, if that is unique among what is off screen in
     both reads; else, with `by_place`, when its role and place are (not after an action that moves content: the
-    next row then sits where this one sat)."""
+    next row then sits where this one sat).
+
+    `listed` is the agent's last list: an element that was on it and is off screen now (a scroll answered without
+    a list came between) is compared with what it was there, by its identifier."""
     def unique(items: list[Element]) -> dict[tuple[str, str], Element]:
         seen: dict[tuple[str, str], list[Element]] = {}
         for e in items:
@@ -191,11 +195,11 @@ def off_screen(old: list[Element], new: list[Element], by_place: bool = True) ->
 
     def place(e: Element) -> tuple:
         return (e.role, e.identifier, *(round(v) for v in e.rect))
-    named, placed = unique(old), {place(e): e for e in old}
-    now_named = unique(new)
+    was_off, placed = unique(old), {place(e): e for e in old}
+    named, now_named = unique([*old, *(listed or [])]), unique(new)
     # Another screen of the same app can reuse an identifier ("title", "footer"): when fewer than half of the
     # identifiers that were off screen still are, this isn't the same content, and nothing is said about it.
-    if named and len(named.keys() & now_named.keys()) * 2 < len(named):
+    if was_off and len(was_off.keys() & now_named.keys()) * 2 < len(was_off):
         return []
     # A place names an element only while every element off screen is where it was. A row added or removed, or a
     # form that slid up for the keyboard, moves them all by one row, and each would look like its neighbour changed.

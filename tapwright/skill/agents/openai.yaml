@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tapwright"
+  short_description: "Test an app on a real iPhone"
+  default_prompt: "Use $tapwright to test my app on my iPhone and report what is broken."

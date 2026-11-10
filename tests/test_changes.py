@@ -424,3 +424,15 @@ def test_another_screen_that_reuses_an_identifier_is_not_a_change_off_screen():
     assert changes.off_screen(old, other, by_place=False) == []  # one identifier of four is left: another screen
     same = [replace(old[0], label="New 0"), *old[1:]]
     assert len(changes.off_screen(old, same, by_place=False)) == 1
+
+
+def test_an_element_that_was_listed_and_is_off_screen_now_is_compared_with_what_it_was():
+    """Tapline's phone check: the state line was on the agent's list, a scroll answered without a list took it off
+    screen, the next tap changed it, and nothing said so."""
+    listed = [el("e7", role="text", label="taps=1", identifier="lab-state", y=700)]
+    now_off = [el("", role="text", label="taps=2", identifier="lab-state", y=-300)]
+    assert changes.off_screen([], now_off, by_place=False, listed=listed) == [
+        '~ text "taps=2" id=lab-state @0,-300 100x40 (off screen; was "taps=1")']
+    assert changes.off_screen([], now_off, by_place=False) == []  # without the list there is nothing to compare with
+    unchanged = [el("", role="text", label="taps=1", identifier="lab-state", y=-300)]
+    assert changes.off_screen([], unchanged, by_place=False, listed=listed) == []

@@ -273,6 +273,23 @@ def view() -> int:
     return 0
 
 
+def skill(a) -> int:
+    """`tapwright skill install`: put the agent skill where Claude Code, Codex and other agents look for skills."""
+    from . import skills
+    if a.action == "path":
+        print(skills.SOURCE)
+        return 0
+    try:
+        written = skills.install(a.project)
+    except OSError as e:
+        print(f"couldn't install the skill: {e}")
+        return 1
+    print(f"Installed the {skills.NAME} skill:")
+    for path in written:
+        print(f"  {path}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="tapwright", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -308,6 +325,10 @@ def main() -> int:
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
     sub.add_parser("view")
+    p = sub.add_parser("skill", help="the agent skill: how to test with Tapwright, for Claude Code, Codex and others")
+    p.add_argument("action", choices=("install", "path"),
+                   help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")
+    p.add_argument("--project", metavar="DIR", help="install into this project's folder instead of your home folder")
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
                    help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")
@@ -325,6 +346,8 @@ def main() -> int:
         return 0
     if a.cmd == "view":
         return view()
+    if a.cmd == "skill":
+        return skill(a)
     if a.cmd == "serve" and a.stop:
         return stop_daemon()
     from .device import run
