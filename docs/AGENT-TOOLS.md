@@ -291,7 +291,9 @@ text items.
   - **Typing without a target:**
     - no input: `Error not_found: No input on screen`;
     - several: `Error ambiguous: <n> inputs on screen; pass a target to pick one:`, then
-      `Candidates:`. A tool that knows focus may add "and none is focused".
+      `Candidates:`. A tool that knows focus may add "and none is focused". Here the block's last
+      line is `Retry with one of the refs as the target.`, since there is no target for an
+      `index` to count in.
   - **`no_action` reasons:** `has no tap action`, `has no long-press action`,
     `is not a switch`, `is not an input`, `is not inside a scroll view`. At a point:
     `Nothing at (x, y) takes <a tap, typing, a toggle, a scroll>.`

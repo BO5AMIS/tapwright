@@ -18,7 +18,7 @@ _CORE = (
     '\n'
     'Answers\n'
     '- The first line says what was done, like `Tapped e3 button "Log in" id=login-button @24,610 354x48.`\n'
-    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements; or `No visible change.`; or the full list when the screen changed. Elements still on screen keep their refs, and a full list counts on from the highest ref given. Only `look` starts again at e1.\n'
+    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements; or `No visible change.`; or the full list when the screen changed. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
     '- `Alert:`, `Keyboard:` and similar header lines come first when they changed.\n'
     '- `Settled in 0.31 s.` is how long the screen took to settle. `wait` answers `Waited 1.0 s.` instead.\n'
     '- `Note:` lines come last. Read them.\n'
