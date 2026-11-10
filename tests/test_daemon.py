@@ -1131,6 +1131,28 @@ def test_an_agent_that_has_not_looked_yet_gets_no_note_about_a_person():
     run(go)
 
 
+def test_a_touch_the_phone_did_not_answer_is_a_timeout_and_the_line_stays():
+    """Over Wi-Fi one request can stall while WebDriverAgent answers the others: no reconnect, and the agent is
+    told the action may have happened."""
+    from tapwright.device import Unanswered
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        lost = []
+        d.lost = lambda reason: lost.append(reason)
+        d.session.fail["tap"] = Unanswered("the phone didn't answer within 10 s")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert e.value.code == "timeout" and not lost and d.state == "live"
+        assert str(e.value) == "the phone didn't answer within 10 s; the action may have happened: look before you retry."
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})  # the next call works
+        assert r["text"].startswith("Tapped")
+        await finish(stop, task)
+    run(go)
+
+
 def test_after_a_dropped_connection_the_answer_is_the_full_list():
     async def go():
         d = make()

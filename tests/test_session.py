@@ -114,6 +114,36 @@ def test_a_read_waits_out_a_notification_banner_over_the_app(phone, monkeypatch)
     assert [e.identifier for e in asyncio.run(s.refresh()).items] == ["NotificationShortLookView"]
 
 
+def test_one_stalled_touch_keeps_the_session_and_says_it_is_not_known(phone):
+    """Seen on the phone over Wi-Fi 2026-11-10: a tap got no answer for 30 s, then WebDriverAgent was started
+    again, though it answered every other request. A touch can't be sent twice, so the caller hears that the
+    phone didn't answer; the session stays."""
+    from tapwright.device import Unanswered
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    waits, real = [], phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/actions"):
+            waits.append(timeout)
+            raise ConnectionLost(f"WebDriverAgent didn't answer {method} {path} within {timeout:.0f} s")
+        return await real(method, path, payload, timeout)
+
+    async def alive():
+        return True
+    phone.http, phone.wda_alive = http, alive
+    with pytest.raises(Unanswered, match="didn't answer within 10 s"):
+        asyncio.run(s.tap(ui_module.Target(x=10, y=10)))
+    assert s.sid == "S" and len(waits) == 1 and 10.0 <= waits[0] <= 10.2  # asked once, for the tap's length + 10 s
+
+    async def dead():
+        return False
+    phone.wda_alive = dead
+    with pytest.raises(ConnectionLost):  # WebDriverAgent answers nothing: the line is dead, as before
+        asyncio.run(s.tap(ui_module.Target(x=10, y=10)))
+    assert s.sid is None
+
+
 def test_one_stalled_read_is_asked_again_and_is_not_a_frozen_app(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a single connection stalled, the app was fine, and the answer
     was "JLD isn't answering" with a reconnect. The read is asked once more on a new connection first."""

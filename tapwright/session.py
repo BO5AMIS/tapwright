@@ -7,11 +7,12 @@ from dataclasses import dataclass
 
 from . import store, ui
 from .control import TAP_MS, Refused
-from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked
+from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+ACTION_WAIT = 10.0  # seconds a touch may take to be answered beyond its own length (a tap answers in about 0.5 s)
 BANNER_ID = "NotificationShortLookView"  # the identifier of a notification banner in SpringBoard's tree
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
@@ -131,7 +132,14 @@ class Session:
                 # tree reads stalled the same way and were answered as a frozen app, with a restart of
                 # WebDriverAgent each time). Only questions, and what may be said twice (`again`: settings): an
                 # action asked twice could happen twice.
-                if not (method == "GET" if again is None else again) or "didn't answer" not in str(e) or self.device.rsd is None:
+                if "didn't answer" not in str(e) or self.device.rsd is None:
+                    raise
+                if not (method == "GET" if again is None else again):
+                    # An action: it can't be sent again. If WebDriverAgent answers a new connection, only this
+                    # one request stalled: the session stays, and the caller hears that it isn't known whether
+                    # the action happened (before, 30 s of silence and then WebDriverAgent started again).
+                    if await self.device.wda_alive():
+                        raise Unanswered(f"the phone didn't answer within {timeout:.0f} s") from None
                     raise
                 getattr(self.device, "log", lambda *a: None)(f"no answer to {method} {path.split('?')[0]} in {timeout:.0f} s: asked again")
                 return await self.device.http(method, full, payload, READ_AGAIN)
@@ -313,7 +321,7 @@ class Session:
     async def tap(self, target: ui.Target, hold_ms: int = TAP_MS) -> str:
         self.typed_into = None
         x, y, what = self._target(target)
-        await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms))
+        await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms), timeout=hold_ms / 1000 + ACTION_WAIT)
         self.last_point = (x, y)
         return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
 
@@ -432,21 +440,22 @@ class Session:
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
-        await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
+        await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms),
+                         timeout=(duration_ms + hold_ms) / 1000 + ACTION_WAIT)
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
     async def scroll(self, x0: float, y0: float, x1: float, y1: float) -> str:
         """A scroll drag that stops where the finger does (ui.scroll_drag)."""
         self.typed_into = None
-        await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1))
+        await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1), timeout=2 + ACTION_WAIT)
         self.last_point = (x0, y0)
         return f"scrolled ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
     async def path(self, points: list) -> str:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
         self.typed_into = None
-        await self._call("POST", "/session/{sid}/actions", ui.path(points))
+        await self._call("POST", "/session/{sid}/actions", ui.path(points), timeout=points[-1][0] / 1000 + ACTION_WAIT)
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"
 

@@ -30,6 +30,11 @@ class ConnectionLost(DeviceError):
     """The tunnel or WebDriverAgent stopped answering: a dead line, not an error reply."""
 
 
+class Unanswered(DeviceError):
+    """One action got no answer, and WebDriverAgent answers other requests: the line is alive, and whether the
+    action happened isn't known. Not a ConnectionLost: nothing needs starting again."""
+
+
 class PhoneLocked(ConnectionLost):
     """WebDriverAgent runs, but the phone is locked, so nothing on the screen can be read until it's unlocked."""
 

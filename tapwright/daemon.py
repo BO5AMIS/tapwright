@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from . import changes, ui
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked,
+from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
                      PhoneNotFound)
 from .session import Snapshot
 from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of
@@ -821,6 +821,12 @@ class Daemon:
 
         try:
             result = await self.control.agent(act)
+        except Unanswered as e:
+            # the line is alive and the session stays; the screen may or may not have changed under the agent's list
+            view.moved = True
+            self.unsettled = True
+            self._announce("agent", name, ok=False, code="timeout")
+            raise Refused("timeout", f"{e}; the action may have happened: look before you retry.") from None
         except ConnectionLost as e:
             self.lost(e)
             if isinstance(e, AppNotAnswering):  # the action went out, then the app stopped answering
