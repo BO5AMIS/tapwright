@@ -48,6 +48,7 @@ def _daemon_owns_phone() -> bool:
 
 
 DAEMON_RUNNING = "tapwright serve is running and owns the phone: stop it first with `tapwright serve --stop`"
+INSTALL_WAIT = 180.0  # seconds the phone gets to install WebDriverAgent (it takes about 20)
 
 
 # ---------- setup ----------
@@ -60,6 +61,8 @@ async def setup(a) -> int:
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
     from . import signing
+    if _daemon_owns_phone():  # its WebDriverAgent is running: iOS would hold the new one's install open
+        return fail(DAEMON_RUNNING)
     print("1. The iPhone, on USB")
     usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"]
     if not usb:
@@ -100,8 +103,13 @@ async def setup(a) -> int:
 
     print("4. WebDriverAgent")
     ipa, runner_id = signing.sign_wda(store.HOME / "build")
-    async with InstallationProxyService(lockdown=lockdown) as proxy:
-        await proxy.install_from_local(ipa)
+    try:
+        async with InstallationProxyService(lockdown=lockdown) as proxy:
+            await asyncio.wait_for(proxy.install_from_local(ipa), INSTALL_WAIT)
+    except asyncio.TimeoutError:
+        # iOS keeps an install open while the app it replaces still runs (seen 2026-11-11, IXErrorDomain 48)
+        return fail(f"the phone didn't finish installing WebDriverAgent in {INSTALL_WAIT:.0f} s. If a test runner "
+                    "is still running on the phone (another tool, or Xcode), stop it, then run setup again.")
     ok(f"installed as {runner_id}")
 
     print("5. Network pairing (Wi-Fi and remote use)")
