@@ -613,3 +613,37 @@ def test_the_keyboard_stays_in_front_of_a_presented_sheet():
     layer = node("Other", 0, 0, 430, 932, children=SHEET)
     tree = ui.read(phone(keys, layer), PHONE, keyboard=True)
     assert "q" in labels(tree.items)
+
+
+SCREEN = (400.0, 800.0)
+
+
+def test_blank_point_prefers_the_centre_of_a_passive_text():
+    items = [el("e1", "button", "Go", rect=(0, 100, 100, 40)), el("e2", "text", "Hello", rect=(150, 200, 100, 20))]
+    assert ui.blank_point(items, SCREEN, 60, 500) == (200.0, 210.0)
+
+
+def test_blank_point_skips_a_text_whose_centre_is_inside_a_button():
+    items = [el("e1", "text", "Row", rect=(0, 100, 200, 40)), el("e2", "button", "Row", rect=(0, 100, 200, 40)),
+             el("e3", "text", "Free", rect=(0, 300, 100, 20))]
+    assert ui.blank_point(items, SCREEN, 60, 500) == (50.0, 310.0)
+
+
+def test_blank_point_falls_back_to_the_grid():
+    items = [el("e1", "button", "Wide", rect=(0, 60, 400, 100)), el("e2", "text", "Under", rect=(0, 60, 400, 20))]
+    x, y = ui.blank_point(items, SCREEN, 60, 500)
+    assert (x, y) == (20.0, 160.0)  # the first grid point below the button
+
+
+def test_blank_point_is_none_on_a_screen_filled_by_one_button():
+    assert ui.blank_point([el("e1", "button", "All", rect=(0, 0, 400, 800))], SCREEN, 60, 500) is None
+
+
+def test_blank_point_never_lands_on_the_keyboard_or_under_the_navigation_bar():
+    bar = ui.Bar("NavigationBar", (0, 0, 400, 100), "bar")
+    # the only text lies under a bar that reaches down to y=100, though the band starts at 60
+    items = [el("e1", "text", "Title", rect=(0, 70, 100, 20), covered_by=(bar,)),
+             el("e2", "button", "Fill", rect=(0, 100, 400, 500))]
+    assert ui.blank_point(items, SCREEN, 60, 500) is None
+    items = [el("e1", "text", "Low", rect=(0, 600, 100, 20)), el("e2", "button", "Fill", rect=(0, 60, 400, 500))]
+    assert ui.blank_point(items, SCREEN, 60, 500) is None  # the text is below the band, the keyboard's

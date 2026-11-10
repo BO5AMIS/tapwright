@@ -80,6 +80,8 @@ STILL_FPS = 5
 PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
 PACE_TICK = 0.25  # how often the pace is checked
 NOTE_PERSON = "a person used the phone since your last look."
+NOTE_KEYBOARD = "closed the keyboard first."
+KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
 
@@ -715,6 +717,7 @@ class Daemon:
                 self._refuse_behind_alert(view, force=False)  # an alert hides the app's elements: say so, not "not found"
                 self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 self._refuse_off_screen(target)
+            box["note"] = await self._close_keyboard(view, name, target)  # a person would close it before the touch
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
@@ -732,6 +735,8 @@ class Daemon:
                                           "happened") from None
         if isinstance(result, Scrolled) and result.note:
             notes = [*notes, result.note]
+        if box.get("note"):  # tap, long_press, toggle and type_text carry theirs here, whatever they return
+            notes = [*notes, box["note"]]
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
@@ -966,6 +971,50 @@ class Daemon:
         done.note = note
         return done
 
+    async def _outside_focus(self, view, name: str, target: ui.Target, keyboard_top: float) -> bool:
+        """Is the touch's target something other than the focused input, so the keyboard is in the way of it
+        (AGENT-TOOLS v1.4)? False for the focused input itself, an element in an OS alert, a point on the
+        keyboard (a key), and whatever the tool is about to refuse (nothing is touched then)."""
+        items = view.items
+        if target.point is not None:
+            x, y = target.point
+            if name != "type_text" and y >= keyboard_top:
+                return False
+            if any(e.in_alert and e.x <= x < e.x + e.width and e.y <= y < e.y + e.height for e in items):
+                return False
+            field = ui.at_point(items, target.point, "input")
+        else:
+            try:
+                field = ui.resolve(items, target)
+            except Refused:
+                return False
+            if isinstance(field, tuple) or field.in_alert:
+                return False
+        if name == "type_text" and (field is None or field.role != "input"):
+            return False  # it refuses typing into this itself
+        return field is None or not await self.session.is_focused(field)  # a non-input is outside by definition
+
+    async def _close_keyboard(self, view, name: str, target: ui.Target | None) -> str:
+        """Before a touch (or a focusing tap) on something other than the focused input while the keyboard is up:
+        close it the way a person does, since the first tap outside the field only closes it and the keyboard
+        covers what is near the bottom. One touch where nothing responds, then WebDriverAgent's own dismissal
+        if it is still up; neither presses return. Gives the note when it ended up closed, else leaves the
+        screen to the usual `covered` rules."""
+        s = self.session
+        if name not in KEYBOARD_TOOLS or target is None or not view.read_keyboard or view.alert_now is not None:
+            return ""  # (an OS alert in front is modal: a touch outside it closes nothing, and behind_alert decides)
+        top, bottom = s.last_insets
+        top = SCROLL_TOP_INSET if top is None else top
+        bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
+        if not await self._outside_focus(view, name, target, bottom):
+            return ""
+        if (blank := ui.blank_point(view.items, s.screen, top, bottom)) is not None:
+            await s.tap(ui.Target(x=blank[0], y=blank[1]))
+            await self._silent_read(view)
+        if view.read_keyboard and await s.dismiss_keyboard():
+            await self._silent_read(view)
+        return "" if view.read_keyboard else NOTE_KEYBOARD
+
     @staticmethod
     def _refuse_behind_alert(view, force: bool = True) -> None:
         """When the newest read shows an OS alert: `behind_alert`. `force` says whether passing it could help
@@ -1126,6 +1175,7 @@ class Daemon:
         mark = self._mark()  # taken before the read: a frame that changes meanwhile counts against the list
         tree = await s.refresh()
         view.alert_now = _alert_key(tree.alert)  # the alert as this read shows it, not as the last answer did
+        view.read_keyboard = tree.keyboard
         known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
         held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
         view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
@@ -1273,6 +1323,7 @@ class Daemon:
             view.items = view.shown = self.session.items
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
             view.alert, view.keyboard = _alert_key(self.session.last_alert), self.session.last_keyboard
+            view.read_keyboard = view.keyboard
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             return text, image
@@ -1311,6 +1362,7 @@ class Daemon:
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
         view.alert, view.keyboard = _alert_key(snap.tree.alert), snap.tree.keyboard
+        view.read_keyboard = view.keyboard
         view.alert_now = view.alert
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)

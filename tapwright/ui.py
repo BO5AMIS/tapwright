@@ -805,6 +805,36 @@ def at_point(items: list[Element], point: tuple[float, float], role: str) -> Ele
     return None
 
 
+BLANK_GRID = 40.0  # points between the points blank_point tries when no label offers one
+
+
+def blank_point(items: list[Element], screen: tuple[float, float], top: float,
+                bottom: float) -> tuple[float, float] | None:
+    """A point to touch that does nothing but take focus away from a text field: between `top` and `bottom` (the
+    bars' edges, y), inside no element that takes an action and no bar that covers content. The centre of the
+    first passive label or header there if it is free (a finger rests on text without pressing anything), else
+    the first free point of a coarse grid, else None. A scroll view doesn't count as one that takes a touch:
+    its empty area does nothing, and one often fills the whole screen."""
+    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
+    blocks += [e.rect for e in items if e.type in COVERING_BARS]
+    blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+
+    def free(x: float, y: float) -> bool:
+        return (0 <= x < screen[0] and top <= y < bottom and not any(_holds(r, (x, y)) for r in blocks))
+    for e in items:
+        if e.role in ("text", "header") and not e.in_alert and free(*e.center):
+            return e.center
+    y = top + BLANK_GRID / 2
+    while y < bottom:
+        x = BLANK_GRID / 2
+        while x < screen[0]:
+            if free(x, y):
+                return x, y
+            x += BLANK_GRID
+        y += BLANK_GRID
+    return None
+
+
 def _pointer(steps: list[dict]) -> dict:
     return {"actions": [{"type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"}, "actions": steps}]}
 

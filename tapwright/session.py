@@ -309,6 +309,25 @@ class Session:
             self.typed_into = (_field_key(field), element)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
 
+    async def is_focused(self, field: ui.Element) -> bool:
+        """Is this listed input the one WebDriverAgent says has focus (the keyboard's target)?"""
+        if field.role != "input":
+            return False
+        active = await self._active_element()
+        return bool(active) and await self._is_field(active, field)
+
+    async def dismiss_keyboard(self) -> bool:
+        """WebDriverAgent's own way of closing the keyboard, which presses no return. False when it refuses (the
+        keyboard has no key to dismiss it with); a dead line still raises ConnectionLost."""
+        self.typed_into = None
+        try:
+            await self._call("POST", "/session/{sid}/wda/keyboard/dismiss", {})
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return False
+        return True
+
     async def _active_element(self) -> str | None:
         focused = (await self._call("GET", "/session/{sid}/element/active")).get("value") or {}
         return focused.get("ELEMENT") or next(iter(focused.values()), None)

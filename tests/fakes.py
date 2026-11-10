@@ -116,6 +116,11 @@ class FakeSession:
         self.scrolls: list = []  # (x0, y0, x1, y1) of each eased scroll drag (the raw swipe tool's aren't recorded)
         self.offscreen: list = []  # elements the last read found outside the screen (tests set it)
         self.behind: list = []  # (element, what is in front of it) for what an open sheet hides (tests set it)
+        self.focused = ""  # the identifier or label of the focused input (empty: none)
+        self.tap_points: list = []  # where each tap went (the element's centre, or the point)
+        self.blank_tap_closes = True  # a tap on a point no element holds closes the keyboard
+        self.dismiss_ok = True  # whether WebDriverAgent's keyboard dismissal is accepted (else a refusal)
+        self.dismiss_closes = False  # whether an accepted dismissal closes the keyboard
         # what every connect raises: a PhoneLocked, or an AppNotAnswering until kill_app ends that app
         self.stuck: Exception | None = None
 
@@ -198,10 +203,24 @@ class FakeSession:
             return ui.Back(False, None, self.dismiss_at)
         return ui.Back(self.has_nav_bar or self.back_at is not None, self.back_at)
 
+    async def is_focused(self, field):
+        self._record("is_focused")
+        return field.role == "input" and bool(self.focused) and self.focused in (field.identifier, field.label)
+
+    async def dismiss_keyboard(self):
+        self._record("dismiss_keyboard")
+        if self.dismiss_ok and self.dismiss_closes:
+            self.last_keyboard = False
+        return self.dismiss_ok
+
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
         self._record("tap")
+        self.tap_points.append(hit if isinstance(hit, tuple) else hit.center)
         if isinstance(hit, tuple):
+            if self.blank_tap_closes and not any(e.actions and e.role != "scroll" and e.x <= hit[0] < e.x + e.width
+                                                 and e.y <= hit[1] < e.y + e.height for e in self.items):
+                self.last_keyboard = False  # a touch where nothing responds takes focus away: the keyboard goes
             self.last_point = hit
             return f"Tapped ({round(hit[0])}, {round(hit[1])})."
         self.last_point = hit.center

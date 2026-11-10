@@ -3691,3 +3691,129 @@ def test_a_row_under_a_translucent_navigation_bar_is_touched_below_it():
         assert d.session.last_point == (215.0, 120.0) and "at its visible part (215, 120)" in r["text"]
         await finish(stop, task)
     run(go)
+
+# ---- closing the keyboard first (AGENT-TOOLS v1.4) ----
+KEYBOARD_NOTE = "Note: closed the keyboard first."
+KEYBOARD_BAR = ui.Bar("Keyboard", (0, 500, 400, 300), "keyboard")
+
+
+async def keyboard_up(shown: bool = True, focused: str = "a", **session_options):
+    """A daemon whose screen has the keyboard up over its lower part, field A focused, and the agent has looked."""
+    d = make()
+    s = d.session
+    s.tree = [
+        el("e1", "text", "Title", rect=(10, 70, 100, 20), type="StaticText"),
+        el("e2", "input", "Field A", "a", rect=(10, 100, 300, 40)),
+        el("e3", "input", "Field B", "b", rect=(10, 160, 300, 40)),
+        button("e4", "Save", "save", rect=(10, 300, 100, 40)),
+        el("e5", "switch", "Notify", "notify", rect=(10, 360, 100, 40), checked=False),
+        button("e6", "Low", "low", rect=(10, 600, 100, 40), covered_by=(KEYBOARD_BAR,)),
+    ]
+    s.last_keyboard, s.last_insets, s.focused = shown, (60.0, 300.0), focused
+    for key, value in session_options.items():
+        setattr(s, key, value)
+    stop, task = await started(d)
+    await d.run_tool("a", "look", {"screenshot": False})
+    return d, stop, task
+
+
+@pytest.mark.parametrize("tool,args,end", [
+    ("tap", {"target": {"id": "save"}}, (60.0, 320.0)),
+    ("long_press", {"target": {"id": "save"}}, (60.0, 320.0)),
+    ("toggle", {"target": {"id": "notify"}}, (60.0, 380.0)),
+])
+def test_a_touch_outside_the_focused_input_closes_the_keyboard_first(tool, args, end):
+    async def go():
+        d, stop, task = await keyboard_up()
+        r = await d.run_tool("a", tool, args)
+        # one touch where nothing responds (the centre of the label "Title"), then the target's own touch
+        assert d.session.tap_points == [(60.0, 80.0), end]
+        assert "dismiss_keyboard" not in d.session.calls  # the blank touch was enough
+        assert r["text"].endswith(KEYBOARD_NOTE)
+        assert "Keyboard: hidden" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_into_another_input_closes_the_keyboard_but_not_into_the_focused_one():
+    async def go():
+        d, stop, task = await keyboard_up()
+        r = await d.run_tool("a", "type_text", {"target": {"id": "a"}, "text": "x"})
+        assert d.session.tap_points == [] and KEYBOARD_NOTE not in r["text"]  # field A: the fast path, no blank tap
+        r = await d.run_tool("a", "type_text", {"target": {"id": "b"}, "text": "y"})
+        assert d.session.tap_points[0] == (60.0, 80.0) and r["text"].endswith(KEYBOARD_NOTE)
+        assert [t[0] for t in d.session.typed] == ["x", "y"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_tap_on_the_focused_input_itself_closes_nothing():
+    async def go():
+        d, stop, task = await keyboard_up()
+        r = await d.run_tool("a", "tap", {"target": {"id": "a"}})
+        assert d.session.tap_points == [(160.0, 120.0)] and KEYBOARD_NOTE not in r["text"]
+        r = await d.run_tool("a", "tap", {"target": {"x": 100, "y": 120}})  # a point on it is the same
+        assert d.session.tap_points[1:] == [(100.0, 120.0)] and KEYBOARD_NOTE not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_keyboard_means_no_extra_tap_and_no_note():
+    async def go():
+        d, stop, task = await keyboard_up(shown=False)
+        r = await d.run_tool("a", "tap", {"target": {"id": "save"}})
+        assert d.session.tap_points == [(60.0, 320.0)] and KEYBOARD_NOTE not in r["text"]
+        assert "dismiss_keyboard" not in d.session.calls and "is_focused" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_dismissal_closes_it_when_the_blank_touch_does_not():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_closes=True)
+        r = await d.run_tool("a", "tap", {"target": {"id": "save"}})
+        assert d.session.calls.count("dismiss_keyboard") == 1
+        assert d.session.tap_points == [(60.0, 80.0), (60.0, 320.0)] and r["text"].endswith(KEYBOARD_NOTE)
+        await finish(stop, task)
+    run(go)
+
+
+def test_when_nothing_closes_it_there_is_no_note_and_covered_still_refuses():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "low"}})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("covered:")
+        assert d.session.calls.count("dismiss_keyboard") == 1  # tried once
+        r = await d.run_tool("a", "tap", {"target": {"id": "save"}})
+        assert KEYBOARD_NOTE not in r["text"]  # still touched, as before
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_point_on_the_keyboard_is_a_key_and_closes_nothing():
+    async def go():
+        d, stop, task = await keyboard_up()
+        r = await d.run_tool("a", "tap", {"target": {"x": 100, "y": 600}})
+        assert d.session.tap_points == [(100.0, 600.0)] and KEYBOARD_NOTE not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_force_does_not_switch_the_closing_off():
+    async def go():
+        d, stop, task = await keyboard_up()
+        r = await d.run_tool("a", "tap", {"target": {"id": "save"}, "force": True})
+        assert d.session.tap_points == [(60.0, 80.0), (60.0, 320.0)] and r["text"].endswith(KEYBOARD_NOTE)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_element_in_an_os_alert_is_touched_without_closing():
+    async def go():
+        d, stop, task = await keyboard_up()
+        d.session.tree = [*d.session.tree, button("e7", "Allow", "allow", rect=(10, 400, 100, 40), in_alert=True)]
+        r = await d.run_tool("a", "tap", {"target": {"id": "allow"}})
+        assert d.session.tap_points == [(60.0, 420.0)] and KEYBOARD_NOTE not in r["text"]
+        await finish(stop, task)
+    run(go)

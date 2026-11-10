@@ -773,3 +773,14 @@ def test_typing_is_refused_when_another_field_has_focus_after_the_move(phone, mo
     s.items = [ui_module.Element("e1", "input", "Email", "email-field", rect=(10, 10, 200, 40), actions=("tap", "type"))]
     with pytest.raises(Refused):
         asyncio.run(s.type_text("hi", target=ui_module.Target(ref="e1")))
+
+
+def test_dismiss_keyboard_is_true_on_success_false_on_a_refusal_and_raises_on_a_dead_line(phone):
+    s = Session(phone)
+    assert asyncio.run(s.dismiss_keyboard()) is True
+    assert phone.requests[-1] == ("POST", "/session/S/wda/keyboard/dismiss", {})
+    phone.fail["/wda/keyboard/dismiss"] = DeviceError("WebDriverAgent: unknown error: no dismiss key")
+    assert asyncio.run(s.dismiss_keyboard()) is False
+    phone.fail["/wda/keyboard/dismiss"] = ConnectionLost("line is dead")
+    with pytest.raises(ConnectionLost):
+        asyncio.run(s.dismiss_keyboard())
