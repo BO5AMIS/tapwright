@@ -2,162 +2,410 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tapwright live view</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Live view</title>
+<link rel="icon" href="data:,">
+<!-- The shared live view page: a client of docs/VIEWER-PROTOCOL.md. One file, inline CSS and
+     script, no external references. It never names the tool that serves it: the tool's name comes
+     in the status message (tool). The text between the video-block markers is shared byte for
+     byte with other copies of this page. Change it only by agreement. -->
 <style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --line: #d0d5dd;
+  --text: #16191f;
+  --muted: #4b5563;
+  --accent: #0b63c5;
+  --btn: #f1f3f6;
+  --btn-line-hover: #98a2b3;
+  --pressed: #dbeafe;
+  --dot-idle: #6b7480;
+  --dot-live: #1f883d;
+  --dot-wait: #9a6700;
+  --dot-bad: #cf222e;
+  --notice-bg: #fdecec;
+  --notice-line: #c62828;
+  --notice-text: #7a1212;
+  --frame-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  /* Marks and overlay labels sit on the phone's picture, which doesn't follow the theme, so
+     they keep one set of colours: dark text on a light fill, readable on any picture. */
+  --agent: #4cc2ff;
+  --person: #8be28b;
+  --fail: #ff6b6b;
+  --on-mark: #000000;
+  --label-bg: #ffd60a;
+  --label-text: #000000;
+}
+@media (prefers-color-scheme: dark) {
   :root {
-    --bg: #f4f4f5; --panel: #ffffff; --fg: #18181b; --muted: #52525b; --line: #d4d4d8;
-    --agent: #2563eb; --person: #d97706; --bad: #dc2626; --on-bad: #ffffff;
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #2a313c;
+    --text: #e6e9ef;
+    --muted: #9aa4b2;
+    --accent: #7cc4ff;
+    --btn: #1f2630;
+    --btn-line-hover: #3b4554;
+    --pressed: #1d3550;
+    --dot-live: #3fb950;
+    --dot-wait: #d29922;
+    --dot-bad: #ff6b6b;
+    --notice-bg: #3a1c1c;
+    --notice-line: #ff6b6b;
+    --notice-text: #ffd7d7;
+    --frame-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #09090b; --panel: #18181b; --fg: #e4e4e7; --muted: #a1a1aa; --line: #3f3f46;
-            --agent: #60a5fa; --person: #fbbf24; --bad: #f87171; --on-bad: #18181b; }
-  }
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body { display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
-         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;
-           padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
-  button, select, label.toggle { font: inherit; color: var(--fg); background: var(--bg);
-           border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
-  label.toggle { display: inline-flex; align-items: center; gap: 6px; }
-  [hidden] { display: none !important; }
-  #status { padding: 6px 16px; text-align: center; color: var(--muted); font-size: 13px; }
-  main { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0 16px 16px; }
-  #phone { position: relative; line-height: 0; width: var(--pw, 9px); height: var(--ph, 19px);
-           touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-  /* the JPEG picture and the video canvas share this class; fit() sets --pw and --ph on #phone */
-  .pic { display: block; width: var(--pw, 9px); height: var(--ph, 19px); border-radius: 16px;
-         box-shadow: 0 0 0 1px var(--line); background: #000;
-         touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; cursor: pointer; }
-  #marks { position: absolute; left: 0; top: 0; pointer-events: none; }
-  #toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: calc(100% - 32px);
-           padding: 8px 14px; border-radius: 8px; background: var(--bad); color: var(--on-bad); }
-  @media (pointer: coarse) { button, select, label.toggle { min-height: 44px; } }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+#bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+#heading {
+  flex: none;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+#statusline {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+}
+#dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--dot-idle);
+}
+#dot.live { background: var(--dot-live); }
+#dot.wait { background: var(--dot-wait); }
+#dot.bad { background: var(--dot-bad); }
+#status {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+#announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+#tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+button, select {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover, select:hover { border-color: var(--btn-line-hover); }
+button[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+@media (pointer: coarse) {
+  button, select { min-height: 44px; }
+  #statusline { height: 44px; }
+}
+#stage {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+#frame {
+  position: relative;
+  width: 200px;
+  height: 433px;
+  background: #000;
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--line), var(--frame-shadow);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#frame.can-point { cursor: crosshair; }
+.pic {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+#empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+  color: #aab2bf;
+}
+#frame.has-frame #empty { display: none; }
+#overlay, #marks, #trail { position: absolute; inset: 0; pointer-events: none; }
+#trail { width: 100%; height: 100%; }
+#overlay.stale { opacity: 0.3; }
+.box {
+  position: absolute;
+  outline: 1px solid rgba(255, 214, 10, 0.9);
+  outline-offset: -1px;
+}
+.box > span {
+  position: absolute;
+  left: -1px;
+  bottom: 100%; /* above the box, so it doesn't cover what the box marks */
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 2px;
+  font: 10px/12px ui-monospace, Consolas, monospace;
+  color: var(--label-text);
+  background: var(--label-bg);
+  white-space: nowrap;
+}
+.mark {
+  --c: var(--agent);
+  position: absolute;
+  animation: markfade 1.6s ease-out forwards;
+}
+.mark.person { --c: var(--person); }
+.mark.fail { --c: var(--fail); animation-duration: 2.6s; }
+.mark .tag {
+  position: absolute;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--on-mark);
+  background: var(--c);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+.mark.ring { width: 0; height: 0; }
+.mark.ring::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: -16px;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--c);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+.mark.ring .tag { left: 20px; top: -8px; }
+.mark.rect {
+  border: 2px solid var(--c);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+.mark.rect .tag { left: -2px; top: -20px; }
+.mark.pill .tag { position: absolute; left: 8px; top: 8px; }
+.mark.pending { animation: none; opacity: 0.55; }
+.mark.pending.gone { opacity: 0; transition: opacity 0.3s ease-out; }
+@keyframes markfade {
+  0% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mark { animation: none; }
+}
+#notice {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  max-width: calc(100% - 32px);
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--notice-bg);
+  border: 1px solid var(--notice-line);
+  color: var(--notice-text);
+  opacity: 0;
+  pointer-events: none;
+}
+#notice.on { opacity: 1; }
 </style>
 </head>
 <body>
-<header>
-  <button type="button" data-accept="home" data-button="home">Home</button>
-  <button type="button" data-accept="volume" data-button="volumeDown">Volume −</button>
-  <button type="button" data-accept="volume" data-button="volumeUp">Volume +</button>
-  <label class="toggle"><input type="checkbox" id="pause"> Pause agent</label>
-  <select id="quality" data-accept="quality" aria-label="Stream quality">
-    <option value="sharp">Sharp</option>
-    <option value="balanced" selected>Balanced</option>
-    <option value="light">Light</option>
-  </select>
+<header id="bar">
+  <h1 id="heading">Live view</h1>
+  <div id="statusline">
+    <span id="dot" aria-hidden="true"></span>
+    <span id="status">Connecting</span>
+    <span id="announce" role="status" aria-live="polite"></span>
+  </div>
+  <div id="tools" role="toolbar" aria-label="Viewer controls">
+    <button type="button" id="pause" aria-pressed="false">Pause agent</button>
+    <button type="button" id="boxes" aria-pressed="false" hidden>Boxes</button>
+    <label class="q" id="quality-wrap" hidden>Quality
+      <select id="quality" aria-label="Stream quality">
+        <option value="sharp">Sharp</option>
+        <option value="balanced" selected>Balanced</option>
+        <option value="light">Light</option>
+      </select>
+    </label>
+    <button type="button" id="home" hidden>Home</button>
+    <button type="button" id="vol-down" hidden>Volume down</button>
+    <button type="button" id="vol-up" hidden>Volume up</button>
+  </div>
 </header>
-<div id="status"><span id="state" aria-live="polite">Connecting…</span><span id="fps"></span></div>
-<main><div id="phone"><img id="screen" class="pic" alt="The phone's screen, live" draggable="false"><canvas id="marks" aria-hidden="true"></canvas></div></main>
-<div id="toast" role="alert" hidden></div>
+<main id="stage">
+  <div id="frame" tabindex="0" role="img" aria-label="Live phone screen">
+    <img id="screen" class="pic" alt="">
+    <div id="empty">Waiting for the first frame</div>
+    <div id="overlay" aria-hidden="true"></div>
+    <canvas id="trail" aria-hidden="true"></canvas>
+    <div id="marks" aria-hidden="true"></div>
+  </div>
+  <div id="notice" role="alert"></div>
+</main>
 <script>
 "use strict";
-if (location.search) history.replaceState(null, "", location.pathname);
-const img = document.getElementById("screen");
-const marks = document.getElementById("marks");
-const ctx = marks.getContext("2d");
-const stateEl = document.getElementById("state");
-const fpsEl = document.getElementById("fps");
-const toastEl = document.getElementById("toast");
-const pauseEl = document.getElementById("pause");
-const qualityEl = document.getElementById("quality");
-const mainEl = document.querySelector("main");
-const phone = document.getElementById("phone");
-const STATES = { live: "Live", connecting: "Connecting", reconnecting: "Reconnecting", locked: "Phone locked", "not-answering": "App not answering", "no-device": "No phone" };
-const VIA = { usb: "USB", wifi: "Wi-Fi", tailscale: "Tailscale" };
-const DRIVERS = { agent: "Agent driving", person: "You're driving" };
-let ws = null;
-let wsDelay = 500;
-let everOpened = false;
-let videoAccepted = false; // the latest status lists "video" in accepts
-let videoOn = false;       // the video canvas is the picture on screen
-let videoSize = null;      // { w, h } from the video config
-let lastSize = null;       // size of the last JPEG picture
-const BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-function wsUrl(path) { return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + path; }
 
-// ---- the picture ----
-// Whichever picture element is showing: the img, or the canvas while video plays.
-function shownPic() { return (videoOn && phone.querySelector("canvas.pic")) || img; }
-function startStream() { if (!videoOn) img.src = "/stream?t=" + Date.now(); }
-img.addEventListener("error", () => { if (!videoOn) setTimeout(startStream, 1000); });
-let applied = "";
-function fit() {
-  if (!videoOn && img.naturalWidth > 1) lastSize = { w: img.naturalWidth, h: img.naturalHeight };
-  const size = videoOn && videoSize ? videoSize : lastSize;
-  const w = size ? size.w : 9, h = size ? size.h : 19.5;
-  const box = mainEl.getBoundingClientRect();
-  const scale = Math.max(0.05, Math.min((box.width - 32) / w, (box.height - 16) / h));
-  const cw = Math.floor(w * scale), ch = Math.floor(h * scale);
-  const d = window.devicePixelRatio || 1;
-  const key = cw + "x" + ch + "@" + d;
-  if (key === applied) return;
-  applied = key;
-  phone.style.setProperty("--pw", cw + "px");
-  phone.style.setProperty("--ph", ch + "px");
-  marks.width = Math.round(cw * d);
-  marks.height = Math.round(ch * d);
-  marks.style.width = cw + "px";
-  marks.style.height = ch + "px";
-  ctx.setTransform(marks.width / cw, 0, 0, marks.height / ch, 0, 0);
+/* parser:start */
+var CRLF2 = new Uint8Array([13, 10, 13, 10]);
+
+function boundaryFromContentType(contentType) {
+  var m = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType || "");
+  return m ? (m[1] || m[2]) : "frame";
 }
-new ResizeObserver(fit).observe(mainEl);
-setInterval(fit, 500);
-startStream();
 
-// ---- status, actions, errors (server text goes in as textContent only) ----
-let lastPaused = false;
-let lastQuality = "balanced";
-function showStatus(s) {
-  if (Array.isArray(s.accepts)) {
-    const accepts = new Set(s.accepts);
-    document.querySelectorAll("[data-accept]").forEach((el) => { el.hidden = !accepts.has(el.dataset.accept); });
-    videoAccepted = accepts.has("video");
+function createParserState(boundary) {
+  var enc = new TextEncoder();
+  return {
+    delim: enc.encode("--" + boundary),
+    closer: enc.encode("\r\n--" + boundary),
+    mode: "preamble",
+    buf: new Uint8Array(0),
+    headers: null,
+    length: -1
+  };
+}
+
+function concatBytes(a, b) {
+  if (a.length === 0) return b;
+  var out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function indexOfBytes(hay, needle, from) {
+  var n = needle.length;
+  var last = hay.length - n;
+  var first = needle[0];
+  for (var i = from || 0; i <= last; i++) {
+    if (hay[i] !== first) continue;
+    var j = 1;
+    while (j < n && hay[i + j] === needle[j]) j++;
+    if (j === n) return i;
   }
-  lastPaused = !!s.paused;
-  if (s.quality) lastQuality = s.quality;
-  if (document.activeElement !== pauseEl) pauseEl.checked = lastPaused;
-  if (document.activeElement !== qualityEl) qualityEl.value = lastQuality;
-  const parts = [STATES[s.state] || String(s.state)];
-  if (s.via) parts.push(VIA[s.via] || String(s.via));
-  parts.push(s.paused ? "Agent paused" : (DRIVERS[s.driver] || "Idle"));
-  if (s.detail) parts.push(String(s.detail));
-  stateEl.textContent = parts.join(" · ");
-  fpsEl.textContent = s.state === "live" ? " · " + Math.round(s.fps || 0) + " fps" : "";
-  video.update();
-}
-let toastTimer = 0;
-function toast(text) {
-  toastEl.textContent = text;
-  toastEl.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 4000);
-}
-function color(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-let clearTimer = 0;
-function clearSoon(ms) {
-  clearTimeout(clearTimer);
-  clearTimer = setTimeout(() => ctx.clearRect(0, 0, marks.clientWidth, marks.clientHeight), ms);
-}
-function showAction(a) {
-  if (!a.point) return;
-  ctx.beginPath();
-  ctx.arc(a.point.x * marks.clientWidth, a.point.y * marks.clientHeight, 14, 0, Math.PI * 2);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = a.ok === false ? color("--bad") : color(a.by === "person" ? "--person" : "--agent");
-  ctx.stroke();
-  clearSoon(700);
-}
-function handle(m) {
-  if (m.type === "status") showStatus(m);
-  else if (m.type === "action") showAction(m);
-  else if (m.type === "error") toast(String(m.message || m.code || "Something went wrong"));
+  return -1;
 }
 
-// ---- video (H.264 over WS /video): the shared block, then this page's wiring ----
+function parsePartHeaders(bytes) {
+  var text = new TextDecoder().decode(bytes);
+  var lines = text.split("\r\n");
+  var headers = {};
+  for (var i = 0; i < lines.length; i++) {
+    var at = lines[i].indexOf(":");
+    if (at > 0) headers[lines[i].slice(0, at).trim().toLowerCase()] = lines[i].slice(at + 1).trim();
+  }
+  return headers;
+}
+
+/* Feed one chunk of the response body; returns the parts completed by it, each
+   { headers, body } with lower-case header names and the exact body bytes. */
+function parseMultipartChunk(state, chunk) {
+  var parts = [];
+  state.buf = concatBytes(state.buf, chunk);
+  for (;;) {
+    var buf = state.buf;
+    if (state.mode === "done") {
+      state.buf = new Uint8Array(0);
+      break;
+    }
+    if (state.mode === "preamble") {
+      var at = indexOfBytes(buf, state.delim, 0);
+      if (at < 0) {
+        state.buf = buf.subarray(Math.max(0, buf.length - state.delim.length + 1));
+        break;
+      }
+      state.buf = buf.subarray(at + state.delim.length);
+      state.mode = "headers";
+      continue;
+    }
+    if (state.mode === "headers") {
+      if (buf.length >= 2 && buf[0] === 45 && buf[1] === 45) {
+        state.mode = "done";
+        continue;
+      }
+      var end = indexOfBytes(buf, CRLF2, 0);
+      if (end < 0) break;
+      state.headers = parsePartHeaders(buf.subarray(0, end));
+      var len = parseInt(state.headers["content-length"], 10);
+      state.length = len >= 0 ? len : -1;
+      state.buf = buf.subarray(end + 4);
+      state.mode = "body";
+      continue;
+    }
+    if (state.length >= 0) {
+      if (buf.length < state.length) break;
+      parts.push({ headers: state.headers, body: buf.slice(0, state.length) });
+      state.buf = buf.subarray(state.length);
+    } else {
+      var stop = indexOfBytes(buf, state.closer, 0);
+      if (stop < 0) break;
+      parts.push({ headers: state.headers, body: buf.slice(0, stop) });
+      state.buf = buf.subarray(stop + 2);
+    }
+    state.mode = "preamble";
+    state.headers = null;
+  }
+  return parts;
+}
+/* parser:end */
+
 /* video-block:start */
 /* Video block: H.264 over a WebSocket (WS /video in docs/VIEWER-PROTOCOL.md). It is self-contained:
    paste it unchanged into another page. It reaches the page only through the object given to
@@ -519,167 +767,760 @@ function createVideoBlock(io) {
   };
 }
 /* video-block:end */
-const video = createVideoBlock({
-  socketUrl: () => wsUrl("/video"),
-  accepts: () => videoAccepted,
-  picture: () => img,
-  onVideoConfig: (c) => { videoSize = { w: c.width, h: c.height }; if (videoOn) fit(); },
-  onVideoStarted: () => {
-    videoOn = true;
-    img.src = BLANK; // stop downloading /stream; a data image never fires "error"
-    fit();
-  },
-  onVideoStopped: () => {
-    videoOn = false;
-    videoSize = null;
-    startStream();
-    fit();
-  }
-});
-video.update();
 
-// ---- the connection for input and status ----
-function connect() {
-  ws = new WebSocket(wsUrl("/ws"));
-  ws.onopen = () => { wsDelay = 500; if (everOpened) startStream(); everOpened = true; };
-  ws.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { /* skip what we can't read */ } };
-  ws.onclose = () => {
-    stateEl.textContent = "Not connected to tapwright serve; retrying…";
-    fpsEl.textContent = "";
-    setTimeout(connect, wsDelay);
-    wsDelay = Math.min(wsDelay * 2, 5000);
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var frame = $("frame");
+  var screenEl = $("screen");
+  var stage = $("stage");
+  var ovl = $("overlay");
+  var marks = $("marks");
+  var trail = $("trail");
+  var notice = $("notice");
+  var heading = $("heading");
+
+  /* The cookie set with this page authenticates /stream and /ws: take the token out of the
+     address bar and the history. */
+  if (location.search) history.replaceState(null, "", location.pathname);
+  function endpoint(path, socket) {
+    var u = new URL(path, location.href);
+    u.search = "";
+    u.hash = "";
+    if (socket) u.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    return u.href;
+  }
+
+  var status = null;
+  var accepts = {};
+  var ws = null;
+  var wsOpen = false;
+  var wsDelay = 500;
+  var overlayOn = false;
+  var overlay = null;
+  var paused = false;
+  var lastActionAt = 0;
+  var objectUrl = null;
+  var streamLive = false;
+  var streamOn = true;
+  var streamAbort = null;
+  var streamWake = null;
+  var videoOn = false;
+  var haveFrame = false;
+  var shown = { rev: null, size: null, coverage: "", natural: null };
+  var lastAnnounce = "";
+
+  function isNum(v) { return typeof v === "number" && isFinite(v); }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function round4(v) { return Math.round(v * 10000) / 10000; }
+  function pct(v) { return (v * 100).toFixed(3) + "%"; }
+
+  function notify(text) {
+    notice.textContent = text;
+    notice.classList.add("on");
+    clearTimeout(notify.timer);
+    notify.timer = setTimeout(function () { notice.classList.remove("on"); }, 4000);
+  }
+
+  /* The tool's name comes from the status message; the page doesn't know it before that. */
+  function applyTool() {
+    var tool = status && typeof status.tool === "string" ? status.tool.trim().slice(0, 40) : "";
+    var name = tool ? tool + " live view" : "Live view";
+    document.title = name;
+    heading.textContent = name;
+  }
+
+  /* Layout: the frame is scaled to fit the stage and keeps the phone's proportions. */
+  function aspect() {
+    var s = shown.size || (status && status.size) || shown.natural;
+    if (s && isNum(s.w) && isNum(s.h) && s.w > 0 && s.h > 0) return s.w / s.h;
+    return 9 / 19.5;
+  }
+  var trailCtx = null;
+  var trailW = 0;
+  var trailH = 0;
+  var trailKey = "";
+  /* The drag trail's canvas holds the frame's size in CSS pixels times the pixel ratio. */
+  function sizeTrail(w, h) {
+    if (typeof trail.getContext !== "function") return;
+    var d = window.devicePixelRatio || 1;
+    var key = w + "x" + h + "@" + d;
+    if (key === trailKey) return;
+    trailKey = key;
+    trail.width = Math.max(1, Math.round(w * d));
+    trail.height = Math.max(1, Math.round(h * d));
+    trailW = w;
+    trailH = h;
+    trailCtx = trail.getContext("2d");
+    if (trailCtx) trailCtx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  function layout() {
+    var pad = 16;
+    var aw = Math.max(40, stage.clientWidth - pad * 2);
+    var ah = Math.max(40, stage.clientHeight - pad * 2);
+    var a = aspect();
+    var w = Math.min(aw, ah * a);
+    var fw = Math.floor(w);
+    var fh = Math.floor(w / a);
+    frame.style.width = fw + "px";
+    frame.style.height = fh + "px";
+    sizeTrail(fw, fh);
+  }
+  if (typeof ResizeObserver === "function") new ResizeObserver(layout).observe(stage);
+  window.addEventListener("resize", layout);
+  screenEl.addEventListener("load", function () {
+    shown.natural = { w: screenEl.naturalWidth, h: screenEl.naturalHeight };
+    layout();
+  });
+
+  /* Status line and toolbar state. */
+  var STATE_TEXT = {
+    live: "Live",
+    connecting: "Connecting",
+    reconnecting: "Reconnecting",
+    locked: "Phone locked",
+    "no-device": "No device",
+    "not-answering": "App not answering"
   };
-}
-function send(m) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  ws.send(JSON.stringify(m));
-  return true;
-}
-connect();
-
-// ---- pointer: taps, long presses, drags ----
-let path = null;
-let activeId = null;
-let t0 = 0;
-function point(e) {
-  const r = shownPic().getBoundingClientRect();
-  const x = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
-  const y = Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1);
-  return [Math.round(performance.now() - t0), +x.toFixed(4), +y.toFixed(4)];
-}
-function drawTrail() {
-  const w = marks.clientWidth, h = marks.clientHeight;
-  ctx.clearRect(0, 0, w, h);
-  ctx.beginPath();
-  path.forEach(([, x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
-  ctx.lineWidth = 4;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = color("--person");
-  ctx.stroke();
-}
-// Input is heard on #phone, so it works the same on the img and on the video canvas.
-phone.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0 || activeId !== null) return;
-  e.preventDefault();
-  activeId = e.pointerId;
-  phone.setPointerCapture(e.pointerId);
-  t0 = performance.now();
-  path = [point(e)];
-  clearTimeout(clearTimer);
-});
-phone.addEventListener("pointermove", (e) => {
-  if (!path || e.pointerId !== activeId) return;
-  const p = point(e);
-  if (p[0] - path[path.length - 1][0] >= 16) { path.push(p); drawTrail(); }
-});
-phone.addEventListener("pointerup", (e) => {
-  if (!path || e.pointerId !== activeId) return;
-  path.push(point(e));
-  send({ type: "gesture", points: path });
-  drawTrail();
-  clearSoon(400);
-  path = null;
-  activeId = null;
-});
-phone.addEventListener("pointercancel", (e) => {
-  if (e.pointerId !== activeId) return;
-  path = null;
-  activeId = null;
-  clearSoon(0);
-});
-phone.addEventListener("contextmenu", (e) => e.preventDefault());
-
-// ---- wheel: scrolls ----
-let wheel = null;
-const clampShare = (v) => Math.max(-0.8, Math.min(0.8, v));
-phone.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const r = shownPic().getBoundingClientRect();
-  const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? r.height : 1;
-  if (!wheel) {
-    const [, x, y] = point(e);
-    wheel = { x, y, dx: 0, dy: 0 };
-    setTimeout(() => {
-      const w = wheel;
-      wheel = null;
-      const dx = +clampShare(w.dx).toFixed(4), dy = +clampShare(w.dy).toFixed(4);
-      if (dx || dy) send({ type: "scroll", x: w.x, y: w.y, dx, dy });
-    }, 150);
+  function renderStatus() {
+    var dot = $("dot");
+    var core = [];
+    var cls = "";
+    if (!wsOpen) {
+      core.push(status ? "Connection lost, retrying" : "Connecting");
+      cls = "wait";
+    } else if (status) {
+      var st = String(status.state || "");
+      core.push(STATE_TEXT[st] || st || "Unknown");
+      if (status.detail) core.push(String(status.detail));
+      if (status.via) core.push("via " + status.via);
+      if (st === "live") cls = "live";
+      else if (st === "locked" || st === "no-device" || st === "not-answering") cls = "bad";
+      else cls = "wait";
+    } else {
+      core.push("Waiting for status");
+      cls = "wait";
+    }
+    if (wsOpen && status) {
+      if (status.driver === "agent" || status.driver === "person") core.push(status.driver + " driving");
+      if (paused) core.push("agent paused");
+    }
+    if (haveFrame && !streamLive && !videoOn) core.push("picture reconnecting");
+    if (shown.coverage === "app-window") core.push("app window only");
+    var plain = core.join(" \u00b7 ");
+    var text = plain;
+    if (wsOpen && status && isNum(status.fps)) text += " \u00b7 " + status.fps.toFixed(1) + " fps";
+    $("status").textContent = text;
+    $("status").title = text; /* the whole line, when the bar cuts it short */
+    dot.className = cls;
+    if (plain !== lastAnnounce) {
+      lastAnnounce = plain;
+      $("announce").textContent = plain;
+    }
+    var pause = $("pause");
+    pause.textContent = paused ? "Resume agent" : "Pause agent";
+    pause.setAttribute("aria-pressed", paused ? "true" : "false");
+    $("empty").textContent = streamLive || videoOn || haveFrame ? "Waiting for the next frame" : "Waiting for the first frame";
   }
-  wheel.dx += (e.deltaX * unit) / r.width;
-  wheel.dy += (e.deltaY * unit) / r.height;
-}, { passive: false });
 
-// ---- keyboard: typing into the phone's focused field ----
-let typed = "";
-let typeTimer = 0;
-function flushText() {
-  clearTimeout(typeTimer);
-  if (typed) { send({ type: "text", text: typed }); typed = ""; }
-}
-document.addEventListener("keydown", (e) => {
-  if (e.isComposing) return;
-  if (e.target.closest && e.target.closest("header")) {
-    if (e.key === "Escape" && document.activeElement) document.activeElement.blur();
-    return;
+  function canPoint() { return !!(accepts.tap || accepts.longPress || accepts.drag); }
+  function applyAccepts() {
+    accepts = {};
+    if (status && Array.isArray(status.accepts)) {
+      for (var i = 0; i < status.accepts.length; i++) accepts[String(status.accepts[i])] = true;
+    }
+    $("quality-wrap").hidden = !accepts.quality;
+    var q = status && status.quality;
+    if ((q === "sharp" || q === "balanced" || q === "light") && document.activeElement !== $("quality")) $("quality").value = q;
+    $("home").hidden = !accepts.home;
+    $("vol-down").hidden = !accepts.volume;
+    $("vol-up").hidden = !accepts.volume;
+    $("boxes").hidden = !accepts.overlay;
+    if (!accepts.overlay && overlayOn) {
+      /* The server stopped offering overlays: the button is gone, so put it back to off. */
+      overlayOn = false;
+      overlay = null;
+      $("boxes").setAttribute("aria-pressed", "false");
+      drawOverlay();
+    }
+    frame.classList.toggle("can-point", canPoint());
   }
-  const altGr = e.getModifierState && e.getModifierState("AltGraph");
-  if ((e.ctrlKey || e.metaKey || e.altKey) && !altGr) return; // shortcuts; pasting arrives as a paste event
-  if (e.key === "Backspace" || e.key === "Enter") {
-    e.preventDefault();
+
+  /* Frames. */
+  function showPart(part) {
+    var h = part.headers;
+    var url = URL.createObjectURL(new Blob([part.body], { type: "image/jpeg" }));
+    var old = objectUrl;
+    objectUrl = url;
+    screenEl.src = url;
+    if (old) URL.revokeObjectURL(old);
+    var rev = h["x-tree-rev"];
+    shown.rev = rev === undefined || rev === "" ? null : String(rev);
+    shown.coverage = h["x-coverage"] || "";
+    var m = /^(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)$/.exec(h["x-size"] || "");
+    shown.size = m ? { w: parseFloat(m[1]), h: parseFloat(m[2]) } : null;
+    haveFrame = true;
+    frame.classList.add("has-frame");
+    layout();
+    drawOverlay();
+    renderStatus();
+  }
+
+  function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+  /* The JPEG stream runs unless video is showing: setStream(false) aborts the download and
+     parks the loop, setStream(true) wakes it. */
+  function setStream(on) {
+    streamOn = on;
+    if (!on) {
+      if (streamAbort) streamAbort.abort();
+    } else if (streamWake) {
+      var wake = streamWake;
+      streamWake = null;
+      wake();
+    }
+  }
+
+  async function runStream() {
+    var delay = 400;
+    for (;;) {
+      if (!streamOn) {
+        await new Promise(function (resolve) { streamWake = resolve; });
+        delay = 400;
+        continue;
+      }
+      var abort = typeof AbortController === "function" ? new AbortController() : null;
+      streamAbort = abort;
+      try {
+        var res = await fetch(endpoint("/stream", false), {
+          cache: "no-store",
+          credentials: "same-origin",
+          signal: abort ? abort.signal : undefined
+        });
+        if (!res.ok || !res.body) throw new Error("stream " + res.status);
+        var state = createParserState(boundaryFromContentType(res.headers.get("content-type")));
+        var reader = res.body.getReader();
+        for (;;) {
+          var r = await reader.read();
+          if (r.done || !streamOn) break;
+          var parts = parseMultipartChunk(state, r.value);
+          if (parts.length) {
+            if (!streamLive) { streamLive = true; }
+            delay = 400;
+            showPart(parts[parts.length - 1]);
+          }
+        }
+        if (!streamOn) {
+          try { reader.cancel(); } catch (e) { /* already closed */ }
+        }
+      } catch (e) {
+        /* fall through to the backoff */
+      }
+      streamLive = false;
+      renderStatus();
+      if (!streamOn) continue;
+      await sleep(delay);
+      delay = Math.min(Math.round(delay * 1.6), 5000);
+    }
+  }
+
+  /* Overlay: element boxes, drawn only for the frame they belong to. */
+  function drawOverlay() {
+    ovl.textContent = "";
+    if (!overlayOn || !overlay || !Array.isArray(overlay.elements)) return;
+    var orev = overlay.rev === undefined || overlay.rev === null ? null : String(overlay.rev);
+    if (orev !== null && shown.rev !== null && orev !== shown.rev) return;
+    ovl.classList.toggle("stale", isNum(overlay.at) && overlay.at < lastActionAt);
+    var els = overlay.elements;
+    var n = Math.min(els.length, 400);
+    for (var i = 0; i < n; i++) {
+      var e = els[i];
+      var r = e && e.rect;
+      if (!r || !isNum(r.x) || !isNum(r.y) || !isNum(r.w) || !isNum(r.h)) continue;
+      var box = document.createElement("div");
+      box.className = "box";
+      box.style.left = pct(r.x);
+      box.style.top = pct(r.y);
+      box.style.width = pct(r.w);
+      box.style.height = pct(r.h);
+      box.title = [e.ref, e.type, e.label, e.id].filter(Boolean).join(" ");
+      if (typeof e.ref === "string" && e.ref !== "") {
+        var tag = document.createElement("span");
+        tag.textContent = e.ref;
+        box.appendChild(tag);
+      }
+      ovl.appendChild(box);
+    }
+  }
+
+  /* Pending marks: a ring drawn the moment a person's tap or long press is released, before
+     the server answers. The person's action message then takes the ring over (claimPending);
+     with no answer it fades from 1.7 s and is gone at 2 s; an error message drops it at once. */
+  var PENDING_FADE_MS = 1700;
+  var PENDING_END_MS = 2000;
+  /* Both servers call a path a tap when no point of it is 10 points or more from the first
+     (docs/VIEWER-PROTOCOL.md leaves the number to the servers; keep this in step with them). */
+  var TAP_SLOP = 10;
+  /* The server's action names the path's first point; the pending ring sits at its last, which
+     can be up to TAP_SLOP away. So the match must allow at least TAP_SLOP, plus a margin for
+     the rounding of both ends and for an element's rect edge: 6 points. */
+  var NEAR_POINTS = TAP_SLOP + 6;
+  var pendingMarks = [];
+
+  function phoneSize() {
+    var s = shown.size || (status && status.size) || null;
+    return s && isNum(s.w) && isNum(s.h) && s.w > 0 && s.h > 0 ? s : null;
+  }
+  function removeMark(el) {
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }
+  function trimMarks() {
+    while (marks.children.length > 12) marks.removeChild(marks.firstChild);
+  }
+  function forgetPending(entry) {
+    clearTimeout(entry.fade);
+    clearTimeout(entry.end);
+    var i = pendingMarks.indexOf(entry);
+    if (i >= 0) pendingMarks.splice(i, 1);
+  }
+  function dropPending() {
+    var all = pendingMarks.slice();
+    for (var i = 0; i < all.length; i++) {
+      forgetPending(all[i]);
+      removeMark(all[i].el);
+    }
+  }
+  function addPending(x, y) {
+    var el = document.createElement("div");
+    el.className = "mark person ring pending";
+    el.style.left = pct(x);
+    el.style.top = pct(y);
+    marks.appendChild(el);
+    trimMarks();
+    var entry = { el: el, x: x, y: y, fade: 0, end: 0 };
+    entry.fade = setTimeout(function () {
+      var at = pendingMarks.indexOf(entry);
+      if (at >= 0) pendingMarks.splice(at, 1);
+      el.classList.add("gone");
+    }, PENDING_FADE_MS);
+    entry.end = setTimeout(function () {
+      forgetPending(entry);
+      removeMark(el);
+    }, PENDING_END_MS);
+    pendingMarks.push(entry);
+  }
+  /* The oldest pending mark that this person action belongs to: the action's point is within
+     NEAR_POINTS of it, or its rect holds it. A failed action with no position takes the oldest. */
+  function claimPending(m, r, p) {
+    if (m.by !== "person" || pendingMarks.length === 0) return null;
+    var size = phoneSize();
+    var tx = size ? NEAR_POINTS / size.w : 0.04;
+    var ty = size ? NEAR_POINTS / size.h : 0.04;
+    var lost = m.ok === false && !r && !p;
+    for (var i = 0; i < pendingMarks.length; i++) {
+      var e = pendingMarks[i];
+      if (!e.el.parentNode) continue;
+      var near = (p && Math.abs(p.x - e.x) <= tx && Math.abs(p.y - e.y) <= ty) ||
+        (r && e.x >= r.x - tx && e.x <= r.x + r.w + tx && e.y >= r.y - ty && e.y <= r.y + r.h + ty);
+      if (near || lost) {
+        forgetPending(e);
+        return e.el;
+      }
+    }
+    return null;
+  }
+  /* How far, in phone points, the path gets from its first point. */
+  function reach(points) {
+    var box = frame.getBoundingClientRect();
+    var size = phoneSize();
+    var w = size ? size.w : Math.max(1, box.width);
+    var h = size ? size.h : Math.max(1, box.height);
+    var first = points[0];
+    var far = 0;
+    for (var i = 1; i < points.length; i++) {
+      far = Math.max(far, Math.hypot((points[i][1] - first[1]) * w, (points[i][2] - first[2]) * h));
+    }
+    return far;
+  }
+  /* A tap or a long press stays within the slop the servers use; anything wider is a drag. */
+  function isTapPath(points) {
+    return reach(points) < TAP_SLOP;
+  }
+
+  /* Actions: short-lived marks. */
+  function showAction(m) {
+    if (isNum(m.at) && m.at > lastActionAt) {
+      lastActionAt = m.at;
+      drawOverlay();
+    }
+    var ok = m.ok !== false;
+    var label = String(m.label || m.kind || "");
+    if (!ok && m.code) label = label ? label + " (" + m.code + ")" : String(m.code);
+    var r = m.rect;
+    var p = m.point;
+    if (!(r && isNum(r.x) && isNum(r.y) && isNum(r.w) && isNum(r.h))) r = null;
+    if (!(p && isNum(p.x) && isNum(p.y))) p = null;
+    var el = claimPending(m, r, p);
+    var reused = !!el;
+    if (reused) {
+      el.textContent = "";
+      el.style.width = "";
+      el.style.height = "";
+    } else {
+      el = document.createElement("div");
+    }
+    el.className = "mark " + (m.by === "person" ? "person" : "agent") + (ok ? "" : " fail");
+    if (r) {
+      el.classList.add("rect");
+      el.style.left = pct(r.x);
+      el.style.top = pct(r.y);
+      el.style.width = pct(r.w);
+      el.style.height = pct(r.h);
+    } else if (p) {
+      el.classList.add("ring");
+      el.style.left = pct(p.x);
+      el.style.top = pct(p.y);
+    } else {
+      el.classList.add("pill");
+      el.style.left = "0";
+      el.style.top = "0";
+    }
+    if (label) {
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = label;
+      el.appendChild(tag);
+    }
+    if (!reused) {
+      marks.appendChild(el);
+      trimMarks();
+    }
+    setTimeout(function () { removeMark(el); }, ok ? 1700 : 2700);
+  }
+
+  /* WebSocket. */
+  function send(obj) {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify(obj));
+      return true;
+    }
+    notify("Not connected");
+    return false;
+  }
+
+  function handleMessage(data) {
+    if (typeof data !== "string") return;
+    var m;
+    try { m = JSON.parse(data); } catch (e) { return; }
+    if (!m || typeof m !== "object" || Array.isArray(m) || typeof m.type !== "string") return;
+    if (m.type === "status") {
+      status = m;
+      paused = m.paused === true;
+      applyTool();
+      applyAccepts();
+      video.update();
+      layout();
+      renderStatus();
+    } else if (m.type === "overlay") {
+      if (!overlayOn) return;
+      overlay = m;
+      drawOverlay();
+    } else if (m.type === "action") {
+      showAction(m);
+    } else if (m.type === "error") {
+      var text = String(m.message || "Error");
+      dropPending();
+      notify(m.code ? text + " (" + m.code + ")" : text);
+    }
+  }
+
+  function connectWs() {
+    var sock;
+    try {
+      sock = new WebSocket(endpoint("/ws", true));
+    } catch (e) {
+      scheduleWs();
+      return;
+    }
+    ws = sock;
+    sock.onopen = function () {
+      wsOpen = true;
+      wsDelay = 500;
+      if (overlayOn && accepts.overlay) send({ type: "overlay", on: true });
+      renderStatus();
+    };
+    sock.onmessage = function (ev) { handleMessage(ev.data); };
+    sock.onclose = function () {
+      if (ws !== sock) return;
+      ws = null;
+      wsOpen = false;
+      dropPending();
+      renderStatus();
+      scheduleWs();
+    };
+    sock.onerror = function () { /* a close follows */ };
+  }
+  function scheduleWs() {
+    setTimeout(connectWs, wsDelay);
+    wsDelay = Math.min(Math.round(wsDelay * 1.7), 5000);
+  }
+
+  /* Toolbar. After a click with the mouse or a finger the control lets go of the focus, so the
+     next Enter or Space goes to the phone and not to the same button again. A keyboard user
+     keeps the focus where they put it. */
+  var viaPointer = false;
+  window.addEventListener("pointerdown", function () { viaPointer = true; }, true);
+  window.addEventListener("keydown", function () { viaPointer = false; }, true);
+  function letGo(el) {
+    if (el && typeof el.blur === "function") el.blur();
+  }
+  function release(el) {
+    if (viaPointer) letGo(el);
+  }
+  $("pause").addEventListener("click", function () {
+    var next = !paused;
+    if (send({ type: "pause", on: next })) {
+      paused = next;
+      renderStatus();
+    }
+    release(this);
+  });
+  $("boxes").addEventListener("click", function () {
+    overlayOn = !overlayOn;
+    this.setAttribute("aria-pressed", overlayOn ? "true" : "false");
+    if (!overlayOn) overlay = null;
+    drawOverlay();
+    send({ type: "overlay", on: overlayOn });
+    release(this);
+  });
+  $("quality").addEventListener("change", function () {
+    send({ type: "quality", preset: this.value });
+    release(this);
+  });
+  $("home").addEventListener("click", function () {
+    send({ type: "button", name: "home" });
+    release(this);
+  });
+  $("vol-up").addEventListener("click", function () {
+    send({ type: "button", name: "volumeUp" });
+    release(this);
+  });
+  $("vol-down").addEventListener("click", function () {
+    send({ type: "button", name: "volumeDown" });
+    release(this);
+  });
+
+  /* Drag trail: the path under the pointer while a person drags, on its own canvas so it
+     never mixes with the action marks. It is drawn in the person's colour with a dark edge,
+     which reads on any picture (the picture doesn't follow the theme). */
+  var TRAIL_CLEAR_MS = 400;
+  var trailTimer = 0;
+  function clearTrail() {
+    clearTimeout(trailTimer);
+    trailTimer = 0;
+    if (trailCtx) trailCtx.clearRect(0, 0, trailW, trailH);
+  }
+  function drawTrail(points) {
+    if (!trailCtx || points.length < 2) return;
+    trailCtx.clearRect(0, 0, trailW, trailH);
+    trailCtx.lineCap = "round";
+    trailCtx.lineJoin = "round";
+    var passes = [["rgba(0, 0, 0, 0.55)", 7], ["#8be28b", 4]];
+    for (var k = 0; k < passes.length; k++) {
+      trailCtx.beginPath();
+      for (var i = 0; i < points.length; i++) {
+        var x = points[i][1] * trailW;
+        var y = points[i][2] * trailH;
+        if (i === 0) trailCtx.moveTo(x, y);
+        else trailCtx.lineTo(x, y);
+      }
+      trailCtx.strokeStyle = passes[k][0];
+      trailCtx.lineWidth = passes[k][1];
+      trailCtx.stroke();
+    }
+  }
+
+  /* Pointer: one finger or the mouse, sent as a path on release. A move is stored only when
+     at least MOVE_GAP_MS have passed since the last stored point, so a fast mouse can't fill
+     the path with near-duplicates; MAX_POINTS caps the whole path, the last point included. */
+  var MOVE_GAP_MS = 16;
+  var MAX_POINTS = 300;
+  var drag = null;
+  function fractionOf(ev) {
+    var r = frame.getBoundingClientRect();
+    return [
+      round4(clamp01((ev.clientX - r.left) / Math.max(1, r.width))),
+      round4(clamp01((ev.clientY - r.top) / Math.max(1, r.height)))
+    ];
+  }
+  frame.addEventListener("pointerdown", function (ev) {
+    if (!canPoint() || drag || !ev.isPrimary) return;
+    if (ev.pointerType === "mouse" && ev.button !== 0) return;
+    ev.preventDefault();
+    var active = document.activeElement;
+    if (active && active !== document.body && typeof active.blur === "function") active.blur();
+    try { frame.setPointerCapture(ev.pointerId); } catch (e) { /* not capturable */ }
+    clearTrail();
+    var p = fractionOf(ev);
+    drag = { id: ev.pointerId, t0: ev.timeStamp, last: 0, far: false, pts: [[0, p[0], p[1]]] };
+  });
+  frame.addEventListener("pointermove", function (ev) {
+    if (!drag || ev.pointerId !== drag.id) return;
+    var dt = ev.timeStamp - drag.t0;
+    if (dt - drag.last < MOVE_GAP_MS) return;
+    var p = fractionOf(ev);
+    var pt = [Math.round(dt), p[0], p[1]];
+    if (drag.pts.length >= MAX_POINTS - 1) drag.pts[drag.pts.length - 1] = pt;
+    else drag.pts.push(pt);
+    drag.last = dt;
+    /* No trail for a tap or a hold: its ring comes when it is released. */
+    if (!drag.far && !isTapPath(drag.pts)) drag.far = true;
+    if (drag.far) drawTrail(drag.pts);
+  });
+  frame.addEventListener("pointerup", function (ev) {
+    if (!drag || ev.pointerId !== drag.id) return;
+    var p = fractionOf(ev);
+    drag.pts.push([Math.max(0, Math.round(ev.timeStamp - drag.t0)), p[0], p[1]]);
+    var points = drag.pts;
+    drag = null;
+    var sent = send({ type: "gesture", points: points });
+    var tap = isTapPath(points);
+    if (!tap) {
+      drawTrail(points);
+      clearTimeout(trailTimer);
+      trailTimer = setTimeout(clearTrail, TRAIL_CLEAR_MS);
+    }
+    /* A tap or long press shows its ring at once; a drag has no single point. */
+    if (sent && (accepts.tap || accepts.longPress) && tap) {
+      var end = points[points.length - 1];
+      addPending(end[1], end[2]);
+    }
+  });
+  frame.addEventListener("pointercancel", function (ev) {
+    if (drag && ev.pointerId === drag.id) {
+      drag = null;
+      clearTrail();
+    }
+  });
+
+  /* Mouse wheel: events within 120 ms become one scroll. Each share is held to 0.8 of the
+     frame (so a fast fling can't ask for more than the phone's screen), which also keeps it
+     inside the protocol's -1..1. A scroll that comes to nothing is not sent. */
+  var WHEEL_MAX = 0.8;
+  var wheel = null;
+  function share(v) {
+    return round4(Math.max(-WHEEL_MAX, Math.min(WHEEL_MAX, v)));
+  }
+  function flushWheel() {
+    var w = wheel;
+    wheel = null;
+    if (!w) return;
+    var dx = share(w.dx);
+    var dy = share(w.dy);
+    if (dx === 0 && dy === 0) return;
+    send({ type: "scroll", x: round4(w.x), y: round4(w.y), dx: dx, dy: dy });
+  }
+  frame.addEventListener("wheel", function (ev) {
+    if (!accepts.scroll) return;
+    ev.preventDefault();
+    var r = frame.getBoundingClientRect();
+    var k = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? r.height : 1;
+    if (!wheel) {
+      wheel = {
+        x: clamp01((ev.clientX - r.left) / Math.max(1, r.width)),
+        y: clamp01((ev.clientY - r.top) / Math.max(1, r.height)),
+        dx: 0,
+        dy: 0
+      };
+      setTimeout(flushWheel, 120);
+    }
+    wheel.dx += (ev.deltaX * k) / Math.max(1, r.width);
+    wheel.dy += (ev.deltaY * k) / Math.max(1, r.height);
+  }, { passive: false });
+
+  /* Keyboard and paste: only when the page itself has focus, not a toolbar control. */
+  var typed = "";
+  var typedTimer = 0;
+  function flushText() {
+    clearTimeout(typedTimer);
+    typedTimer = 0;
+    if (!typed) return;
+    var t = typed;
+    typed = "";
+    send({ type: "text", text: t });
+  }
+  function inToolbar(target) {
+    return !!(target && target.closest && target.closest("#bar"));
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.defaultPrevented || ev.isComposing) return;
+    if (inToolbar(ev.target)) {
+      if (ev.key === "Escape") letGo(document.activeElement);
+      return;
+    }
+    /* Ctrl, Alt and Meta make shortcuts, which stay the browser's. But AltGr (Alt Gr on a
+       Windows layout reports Ctrl and Alt together) types characters such as @ or a with an
+       accent, and those go to the phone. */
+    var altGr = typeof ev.getModifierState === "function" && ev.getModifierState("AltGraph");
+    if (ev.metaKey || ((ev.ctrlKey || ev.altKey) && !altGr)) return;
+    if (ev.key === "Backspace" && accepts.backspace) {
+      ev.preventDefault();
+      flushText();
+      send({ type: "key", key: "backspace" });
+    } else if (ev.key === "Enter" && accepts.enter) {
+      ev.preventDefault();
+      flushText();
+      send({ type: "key", key: "enter" });
+    } else if (accepts.text && Array.from(ev.key).length === 1) {
+      ev.preventDefault();
+      typed += ev.key;
+      clearTimeout(typedTimer);
+      typedTimer = setTimeout(flushText, 300);
+    }
+  });
+  document.addEventListener("paste", function (ev) {
+    if (!accepts.text || inToolbar(ev.target)) return;
+    var text = ev.clipboardData ? ev.clipboardData.getData("text") : "";
+    if (!text) return;
+    ev.preventDefault();
     flushText();
-    send({ type: "key", key: e.key === "Enter" ? "enter" : "backspace" });
-  } else if (e.key.length === 1) {
-    e.preventDefault();
-    typed += e.key;
-    clearTimeout(typeTimer);
-    typeTimer = setTimeout(flushText, 150);
-  }
-});
-document.addEventListener("paste", (e) => {
-  const text = e.clipboardData ? e.clipboardData.getData("text") : "";
-  if (text) { e.preventDefault(); flushText(); send({ type: "text", text }); }
-});
+    send({ type: "text", text: text });
+  });
 
-// ---- toolbar (pointer clicks let go of focus so typing keeps reaching the phone; keyboard users keep theirs) ----
-let viaPointer = false;
-window.addEventListener("pointerdown", () => { viaPointer = true; }, true);
-window.addEventListener("keydown", () => { viaPointer = false; }, true);
-function release(el) { if (viaPointer) el.blur(); }
-function offline() { toast("Not connected to tapwright serve"); }
-document.querySelectorAll("[data-button]").forEach((b) => b.addEventListener("click", () => {
-  send({ type: "button", name: b.dataset.button });
-  release(b);
-}));
-pauseEl.addEventListener("change", () => {
-  if (!send({ type: "pause", on: pauseEl.checked })) { pauseEl.checked = lastPaused; offline(); }
-  release(pauseEl);
-});
-qualityEl.addEventListener("change", () => {
-  if (!send({ type: "quality", preset: qualityEl.value })) { qualityEl.value = lastQuality; offline(); }
-  release(qualityEl);
-});
+  /* Video: the self-contained block above, wired to this page. */
+  var video = createVideoBlock({
+    socketUrl: function () { return endpoint("/video", true); },
+    accepts: function () { return !!accepts.video; },
+    picture: function () { return screenEl; },
+    onVideoConfig: function (c) {
+      shown.rev = null;
+      shown.size = null;
+      shown.coverage = c.coverage || "";
+      shown.natural = { w: c.width, h: c.height };
+      layout();
+      drawOverlay();
+      renderStatus();
+    },
+    onVideoStarted: function () {
+      videoOn = true;
+      setStream(false);
+      streamLive = false;
+      haveFrame = true;
+      frame.classList.add("has-frame");
+      layout();
+      renderStatus();
+    },
+    onVideoStopped: function () {
+      videoOn = false;
+      setStream(true);
+      renderStatus();
+    }
+  });
+
+  layout();
+  renderStatus();
+  connectWs();
+  runStream();
+})();
 </script>
 </body>
 </html>
