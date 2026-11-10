@@ -3870,8 +3870,8 @@ def test_a_target_behind_an_open_sheet_is_covered_naming_the_sheet():
                 with pytest.raises(Refused) as e:
                     await d.run_tool("a", "tap", {"target": target, "force": force})
                 assert e.value.code == "not_actionable", target
-                assert str(e.value) == (f'covered: button "Save" id=lab-save @16,-40 193x49 is under the open sheet '
-                                        f'{front}; close that first.')
+                assert str(e.value) == (f'covered: button "Save" id=lab-save @16,-40 193x49 is behind {front}; '
+                                        'close that first.')
         assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
