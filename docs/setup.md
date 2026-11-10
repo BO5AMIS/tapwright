@@ -75,6 +75,30 @@ tools start it too. It stops by itself after 30 minutes without viewers or reque
 (`tapwright serve --keep-alive` keeps it running), or with `tapwright serve --stop`. Its log
 is `~/.tapwright/serve.log`.
 
+### The live view as video
+
+By default the picture is a stream of JPEG frames: about 26 a second, at a cost to the phone
+that grows with the frame rate. With `--video` the phone mirrors its own screen to the
+computer over AirPlay, and the live view plays that as H.264: 60 frames a second at about
+20 KB/s, with nothing installed on the phone.
+
+```sh
+pip install "tapwright[video]"
+tapwright serve --video
+```
+
+- The phone and the computer must be on the same Wi-Fi. USB still carries the control.
+- It needs [UxPlay](https://github.com/FDH2/UxPlay), an open-source AirPlay receiver, on the
+  computer: `uxplay` on the PATH, or the path in `TAPWRIGHT_UXPLAY`. On Windows it is built
+  with MSYS2 (`pacman -S` its dependencies, then its own build steps); Tapwright finds the
+  build in `C:\msys64\ucrt64\bin`. The firewall must let the phone reach it on this network.
+- Tapwright starts Screen Mirroring itself, the way you would: it opens Control Center, taps
+  Screen Mirroring and picks "Tapwright", then returns to the app that was in front. This
+  takes about 13 seconds after the phone connects. Mirroring ends when `tapwright serve` stops.
+- If anything is missing, the log says what, and the live view stays on the JPEG stream.
+- While the screen is still, the phone sends nothing. Under constant animation mirroring
+  costs the phone about two thirds of one CPU core.
+
 ## Troubleshooting
 
 | Symptom | Fix |

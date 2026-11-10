@@ -87,6 +87,9 @@ which keeps tests stable.
 - `tapwright view`, or the agent's `viewer` tool, gives a link to open in a browser on your
   computer: the phone's screen, live, with the agent's touches marked. The viewer shows who is
   driving, you or the agent. You can tap, drag and type there too, and your input goes first.
+- For a smooth picture, start the service with `tapwright serve --video` (same Wi-Fi; see
+  [setup.md](setup.md#the-live-view-as-video)): the phone then mirrors its screen as video, 60
+  frames a second.
 - **Pause agent** in the viewer stops the agent until you press Resume.
 - On the phone, **lock it**. Every action then answers `locked` until you unlock it.
 - `tapwright serve --stop` on the computer ends the session.
