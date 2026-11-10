@@ -33,7 +33,7 @@ _CORE = (
     '- `paused`: the user paused you. Ask them to resume.\n'
     '- `locked`: the phone is locked. Ask the user to unlock it.\n'
     '- `in_background`: the app is in the background. Ask the user to open it.\n'
-    '- `not_answering`: the app in front stopped answering. Close it and open it again (`close_app`, then `open_app`), or ask the user to.\n'
+    '- `not_answering`: the app in front stopped answering. Close it and open it again (`close_app`, then `open_app`, where the tool has them), or ask the user to.\n'
     '- `reconnecting`: the link dropped. Wait a few seconds, then `look`.\n'
     '- `not_connected`: nothing to drive. Follow the setup steps in the message.\n'
     '- `timeout`: no answer in time. The action may have happened: `look` before retrying.\n'

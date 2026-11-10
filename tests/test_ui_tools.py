@@ -412,6 +412,23 @@ def test_what_is_off_screen_behind_a_share_sheet_is_behind_it_too():
     assert plain.behind == [] and {e.identifier for e in plain.offscreen} == {"lab-far", "lab-save"}
 
 
+def test_back_closes_an_open_popover_by_a_touch_on_its_dismiss_region():
+    """iOS 26's share sheet is a popover over a full-screen "dismiss popup" region: a person taps outside the
+    sheet. `back` neither found a bar's back button nor closed it, and left the phone on another screen."""
+    def share(sheet_y, sheet_h):
+        bar = node("NavigationBar", 0, 59, 430, 54, name="Lab", children=[node("Button", 20, 59, 111, 44, "Back", name="BackButton")])
+        window = node("Other", 0, 0, 430, 932, children=[
+            node("Other", 0, 0, 430, 932, "dismiss popup", name="PopoverDismissRegion"),
+            node("Popover", 9, sheet_y, 412, sheet_h)])
+        return under_window(node("Other", 0, 0, 430, 932, children=[bar]), window)
+    assert ui.back_button(share(510, 414), PHONE) == ui.Back(False, None, (215.0, 255.0))  # the middle of what is above
+    assert ui.back_button(share(70, 500), PHONE) == ui.Back(False, None, (215.0, 751.0))  # no room above: below it
+    full = ui.back_button(share(40, 880), PHONE)  # no room either side: the bar's own button, as before
+    assert full.dismiss is None and full.bar and full.point is not None
+    plain = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932, "dismiss popup", name="PopoverDismissRegion")])
+    assert ui.back_button(under_window(plain), PHONE).dismiss is None  # a region alone is no open popover
+
+
 def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     """On the phone the keyboard's own full-screen window starts with an empty full-screen view and has a key
     to act on ("Next keyboard"): it looked like a sheet with a backdrop and hid the whole app (2026-11-09)."""

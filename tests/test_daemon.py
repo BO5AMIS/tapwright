@@ -2163,6 +2163,20 @@ def test_back_taps_the_navigation_bars_back_button():
     run(go)
 
 
+def test_back_closes_what_is_open_on_top_before_anything_else():
+    """AGENT-TOOLS v1.4, item 6: a popover closes by a touch outside it, and the answer says so."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.back_at = (48.0, 81.0)  # the bar behind the sheet has a back button: it must not be tapped
+        d.session.dismiss_at = (215.0, 255.0)
+        r = await d.run_tool("a", "back", {})
+        assert d.session.last_point == (215.0, 255.0) and r["text"].startswith("Closed the sheet.")
+        assert "swipe" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
 def test_back_swipes_from_the_left_edge_only_when_there_is_no_navigation_bar():
     async def go():
         d = make()

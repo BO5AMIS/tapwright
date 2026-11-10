@@ -996,10 +996,14 @@ class Daemon:
         return ui.resolve(items, target)
 
     async def _back(self, view, a: dict) -> str:
-        """Tap the navigation bar's back button. A bar without one is a root screen (or has only Cancel,
+        """Close an open popover by a touch outside it (AGENT-TOOLS v1.4); else tap the navigation bar's back
+        button. A bar without one is a root screen (or has only Cancel,
         Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
         back = await s.back_point()
+        if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
+            await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
+            return "Closed the sheet."
         if back.point is not None:
             await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
             return "Tapped the back button."

@@ -729,6 +729,10 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
 class Back(NamedTuple):
     bar: bool  # a NavigationBar is on screen
     point: tuple[float, float] | None  # the centre of its back button, if it has one
+    dismiss: tuple[float, float] | None = None  # where a touch closes the popover that is open on top, if one is
+
+
+DISMISS_MARGIN = 60.0  # points a closing touch keeps from the screen's top (the status bar) and from the sheet
 
 
 # Buttons that sit at a bar's left edge but do something other than go back.
@@ -749,6 +753,8 @@ def back_button(source: str, screen: tuple[float, float]) -> Back:
         x, y, w, h = rect
         return w > 0 and h > 0 and 0 <= x + w / 2 < screen[0] and 0 <= y + h / 2 < screen[1]
 
+    if (dismiss := _dismiss_point(root, screen)) is not None:
+        return Back(False, None, dismiss)  # what is open on top closes first; the bar behind it can't be reached
     bars = [n for n in root.iter() if _kind(n) == "NavigationBar" and on_screen(_rect(n))]
     if not bars:
         return Back(False, None)
@@ -769,6 +775,23 @@ def back_button(source: str, screen: tuple[float, float]) -> Back:
         if (_text(n.get("label")) or _text(n.get("name"))).lower() not in NOT_BACK:
             return Back(True, centre(n))
     return Back(True, None)
+
+
+def _dismiss_point(root: ET.Element, screen: tuple[float, float]) -> tuple[float, float] | None:
+    """Where a person taps to close an open popover (iOS 26's share sheet): on its "dismiss popup" region, in the
+    middle of the part above the sheet, or below it when there is no room above. None when no popover is open."""
+    region = next((n for n in root.iter() if _text(n.get("name")) == "PopoverDismissRegion"), None)
+    sheets = [n for n in root.iter() if _kind(n) == "Popover" and _rect(n)[2] > 0 and _rect(n)[3] > 0]
+    if region is None or not sheets:
+        return None
+    rx, ry, rw, rh = _overlap(_rect(region), (0.0, 0.0, *screen))
+    _, sy, _, sh = _rect(sheets[-1])
+    above, below = sy - ry, (ry + rh) - (sy + sh)
+    if above >= 2 * DISMISS_MARGIN:
+        return rx + rw / 2, ry + max(above / 2, DISMISS_MARGIN)
+    if below >= 2 * DISMISS_MARGIN:
+        return rx + rw / 2, sy + sh + below / 2
+    return None
 
 
 def at_point(items: list[Element], point: tuple[float, float], role: str) -> Element | None:

@@ -107,6 +107,7 @@ class FakeSession:
         self.foreground: str | None = None  # the bundle id the phone shows
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
+        self.dismiss_at: tuple[float, float] | None = None  # where a touch closes an open popover (None: none open)
         self.launched: list = []
         self.closed: list = []
         self.read_timeouts: list = []  # the per-read timeout each refresh() was given
@@ -193,6 +194,8 @@ class FakeSession:
         return self.foreground
 
     async def back_point(self):
+        if self.dismiss_at is not None:
+            return ui.Back(False, None, self.dismiss_at)
         return ui.Back(self.has_nav_bar or self.back_at is not None, self.back_at)
 
     async def tap(self, target, hold_ms=60):
