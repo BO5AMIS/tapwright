@@ -131,6 +131,7 @@ class Session:
                 # action asked twice could happen twice.
                 if not (method == "GET" if again is None else again) or "didn't answer" not in str(e) or self.device.rsd is None:
                     raise
+                getattr(self.device, "log", lambda *a: None)(f"no answer to {method} {path.split('?')[0]} in {timeout:.0f} s: asked again")
                 return await self.device.http(method, full, payload, READ_AGAIN)
         except ConnectionLost:
             self.sid = None  # the next call starts WebDriverAgent again
