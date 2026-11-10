@@ -12,6 +12,7 @@ from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSet
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+READ_AGAIN = 5.0  # seconds: the second try of a read that got no answer (see Session._source)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -132,11 +133,24 @@ class Session:
         """The tree as WebDriverAgent's XML. A read normally takes about 0.2 s; one that hasn't answered within
         READ_CUT seconds is cut, and the phone is asked why: an app that is in front and doesn't answer
         accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
+        sid = self.sid
         try:
             return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
         except (PhoneLocked, AppNotAnswering):
             raise
         except ConnectionLost as e:
+            # One read that got no answer is not yet a frozen app: over Wi-Fi a single connection can stall while
+            # the phone and the app are fine (seen 2026-11-10: four such stalls in eight minutes on a network
+            # losing 4% of its packets, each one answered as "JLD isn't answering"). Every request has its own
+            # connection, so the read is asked once more; a frozen app doesn't answer that one either.
+            if sid is not None and "didn't answer" in str(e) and self.device.rsd is not None:
+                try:
+                    value = (await self.device.http("GET", ui.SOURCE_PATH.replace("{sid}", sid), None, READ_AGAIN)).get("value")
+                except (ConnectionLost, DeviceError):
+                    pass
+                else:
+                    self.sid = sid  # the session is alive: nothing needs starting again
+                    return value
             raise await self._why_stuck(False, e) from e
 
     async def foreground_bundle_id(self) -> str | None:

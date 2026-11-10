@@ -84,6 +84,27 @@ def test_a_frozen_app_in_front_is_named_instead_of_a_dropped_line(phone):
     assert paths.index("/session/S/wda/locked") < paths.index("/session/S/window/size")
 
 
+def test_one_stalled_read_is_asked_again_and_is_not_a_frozen_app(phone):
+    """Seen on the phone over Wi-Fi 2026-11-10: a single connection stalled, the app was fine, and the answer
+    was "JLD isn't answering" with a reconnect. The read is asked once more on a new connection first."""
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    stalls, real = [1], phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/source" in path and stalls:
+            stalls.pop()
+            raise ConnectionLost(f"WebDriverAgent didn't answer {method} {path} within {timeout:.0f} s")
+        if "/source" in path:
+            return {"value": '<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="JLD" '
+                             'label="JLD" enabled="true" x="0" y="0" width="430" height="932"/></AppiumAUT>'}
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    asyncio.run(s.refresh())  # no AppNotAnswering, no ConnectionLost
+    assert s.sid == "S" and stalls == []
+
+
 def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phone):
     """An app that freezes while in use: the read used to wait up to 60 s in silence. It is cut at READ_CUT, and
     the app iOS has in front is named (R6: a drop ends clearly)."""
@@ -101,7 +122,7 @@ def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phon
     phone.http = http
     with pytest.raises(AppNotAnswering) as e:
         asyncio.run(s.refresh())
-    assert e.value.bundle_id == "app.jld.mobile" and waits == [session_module.READ_CUT]
+    assert e.value.bundle_id == "app.jld.mobile" and waits == [session_module.READ_CUT, session_module.READ_AGAIN]
     phone.in_front = []  # nothing in front can be blamed: it stays a dropped line
     asyncio.run(s.ensure())
     with pytest.raises(ConnectionLost) as e:
