@@ -466,6 +466,14 @@ def test_the_keyboards_own_keys_and_views_are_not_listed_but_a_bar_above_the_key
                                              PHONE, keyboard=True).items)  # with the keys asked for, all of them
 
 
+def test_ios_s_own_dimming_view_is_not_listed():
+    """`image id=AdditionalDimmingOverlay` is the dimming under iOS's navigation bar: nothing to read or act on."""
+    tree = ui.read(under_window(node("Other", 0, 0, 430, 932, children=[
+        node("Image", -120, -163, 670, 326, "", name="AdditionalDimmingOverlay"),
+        node("Button", 16, 300, 398, 48, "Save", name="lab-save")])), PHONE)
+    assert [e.identifier for e in tree.items] == ["lab-save"]
+
+
 def test_an_off_screen_element_exposed_twice_is_kept_once():
     """React Native exposes a text as a view with the identifier and a text inside it, same words, same place.
     On screen that is one line; off screen it was two, so every off-screen change was said twice (seen on the

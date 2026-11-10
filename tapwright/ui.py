@@ -395,7 +395,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
         # ...nor is a view of that window that reaches down into the keys (`inputView` on the phone, around the
         # keys but not above them in the tree); a bar that ends where the keys begin is the app's
-        worth = worth and node not in keyboard_holders and not (
+        worth = worth and identifier not in IOS_NOISE and node not in keyboard_holders and not (
             keys_top is not None and not in_keyboard and y + h > keys_top + 1)
         # ...nor a plain view of exactly the keyboard's size and place in another window (`inputView`, in the
         # text effects window on the phone)
@@ -529,6 +529,7 @@ def _plain(node: ET.Element) -> Element | None:
     role = "header" if kind == "StaticText" and "Header" in traits else ROLES.get(kind, kind.lower())
     worth = role == "scroll" or ((kind in INTERACTIVE or label or value or identifier)
                                  and not (kind in CONTAINERS and not identifier))
+    worth = worth and identifier not in IOS_NOISE
     if not worth or w <= 0 or h <= 0 or kind in ("Alert", "Keyboard"):
         return None
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
@@ -882,6 +883,9 @@ def at_point(items: list[Element], point: tuple[float, float], role: str) -> Ele
 BLANK_GRID = 40.0  # points between the points blank_point tries when no label offers one
 
 
+# iOS's own views that carry an identifier but nothing to read or act on: listing them is noise (a first-time agent
+# asked what `image id=AdditionalDimmingOverlay` was, 2026-11-11; it is the dimming under the navigation bar)
+IOS_NOISE = frozenset({"AdditionalDimmingOverlay"})
 SPRINGBOARD_ROOT = 'bundleId="com.apple.springboard"'  # in the tree's first element when SpringBoard is in front
 SHEET_BESIDE = 60.0  # points of screen a sheet must leave free on a side for a touch beside it
 SHEET_GRIP = 14.0  # how far below a sheet's top edge a finger takes hold to pull it down
