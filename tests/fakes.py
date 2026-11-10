@@ -112,8 +112,7 @@ class FakeSession:
         self.read_timeouts: list = []  # the per-read timeout each refresh() was given
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
         self.typed: list = []  # (text, replace, submit, target) of each type_text
-        self.holds: list = []  # the hold at the end of each swipe, in ms
-        self.moves: list = []  # each scroll swipe's move, in ms (the raw swipe tool's aren't recorded)
+        self.scrolls: list = []  # (x0, y0, x1, y1) of each eased scroll drag (the raw swipe tool's aren't recorded)
         self.offscreen: list = []  # elements the last read found outside the screen (tests set it)
         # what every connect raises: a PhoneLocked, or an AppNotAnswering until kill_app ends that app
         self.stuck: Exception | None = None
@@ -214,11 +213,13 @@ class FakeSession:
 
     async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
         self._record("swipe")
-        self.holds.append(hold_ms)
-        if hold_ms:
-            self.moves.append(duration_ms)
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
+
+    async def scroll(self, x0, y0, x1, y1):
+        """Recorded, then as a swipe, so tests that watch swipes (MovingPicture) see scrolls too."""
+        self.scrolls.append((x0, y0, x1, y1))
+        return await self.swipe(x0, y0, x1, y1)
 
     async def path(self, points):
         self._record("path")

@@ -778,7 +778,7 @@ class Daemon:
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
             seq, since = self._mark()
-            await s.swipe(x0, y0, x1, y1, ui.SCROLL_MOVE_MS, ui.SCROLL_HOLD_MS)
+            await s.scroll(x0, y0, x1, y1)
             if not to or swipes == MAX_SCROLL_SWIPES:
                 break
             await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
@@ -1202,7 +1202,7 @@ class Daemon:
         if kind == "scroll":
             x0, y0, x1, y1 = ui.scroll_swipe(float(m["x"]), float(m["y"]), float(m.get("dx", 0)),
                                              float(m.get("dy", 0)), s.screen)
-            return (lambda: s.swipe(x0, y0, x1, y1, 300)), "scroll", (x0, y0)
+            return (lambda: s.scroll(x0, y0, x1, y1)), "scroll", (x0, y0)  # a wheel stops where it should
         if kind == "text":
             text = str(m["text"])
             if not text:

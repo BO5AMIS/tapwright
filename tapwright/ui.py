@@ -182,12 +182,16 @@ BACKDROP_HEIGHT = 0.4
 PASSIVE = {"text", "header", "image"}
 OVERLAY_MAX = 0.95  # a later element covers an earlier one like a bar, unless it takes this share of the screen (a layer)
 WRAPPER = 0.9  # a layer's listed descendant this big, and not a scroll view, is a transparent wrapper: no content
-# A scroll is a slow drag whose finger rests at the end, so the content stops where the finger does instead of
-# flinging. On the lab a 600 ms move and 150 ms rest stopped in place (a 1.3 s call); a 300 ms move slid 85 pt
-# further after the call and 200 ms up to 150 pt, rests of 80-150 ms alike (iPhone 14 Pro Max, iOS 26.5,
-# 2026-11-09). A drifting list would make the next tap land on the wrong row, so the slow drag stays.
-SCROLL_MOVE_MS = 600
-SCROLL_HOLD_MS = 150
+# A scroll drags fast, then eases over its last stretch and rests before the finger lifts, so the content stops
+# where the finger does instead of flinging: a drifting list would make the next tap land on the wrong row. iOS
+# judges a flick by the finger's speed over that last stretch: ending at 330 pt/s or slower stopped in place every
+# time, 440 pt/s flung, whatever the speed before. A plain 600 ms drag with a 150 ms rest slid 50-130 pt on after
+# 410 pt and flung off the list after 655 pt (lab, iPhone 14 Pro Max, iOS 26.5, 2026-11-10).
+SCROLL_FAST_MS = 300  # the drag up to its last stretch
+SCROLL_EASE_MS = 150  # the last stretch
+SCROLL_EASE_PT = 37.5  # at most this long (250 pt/s over SCROLL_EASE_MS)
+SCROLL_EASE_SHARE = 0.15  # and at most this share of the drag
+SCROLL_HOLD_MS = 80  # the rest before the finger lifts
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -770,6 +774,21 @@ def swipe(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, ho
                      {"type": "pause", "duration": 50},
                      {"type": "pointerMove", "duration": duration_ms, "x": round(x1), "y": round(y1)},
                      *([{"type": "pause", "duration": hold_ms}] if hold_ms else []),
+                     {"type": "pointerUp", "button": 0}])
+
+
+def scroll_drag(x0: float, y0: float, x1: float, y1: float) -> dict:
+    """W3C actions for a scroll that stops where the finger does: a fast drag to the last stretch, that stretch
+    slowly, then a rest (see SCROLL_EASE_MS)."""
+    length = math.hypot(x1 - x0, y1 - y0)
+    share = min(SCROLL_EASE_PT, SCROLL_EASE_SHARE * length) / length if length else 0.0
+    mx, my = x1 - (x1 - x0) * share, y1 - (y1 - y0) * share
+    return _pointer([{"type": "pointerMove", "duration": 0, "x": round(x0), "y": round(y0)},
+                     {"type": "pointerDown", "button": 0},
+                     {"type": "pause", "duration": 50},
+                     {"type": "pointerMove", "duration": SCROLL_FAST_MS, "x": round(mx), "y": round(my)},
+                     {"type": "pointerMove", "duration": SCROLL_EASE_MS, "x": round(x1), "y": round(y1)},
+                     {"type": "pause", "duration": SCROLL_HOLD_MS},
                      {"type": "pointerUp", "button": 0}])
 
 

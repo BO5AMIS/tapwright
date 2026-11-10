@@ -517,6 +517,23 @@ def test_a_swipe_can_hold_before_the_finger_lifts():
     assert [s["type"] for s in plain[-2:]] == ["pointerMove", "pointerUp"]
 
 
+def test_a_scroll_drag_eases_over_its_last_stretch_then_rests():
+    """iOS judges a flick by the finger's speed over its last stretch: ending at 330 pt/s or slower stopped in
+    place, 440 pt/s flung (lab, 2026-11-10). So the drag ends slowly, whatever its length."""
+    for start, end in ((850.0, 195.0), (727.0, 318.0), (580.0, 460.0), (195.0, 850.0)):
+        steps = ui.scroll_drag(215, start, 215, end)["actions"][0]["actions"]
+        assert [s["type"] for s in steps] == ["pointerMove", "pointerDown", "pause", "pointerMove", "pointerMove",
+                                              "pause", "pointerUp"]
+        assert (steps[0]["x"], steps[0]["y"]) == (215, round(start)) and (steps[4]["x"], steps[4]["y"]) == (215, round(end))
+        fast, ease, rest = steps[3], steps[4], steps[5]
+        assert (fast["duration"], ease["duration"], rest["duration"]) == (
+            ui.SCROLL_FAST_MS, ui.SCROLL_EASE_MS, ui.SCROLL_HOLD_MS)
+        last = abs(ease["y"] - fast["y"])
+        assert last <= 0.15 * abs(end - start) + 1 and last / ease["duration"] <= 0.26  # <= 250 pt/s, give or take rounding
+        assert (end - start) * (fast["y"] - start) > 0  # the fast stretch goes the same way
+    assert ui.SCROLL_FAST_MS + ui.SCROLL_EASE_MS + ui.SCROLL_HOLD_MS < 600 + 150  # quicker than the old slow drag
+
+
 def test_a_later_transparent_wrapper_with_a_small_button_hides_nothing():
     wrapper = node("Other", 0, 0, 430, 932, "Screen", name="wrapper", children=[node("Button", 20, 500, 100, 44, "Floating")])
     layer = node("Other", 0, 0, 430, 932, children=[wrapper])

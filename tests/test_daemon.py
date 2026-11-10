@@ -2772,17 +2772,17 @@ def test_a_direction_that_contradicts_to_is_bad_params():
     run(go)
 
 
-def test_a_scroll_swipe_ends_with_a_hold_so_the_content_does_not_fling():
+def test_scrolls_use_the_eased_drag_so_the_content_does_not_fling():
     async def go():
         d = make()
         stop, task = await started(d)
         await looked(d, [el("e1", "scroll", "Page", rect=(0, 0, 400, 800))])
         await d.run_tool("a", "scroll", {"direction": "down", "look": False})
-        # a slow drag with a rest: faster drags slid on after the call on the lab (2026-11-09)
-        assert (ui.SCROLL_MOVE_MS, ui.SCROLL_HOLD_MS) == (600, 150)
-        assert d.session.holds == [150] and d.session.moves == [600]
+        assert len(d.session.scrolls) == 1  # ui.scroll_drag: fast, then slow over the last stretch, then a rest
+        assert await d.viewer_message({"type": "scroll", "x": 0.5, "y": 0.5, "dx": 0, "dy": 0.25}) is None
+        assert len(d.session.scrolls) == 2  # a person's wheel stops where it should too
         await d.run_tool("a", "swipe", {"x0": 10, "y0": 300, "x1": 10, "y1": 100, "look": False})
-        assert d.session.holds == [150, 0]  # the raw swipe tool keeps its fling
+        assert len(d.session.scrolls) == 2  # the raw swipe tool keeps its fling
         await finish(stop, task)
     run(go)
 

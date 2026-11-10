@@ -355,6 +355,13 @@ class Session:
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
+    async def scroll(self, x0: float, y0: float, x1: float, y1: float) -> str:
+        """A scroll drag that stops where the finger does (ui.scroll_drag)."""
+        self.typed_into = None
+        await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1))
+        self.last_point = (x0, y0)
+        return f"scrolled ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
+
     async def path(self, points: list) -> str:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
         self.typed_into = None
