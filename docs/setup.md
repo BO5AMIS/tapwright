@@ -63,6 +63,16 @@ The first start of a session mounts Apple's developer disk image on the phone (d
 once, needs internet) and starts WebDriverAgent; that takes up to a minute. Later starts
 take seconds.
 
+**The passcode screen.** Before it lets a UI test start, iOS may show **Enter iPhone Passcode
+for "XCTest"** with the line *Enable UI Automation*. It does so on a first run, and again now
+and then (on our phone it came back in the middle of a day of testing). Nothing starts until
+a person enters the passcode; Tapwright can't, and says so: agents get `locked` with "the
+phone is asking for its passcode to allow UI automation", and the live view shows the same.
+The start goes on by itself once the passcode is in.
+
+To stop the phone asking, turn on Settings > Developer > **Enable UI Automation**. Do this on
+every dedicated test device, or an unattended run stops at that screen.
+
 ## 5. The live view
 
 ```sh
@@ -106,6 +116,7 @@ tapwright serve --video
 | no iPhone on USB | unlock the phone; another cable or port; Windows: open Apple Devices once |
 | "the profile doesn't include this iPhone" | run setup with the API key (it makes a new profile), or make one that lists the phone |
 | WebDriverAgent doesn't start | phone unlocked and screen on; Developer Mode on; run setup again to reinstall |
+| the phone shows "Enter iPhone Passcode for XCTest" | enter it; then Settings > Developer > Enable UI Automation, so it doesn't ask again |
 | works on USB, not on Wi-Fi | same network, no client isolation; run `tapwright probe` with the phone on the Wi-Fi |
 | actions do nothing on a screen | look again: the screen may have changed; system alerts need `alert` |
 | "tapwright serve is running and owns the phone" | `smoke` and `probe` need the phone to themselves: `tapwright serve --stop` |

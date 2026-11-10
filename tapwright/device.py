@@ -34,6 +34,22 @@ class PhoneLocked(ConnectionLost):
     """WebDriverAgent runs, but the phone is locked, so nothing on the screen can be read until it's unlocked."""
 
 
+AUTH_PROMPT = "LocalAuthenticationUIService"  # the process that draws iOS's passcode screen
+PROMPT_AFTER = 6.0  # seconds a start may take before the phone is asked whether that screen is up (a start takes 3)
+PROMPT_EVERY = 3.0
+
+
+class PasscodeNeeded(PhoneLocked):
+    """iOS shows "Enter iPhone Passcode for "XCTest" / Enable UI Automation" and starts no UI test until a person
+    types the passcode. It asks on a first run, and again now and then unless Settings > Developer > Enable UI
+    Automation is on (2026-11-10: it came up at midday on a phone that had run tests since the morning, and
+    all the daemon said was "reconnecting"). The phone isn't locked, but the cure is the same: its owner."""
+
+    def __init__(self):
+        super().__init__("the phone is asking for its passcode to allow UI automation: enter it on the phone "
+                         "(Settings > Developer > Enable UI Automation stops it asking)")
+
+
 class AppNotAnswering(ConnectionLost):
     """WebDriverAgent runs, but the app in front never answers it, so every read of the screen hangs behind
     that app (2026-11-10: a development build froze mid-reload and stayed in front for hours)."""
@@ -87,6 +103,7 @@ class Device:
         self.rsd = None
         self.via = None
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
+        self.awaiting_passcode = False  # the last start stopped at iOS's passcode screen (see PasscodeNeeded)
 
     # ---- the tunnel ----
     async def connect(self) -> None:
@@ -165,7 +182,11 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
         if self.runner and not self.runner.done() and await self.wda_alive():
+            self.awaiting_passcode = False
             return
+        if self.awaiting_passcode and self.runner and not self.runner.done() and await self.passcode_prompt_up():
+            raise PasscodeNeeded()  # still up: a new start would take the screen away from under the person's fingers
+        self.awaiting_passcode = False
         await self._stop_runner()  # iOS may have killed it before its task noticed (measured)
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
             for p in await info.proclist():
@@ -185,22 +206,50 @@ class Device:
         except TypeError:  # run() no longer takes a listener: start without the hook
             run = service.run(cfg)
         self.runner = asyncio.create_task(run, name="webdriveragent")
-        deadline = time.monotonic() + wait
+        began = time.monotonic()
+        deadline, ask_at = began + wait, began + PROMPT_AFTER
         while time.monotonic() < deadline:
             if failed.is_set():  # the phone said so: don't wait out the minute
                 await self._stop_runner()
-                raise DeviceError(f"UI testing failed to start: {reason[0]}")
+                raise await self._or_passcode(DeviceError(f"UI testing failed to start: {reason[0]}"))
             if self.runner.done():
                 exc = self.runner.exception()
-                raise DeviceError(f"WebDriverAgent stopped while starting: {exc}")
+                raise await self._or_passcode(DeviceError(f"WebDriverAgent stopped while starting: {exc}"))
             if await self.wda_alive():
                 self.log("WebDriverAgent is running")
                 return
+            if time.monotonic() >= ask_at:
+                # slower than any start: is iOS waiting for the passcode? The runner is left as it is, so the
+                # start goes on by itself once the passcode is in
+                ask_at = time.monotonic() + PROMPT_EVERY
+                if await self.passcode_prompt_up():
+                    self.awaiting_passcode = True
+                    raise PasscodeNeeded()
             try:
                 await asyncio.wait_for(failed.wait(), 0.5)
             except asyncio.TimeoutError:
                 pass
-        raise DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)")
+        raise await self._or_passcode(
+            DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)"))
+
+    async def passcode_prompt_up(self) -> bool:
+        """Is iOS's passcode screen in front (from the process list, which answers without WebDriverAgent)?
+        False when the phone can't be asked."""
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        try:
+            async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
+                procs = await asyncio.wait_for(info.proclist(), 10)
+        except Exception:
+            return False
+        return any(p.get("foregroundRunning") and p.get("name") == AUTH_PROMPT for p in procs)
+
+    async def _or_passcode(self, error: DeviceError) -> DeviceError:
+        """The reason a start failed: the passcode screen when it is up, else `error`."""
+        if await self.passcode_prompt_up():
+            self.awaiting_passcode = True
+            return PasscodeNeeded()
+        return error
 
     async def foreground_apps(self) -> list[str]:
         """Bundle ids of the apps iOS has in the foreground, from its process list: that answers while

@@ -188,3 +188,16 @@ def test_at_point_gives_a_shared_edge_to_one_field():
     assert ui.at_point([a, b], (99.9, 10.0), "input") is a
     assert ui.at_point([a, b], (200.0, 10.0), "input") is None
 
+
+def test_of_several_matches_the_one_in_the_alert_is_the_target():
+    """AGENT-TOOLS v1.5 item 9: an alert's Cancel and a Cancel behind it are not a choice; only the front one
+    can be meant. Two in the alert, or none, are still ambiguous."""
+    behind = ui.Element("e1", "button", label="Cancel", rect=(10, 100, 100, 40), actions=("tap",))
+    front = ui.Element("e2", "button", label="Cancel", rect=(100, 500, 100, 44), actions=("tap",), in_alert=True)
+    other = ui.Element("e3", "button", label="Cancel", rect=(220, 500, 100, 44), actions=("tap",), in_alert=True)
+    for target in (ui.Target(label="Cancel"), ui.Target(text="canc")):
+        assert ui.resolve([behind, front], target) is front
+        assert code(ui.resolve, [behind, front, other], target).code == "ambiguous"
+        assert code(ui.resolve, [behind, ui.Element("e4", "button", label="Cancel", rect=(10, 200, 100, 40))],
+                    target).code == "ambiguous"
+    assert ui.resolve([behind, front], ui.Target(label="Cancel", index=0)) is behind  # an index still counts them all

@@ -41,7 +41,10 @@ step in full.
    turn it on, restart, confirm, and run setup again.
 5. Check it: `tapwright smoke --app <bundle id of one of your apps>`. The first start mounts
    Apple's developer disk image and can take up to a minute. Later starts take about 2 s.
-6. Give Tapwright to your agent, naming the apps it may use (see "Personal phone or
+6. The phone may show **Enter iPhone Passcode for "XCTest"** (Enable UI Automation). Enter
+   it. To stop the phone asking again, turn on Settings > Developer > **Enable UI
+   Automation**: on a test device, do this now.
+7. Give Tapwright to your agent, naming the apps it may use (see "Personal phone or
    dedicated device"):
    ```sh
    claude mcp add tapwright -- tapwright mcp --apps com.example.app
@@ -114,6 +117,9 @@ recommend.
 Run `tapwright doctor` first. Then the three most common failures:
 
 - **The agent gets `locked`.** Unlock the phone. Tapwright can't pass Face ID or the passcode.
+  If the message says the phone is asking for its passcode to allow UI automation, the phone
+  shows **Enter iPhone Passcode for "XCTest"**: enter it, and turn on Settings > Developer >
+  **Enable UI Automation** so it doesn't ask again.
 - **The agent gets `not_answering`.** The app in front has frozen. The agent can close it with
   `close_app` and open it again.
 - **The agent gets `unsupported: no_apps` or `outside_apps`.** It was started without an app

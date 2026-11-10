@@ -3782,7 +3782,10 @@ def test_type_text_into_another_input_closes_the_keyboard_but_not_into_the_focus
         r = await d.run_tool("a", "type_text", {"target": {"id": "a"}, "text": "x"})
         assert d.session.tap_points == [] and KEYBOARD_NOTE not in r["text"]  # field A: the fast path, no blank tap
         r = await d.run_tool("a", "type_text", {"target": {"id": "b"}, "text": "y"})
-        assert d.session.tap_points[0] == (60.0, 80.0) and r["text"].endswith(KEYBOARD_NOTE)
+        assert d.session.tap_points[0] == (60.0, 80.0)  # closed first, as before any touch outside the field
+        # ...but with no note: typing focuses field B, so the keyboard is up again as the call answers, and
+        # "closed the keyboard" beside `Keyboard: shown` read as a contradiction to a first-time agent
+        assert KEYBOARD_NOTE not in r["text"]
         assert [t[0] for t in d.session.typed] == ["x", "y"]
         await finish(stop, task)
     run(go)
@@ -3856,5 +3859,32 @@ def test_an_element_in_an_os_alert_is_touched_without_closing():
         d.session.tree = [*d.session.tree, button("e7", "Allow", "allow", rect=(10, 400, 100, 40), in_alert=True)]
         r = await d.run_tool("a", "tap", {"target": {"id": "allow"}})
         assert d.session.tap_points == [(60.0, 420.0)] and KEYBOARD_NOTE not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_phone_asking_for_its_passcode_answers_locked_and_says_which_screen():
+    """iOS's "Enable UI Automation" passcode screen: the agent's code is `locked` (ask the user), and the
+    message and the live view's detail name the screen, not a lock."""
+    from tapwright.device import PasscodeNeeded
+
+    async def go():
+        s = FakeSession()
+        s.stuck = PasscodeNeeded()
+        d = make(s)
+        stop, task = await started(d, until=())
+        await until_stuck(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert e.value.code == "locked"
+        assert str(e.value) == ("the phone is asking for its passcode to allow UI automation; ask the user to "
+                                "enter it on the phone")
+        assert "Enable UI Automation" in d.detail
+        s.stuck = None  # the user typed it
+        for _ in range(300):
+            if d.state == "live":
+                break
+            await asyncio.sleep(0.01)
+        assert d.stuck is None and d.state == "live"
         await finish(stop, task)
     run(go)

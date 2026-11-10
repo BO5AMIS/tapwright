@@ -718,6 +718,9 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
             raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "
                                        f"element{'s' if len(hits) != 1 else ''} match {what}")
         return hits[target.index]
+    in_front = [e for e in hits if e.in_alert]
+    if len(hits) > 1 and len(in_front) == 1:
+        return in_front[0]  # an alert's own Cancel, not the Cancel behind it: only the front one can be meant
     if len(hits) > 1:
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}.\nCandidates:\n"

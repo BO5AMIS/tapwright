@@ -298,3 +298,64 @@ def test_a_runner_that_ignores_cancel_does_not_hang_the_stop(monkeypatch):
         await d._stop_runner()
         assert time.monotonic() - began < 0.4 and d.runner is None
     asyncio.run(scenario())
+
+
+class _PromptInfo(_Ctx):
+    """The phone's process list while iOS shows its passcode screen."""
+    async def proclist(self):
+        return [{"name": "SpringBoard", "foregroundRunning": False},
+                {"name": "LocalAuthenticationUIService", "foregroundRunning": True, "isApplication": True,
+                 "bundleIdentifier": "com.apple.LocalAuthenticationUIService"}]
+
+
+def test_a_start_that_waits_for_the_passcode_says_so(monkeypatch):
+    """2026-11-10: iOS showed "Enter iPhone Passcode for XCTest / Enable UI Automation"; the start hung for a
+    minute, failed, and all anyone was told was "reconnecting"."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    from tapwright import device as device_module
+    from tapwright.device import PasscodeNeeded, PhoneLocked
+    _fake_phone_side(monkeypatch, _Service)  # the runner starts and never answers
+    monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)
+    monkeypatch.setattr(device_module, "PROMPT_AFTER", 0.2)
+
+    async def scenario():
+        d = Device(log=lambda *a: None)
+        d.rsd = object()
+
+        async def wda_alive():
+            return False
+        d.wda_alive = wda_alive
+        began = time.monotonic()
+        with pytest.raises(PasscodeNeeded, match="asking for its passcode") as e:
+            await d.start_wda("runner.id", wait=30)
+        assert time.monotonic() - began < 5 and isinstance(e.value, PhoneLocked)
+        pending = d.runner
+        assert pending is not None and not pending.done()  # left running: it goes on once the passcode is in
+        with pytest.raises(PasscodeNeeded):  # the screen is still up: nothing is started over it
+            await d.start_wda("runner.id", wait=30)
+        assert d.runner is pending and not pending.done()
+
+        async def now_alive():
+            return True
+        d.wda_alive = now_alive  # the person typed it: the same start finished
+        await d.start_wda("runner.id", wait=30)
+        assert d.runner is pending and not d.awaiting_passcode
+        await d.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_start_with_no_passcode_screen_keeps_its_own_reason(monkeypatch):
+    _fake_phone_side(monkeypatch, _failing("initialization_for_ui_testing_did_fail"))
+    with pytest.raises(DeviceError, match="UI testing failed to start") as e:
+        asyncio.run(_start(30))
+    assert type(e.value) is DeviceError
+
+
+def test_a_failed_start_behind_the_passcode_screen_is_named(monkeypatch):
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    from tapwright.device import PasscodeNeeded
+    _fake_phone_side(monkeypatch, _failing("initialization_for_ui_testing_did_fail"))
+    monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)
+    with pytest.raises(PasscodeNeeded):
+        asyncio.run(_start(30))

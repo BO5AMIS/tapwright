@@ -18,7 +18,8 @@ from PIL import Image, UnidentifiedImageError
 from . import changes, ui
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PhoneLocked, PhoneNotFound
+from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked,
+                     PhoneNotFound)
 from .session import Snapshot
 from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of
 
@@ -406,6 +407,9 @@ class Daemon:
         is coming back."""
         if self.state == "no-device":
             return Refused("not_connected", f"no phone to drive ({self.detail}); fix that, then try again")
+        if isinstance(self.stuck, PasscodeNeeded):
+            return Refused("locked", "the phone is asking for its passcode to allow UI automation; ask the user "
+                                     "to enter it on the phone")
         if isinstance(self.stuck, PhoneLocked):
             return Refused("locked", "the phone is locked; ask the user to unlock it")
         if isinstance(self.stuck, AppNotAnswering):
@@ -744,8 +748,11 @@ class Daemon:
                                           "happened") from None
         if isinstance(result, Scrolled) and result.note:
             notes = [*notes, result.note]
-        if box.get("note"):  # tap, long_press, toggle and type_text carry theirs here, whatever they return
-            notes = [*notes, box["note"]]
+        # The keyboard note is given only when the keyboard is still closed as the call answers (AGENT-TOOLS
+        # v1.4): type_text focuses its input, so the keyboard is up again and the note would contradict the header
+        closed_first = box.get("note") if name != "type_text" else None
+        if closed_first:
+            notes = [*notes, closed_first]
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
@@ -774,6 +781,8 @@ class Daemon:
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT, done.seconds)
+        if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
+            answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
             # say only what the new list shows; if the switch can't be found again, claim nothing
             old = result.before

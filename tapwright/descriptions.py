@@ -85,8 +85,8 @@ SHARED = {
     'type_text': (
         'Type `text` into an input. `target` picks the input; without it, the focused input, else the '
         'only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears '
-        "the field first; false appends. `submit: true` then presses the keyboard's submit key. Answers "
-        '`Typed into <element>. Value is now "…"` and what changed.'
+        "the field first; false appends. `submit: true` then presses the keyboard's submit key. `force` is "
+        'as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.'
     ),
     'scroll': (
         'Scroll content: `down` shows what is below. `direction` (default `down`), `amount` (0.1-1.0 of '
@@ -99,8 +99,8 @@ SHARED = {
         "it's already there); omit `value` to flip it. Answers the new state and what changed."
     ),
     'back': (
-        'Go back one screen. Answers what changed; `not_actionable: no_action` when there is nothing to '
-        'go back to.'
+        'Go back one screen. An open sheet or popover closes first, where it can be closed. Answers what '
+        'changed; `not_actionable: no_action` when there is nothing to go back to.'
     ),
     'open_url': 'Open a URL or deep link, like "myapp://settings". Answers what came up and what changed.',
     'wait': (

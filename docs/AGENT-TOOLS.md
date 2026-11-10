@@ -266,7 +266,10 @@ text items.
   `Note: closed the keyboard first.` A person's first tap outside the field often only closes the
   keyboard, and the keyboard covers controls near the bottom; the tool does both steps in one and
   says so. With a hardware keyboard connected no keyboard shows, and nothing is closed. Nothing is
-  closed for a call the tool refuses, or while a system alert is in front.
+  closed for a call the tool refuses, or while a system alert is in front. The note is given only
+  when the keyboard is still closed as the call answers: Tapwright's `type_text` focuses the new
+  input, so the keyboard is up again and it leaves the note out; Tapline's `type_text` sets the
+  value without focusing, so it keeps the note.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;
@@ -325,7 +328,7 @@ text items.
 | `look` | `screenshot`, `width`, `labels` | the full list (§3) |
 | `tap` | `target`, `force`, `look`, `screenshot` | **Change Tapline:** `press` becomes `tap`, to match the viewer protocol, Appium and Maestro, and "what a real tap would do" |
 | `long_press` | `target`, `seconds` (default 1.0), `force`, `look`, `screenshot` | Tapline ignores `seconds` and calls the handler |
-| `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
+| `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `force`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
 | `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start` or `end`), `target`, `look`, `screenshot` | "down shows what's below". **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
 | `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`, and answers `no_action` when the Modal has none |
