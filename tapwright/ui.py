@@ -397,6 +397,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         # keys but not above them in the tree); a bar that ends where the keys begin is the app's
         worth = worth and node not in keyboard_holders and not (
             keys_top is not None and not in_keyboard and y + h > keys_top + 1)
+        # ...nor a plain view of exactly the keyboard's size and place in another window (`inputView`, in the
+        # text effects window on the phone)
+        if worth and kind == "Other" and not label and not value and any(_same_rect(rect, r) for r in keyboard_rects):
+            worth = False
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
@@ -453,6 +457,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 window, up = up, parents.get(up)
             if window is not n:
                 keyboard_windows[window] = min(_rect(n)[1], keyboard_windows.get(window, math.inf))
+    keyboard_rects = [_keyboard_view(n, parents, screen_rect) for n in root.iter()
+                      if _kind(n) == "Keyboard" and _rect(n)[3] > 0]
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)

@@ -451,9 +451,13 @@ def test_the_keyboards_own_keys_and_views_are_not_listed_but_a_bar_above_the_key
         node("Keyboard", 0, 631, 430, 243, children=[node("Key", 4, 640, 43, 56, "q")])])
     done = node("Toolbar", 0, 587, 430, 44, children=[node("Button", 360, 590, 60, 38, "Done")])
     view = node("Other", 0, 587, 430, 345, children=[done, keys, strip])
-    around = node("Other", 0, 614, 430, 318, name="inputView")  # beside the keys' views in the tree, not above them
     window = node("Window", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932, children=[
-        node("Other", 0, 0, 430, 932), around, view])])
+        node("Other", 0, 0, 430, 932), view])])
+    # as the phone has it: a window of its own with a view named inputView, the keyboard's size and place
+    effects = node("Window", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932), node("Other", 0, 587, 430, 345, children=[
+            node("Other", 0, 587, 430, 345, name="inputView")])])])
+    window = effects + window
     tree = ui.read(phone(node("Window", 0, 0, 430, 932, children=[lab_base()]), window), PHONE)
     shown = labels(tree.items)
     assert tree.keyboard and "Done" in shown and "Base action" in shown
