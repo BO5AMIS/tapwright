@@ -64,14 +64,16 @@ once, needs internet) and starts WebDriverAgent; that takes up to a minute. Late
 take seconds.
 
 **The passcode screen.** Before it lets a UI test start, iOS may show **Enter iPhone Passcode
-for "XCTest"** with the line *Enable UI Automation*. It does so on a first run, and again now
-and then (on our phone it came back in the middle of a day of testing). Nothing starts until
+for "XCTest"** with the line *Enable UI Automation*. It does so on a first run, and again
+every few hours (on our phone it came back two and a half hours after the passcode was
+entered). Nothing starts until
 a person enters the passcode; Tapwright can't, and says so: agents get `locked` with "the
 phone is asking for its passcode to allow UI automation", and the live view shows the same.
 The start goes on by itself once the passcode is in.
 
-To stop the phone asking, turn on Settings > Developer > **Enable UI Automation**. Do this on
-every dedicated test device, or an unattended run stops at that screen.
+To stop the phone asking, turn on Settings > Developer > **Enable UI Automation**. Entering
+the passcode only lasts a few hours; the setting lasts. Do this on every dedicated test
+device, or an unattended run stops at that screen.
 
 ## 5. The live view
 
