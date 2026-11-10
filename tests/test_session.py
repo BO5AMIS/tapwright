@@ -84,6 +84,31 @@ def test_a_frozen_app_in_front_is_named_instead_of_a_dropped_line(phone):
     assert paths.index("/session/S/wda/locked") < paths.index("/session/S/window/size")
 
 
+def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phone):
+    """An app that freezes while in use: the read used to wait up to 60 s in silence. It is cut at READ_CUT, and
+    the app iOS has in front is named (R6: a drop ends clearly)."""
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    waits = []
+    real = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.startswith("/session/S/source") or "/source" in path:
+            waits.append(timeout)
+            raise ConnectionLost(f"WebDriverAgent didn't answer {method} {path} within {timeout:.0f} s")
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    with pytest.raises(AppNotAnswering) as e:
+        asyncio.run(s.refresh())
+    assert e.value.bundle_id == "app.jld.mobile" and waits == [session_module.READ_CUT]
+    phone.in_front = []  # nothing in front can be blamed: it stays a dropped line
+    asyncio.run(s.ensure())
+    with pytest.raises(ConnectionLost) as e:
+        asyncio.run(s.refresh())
+    assert type(e.value) is ConnectionLost
+
+
 def test_a_locked_phone_at_connect_is_named(phone):
     phone.locked, phone.in_front = True, ["app.jld.mobile"]
     phone.fail["/window/size"] = ConnectionLost("didn't answer")

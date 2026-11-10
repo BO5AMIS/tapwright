@@ -378,11 +378,15 @@ class Daemon:
         self.broadcast(message)
 
     # ---- the connection ----
-    def lost(self, reason: str) -> None:
-        """A request found the line dead: the supervisor reconnects."""
+    def lost(self, reason: "str | Exception") -> None:
+        """A request found the line dead: the supervisor reconnects. When the request was cut because the app in
+        front doesn't answer (AppNotAnswering), that is what agents and the live view are told meanwhile."""
+        stuck = reason if isinstance(reason, AppNotAnswering) else None
+        if stuck is not None:
+            self.stuck = stuck
         if self.state in ("live", "locked"):
             self.log(f"connection lost: {reason}")
-            self._set_state("reconnecting", reason[:200])
+            self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
         self._lost.set()
@@ -476,7 +480,7 @@ class Daemon:
             try:
                 await self._pace_once()
             except ConnectionLost as e:
-                self.lost(str(e))
+                self.lost(e)
             except Refused:
                 pass  # not connected, or paused: the next check tries again
             except Exception as e:
@@ -540,7 +544,7 @@ class Daemon:
             try:
                 locked = await self.control.read(lambda: self._connected_only(self.session.locked))
             except ConnectionLost as e:
-                self.lost(str(e))
+                self.lost(e)
             except Refused:
                 pass
             except Exception as e:
@@ -708,7 +712,10 @@ class Daemon:
         try:
             result = await self.control.agent(act)
         except ConnectionLost as e:
-            self.lost(str(e))
+            self.lost(e)
+            if isinstance(e, AppNotAnswering):  # the action went out, then the app stopped answering
+                self._announce("agent", name, ok=False, code="not_answering")
+                raise self._not_connected() from None
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
@@ -1324,7 +1331,7 @@ class Daemon:
             try:
                 return await self.control.read(lambda: self._connected_only(fn))
             except ConnectionLost as e:
-                self.lost(str(e))
+                self.lost(e)
                 if attempt == 2:
                     raise Refused("reconnecting", "lost the connection to the phone; try again") from None
                 await self.wait_connected()
@@ -1359,7 +1366,7 @@ class Daemon:
         except Refused as e:
             return {"type": "error", "code": e.code, "message": str(e)}
         except ConnectionLost as e:
-            self.lost(str(e))
+            self.lost(e)
             return {"type": "error", "code": "reconnecting",
                     "message": "the connection dropped; your input may not have reached the phone"}
         except (ValueError, KeyError, TypeError, IndexError) as e:

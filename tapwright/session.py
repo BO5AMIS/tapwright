@@ -12,6 +12,7 @@ from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSet
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
 
@@ -120,6 +121,17 @@ class Session:
             raise
 
     # ---- seeing ----
+    async def _source(self, timeout: float = 60) -> str:
+        """The tree as WebDriverAgent's XML. A read normally takes about 0.2 s; one that hasn't answered within
+        READ_CUT seconds is cut, and the phone is asked why: an app that is in front and doesn't answer
+        accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
+        try:
+            return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+        except (PhoneLocked, AppNotAnswering):
+            raise
+        except ConnectionLost as e:
+            raise await self._why_stuck(False, e) from e
+
     async def foreground_bundle_id(self) -> str | None:
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
@@ -194,7 +206,7 @@ class Session:
 
     async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
+        source = await self._source(timeout)
         return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard))
 
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
@@ -228,12 +240,11 @@ class Session:
 
     async def back_point(self) -> ui.Back:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60))["value"]
-        return ui.back_button(source, self.screen)
+        return ui.back_button(await self._source(), self.screen)
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
+        source = await self._source(timeout)
         tree = ui.read(source, self.screen)
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
@@ -343,7 +354,7 @@ class Session:
 
     async def _field_now(self, field: ui.Element) -> tuple[float, float, float, float] | None:
         """Where the tree shows the field now: the one input with its identifier (else its label), or None."""
-        source = (await self._call("GET", ui.SOURCE_PATH, timeout=60)).get("value")
+        source = await self._source()
         if not isinstance(source, str):
             return None
         same = [e for e in ui.read(source, self.screen).items if e.role == field.role

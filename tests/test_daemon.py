@@ -369,6 +369,31 @@ def test_a_frozen_app_is_named_at_once_and_close_app_ends_it():
     run(go)
 
 
+def test_an_app_that_freezes_mid_session_answers_not_answering_and_then_recovers():
+    """The lab's 20 s freeze: a look during it must end with a code, and the next one must work by itself."""
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        frozen = AppNotAnswering("app.jld.mobile", "JLD")
+        s.stuck = frozen  # the reconnect finds it still frozen
+        s.fail["look"] = s.fail["snapshot"] = frozen  # the read is cut and the app named
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert e.value.code == "not_answering" and str(e.value).startswith("JLD (app.jld.mobile) is in front")
+        assert d.state == "not-answering" and d.stuck is not None
+        s.stuck = None  # the app answers again: nobody has to do anything
+        for _ in range(300):
+            if d.state == "live":
+                break
+            await asyncio.sleep(0.01)
+        assert d.state == "live" and d.stuck is None
+        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_phone_locked_at_connect_answers_locked():
     async def go():
         s = FakeSession()
