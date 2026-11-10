@@ -116,9 +116,11 @@ class Device:
         self.tunnel = None
         self.rsd = None
         self.via = None
-        # One connection kept open to WebDriverAgent (see _on_kept). Off unless TAPWRIGHT_KEEP=1: built with a
-        # simulated phone, timed on the real one, not yet run through the suites.
-        self.keep = os.environ.get("TAPWRIGHT_KEEP", "0") == "1"
+        # One connection kept open to WebDriverAgent (see _on_kept). On over USB, where the reliability suite
+        # passed with it (2026-11-11); off over a network until it has been measured there. TAPWRIGHT_KEEP=1 or
+        # 0 overrides.
+        forced = os.environ.get("TAPWRIGHT_KEEP")
+        self._keep_forced = None if forced not in ("0", "1") else forced == "1"
         self._kept: tuple | None = None
         self._kept_lock = asyncio.Lock()
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
@@ -372,6 +374,14 @@ class Device:
             err = data.get("value", {}) if isinstance(data.get("value"), dict) else {}
             raise DeviceError(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
         return data
+
+    @property
+    def keep(self) -> bool:
+        return self._keep_forced if self._keep_forced is not None else self.via == "USB"
+
+    @keep.setter
+    def keep(self, value: bool) -> None:
+        self._keep_forced = value
 
     async def _on_kept(self, request: bytes, again: bool) -> tuple[int, bytes] | None:
         """One request on the connection kept open to WebDriverAgent (it keeps one open, measured 2026-11-10: a
