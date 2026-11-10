@@ -12,6 +12,8 @@ from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSet
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+BANNER_ZONE = 200.0  # points from the top: where a notification banner can lie (a touch lower down is never held)
+SPRINGBOARD = "com.apple.springboard"
 KEY_MS = 60  # ms a typed key counts for in the notice to Tapline (see tapline.py)
 SCROLL_MS = 1200  # ms a scroll drag counts for there (an eased drag that ends slowly)
 ACTION_WAIT = 10.0  # seconds a touch may take to be answered beyond its own length (a tap answers in about 0.5 s)
@@ -62,6 +64,7 @@ class Session:
         # Awaited with a touch's length in ms just before each touch while it is set: the daemon sets it for the
         # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
         self.touch_hook = None
+        self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -327,14 +330,41 @@ class Session:
         return cx, cy, hit.line(actions=False)
 
     # ---- acting ----
-    async def _touching(self, ms: float) -> None:
+    async def _touching(self, ms: float, at: tuple[float, float] | None = None) -> None:
+        """Just before a touch that starts at `at`: wait out a notification banner over the top of the screen (for
+        the agent's touches), then tell Tapline the touch is the agent's."""
+        if self.banner_guard and at is not None:
+            await self._clear_of_banner(at)
         if self.touch_hook is not None:
             await self.touch_hook(ms)
+
+    async def _clear_of_banner(self, at: tuple[float, float]) -> None:
+        """A touch near the top of the screen while a notification banner is there lands on the banner: a tap opens
+        the notification's app, a drag down opens the notification out (seen on the phone 2026-11-10: a scroll to
+        a list's start pulled a Mail banner open). While a banner shows, WebDriverAgent names SpringBoard as the
+        app in front though the phone's process list still has the app: then this waits for it to leave, and
+        refuses the touch if it doesn't. Touches lower down, and SpringBoard's own screens with no app in front
+        (the home screen), are not held up."""
+        if at[1] >= BANNER_ZONE:
+            return
+        waited = 0.0
+        while await self.foreground_bundle_id() == SPRINGBOARD:
+            try:
+                in_front = await asyncio.wait_for(self.device.foreground_apps(), 5)
+            except Exception:
+                return  # the phone can't say: WebDriverAgent's answer alone is no reason to refuse
+            if not in_front:
+                return  # the home screen itself: nothing lies over an app
+            if waited >= BANNER_WAIT:
+                raise Refused("not_actionable", "covered: a notification is over the top of the screen, so nothing "
+                                                "was touched; wait a few seconds, then try again.")
+            await asyncio.sleep(BANNER_POLL)
+            waited += BANNER_POLL
 
     async def tap(self, target: ui.Target, hold_ms: int = TAP_MS) -> str:
         self.typed_into = None
         x, y, what = self._target(target)
-        await self._touching(hold_ms)
+        await self._touching(hold_ms, (x, y))
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms), timeout=hold_ms / 1000 + ACTION_WAIT)
         self.last_point = (x, y)
         return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
@@ -455,7 +485,7 @@ class Session:
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
-        await self._touching(duration_ms + hold_ms)
+        await self._touching(duration_ms + hold_ms, (x0, y0))
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms),
                          timeout=(duration_ms + hold_ms) / 1000 + ACTION_WAIT)
         self.last_point = (x0, y0)
@@ -464,7 +494,7 @@ class Session:
     async def scroll(self, x0: float, y0: float, x1: float, y1: float) -> str:
         """A scroll drag that stops where the finger does (ui.scroll_drag)."""
         self.typed_into = None
-        await self._touching(SCROLL_MS)
+        await self._touching(SCROLL_MS, (x0, y0))
         await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1), timeout=2 + ACTION_WAIT)
         self.last_point = (x0, y0)
         return f"scrolled ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
@@ -472,7 +502,7 @@ class Session:
     async def path(self, points: list) -> str:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
         self.typed_into = None
-        await self._touching(points[-1][0])
+        await self._touching(points[-1][0], (points[0][1], points[0][2]))
         await self._call("POST", "/session/{sid}/actions", ui.path(points), timeout=points[-1][0] / 1000 + ACTION_WAIT)
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"

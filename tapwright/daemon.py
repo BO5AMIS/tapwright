@@ -847,11 +847,11 @@ class Daemon:
         async def act_as_agent():
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
             # person's input from the live view, queued separately, is never announced as the agent's
-            self.session.touch_hook = self._agent_touches.notify
+            self.session.touch_hook, self.session.banner_guard = self._agent_touches.notify, True
             try:
                 return await act()
             finally:
-                self.session.touch_hook = None
+                self.session.touch_hook, self.session.banner_guard = None, False
 
         try:
             result = await self.control.agent(act_as_agent)

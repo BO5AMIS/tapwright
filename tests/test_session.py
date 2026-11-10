@@ -114,6 +114,40 @@ def test_a_read_waits_out_a_notification_banner_over_the_app(phone, monkeypatch)
     assert [e.identifier for e in asyncio.run(s.refresh()).items] == ["NotificationShortLookView"]
 
 
+def test_a_touch_near_the_top_waits_out_a_notification_banner(phone, monkeypatch):
+    """Seen on the phone 2026-11-10: a scroll to a list's start began near the top while a Mail banner was there
+    and pulled it open. An agent's touch up there waits for the banner to leave; one that stays isn't touched."""
+    monkeypatch.setattr(session_module, "BANNER_POLL", 0.001)
+    monkeypatch.setattr(session_module, "BANNER_WAIT", 0.005)
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.in_front = ["app.jld.mobile"]
+    fronts, touched, real = ["com.apple.springboard", "com.apple.springboard", "app.jld.mobile"], [], phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/wda/activeAppInfo"):
+            return {"value": {"bundleId": fronts.pop(0) if len(fronts) > 1 else fronts[0]}}
+        if path.endswith("/actions"):
+            touched.append(payload)
+            return {"value": None}
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    s.banner_guard = True
+    asyncio.run(s.swipe(200, 150, 200, 500))  # starts under where a banner lies
+    assert len(touched) == 1 and fronts == ["app.jld.mobile"]
+    fronts[:] = ["com.apple.springboard"]  # a banner that stays
+    with pytest.raises(Refused, match="covered: a notification is over the top"):
+        asyncio.run(s.swipe(200, 150, 200, 500))
+    assert len(touched) == 1
+    asyncio.run(s.swipe(200, 600, 200, 300))  # lower down: no banner can be there, nothing is asked
+    phone.in_front = []  # the home screen itself: no app under a banner
+    asyncio.run(s.swipe(200, 150, 200, 500))
+    s.banner_guard = False  # a person's input from the live view is theirs
+    phone.in_front = ["app.jld.mobile"]
+    asyncio.run(s.swipe(200, 150, 200, 500))
+    assert len(touched) == 4
+
+
 def test_one_stalled_touch_keeps_the_session_and_says_it_is_not_known(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a tap got no answer for 30 s, then WebDriverAgent was started
     again, though it answered every other request. A touch can't be sent twice, so the caller hears that the
