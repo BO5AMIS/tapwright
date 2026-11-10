@@ -805,6 +805,9 @@ function createVideoBlock(io) {
   var streamAbort = null;
   var streamWake = null;
   var videoOn = false;
+  /* The video's own frame rate while it shows (null until the first second has passed). */
+  var videoFps = null;
+  var videoFpsTimer = null;
   var haveFrame = false;
   var shown = { rev: null, size: null, coverage: "", natural: null };
   var lastAnnounce = "";
@@ -881,6 +884,8 @@ function createVideoBlock(io) {
     "no-device": "No device",
     "not-answering": "App not answering"
   };
+  /* How the phone is reached, as people write it. */
+  var VIA_TEXT = { usb: "USB", wifi: "Wi-Fi", tailscale: "Tailscale" };
   function renderStatus() {
     var dot = $("dot");
     var core = [];
@@ -892,7 +897,7 @@ function createVideoBlock(io) {
       var st = String(status.state || "");
       core.push(STATE_TEXT[st] || st || "Unknown");
       if (status.detail) core.push(String(status.detail));
-      if (status.via) core.push("via " + status.via);
+      if (status.via) core.push("via " + (VIA_TEXT[String(status.via)] || String(status.via)));
       if (st === "live") cls = "live";
       else if (st === "locked" || st === "no-device" || st === "not-answering") cls = "bad";
       else cls = "wait";
@@ -908,7 +913,8 @@ function createVideoBlock(io) {
     if (shown.coverage === "app-window") core.push("app window only");
     var plain = core.join(" \u00b7 ");
     var text = plain;
-    if (wsOpen && status && isNum(status.fps)) text += " \u00b7 " + status.fps.toFixed(1) + " fps";
+    var fps = videoOn ? videoFps : status && isNum(status.fps) ? status.fps : null;
+    if (wsOpen && status && isNum(fps)) text += " \u00b7 " + fps.toFixed(1) + " fps";
     $("status").textContent = text;
     $("status").title = text; /* the whole line, when the bar cuts it short */
     dot.className = cls;
@@ -1507,14 +1513,39 @@ function createVideoBlock(io) {
       haveFrame = true;
       frame.classList.add("has-frame");
       layout();
+      startVideoFps();
       renderStatus();
     },
     onVideoStopped: function () {
       videoOn = false;
+      stopVideoFps();
       setStream(true);
       renderStatus();
     }
   });
+
+  /* While video shows, the status line's rate is the video's own: frames drawn in the last second.
+     (The server's fps is its JPEG stream's.) */
+  function startVideoFps() {
+    stopVideoFps();
+    var last = video.stats().frames;
+    var lastAt = Date.now();
+    videoFps = null;
+    videoFpsTimer = setInterval(function () {
+      var now = Date.now();
+      var frames = video.stats().frames;
+      var seconds = (now - lastAt) / 1000;
+      if (seconds > 0) videoFps = Math.max(0, (frames - last) / seconds);
+      last = frames;
+      lastAt = now;
+      renderStatus();
+    }, 1000);
+  }
+  function stopVideoFps() {
+    if (videoFpsTimer !== null) clearInterval(videoFpsTimer);
+    videoFpsTimer = null;
+    videoFps = null;
+  }
 
   layout();
   renderStatus();
