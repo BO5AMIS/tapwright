@@ -1065,6 +1065,23 @@ def test_after_a_person_acted_the_answer_is_the_full_list_with_the_note():
     run(go)
 
 
+def test_an_agent_that_has_not_looked_yet_gets_no_note_about_a_person():
+    """Seen on the phone 2026-11-10: a new agent's first call ended with "a person used the phone since your
+    last look", because someone had used the live view before it connected."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        first = await d.run_tool("b", "look", {"screenshot": False})
+        assert "Note:" not in first["text"]
+        await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]})
+        again = await d.run_tool("b", "look", {"screenshot": False})
+        assert again["text"].endswith("\nNote: a person used the phone since your last look.")
+        await finish(stop, task)
+    run(go)
+
+
 def test_after_a_dropped_connection_the_answer_is_the_full_list():
     async def go():
         d = make()

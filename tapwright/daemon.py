@@ -729,7 +729,8 @@ class Daemon:
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
         target = args.get("target")
         view = self.control.client(client_id)
-        notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
+        # an agent that hasn't looked yet has no "last look": its first list is whole anyway
+        notes = [NOTE_PERSON] if 0 <= view.seen < self.control.person_generation else []
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
         await self.wait_connected()
