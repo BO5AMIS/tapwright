@@ -83,6 +83,7 @@ STILL_FPS = 5
 PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
 PACE_TICK = 0.25  # how often the pace is checked
 LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
+BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -1439,7 +1440,7 @@ class Daemon:
         button. A bar without one is a root screen (or has only Cancel,
         Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
-        back = await s.back_point()
+        back = await self._still_back()
         if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
@@ -1457,6 +1458,32 @@ class Daemon:
         width, height = s.screen
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
+
+    async def _still_back(self) -> ui.Back:
+        """Where `back` would touch, read until two reads in a row agree. A sheet that is still sliding in has
+        more room above it than it will have: the middle of that room, tapped half a second later, is inside the
+        sheet. On the phone that touch landed on an app in the share sheet and opened it (2026-11-10, over Wi-Fi,
+        where a read and the touch after it are further apart; Mail came to the front). So nothing is touched
+        until the sheet stands still; a sheet that never does is `no_action`."""
+        s = self.session
+
+        def where(back: ui.Back) -> tuple:
+            behind = getattr(s, "behind", [])
+            front = behind[0][1] if behind else None
+            box = ui.sheet_box(front, getattr(s, "front_items", None) or [], s.screen) if behind else None
+            return back.dismiss, back.point, box
+        back = await s.back_point()
+        seen = where(back)
+        if back.dismiss is None and not getattr(s, "behind", []):
+            return back  # nothing is open on top: a bar's back button doesn't slide
+        for _ in range(BACK_STILL_TRIES):
+            await asyncio.sleep(BACK_STILL_PAUSE)
+            back = await s.back_point()
+            now = where(back)
+            if now == seen:
+                return back
+            seen = now
+        raise Refused("not_actionable", "no_action: what is open on top is still moving; call back again in a moment")
 
     async def _close_sheet(self, view) -> str:
         """Close the sheet in front the two ways a person tries from outside it: a touch beside it, on what it

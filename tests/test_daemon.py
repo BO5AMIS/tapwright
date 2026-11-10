@@ -3612,6 +3612,39 @@ def test_back_finds_the_sheet_inside_a_backdrop_that_fills_the_screen():
     run(go)
 
 
+def test_back_touches_nothing_while_the_sheet_is_still_sliding_in():
+    """Seen on the phone 2026-11-10 over Wi-Fi: the share sheet was read while it slid up, the middle of the room
+    above it was tapped half a second later, and by then that point was an app's icon in the sheet. Mail opened."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        places = [(200.0, 400.0), (200.0, 250.0), (200.0, 165.0), (200.0, 165.0)]  # the room above shrinks, then holds
+
+        async def back_point():
+            return ui.Back(False, None, places.pop(0) if len(places) > 1 else places[0])
+        d.session.back_point = back_point
+        r = await d.run_tool("a", "back", {"look": False})
+        assert r["text"].startswith("Closed the sheet.") and d.session.tap_points == [(200.0, 165.0)]
+        # one that never stands still: nothing is touched
+        d.session.tap_points.clear()
+        moving = iter(range(1000))
+
+        async def sliding():
+            return ui.Back(False, None, (200.0, 400.0 - 10 * next(moving)))
+        d.session.back_point = sliding
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {"look": False})
+        assert e.value.code == "not_actionable" and "still moving" in str(e.value) and d.session.tap_points == []
+        await finish(stop, task)
+    pause = daemon_module.BACK_STILL_PAUSE
+    daemon_module.BACK_STILL_PAUSE = 0.001
+    try:
+        run(go)
+    finally:
+        daemon_module.BACK_STILL_PAUSE = pause
+
+
 def test_back_never_drags_from_the_top_of_the_screen():
     """A layer that fills the screen is no sheet to pull, and a drag from the top edge opens Notification Center."""
     async def go():
