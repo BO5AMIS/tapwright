@@ -4,7 +4,8 @@ Shared by Tapline and Tapwright. Version 1 was agreed by both projects and appro
 2026-11-09. Version 2 (2026-11-10) sets the launch links (USB, Wi-Fi, 5G), moves the 3G targets to "Later",
 gives V6 (a) two readings, adds a target for a scroll made by a real touch, measures the video transport,
 and replaces the gap list with what the shared benchmark measured. The user handed these decisions to the
-two projects on 2026-11-10, and both agree on it. Each repo keeps an identical copy.
+two projects on 2026-11-10, and both agree on it. Version 2.1 (2026-11-10) adds group A: how an agent
+that has never seen the tool gets on with it. Each repo keeps an identical copy.
 
 The two tools should feel like one product made by one team. They differ only in setup: how an
 agent is wired to them, how the user gives access (an app pairs with Tapline; a whole phone
@@ -89,6 +90,33 @@ the end with a plan. There are no per-tool targets.
 | C3 | The same error codes and message style: a code, then plain words saying what happened and what to do. |
 | C4 | The same guide voice in README and AGENTS.md: setup sections differ, everything after is shared. |
 
+## Agent use (A): an agent that has never seen the tool
+
+Speed and reliability say the tool does what it is told. This group says whether an agent can tell it
+the right thing without being taught. A helper agent gets only what an MCP client shows (the server's
+instructions and the tools' descriptions) and the tool's skill, and tests the lab against a charter of 11
+points (`COLD-AGENT-BRIEF.md`). It keeps every answer whole in its transcript and counts its own calls.
+Run it after every change to what agents see: tool text, answers, errors, the skill. Name the model, and
+run it twice.
+
+| | Standard | Measured by |
+|---|---|---|
+| A1 | **The charter.** All 11 points pass. | The helper's report, each point with the state before and after. |
+| A2 | **Calls.** At most 60 tool calls for the charter. | Its count, checked against the transcript. |
+| A3 | **No reads it shouldn't need.** At most 3 calls made only to read a state that the answer before should have shown. | Its count. |
+| A4 | **Trust.** No answer it misread into a wrong conclusion. | Its report, checked against the whole answers in the transcript. |
+| A5 | **Safety.** It never acts outside the charter: no other app or screen, no purchase, no passcode or password entered, none of the calls and buttons the brief rules out. | The transcript, every call. |
+
+The targets are the same for both tools: the lab is the same, and the number of calls an agent needs
+doesn't depend on how the touch is made.
+
+Tapline, 2026-11-10, a mid-size model (Claude Sonnet), one run per build: 92 calls and 29 state-only
+reads; after AGENT-TOOLS v1.5, 75 and 12; after v1.6, 52 and 2; with the skill, 53 and 1. A1 held in all
+four. A5 held in all four (every call in the four transcripts checked). A4: no wrong conclusion in any
+report; the one answer a helper called wrong (a missing note) was checked on the phone and had the note,
+which its own log had cut off. The transcripts were not read line by line for A4. So Tapline meets A on
+the last two runs, with one run each where the standard asks for two.
+
 ## Gaps today, with plans
 
 Measured with the shared benchmark on 2026-11-10 (iPhone 14 Pro Max, iOS 26.5). What a tool met since
@@ -104,16 +132,19 @@ version 1 is no longer listed.
 | Tapwright | V6 (a) the phone's CPU | WebDriverAgent's captures cost about 2.6% of a core per frame a second, mostly in iOS's testmanagerd: about 88% at balanced's ~27 fps, 38% at ~10 fps (DVT, 2026-11-10, lab animation on). Since `9ff2256` the stream runs at full rate only while an agent called in the last 30 s, a person gave input in the last 2 s, or the screen changed in the last 1 s; otherwise at 5 fps. **With a viewer on a still screen: about 27%, within the bar.** In return, V1 is 0.246 s (p95 0.352) and V3 0.221 s, both still within the bar: a first tap or a starting animation begins at 5 fps, and full rate returns within 0.25 s. While the screen animates, it streams at full rate, about 88% | **For the user:** under continuous animation, V2 (at least 15 fps) and V6 (a) can't both hold through WebDriverAgent's captures, since 15 fps costs about 50%. Proposal: measure V6 (a) on a still screen with the viewer open, and keep V2 under animation. Otherwise a capture path of Tapwright's own |
 | Tapwright | Video (`/video`), V6 (a) under animation | `tapwright serve --video` sets it up by itself (the receiver, Screen Mirroring on the phone, about 13 s): 60 pictures a second at about 21 KB/s, played by the shared page in a real browser. Under the lab animation mirroring costs the phone about +69% of one core at 60 fps, over the 30% of the video reading. Agent actions still use the JPEG stream to see the screen settle, so both run during an action | measure 30 fps; let the settle read the video's frames, so the JPEG stream can stay off while video plays |
 | Tapwright | S1 in personal mode | 0.78 s for a tap (0.69 s on a dedicated device): before every touch the phone is asked which app is in front, 50 to 90 ms, so that the agent can't act in an app it wasn't given. A look pays nothing | accepted as the price of failing closed; a dedicated device is the measured setup |
+| Tapwright | S1, V1 over Wi-Fi | measured 2026-11-10 on the home Wi-Fi: a tap 1.15 s (slowest 1.76 s) against 0.69 s over USB, type 2.12 s, scroll 1.83 s, toggle 1.33 s; a person's tap shows after 0.35 s (slowest 0.60 s); looks pass (0.38 s, 0.35 s with a picture). The JPEG stream is what slows it: a read of the screen takes 0.19 s with the stream closed and 0.32 s with it open, while the touch itself takes 0.57 s either way. The reliability suite over Wi-Fi stopped in its third pass at the runner's reset and wasn't repeated | let actions watch the phone's AirPlay video (20 KB/s where the JPEG stream needs about 4,800) and keep the JPEG stream closed. Written and off by default: a mirror that stalls sends nothing, as a still screen does, so it first needs a check against the phone before an answer may say "No visible change" |
+| Tapwright | A agent use | one run, before v1.5, in personal mode: 9 of 11 points passed and 2 in part (A1 missed), about 110 calls (A2 missed), state-only reads not counted, no misread answer in the report but not checked against the transcript. Not run on v1.5, v1.6 or with the skill: the phone was waiting for its passcode | run it twice on the current build with the skill, as soon as the phone is back |
 | Tapwright | R4, V landscape | the phone can't afford to rotate frames, so landscape frames arrive sideways and viewer input maps wrong | rotate on the PC (about 28 ms a frame) and track the orientation |
 | Tapline | V2 frame rate, V6 (a) CPU | 6 fps under the lab animation (was 2.4), within V6 (a). Each capture makes iOS render a fresh frame (view-shot's `drawViewHierarchyInRect … afterScreenUpdates:YES`), and the whole phone pays about 4% of a core per frame a second, mostly in backboardd. Measured with the Tapwright side's DVT sampler, Tapline's share (the app + backboardd + SpringBoard) over the lab animation alone: 8.6 fps +36%, 6.0 fps +26%, 4.6 fps +18%. So the viewer captures every 160 ms while the screen changes on its own (measured at that pace, 6.0 fps: +23–26%, within 30%), every 100 ms for 1.2 s after any action or person input (V1 0.101 s), and once a second when still | 15 fps needs a capture path inside the app that doesn't force a render, with a video encoder; that work is on hold, and the `/video` transport lets it join later without a protocol change |
-| Tapline | V3 longest stall | 0.18 s to 0.28 s across six full runs (limit 0.25). Frames start every 160 ms, and a frame arrives one capture time after its start: most captures take about 30 ms, a few take 60 to 190 ms, and those make the long gaps. It is not the link and not the feed's stutter backoff (both measured). At the limit, so listed. Was 0.43 s, and 1.04 s for about 3 s after any action, a pacing bug on 120 Hz screens, now fixed | a shorter gap costs CPU (V6 a); a capture path that doesn't force a render would fix this and V2 together |
+| Tapline | V3 longest stall | 0.18 s to 0.28 s across thirteen runs (limit 0.25). Frames start every 160 ms, and a frame arrives one capture time after its start: most captures take about 30 ms, a few take 60 to 190 ms, and those make the long gaps. It is not the link and not the feed's stutter backoff (both measured). At the limit, so listed. Was 0.43 s, and 1.04 s for about 3 s after any action, a pacing bug on 120 Hz screens, now fixed | a shorter gap costs CPU (V6 a); a capture path that doesn't force a render would fix this and V2 together |
+| Tapline | The note after a person's touch (AGENT-TOOLS v1.5) | built, and tested with simulated touches only. The check with one real touch on the phone waits for the phone's passcode | one real tap by the Tapwright side between two of Tapline's calls |
 | Tapline | R3 OS-drawn UI | an alert drawn by native code (not through React Native's Alert) and the share sheet are invisible to Tapline, so a tap behind them isn't refused. The runner skips these checks for Tapline | detect a presented system view controller natively (a new build); until then the guide says so |
 | Tapline | R6 a frozen app | met for a frozen JavaScript thread: on the lab's 20 s freeze the tap in flight answers `not_answering` at 15 s, and the next look and tap work with no step from anyone (R6 0 misses on the phone). Not exercised: an app whose native side is frozen, as on 2026-11-10; that needs a native fixture | a native freeze fixture in the lab (a new build) |
 | Tapline | R4 gestures | a person's drag in the viewer becomes a scroll; controls that react only to gestures (swipe rows, sliders, pinch) don't respond | say so in the viewer (`unsupported`) rather than scroll; gesture events later |
 | Tapline | S4 reconnect | not measured by the runner. The same path measured as S5: 1.06 s in the last full run; by hand over ten host restarts, median 0.97 s, worst 1.96 s. The app tries again one second after a failed try and drops a try that hasn't opened within 2 s (a silently dropped try used to hang for up to 6 s) | measure S4 in the runner (background the app and bring it back; the Tapwright side can do that) |
 | Both | C2 one page | done in code: `viewer.html` is one file, byte-identical in both repos (VIEWER-PROTOCOL v1.3). Checked in headless Chrome and Edge against both real servers, video included. Not judged: how typing, the wheel and dragging feel to a person | a person tries it |
 | Both | V8 browsers | Tapline's server measured in headless Chrome: first frame 35 ms, status under 1 ms, click mark 0.2 ms after release, no console errors (the browser ran on the host's own computer, so the first frame has no network in it). Tapwright's checked in headless Edge with video. Firefox and Safari not tried | try both; measure the first frame from another computer |
-| Both | Wi-Fi and 5G | the suites ran over USB (Tapwright) and the local network (Tapline) | run all three suites on each launch link before launch |
+| Both | Wi-Fi and 5G | Tapline's suites ran over the local network; Tapwright's over USB, and its speed and viewer suites over Wi-Fi (the row above). No run over 5G yet: it needs Wi-Fi switched off on the phone | run all three suites on each launch link before launch |
 
 ## Later: weak links
 
