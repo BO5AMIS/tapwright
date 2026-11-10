@@ -4072,3 +4072,28 @@ def test_a_forced_touch_past_a_check_says_where_it_may_have_landed():
         assert "Note:" not in r["text"]
         await finish(stop, task)
     run(go)
+
+
+def test_off_screen_changes_follow_a_full_list_that_came_because_most_of_the_screen_changed():
+    """Tapline's third first-time agent: a tap after a scroll made with look: false answered the full list, the
+    state line's change (off screen) was dropped, and it needed two more calls to read it."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.tree = [button(f"e{i + 1}", f"Old {i}", f"old-{i}", rect=(10, 10 + 50 * i, 100, 40)) for i in range(6)]
+        s.offscreen = [el("", "text", "taps=1", "lab-state", rect=(16, 1400, 398, 60))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.tree = [button(f"e{i + 1}", f"New {i}", f"new-{i}", rect=(10, 10 + 50 * i, 100, 40)) for i in range(6)]
+        s.offscreen = [el("", "text", "taps=2", "lab-state", rect=(16, 1400, 398, 60))]
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        lines = unsettled(r)
+        assert lines[1].startswith("Screen ") and lines[-1] == ('~ text "taps=2" id=lab-state @16,1400 398x60 '
+                                                               '(off screen; was "taps=1")')
+        # not when the full list was forced: a person acted, so the old off-screen list is no baseline
+        s.offscreen = [el("", "text", "taps=3", "lab-state", rect=(16, 1400, 398, 60))]
+        assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
+        assert unsettled(r)[1].startswith("Screen ") and "off screen" not in r["text"]
+        await finish(stop, task)
+    run(go)

@@ -1493,6 +1493,7 @@ class Daemon:
         `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
         s = self.session
         tail = [] if seconds is None else [settled_line(seconds)]
+        app_before = view.app
 
         async def read():
             self._mark_read(view)
@@ -1518,7 +1519,11 @@ class Daemon:
                                                              False, False)
         # what changed off screen (v1.6), against what lay there at the agent's last answer
         off_was, view.shown_off = view.shown_off, self._off_screen_now()
-        if not up.full and (off := changes.off_screen(off_was, view.shown_off, by_place=not moves_content)):
+        # ...unless the old list is no baseline: another app is in front now, or the full list was forced (a
+        # person acted, the line dropped, the agent had never looked)
+        same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
+        off = changes.off_screen(off_was, view.shown_off, by_place=not moves_content) if same_app and not full else []
+        if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
         if earlier and not up.full:
@@ -1529,7 +1534,8 @@ class Daemon:
             tree = snap.tree
             head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more,
                                (tree.above, tree.below))
-            return _answer([result, head, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+            # the full list because most of the screen changed: what changed off screen still follows it
+            return _answer([result, head, *off, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
