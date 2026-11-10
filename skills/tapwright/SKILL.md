@@ -101,6 +101,7 @@ with no element.
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
 | see pixels (layout, colours, images) | `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
+| work with Tapwright and Tapline both connected | inside the app under test, Tapline's tools: its reads and actions are the fast ones. For what iOS draws (permission prompts, system alerts, the share sheet), other apps, real gestures, and the live view: Tapwright's. A ref belongs to the tool that gave it: never pass one tool's ref to the other; use the element's `id` with either |
 | answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise. `Alert:` in the header is a system alert; an app's own alert is ordinary elements: tap its button |
 | start a run from a clean app | `close_app`, then `open_app` |
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
