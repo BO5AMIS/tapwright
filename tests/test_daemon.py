@@ -3284,16 +3284,33 @@ def test_a_slow_read_in_wait_for_is_a_timeout_not_a_lost_phone():
         d.lost = lambda reason: lost.append(reason)
 
         async def slow_refresh(timeout=None):
-            await asyncio.sleep(2.0)  # longer than the whole wait_for
-        d.session.refresh = slow_refresh
+            await asyncio.sleep(2.0)  # longer than the whole wait_for, and than the first read's own time
+        real, d.session.refresh = d.session.refresh, slow_refresh
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "wait_for", {"text": "never", "timeout": 0.5})
         assert e.value.code == "timeout" and not lost and d.state == "live"
         # no read came back: the answer says so, and doesn't claim the text wasn't there
-        assert str(e.value) == ("The phone didn't answer within 0.5 s, so it isn't known whether text \"never\" is on "
+        assert str(e.value) == ("The phone didn't answer within 0.7 s, so it isn't known whether text \"never\" is on "
                                 "screen; look, then wait again.")
+
+        # a read slower than the wait, but inside the first read's own time: the screen is seen once, and the
+        # answer is about the screen ("it didn't happen"), 12 of 12 times "not known" over Wi-Fi before
+        async def slowish(timeout=None):
+            await asyncio.sleep(0.6)
+            return await real(timeout)
+        d.session.refresh = slowish
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"text": "never", "timeout": 0.5})
+        assert str(e.value) == 'Waited 0.5 s for text "never" to appear; it didn\'t happen.'
+        r = await d.run_tool("a", "wait_for", {"text": "OK", "timeout": 0.5, "look": False})
+        assert r["text"].startswith("Done after")
         await finish(stop, task)
-    run(go)
+    first = daemon_module.WAIT_FOR_FIRST_READ
+    daemon_module.WAIT_FOR_FIRST_READ = 0.7
+    try:
+        run(go)
+    finally:
+        daemon_module.WAIT_FOR_FIRST_READ = first
 
 
 def test_wait_for_checks_its_arguments():

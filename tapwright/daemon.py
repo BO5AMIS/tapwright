@@ -72,6 +72,7 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
+WAIT_FOR_FIRST_READ = 3.0  # `wait_for`'s first read of the screen gets at least this long (twice the slowest look allowed)
 # The stream's pace. Every frame WebDriverAgent captures costs the phone, mostly in iOS's testmanagerd: about 88% of
 # a core at balanced's ~27 fps and 38% at light's ~10 fps (DVT sysmontap, the lab animating, 2026-11-10). So the
 # stream runs at its preset's rate while something happens, and at STILL_FPS once nothing has: no agent call for
@@ -1013,16 +1014,20 @@ class Daemon:
                 raise timed_out
             # The read gets its own full deadline, so a slow phone isn't taken for a dead one; wait_for's
             # deadline is kept by cancelling the read, which answers `timeout` and leaves the link alone.
-            # "It didn't happen" needs one look at the screen. Over Wi-Fi a read can stall for seconds (seen
-            # 2026-11-10: a 5 s wait answered that a text didn't appear which had been on screen all along; no
-            # read had come back). Then the answer says that the screen wasn't read, not what was on it.
+            # "It didn't happen" needs one look at the screen, so the first read gets at least
+            # WAIT_FOR_FIRST_READ seconds, whatever the wait's own time: over Wi-Fi one read can take most of a
+            # second, and a 0.5 s wait then never saw the screen at all (seen 2026-11-10: twelve of twelve). If
+            # even that read doesn't come back (a stall), the answer says that the screen wasn't read, not what
+            # was on it (the same day: a 5 s wait said a text didn't appear which had been there all along).
+            grace = left if seen else max(left, WAIT_FOR_FIRST_READ)
             try:
                 tree = await asyncio.wait_for(
-                    self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), left)
+                    self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), grace)
             except asyncio.TimeoutError:
                 if not seen:
-                    raise Refused("timeout", f"The phone didn't answer within {timeout:g} s, so it isn't known "
-                                             f'whether {kind} "{args[kind]}" is on screen; look, then wait again.') from None
+                    raise Refused("timeout", f"The phone didn't answer within {max(timeout, WAIT_FOR_FIRST_READ):g} s, so it "
+                                             f'isn\'t known whether {kind} "{args[kind]}" is on screen; look, then '
+                                             "wait again.") from None
                 raise timed_out from None
             seen = True
             if self._missing(tree.items, target) == gone:
