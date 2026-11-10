@@ -148,7 +148,8 @@ Network: 2 requests in flight
   the elements that lie wholly below and wholly above the screen: `(+41 below, +2 above)`,
   `(+41 below)` or `(+2 above)`; nothing when there are none. Below comes first. Left and
   right aren't counted. It counts what exists now: a long list that makes its rows as they
-  scroll into view has more below than the count says. Scroll to reach them.
+  scroll into view has more below than the count says. Scroll to reach them. What an open
+  sheet or popover hides isn't counted: scrolling can't reach it until the sheet is closed.
 - `Route:` and `Network:` are Tapline only.
 - `Keyboard:` is Tapwright only. Its keys aren't listed; type with `type_text`.
 - `Alert:` comes from both. Tapwright can press its buttons with `alert`; Tapline can't press
