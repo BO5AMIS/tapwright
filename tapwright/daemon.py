@@ -791,10 +791,11 @@ class Daemon:
         if name == "back" and not done.changed:
             raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
         # a toggle that changed nothing on the stream is not trusted: the tree says whether the switch flipped
-        if (not done.changed and name != "toggle" and not (full[0] or view.moved)
+        if (not done.changed and name != "toggle" and not (full[0] or view.moved) and not view.shown_off
                 and (mark[1] is view.read_mark[1] or alike(mark[1], view.read_mark[1]))):
             # no frame changed after the call returned, and the picture at its start is the one the agent's
-            # list was read against (nothing changed silently before it): no tree read, the list stays
+            # list was read against (nothing changed silently before it): no tree read, the list stays.
+            # Not when something lies off screen: the action's effect may be there, and only a read shows it
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
@@ -1433,6 +1434,7 @@ class Daemon:
             self._mark_read(view)
             text, image = await self.session.look(screenshot=False)
             view.items = view.shown = self.session.items
+            view.shown_off = self._off_screen_now()
             view.top_ref, view.app, view.seen = changes.highest(view.items), self.session.app, self.control.generation
             view.alert, view.keyboard = _alert_key(self.session.last_alert), self.session.last_keyboard
             view.read_keyboard = view.keyboard
@@ -1479,6 +1481,10 @@ class Daemon:
         view.alert_now = view.alert
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)
+        # what changed off screen (v1.6), against what lay there at the agent's last answer
+        off_was, view.shown_off = view.shown_off, self._off_screen_now()
+        if not up.full and (off := changes.off_screen(off_was, view.shown_off, by_place=not moves_content)):
+            up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
         if earlier and not up.full:
             # the block is measured from the agent's last list, so it holds those actions' changes too: a
@@ -1490,6 +1496,12 @@ class Daemon:
                                (tree.above, tree.below))
             return _answer([result, head, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         return _answer([result, *up.lines, *tail], notes)
+
+    def _off_screen_now(self) -> list[ui.Element]:
+        """What the last read found off screen, without what an open sheet hides (as in the header's counts)."""
+        s = self.session
+        hidden = {id(e) for e, _ in getattr(s, "behind", [])}
+        return [e for e in getattr(s, "offscreen", []) if id(e) not in hidden]
 
     def _current(self, view) -> bool:
         """Is the agent's last list still the screen? Not if a person or another agent acted since

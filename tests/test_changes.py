@@ -373,3 +373,34 @@ def test_a_read_with_no_action_before_it_gives_a_text_that_moved_alone_a_new_ref
     with_id = [replace(old[1], identifier="row-delete")]
     moved = [replace(with_id[0], rect=(200, 500, 100, 40))]
     assert refs(changes.carry_refs(with_id, moved, moves_content=None)) == ["e2"]  # an identifier is the same element
+
+
+# ---- changes off screen (AGENT-TOOLS v1.6) ----
+def test_a_changed_element_off_screen_gets_a_line_without_a_ref():
+    old = [el("", role="text", label="taps=1", identifier="lab-state", y=1400), el("", label="Row 9", y=1500)]
+    new = [el("", role="text", label="taps=2", identifier="lab-state", y=1400), el("", label="Row 9", y=1500)]
+    assert changes.off_screen(old, new) == ['~ text "taps=2" id=lab-state @0,1400 100x40 (off screen; was "taps=1")']
+    assert changes.off_screen(old, old) == []
+
+
+def test_off_screen_an_identifier_follows_its_element_and_a_place_only_counts_when_nothing_moved():
+    old = [el("", role="text", label="taps=1", identifier="lab-state", y=1400), el("", label="Edit", y=1500)]
+    scrolled = [el("", role="text", label="taps=2", identifier="lab-state", y=1100), el("", label="Delete", y=1500)]
+    after_scroll = changes.off_screen(old, scrolled, by_place=False)  # the row at 1500 is another row now
+    assert after_scroll == ['~ text "taps=2" id=lab-state @0,1100 100x40 (off screen; was "taps=1")']
+    in_place = changes.off_screen(old, [old[0], el("", label="Delete", y=1500)])
+    assert in_place == ['~ button "Delete" @0,1500 100x40 (off screen; was "Edit")']
+    twice = [el("", label="A", identifier="row", y=1400), el("", label="B", identifier="row", y=1500)]
+    moved = [el("", label="C", identifier="row", y=1450), el("", label="D", identifier="row", y=1550)]
+    assert changes.off_screen(twice, moved) == []  # an identifier two elements share names neither
+
+
+def test_off_screen_lists_five_and_counts_the_rest_and_new_or_gone_elements_are_not_news():
+    old = [el("", label=f"v{i}", identifier=f"id-{i}", y=1000 + 50 * i) for i in range(7)]
+    new = [el("", label=f"w{i}", identifier=f"id-{i}", y=1000 + 50 * i) for i in range(7)]
+    lines = changes.off_screen(old, new)
+    assert len(lines) == 6 and lines[-1] == "~ 2 more changed off screen"
+    assert changes.off_screen(old[:2], old) == [] and changes.off_screen(old, old[:2]) == []
+    switch = [el("", role="switch", label="Wi-Fi", identifier="wifi", y=1400, checked=False)]
+    flipped = [el("", role="switch", label="Wi-Fi", identifier="wifi", y=1400, checked=True)]
+    assert changes.off_screen(switch, flipped)[0].endswith('(off screen; was "false")')

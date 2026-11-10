@@ -3995,3 +3995,50 @@ def test_scroll_to_a_target_needs_an_element_and_no_direction():
         assert e.value.code == "not_found" and d.session.scrolls == []
         await finish(stop, task)
     run(go)
+
+
+# ---- changes off screen (AGENT-TOOLS v1.6) ----
+def test_a_tap_whose_effect_is_off_screen_shows_it_instead_of_no_visible_change():
+    """Tapline's second first-time agent spent 12 calls reading a state line after taps that answered "No visible
+    change.": the effect was real, and scrolled out of view."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        d.hub.publish(b"A")
+        s.offscreen = [el("", "text", "taps=1", "lab-state", rect=(16, 1400, 398, 60))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")  # nothing changes on the picture
+        real = s.tap
+
+        async def tap(*a, **k):
+            s.offscreen = [el("", "text", "taps=2", "lab-state", rect=(16, 1400, 398, 60))]
+            return await real(*a, **k)
+        s.tap = tap
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert unsettled(r)[1:] == ["Same screen. Changes:",
+                                    '~ text "taps=2" id=lab-state @16,1400 398x60 (off screen; was "taps=1")']
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # the same state again: now nothing changed
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_what_an_open_sheet_hides_off_screen_is_not_reported():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        d.hub.publish(b"A")
+        hidden = el("", "text", "taps=1", "lab-state", rect=(16, 1400, 398, 60))
+        s.offscreen, s.behind = [hidden], [(hidden, None)]
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        changed = el("", "text", "taps=2", "lab-state", rect=(16, 1400, 398, 60))
+        s.offscreen, s.behind = [changed], [(changed, None)]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)

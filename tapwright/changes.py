@@ -170,6 +170,43 @@ def _changes(old: list[Element], new: list[Element]) -> tuple[list[str], int]:
     return lines or [NO_CHANGE], len(added) + len(gone) + len(modified) + len(moved)
 
 
+OFF_LISTED = 5  # up to this many changed off-screen elements get a line each; more become a count
+
+
+def off_screen(old: list[Element], new: list[Element], by_place: bool = True) -> list[str]:
+    """`~` lines for the elements off screen whose text, value, checked, selected or disabled changed between two
+    reads (AGENT-TOOLS v1.6): a tap whose effect lands on something scrolled out of view answered "No visible
+    change.", which read as "nothing happened". No refs (what is off screen has none), and only `~`: off-screen
+    elements that are new, gone or moved aren't listed, since a scroll moves all of them.
+
+    Off screen an element is the same one when its identifier is, if that is unique among what is off screen in
+    both reads; else, with `by_place`, when its role and place are (not after an action that moves content: the
+    next row then sits where this one sat)."""
+    def unique(items: list[Element]) -> dict[tuple[str, str], Element]:
+        seen: dict[tuple[str, str], list[Element]] = {}
+        for e in items:
+            if e.identifier:
+                seen.setdefault((e.role, e.identifier), []).append(e)
+        return {key: group[0] for key, group in seen.items() if len(group) == 1}
+
+    def place(e: Element) -> tuple:
+        return (e.role, e.identifier, *(round(v) for v in e.rect))
+    named, placed = unique(old), {place(e): e for e in old}
+    now_named = unique(new)
+    lines = []
+    for e in new:
+        key = (e.role, e.identifier)
+        was = named.get(key) if now_named.get(key) is e else (placed.get(place(e)) if by_place else None)
+        if was is None:
+            continue
+        fields = _was(was, replace(e, actions=was.actions))  # what it can do isn't news off screen
+        if fields:
+            lines.append(f"~ {e.line(ref=False, actions=False)} (off screen; was {', '.join(fields)})")
+    if len(lines) > OFF_LISTED:
+        lines = [*lines[:OFF_LISTED], f"~ {len(lines) - OFF_LISTED} more changed off screen"]
+    return lines
+
+
 def diff(old: list[Element], new: list[Element]) -> list[str]:
     """The change lines from `old` to `new`, whose refs came from carry_refs: `+` new, `-` gone (no ref),
     `~` changed (with the old value), `↕` moved; or just "No visible change."."""
