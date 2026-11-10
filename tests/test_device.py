@@ -339,13 +339,19 @@ def test_a_start_that_waits_for_the_passcode_says_so(monkeypatch):
         with pytest.raises(PasscodeNeeded):
             await d.start_wda("runner.id", wait=30)
         assert d.runner is pending  # still nothing new was started over it
+        monkeypatch.setattr(device_module, "PROMPT_RETRY", 0.0)  # ...until the long retry: the list may be wrong
+        with pytest.raises(PasscodeNeeded):
+            await d.start_wda("runner.id", wait=30)
+        assert d.runner is not pending and not d.runner.done()
+        pending = d.runner
+        monkeypatch.setattr(device_module, "PROMPT_RETRY", 300.0)
 
         async def now_alive():
             return True
         monkeypatch.setattr(device_info, "DeviceInfo", _Info)  # the person typed it: the screen is gone
         d.wda_alive = now_alive
         await d.start_wda("runner.id", wait=30)
-        assert d.runner is not pending and not d.runner.done() and not d.awaiting_passcode  # a new start, and it is up
+        assert d.runner is pending and not d.runner.done() and not d.awaiting_passcode  # the waiting start finished
         await d.close()
 
     asyncio.run(scenario())

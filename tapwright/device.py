@@ -37,6 +37,7 @@ class PhoneLocked(ConnectionLost):
 AUTH_PROMPT = "LocalAuthenticationUIService"  # the process that draws iOS's passcode screen
 PROMPT_AFTER = 6.0  # seconds a start may take before the phone is asked whether that screen is up (a start takes 3)
 PROMPT_EVERY = 3.0
+PROMPT_RETRY = 300.0  # seconds after which a start is tried anyway, in case the process list is wrong about the screen
 
 
 class PasscodeNeeded(PhoneLocked):
@@ -104,6 +105,7 @@ class Device:
         self.via = None
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
         self.awaiting_passcode = False  # the last start stopped at iOS's passcode screen (see PasscodeNeeded)
+        self._launched_at = 0.0  # when the test runner was last started (monotonic clock)
 
     # ---- the tunnel ----
     async def connect(self) -> None:
@@ -184,11 +186,13 @@ class Device:
         if self.runner and not self.runner.done() and await self.wda_alive():
             self.awaiting_passcode = False
             return
-        if self.awaiting_passcode and await self.passcode_prompt_up() is not False:
+        if self.awaiting_passcode and time.monotonic() - self._launched_at < PROMPT_RETRY \
+                and await self.passcode_prompt_up() is not False:
             # Still up (or the phone couldn't say): start nothing. A new start takes the screen away and puts a
             # new one up, under the person's fingers; seen on the phone as the app behind it coming to the front
             # and going again with every retry. The screen stays up without a runner (measured), so this waits,
-            # still, until the passcode is in or Cancel is tapped; the start after that finds out which.
+            # still, until the passcode is in or Cancel is tapped; the start after that finds out which. (And
+            # every PROMPT_RETRY seconds one start is tried regardless: the process list is the only witness.)
             raise PasscodeNeeded()
         self.awaiting_passcode = False
         await self._stop_runner()  # iOS may have killed it before its task noticed (measured)
@@ -210,7 +214,7 @@ class Device:
         except TypeError:  # run() no longer takes a listener: start without the hook
             run = service.run(cfg)
         self.runner = asyncio.create_task(run, name="webdriveragent")
-        began = time.monotonic()
+        began = self._launched_at = time.monotonic()
         deadline, ask_at = began + wait, began + PROMPT_AFTER
         while time.monotonic() < deadline:
             if failed.is_set():  # the phone said so: don't wait out the minute
