@@ -205,7 +205,7 @@ def test_the_full_list_replaces_the_changes_when_the_app_changed_or_there_was_no
     old = [el("e1", label="Wi-Fi"), el("e2", label="Bluetooth", y=50)]
     new = [el("e1", label="Wi-Fi"), el("e2", label="Bluetooth", y=50)]
     up = changes.update(old, new, app_changed=True)
-    assert up.full and up.lines == [] and refs(up.items) == ["e1", "e2"] and up.top == 2
+    assert up.full and up.lines == [] and refs(up.items) == ["e3", "e4"] and up.top == 4  # nothing carried
     first = changes.update([], new)
     assert first.full and refs(first.items) == ["e1", "e2"]
 
@@ -222,17 +222,35 @@ def test_the_full_list_replaces_the_changes_past_half_the_list_or_eight():
     assert changes.update(rows(4), [el("e1", label="Z")] + rows(4)[1:]).full is False  # 2 changed of 4
 
 
-def test_a_full_list_renumbers_from_e1():
-    old = [el("e1", label="A"), el("e9", label="B", y=50)]
-    new = [el("e1", label="X"), el("e2", label="Y", y=50)]
-    up = changes.update(old, new, app_changed=True, used=9)
-    assert refs(up.items) == ["e1", "e2"] and up.top == 2
+def test_a_full_list_keeps_numbering_so_no_old_ref_lands_on_another_element():
+    def rows(n, tag="A", replaced=0):
+        return [el(f"e{i + 1}", label=f"{'B' if i < replaced else tag} {i}", y=i * 50) for i in range(n)]
+    old = rows(10)
+    # 5 of 10 replaced: 10 changes > max(8, 5), so the full list answers
+    up = changes.update(old, rows(10, replaced=5), used=12)
+    assert up.full and up.lines == []
+    # (a) what stayed on screen keeps its ref; (b) the new elements count on from the highest ref given (12)
+    assert refs(up.items) == ["e13", "e14", "e15", "e16", "e17", "e6", "e7", "e8", "e9", "e10"]
+    assert up.top == 17
+    # (c) another app in front, or a forced full list: nothing of the old list is carried
+    same = [el("e1", label="A"), el("e2", label="B", y=50)]
+    for kwargs in ({"app_changed": True}, {"full": True}):
+        fresh = changes.update(same, [el("e1", label="A"), el("e2", label="B", y=50)], **kwargs)
+        assert fresh.full and refs(fresh.items) == ["e3", "e4"] and not set(refs(fresh.items)) & set(refs(same))
+    gap = changes.update([el("e1", label="A"), el("e9", label="B", y=50)],
+                         [el("e1", label="X"), el("e2", label="Y", y=50)], app_changed=True, used=9)
+    assert refs(gap.items) == ["e10", "e11"] and gap.top == 11
+    # (d) the top never goes down, whatever the answer
+    assert changes.update(same, []).top == 2
+    assert changes.update(same, [], used=7).top == 7
+    assert changes.update([], [], used=5).top == 5
+    assert changes.update(old, rows(10, replaced=5), used=12).top >= 12
 
 
 def test_nothing_left_of_a_list_is_the_full_list_not_a_column_of_gone_lines():
     old = [el("e1", label="A"), el("e2", label="B", y=50)]
     up = changes.update(old, [])
-    assert up.full and up.items == [] and up.lines == [] and up.top == 0
+    assert up.full and up.items == [] and up.lines == [] and up.top == 2  # no elements, but e1 and e2 were given
     assert changes.update([], []).lines == [changes.SAME_SCREEN, changes.NO_CHANGE]
 
 
@@ -240,13 +258,13 @@ def test_full_forces_the_full_list_even_for_an_empty_screen():
     up = changes.update([], [], full=True)
     assert up.full and up.lines == [] and up.items == []
     up = changes.update([el("e1", label="A")], [el("e1", label="A")], full=True)
-    assert up.full and refs(up.items) == ["e1"]
+    assert up.full and refs(up.items) == ["e2"] and up.top == 2  # forced: nothing carried, so a new number
 
 
 def test_a_forced_full_list_does_not_diff():
     old = [el("e1", label="A")]
     up = changes.update(old, [el("e1", label="A"), el("e2", label="B", y=50)], full=True)
-    assert up.full and refs(up.items) == ["e1", "e2"] and up.lines == []
+    assert up.full and refs(up.items) == ["e2", "e3"] and up.lines == []
 
 
 def _rows(labels):

@@ -176,21 +176,27 @@ class Update:
 def update(old: list[Element], new: list[Element], app_changed: bool = False, used: int = 0,
            shown: list[Element] | None = None, full: bool = False, header: list[str] | None = None,
            moves_content: bool = False) -> Update:
-    """After an action: carry the refs over, and say what changed. The full list instead (renumbered from
-    e1, so every older ref is invalid) when the app changed, when there was no list before, or when more
-    than max(8, half the new list) of the elements changed, or when nothing is left of a list that had
-    elements (a column of `-` lines would only hide that the screen is covered).
+    """After an action: carry the refs over, and say what changed. The full list instead when the app changed,
+    when there was no list before, or when more than max(8, half the new list) of the elements changed, or
+    when nothing is left of a list that had elements (a column of `-` lines would only hide that the screen is
+    covered). A full list keeps numbering too (AGENT-TOOLS v1.4): what stayed keeps its ref and everything else
+    counts on from the highest ref given, so an older ref never lands on another element. Only `look` starts
+    again at e1. After another app came to the front, or when `full` is forced, nothing is carried.
     `old` is the list whose refs carry; `shown` is what the agent was last told, when a silent re-read
     moved `old` past it: the changes are measured against that, so nothing it hasn't heard of is lost.
     `full` forces the full list (a person acted, the line dropped, the agent never looked).
     `header` lines (an alert or the keyboard changed) come first in the change block."""
     base = old if shown is None else shown
-    if full or app_changed or (not base and bool(new)) or (bool(base) and not new):
-        return Update(list(new), True, [], highest(new))
+    if full or app_changed:
+        fresh = carry_refs([], new, max(used, highest(old)))
+        return Update(fresh, True, [], max(used, highest(old), highest(fresh)))
     carried = carry_refs(old, new, used, moves_content)
+    top = max(used, highest(old), highest(carried))
+    if (not base and bool(new)) or (bool(base) and not new):
+        return Update(carried, True, [], top)
     lines, count = _changes(base, carried)
     if count > max(FULL_MIN, len(new) / 2):
-        return Update(list(new), True, [], highest(new))
+        return Update(carried, True, [], top)
     if header:
         lines = [*header, *([] if lines == [NO_CHANGE] else lines)]
-    return Update(carried, False, [SAME_SCREEN, *lines], max(used, highest(carried)))
+    return Update(carried, False, [SAME_SCREEN, *lines], top)

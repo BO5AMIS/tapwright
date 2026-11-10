@@ -934,8 +934,10 @@ def test_a_new_app_or_a_screen_the_agent_has_not_seen_gets_the_full_list():
         assert unsettled(r)[1:3] == ["Screen 400x800 pt @3x · 2 elements",
                                                "App: Settings (com.apple.Preferences)"]
         d.session.tree = [button("e1", "Wi-Fi")]  # the app didn't change: a change list, e2 is gone
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert [x.ref for x in d.control.client("a").items] == ["e2", "e3"]  # the app changed: nothing carried
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e2"}})  # e1 (OK) is not on this screen
         assert unsettled(r)[1:] == ["Same screen. Changes:", '- button "Bluetooth"']
+        assert [x.ref for x in d.control.client("a").items] == ["e2"]  # Wi-Fi kept its ref
         await finish(stop, task)
     run(go)
 
@@ -1030,7 +1032,7 @@ def test_an_action_that_leaves_nothing_on_screen_answers_with_the_full_list_and_
             "(nothing visible; the app may still be loading)",
             "Note: something outside the app (a system sheet or browser) may cover it."]
         view = d.control.client("a")
-        assert view.items == [] and view.top_ref == 0
+        assert view.items == [] and view.top_ref == 1  # e1 was given, and is never handed out again
         await finish(stop, task)
     run(go)
 
@@ -1183,7 +1185,8 @@ def test_after_a_scroll_the_old_refs_of_identical_buttons_are_not_found():
         r = await d.run_tool("a", "scroll", {"direction": "down"})
         assert unsettled(r)[1].startswith("Screen")  # nothing is known to carry over: the full list
         view = d.control.client("a")
-        assert [x.ref for x in view.items if x.label == "Edit"] == ["e4", "e5", "e6"]  # renumbered, and shown
+        assert [x.ref for x in view.items if x.label == "Edit"] == ["e30", "e31", "e32"]  # new, above the 26 given
+        assert not {"e4", "e5", "e6"} & {x.ref for x in view.items}  # the old Edit refs land on nothing
         await finish(stop, task)
     run(go)
 
