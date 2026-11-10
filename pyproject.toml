@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pyflakes"]
+video = ["av>=14"]  # the H.264 live view (/video): decode the AirPlay stream, encode it again
 
 [project.scripts]
 tapwright = "tapwright.cli:main"

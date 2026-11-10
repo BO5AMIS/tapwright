@@ -147,11 +147,62 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame",
                                  headers={"Cache-Control": "no-store"})
 
-    async def ws(websocket: WebSocket):
+    async def ws_allowed(websocket: WebSocket) -> bool:
+        """The checks both WebSockets share: token (header or same-origin cookie), Host and Origin."""
         host = websocket.headers.get("host", "")
         origin = websocket.headers.get("origin")
         if denied(websocket, cookie=True) is not None or origin not in (None, f"http://{host}", f"https://{host}"):
             await websocket.close(code=4403)
+            return False
+        return True
+
+    async def video(websocket: WebSocket):
+        """H.264 pictures (VIEWER-PROTOCOL `WS /video`): the config, then binary pictures."""
+        if not await ws_allowed(websocket):
+            return
+        await websocket.accept()
+        hub = getattr(daemon, "video", None)
+        if hub is None or not hub.live:  # accepted first, so a browser can read the code and use /stream
+            await websocket.close(code=1013)
+            return
+        sub = hub.subscribe()
+
+        async def send_all():  # the only writer on this socket
+            while True:
+                item = await sub.get()
+                if item is None:
+                    return
+                if isinstance(item, dict):
+                    await websocket.send_json(item)
+                else:
+                    await websocket.send_bytes(item)
+
+        async def receive_all():
+            while True:
+                event = await websocket.receive()
+                if event["type"] == "websocket.disconnect":
+                    return
+                try:
+                    message = json.loads(event.get("text") or "")
+                except (ValueError, RecursionError):
+                    continue
+                if isinstance(message, dict) and message.get("type") == "key":
+                    hub.request_key()
+
+        tasks = [asyncio.create_task(receive_all()), asyncio.create_task(send_all())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            sub.close()
+            for task in tasks:
+                task.cancel()
+            await asyncio.wait(tasks)
+            for task in tasks:
+                if not task.cancelled():
+                    task.exception()  # mark a failure as seen
+
+    async def ws(websocket: WebSocket):
+        if not await ws_allowed(websocket):
             return
         await websocket.accept()
         queue = daemon.subscribe()
@@ -204,6 +255,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         Route("/viewer", index),  # the same page: both tools serve it at / and /viewer (AGENT-TOOLS v1.4)
         Route("/stream", stream),
         WebSocketRoute("/ws", ws),
+        WebSocketRoute("/video", video),
         Route("/api/health", health),
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/{name}", tool, methods=["POST"]),

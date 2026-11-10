@@ -1,4 +1,5 @@
 """The HTTP side with a fake session: page, token, API, stream, WebSocket."""
+import time
 from importlib.resources import files
 
 import pytest
@@ -288,3 +289,114 @@ def test_a_closed_hub_ends_the_stream_body_cleanly():
         r = c.get("/stream", headers=AUTH)
     assert r.status_code == 200 and r.content == b"--frame\r\n"
     assert d.pump.viewers == 0
+
+
+class FakeSubscription:
+    def __init__(self, items):
+        self.items, self.closed = list(items), False
+        self.queue = None
+
+    async def get(self):
+        import asyncio
+        if self.queue is None:
+            self.queue = asyncio.Queue()
+            for item in self.items:
+                self.queue.put_nowait(item)
+        return await self.queue.get()
+
+    def close(self):
+        self.closed = True
+
+
+class FakeVideoHub:
+    """Stands in for tapwright.video.VideoHub: a config, then one picture."""
+    CONFIG = {"type": "config", "codec": "avc1.64001f", "width": 2, "height": 2, "description": "AQ==",
+              "at": 1, "coverage": "screen", "source": "airplay"}
+    PICTURE = bytes([1, 0, 0, 0, 0, 0, 0, 0]) + b"\x00\x00\x00\x01\x65"
+
+    def __init__(self, live=True):
+        self.live, self.keys, self.subs = live, 0, []
+
+    def subscribe(self):
+        sub = FakeSubscription([self.CONFIG, self.PICTURE])
+        self.subs.append(sub)
+        return sub
+
+    def request_key(self):
+        self.keys += 1
+
+    def set_quality(self, preset):
+        self.quality = preset
+
+    def close(self):
+        self.live = False
+
+
+def test_video_socket_refuses_strangers_like_the_viewer_socket():
+    app, d = app_and_daemon()
+    d.video = FakeVideoHub()
+    with TestClient(app) as c:
+        for kwargs in ({}, {"url": f"/video?token={TOKEN}"},
+                       {"headers": {**AUTH, "origin": "http://evil.example"}}):
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with c.websocket_connect(kwargs.get("url", "/video"), headers=kwargs.get("headers", {})) as ws:
+                    ws.receive_bytes()
+            assert refused.value.code == 4403
+        c.get(f"/?token={TOKEN}", follow_redirects=False)
+        with pytest.raises(WebSocketDisconnect):  # a cookie from another site
+            with c.websocket_connect("/video", headers={"sec-fetch-site": "same-site"}) as ws:
+                ws.receive_bytes()
+    assert not d.video.subs
+
+
+def test_video_socket_closes_with_1013_without_a_live_hub():
+    app, d = app_and_daemon()
+    with TestClient(app) as c:
+        for hub in (None, FakeVideoHub(live=False)):
+            d.video = hub
+            with pytest.raises(WebSocketDisconnect) as closed:
+                with c.websocket_connect("/video", headers=AUTH) as ws:
+                    ws.receive_bytes()
+            assert closed.value.code == 1013
+
+
+def test_video_socket_sends_the_config_first_and_passes_key_requests_on():
+    app, d = app_and_daemon()
+    d.video = FakeVideoHub()
+    with TestClient(app) as c, c.websocket_connect("/video", headers=AUTH) as ws:
+        assert ws.receive_json() == FakeVideoHub.CONFIG
+        assert ws.receive_bytes() == FakeVideoHub.PICTURE
+        ws.send_text("not json")
+        ws.send_json({"type": "other"})
+        ws.send_json({"type": "key"})
+        for _ in range(200):
+            if d.video.keys:
+                break
+            time.sleep(0.01)
+        assert d.video.keys == 1
+    for _ in range(200):
+        if d.video.subs[0].closed:
+            break
+        time.sleep(0.01)
+    assert d.video.subs[0].closed
+
+
+def test_video_is_accepted_only_while_the_hub_is_live():
+    _, d = app_and_daemon()
+    assert "video" not in d.status()["accepts"]
+    d.video = FakeVideoHub(live=False)
+    assert "video" not in d.status()["accepts"]
+    d.video.live = True
+    assert "video" in d.status()["accepts"] and "tap" in d.status()["accepts"]
+    d.video.live = False
+    assert "video" not in d.status()["accepts"]
+
+
+def test_quality_reaches_the_video_hub_and_closing_closes_it():
+    import asyncio
+    _, d = app_and_daemon()
+    d.video = FakeVideoHub()
+    asyncio.run(d.set_quality("light"))
+    assert d.video.quality == "light"
+    asyncio.run(d.close())
+    assert not d.video.live

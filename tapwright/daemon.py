@@ -313,6 +313,7 @@ class Daemon:
         self.state, self.detail = "connecting", None
         self.preset = "balanced"
         self.ws_clients = 0
+        self.video = None  # a tapwright.video.VideoHub when the H.264 live view is set up (never created here)
         self.last_request = time.monotonic()
         self._ever_connected = False
         # why the last connect couldn't finish, when the phone said: a PhoneLocked, or an AppNotAnswering
@@ -333,7 +334,8 @@ class Daemon:
                else "tailscale" if via.startswith("network") else None)
         return {"type": "status", "protocol": PROTOCOL, "state": self.state, "detail": self.detail, "via": via,
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
-                "size": {"w": w, "h": h}, "accepts": ACCEPTS, "quality": self.preset}
+                "size": {"w": w, "h": h}, "quality": self.preset,
+                "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
 
     def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=200)
@@ -1409,6 +1411,8 @@ class Daemon:
             await self._read(lambda: self.session.settings({**PRESETS[preset], **NO_IDLE_WAIT}))
             self._fps = int(PRESETS[preset]["mjpegServerFramerate"])  # full rate; the pace slows it again when still
         self.preset = preset
+        if self.video is not None:
+            self.video.set_quality(preset)
         self.broadcast(self.status())
 
     # ---- the stream and shutting down ----
@@ -1422,6 +1426,8 @@ class Daemon:
     async def close(self) -> None:
         await self.pump.stop()
         self.hub.close()
+        if self.video is not None:
+            await asyncio.to_thread(self.video.close)  # joins its threads
         try:
             await asyncio.wait_for(self.session.close(), 10)
         except Exception as e:
