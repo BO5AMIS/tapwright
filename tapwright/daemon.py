@@ -620,6 +620,7 @@ class Daemon:
                     await self._silent_read(view)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
                 self._refuse_behind_alert(view, force=False)  # an alert hides the app's elements: say so, not "not found"
+                self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 self._refuse_off_screen(target)
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
@@ -878,6 +879,19 @@ class Daemon:
             alert = " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
+
+    def _refuse_behind_sheet(self, target: ui.Target) -> None:
+        """A target on no listed element but on one an open sheet (or another layer) hides: `covered`, naming what
+        is in front, not `not_found`. It isn't on the list, so `force` has nothing to touch."""
+        behind = getattr(self.session, "behind", [])
+        try:
+            hit = ui.resolve([e for e, _ in behind], dataclasses.replace(target, index=0))
+        except Refused:
+            return
+        front = next((line for e, line in behind if e is hit), None)
+        if front is not None:
+            raise Refused("not_actionable", f"covered: {hit.line(ref=False, actions=False)} is behind {front}; "
+                                            "close that first.")
 
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's

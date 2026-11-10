@@ -114,6 +114,7 @@ class FakeSession:
         self.typed: list = []  # (text, replace, submit, target) of each type_text
         self.scrolls: list = []  # (x0, y0, x1, y1) of each eased scroll drag (the raw swipe tool's aren't recorded)
         self.offscreen: list = []  # elements the last read found outside the screen (tests set it)
+        self.behind: list = []  # (element, what is in front of it) for what an open sheet hides (tests set it)
         # what every connect raises: a PhoneLocked, or an AppNotAnswering until kill_app ends that app
         self.stuck: Exception | None = None
 

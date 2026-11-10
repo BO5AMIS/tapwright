@@ -1,4 +1,4 @@
-﻿"""What an agent does with the phone: look, tap, type, swipe, launch apps. One Session
+"""What an agent does with the phone: look, tap, type, swipe, launch apps. One Session
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
@@ -49,6 +49,7 @@ class Session:
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
         self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
+        self.behind: list[tuple[ui.Element, str]] = []  # what a sheet hides, with what is in front (for `covered`)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -101,7 +102,7 @@ class Session:
         self.sid = None
         self.scale = self.app = None
         self.scale_read = False
-        self.items, self.offscreen = [], []
+        self.items, self.offscreen, self.behind = [], [], []
         self.typed_into = None
         self.last_point = None
 
@@ -199,7 +200,7 @@ class Session:
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
         """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
         request a tree-only read leaves out."""
-        self.items, self.offscreen = tree.items, tree.offscreen
+        self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
@@ -234,7 +235,7 @@ class Session:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = (await self._call("GET", ui.SOURCE_PATH, timeout=timeout))["value"]
         tree = ui.read(source, self.screen)
-        self.items, self.offscreen = tree.items, tree.offscreen
+        self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return tree

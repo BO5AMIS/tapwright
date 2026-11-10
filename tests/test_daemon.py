@@ -3428,6 +3428,29 @@ def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
     run(go)
 
 
+def test_a_target_behind_an_open_sheet_is_covered_naming_the_sheet():
+    """AGENT-TOOLS v1.4: not `not_found`, and not `off_screen` either when it is also scrolled away."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "other", "dismiss popup", "PopoverDismissRegion", rect=(0, 0, 430, 932))])
+        save = el("", "button", "Save", "lab-save", rect=(16, -40, 193, 49))
+        front = 'e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932'
+        d.session.behind = [(save, front)]
+        d.session.offscreen = [save]  # behind the sheet wins: scrolling can't help until it is closed
+        for target in ({"id": "lab-save"}, {"label": "Save"}, {"text": "sav"}):
+            for force in (False, True):
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": target, "force": force})
+                assert e.value.code == "not_actionable", target
+                assert str(e.value) == (f'covered: button "Save" id=lab-save @16,-40 193x49 is behind {front}; '
+                                        'close that first.')
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
 KEYBOARD = ui.Bar("Keyboard", (0.0, 614.0, 430.0, 318.0), "keyboard @0,614 430x318")
 
 

@@ -160,6 +160,9 @@ class Tree:
     app: tuple[str, str] | None = None  # (label, bundle id) from the root Application, when it says
     # what would be listed but lies outside the screen or its scroll view (a target naming one is off_screen)
     offscreen: list[Element] = field(default_factory=list)
+    # what an open sheet or other layer hides, each with the line of what is in front of it (a target naming
+    # one is covered); what is off screen under a presented sheet is here too
+    behind: list[tuple[Element, str]] = field(default_factory=list)
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -296,8 +299,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     # Everything below is numbered by visit order, so "what is inside this node" is a range of numbers.
     found: list[tuple[Element, int, tuple[int, ...]]] = []  # each listed element, its number, the bars it is inside
     covering: list[tuple[int, Bar]] = []  # the bars iOS draws over content, by number
-    # number ranges a later layer covers, where, and whether it is a presentation (which hides bars too)
-    hidden: list[tuple[int, int, tuple[float, float, float, float], bool]] = []
+    # number ranges a later layer covers, where, whether it is a presentation (which hides bars too), and the
+    # layer's own range
+    hidden: list[tuple[int, int, tuple[float, float, float, float], bool, tuple[int, int]]] = []
+    off_numbers: list[int] = []  # where in the visit order each entry of tree.offscreen lies
     visits = [0]
     numbered: dict[int, ET.Element] = {}  # each visited node by its number...
     ends: dict[int, int] = {}  # ...and the number after its subtree
@@ -313,7 +318,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         left, top, right, bottom = clip
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
             if screen_rect is not None and not in_keyboard:
+                before = len(tree.offscreen)
                 _offscreen(node, tree.offscreen)
+                off_numbers.extend([visits[0]] * (len(tree.offscreen) - before))
+                visits[0] += 1  # the subtree takes a place in the order, so a later layer's range holds it
             return  # nothing in this subtree is on screen
         number = visits[0]
         visits[0] += 1
@@ -372,6 +380,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         elif worth and not visible and screen_rect is not None and not in_keyboard and kind != "Alert":
             if (plain := _plain(node)) is not None and len(tree.offscreen) < MAX_OFFSCREEN:
                 tree.offscreen.append(plain)  # its centre is past the screen or its scroll view's edge
+                off_numbers.append(number)
         if kind in CLIPPING:
             clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
         spans = []  # the numbers each child's subtree used
@@ -384,7 +393,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             for k, child in enumerate(node):
                 if k and spans[k][1] > spans[k][0]:  # the earlier children, under what the layer hides
                     rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends)
-                    hidden.extend((spans[0][0], spans[k][0], r, presented) for r in rects)
+                    hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
     try:
@@ -398,14 +407,21 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
-    def behind(number: int, point: tuple[float, float], barlike: bool) -> bool:
-        """Does a layer hide it? Opaque content leaves bars and their children alone (the cover logic handles
-        touches near them); a presentation dims them. The keyboard is always in front."""
-        return any(a <= number < b and _holds(rect, point) and (presented or not barlike) for a, b, rect, presented in hidden)
-    shown = [(e, number, inside) for e, number, inside in found
-             if keyboards & set(inside) or not behind(number, e.center, bool(inside) or e.type in BARS)]
+    def over(number: int, point: tuple[float, float], barlike: bool) -> tuple[int, int] | None:
+        """The range of the layer that hides it, else None. Opaque content leaves bars and their children alone
+        (the cover logic handles touches near them); a presentation dims them. The keyboard is always in front."""
+        return next((layer for a, b, rect, presented, layer in hidden
+                     if a <= number < b and _holds(rect, point) and (presented or not barlike)), None)
+    shown: list[tuple[Element, int, tuple[int, ...]]] = []
+    under: list[tuple[Element, tuple[int, int]]] = []  # what a layer hides, with that layer's range
+    for e, number, inside in found:
+        layer = None if keyboards & set(inside) else over(number, e.center, bool(inside) or e.type in BARS)
+        if layer is None:
+            shown.append((e, number, inside))
+        else:
+            under.append((e, layer))
     live = [(n, bar) for n, bar in covering if bar.kind == "Keyboard"
-            or not behind(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2), False)]
+            or over(n, (bar.rect[0] + bar.rect[2] / 2, bar.rect[1] + bar.rect[3] / 2), False) is None]
     bar_numbers = {n for n, _ in covering}
     area = screen[0] * screen[1] if screen else math.inf
     ahead = [(o, m, set(within)) for o, m, within in shown]
@@ -421,6 +437,18 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     tree.more = max(0, len(shown) - MAX_ELEMENTS)
     for i, e in enumerate(tree.items, 1):
         e.ref = f"e{i}"
+
+    def front(layer: tuple[int, int]) -> str:
+        """The line of what the layer shows first with a name: what the agent closes or answers."""
+        inside = [e for e, n, _ in shown[:MAX_ELEMENTS] if layer[0] <= n < layer[1]]
+        named = next((e for e in inside if e.label or e.identifier), inside[0] if inside else None)
+        return named.line(actions=False) if named else "what is open in front of it"
+    tree.behind = [(e, front(layer)) for e, layer in under[:MAX_OFFSCREEN]]
+    presented = [(a, b, layer) for a, b, _, is_presented, layer in hidden if is_presented]
+    for e, n in zip(tree.offscreen, off_numbers):  # off screen and under a sheet: closing the sheet comes first
+        layer = next((layer for a, b, layer in presented if a <= n < b), None)
+        if layer is not None and len(tree.behind) < MAX_OFFSCREEN:
+            tree.behind.append((e, front(layer)))
     for top, reach in ([] if tree.alert else bars):  # bars behind an alert aren't what a swipe would meet
         if top:
             tree.top_inset = max(tree.top_inset or 0.0, reach)

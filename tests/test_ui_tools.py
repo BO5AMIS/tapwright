@@ -383,6 +383,35 @@ def test_a_bottom_sheet_with_a_backdrop_hides_the_base_screen_it_covers():
         assert e.value.code == "not_found"
 
 
+def test_what_a_sheet_hides_is_kept_apart_with_what_is_in_front_of_it():
+    """AGENT-TOOLS v1.4: a target behind an open sheet answers `covered`, naming the sheet, not `not_found`."""
+    tree = ui.read(bottom_sheet(lab_base()), PHONE)
+    behind = {e.identifier or e.label: front for e, front in tree.behind}
+    assert {"lab-base", "Base row"} <= set(behind)
+    assert set(behind.values()) == {tree.items[0].line(actions=False)}  # the sheet's first named element, with its ref
+    assert tree.items[0].identifier == "lab-sheet" and tree.items[0].ref == "e1"
+    assert not {e.identifier for e, _ in tree.behind} & {e.identifier for e in tree.items if e.identifier}
+    assert ui.read(lab_base(), PHONE).behind == []
+
+
+def test_what_is_off_screen_behind_a_share_sheet_is_behind_it_too():
+    """The runner's check left Save scrolled above the screen with the share sheet open: the answer was `off_screen:
+    scroll it into view`, which can't help until the sheet is closed (2026-11-10)."""
+    base = node("Other", 0, 0, 430, 932, children=[
+        node("Button", 16, -200, 193, 49, "Far", name="lab-far"),  # wholly above the screen
+        node("Button", 16, -40, 193, 49, "Save", name="lab-save"),  # its centre is above the screen
+        node("Button", 16, 300, 398, 49, "Base action", name="lab-base")])
+    pop = node("Popover", 9, 510, 412, 414, children=[
+        node("Other", 9, 510, 412, 414, children=[node("StaticText", 22, 600, 83, 20, "Target", name="cellTitleLabel")])])
+    window = node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932, "dismiss popup", name="PopoverDismissRegion"), pop])
+    tree = ui.read(under_window(base, window), PHONE)
+    assert {e.identifier for e, _ in tree.behind} == {"lab-far", "lab-save", "lab-base"}
+    assert all(front.startswith('e1 other "dismiss popup" id=PopoverDismissRegion') for _, front in tree.behind)
+    plain = ui.read(under_window(base), PHONE)  # no sheet: off screen is only off screen
+    assert plain.behind == [] and {e.identifier for e in plain.offscreen} == {"lab-far", "lab-save"}
+
+
 def test_the_keyboard_window_is_no_layer_and_hides_nothing():
     """On the phone the keyboard's own full-screen window starts with an empty full-screen view and has a key
     to act on ("Next keyboard"): it looked like a sheet with a backdrop and hid the whole app (2026-11-09)."""
