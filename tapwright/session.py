@@ -237,7 +237,8 @@ class Session:
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=80)
             image = buf.getvalue()
-        return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more), image
+        return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more,
+                           (tree.above, tree.below)), image
 
     async def back_point(self) -> ui.Back:
         """The top navigation bar: whether there is one, and where its back button is, in points."""

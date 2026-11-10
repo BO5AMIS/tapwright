@@ -647,3 +647,41 @@ def test_blank_point_never_lands_on_the_keyboard_or_under_the_navigation_bar():
     assert ui.blank_point(items, SCREEN, 60, 500) is None
     items = [el("e1", "text", "Low", rect=(0, 600, 100, 20)), el("e2", "button", "Fill", rect=(0, 60, 400, 500))]
     assert ui.blank_point(items, SCREEN, 60, 500) is None  # the text is below the band, the keyboard's
+
+
+# ---- how much lies off screen (AGENT-TOOLS v1.5) ----
+def _long_list():
+    twice = node("Button", 16, 1200, 398, 48, "Row 9", children=[node("StaticText", 16, 1200, 398, 48, "Row 9")])
+    return node("ScrollView", 0, 0, 430, 932, children=[
+        node("Button", 16, -300, 398, 48, "Up 1"), node("Button", 16, -240, 398, 48, "Up 2"),
+        node("Button", 16, 300, 398, 48, "Here"),
+        node("Button", 600, 300, 398, 48, "Right"),  # beside the screen: not counted
+        node("Button", 16, 1000, 398, 48, "Row 7"), node("Button", 16, 1100, 398, 48, "Row 8"), twice])
+
+
+def test_the_header_counts_what_lies_above_and_below_the_screen():
+    """A first-time agent found a button only through an `off_screen` error: nothing in the list said there was
+    more. Below comes first; a side with nothing is left out; a duplicate counts once; left and right don't count."""
+    tree = ui.read(phone(_long_list()), PHONE)
+    assert [e.label for e in tree.items] == ["", "Here"] and (tree.above, tree.below) == (2, 3)
+    head = ui.describe(tree.items, PHONE, 3, off=(tree.above, tree.below)).splitlines()[0]
+    assert head == "Screen 430x932 pt @3x · 2 elements (+3 below, +2 above)"
+    assert ui.describe(tree.items, PHONE, 3, off=(0, 3)).splitlines()[0].endswith("2 elements (+3 below)")
+    assert ui.describe(tree.items, PHONE, 3, off=(2, 0)).splitlines()[0].endswith("2 elements (+2 above)")
+    assert ui.describe(tree.items, PHONE, 3).splitlines()[0] == "Screen 430x932 pt @3x · 2 elements"
+
+
+def test_what_is_off_screen_under_an_open_sheet_is_not_counted():
+    """Scrolling can't reach it until the sheet is closed, so the header doesn't promise it."""
+    base = node("Other", 0, 0, 430, 932, children=[
+        node("Button", 16, -200, 193, 49, "Far", name="lab-far"),
+        node("Button", 16, 300, 398, 49, "Base action", name="lab-base"),
+        node("Button", 16, 1100, 398, 49, "Deep", name="lab-deep")])
+    pop = node("Popover", 9, 510, 412, 414, children=[
+        node("Other", 9, 510, 412, 414, children=[node("StaticText", 22, 600, 83, 20, "Target", name="cellTitleLabel")])])
+    window = node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932, "dismiss popup", name="PopoverDismissRegion"), pop])
+    plain = ui.read(under_window(base), PHONE)
+    assert (plain.above, plain.below) == (1, 1)
+    covered = ui.read(under_window(base, window), PHONE)
+    assert (covered.above, covered.below) == (0, 0)

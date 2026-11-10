@@ -147,7 +147,10 @@ def test_the_line_clips_flattens_and_quotes_text():
     long = "Line one\n   line   two " + "x" * 200
     e = one("StaticText", long)
     quoted = json.loads(e.line().split(" ", 2)[2].rsplit(" @", 1)[0])
-    assert len(quoted) == 80 and quoted.startswith("Line one line two xxxx")
+    # AGENT-TOOLS v1.5: cut at 200 characters, and the cut says how many are missing
+    assert quoted == ("Line one line two " + "x" * 200)[:200] + "…(+18)"
+    exact = one("StaticText", "y" * 200)
+    assert json.loads(exact.line().split(" ", 2)[2].rsplit(" @", 1)[0]) == "y" * 200  # nothing cut: no mark
     odd = one("StaticText", 'Say "hi"', value='Say "hi" now')
     assert odd.line() == 'e1 text "Say \\"hi\\"" value="Say \\"hi\\" now" @10,10 100x40'
     assert one("TextField", "Email", value="a@b.example").line() == \

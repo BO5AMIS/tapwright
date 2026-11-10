@@ -200,4 +200,5 @@ def test_of_several_matches_the_one_in_the_alert_is_the_target():
         assert code(ui.resolve, [behind, front, other], target).code == "ambiguous"
         assert code(ui.resolve, [behind, ui.Element("e4", "button", label="Cancel", rect=(10, 200, 100, 40))],
                     target).code == "ambiguous"
-    assert ui.resolve([behind, front], ui.Target(label="Cancel", index=0)) is behind  # an index still counts them all
+    assert ui.resolve([behind, front, other], ui.Target(label="Cancel", index=1)) is other  # an index picks among those
+    assert ui.resolve([behind, front], ui.Target(label="Cancel", index=0)) is front

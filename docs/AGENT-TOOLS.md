@@ -9,7 +9,12 @@ what the second cross-check found: duplicate folding, bidi marks, `ambiguous` wo
 actions, touching the visible part, and the cap note. Both projects agree on it, and the user approved it on 2026-11-09. Version 1.4 (2026-11-10) adds: closing the keyboard first, `covered` for what
 an open sheet hides, numbering that carries through full lists, the code `not_answering`, and
 `back` closing what is open on top. The user handed these decisions to the two projects on
-2026-11-10, and both agree on it. Each repo keeps an identical copy in `docs/`. It changes only by
+2026-11-10, and both agree on it. Version 1.5 (2026-11-10) adds what agents new to the tools ran
+into: the header counts what lies off screen, text is cut at 200 characters and a cut says how
+much is missing, a match in the alert in front wins over matches behind it, a person's touch on
+the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
+apps an agent was given answers `not_allowed`. Each repo keeps an
+identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
 
@@ -60,6 +65,11 @@ nested form wins: the schema enforces "exactly one", and every tool uses the sam
 - **A nested pair:** when a `label` or `text` target matches both an element and another match
   that contains it, the one that takes the action wins (a button over its own text), as a
   finger's touch would. If both or neither take it, they stay `ambiguous`.
+- **The layer in front (v1.5):** when several elements match an `id`, `label` or `text`
+  target and some of them are in the alert that is in front, only those count: a person sees
+  one "Cancel", not the one behind the alert too. `index` then picks among those. With no
+  match in the alert nothing changes, so a target behind it still answers `behind_alert`.
+  What an open sheet or popover hides isn't matched at all (it answers `covered`, §4).
 - **Tapwright `id`:** WebDriverAgent mirrors the label into the identifier when an app sets
   none. A real identifier wins over a mirror.
 
@@ -124,7 +134,7 @@ Settled in 0.31 s.
 ### 3.2 Header
 
 ```
-Screen 430x932 pt @3x · 26 elements
+Screen 430x932 pt @3x · 26 elements (+41 below, +2 above)
 App: Settings (com.apple.Preferences)
 Route: Home › Profile (id="42")
 Alert: "Allow notifications?" [Don't Allow] [Allow]
@@ -134,6 +144,11 @@ Network: 2 requests in flight
 
 - The first line is always there. The others appear only when they apply and the tool knows
   them.
+- **What lies off screen (v1.5).** After the count of listed elements, the first line counts
+  the elements that lie wholly below and wholly above the screen: `(+41 below, +2 above)`,
+  `(+41 below)` or `(+2 above)`; nothing when there are none. Below comes first. Left and
+  right aren't counted. It counts what exists now: a long list that makes its rows as they
+  scroll into view has more below than the count says. Scroll to reach them.
 - `Route:` and `Network:` are Tapline only.
 - `Keyboard:` is Tapwright only. Its keys aren't listed; type with `type_text`.
 - `Alert:` comes from both. Tapwright can press its buttons with `alert`; Tapline can't press
@@ -151,7 +166,10 @@ Network: 2 requests in flight
     a pressable wrapping "Log in" is `button "Log in"`.
   - A container that isn't accessible (a scroll view, a plain view) quotes nothing:
     `e1 scroll @0,0 430x778 [scroll]`.
-  - Text is clipped to 80 characters, with whitespace flattened, JSON-quoted.
+  - Text is cut at 200 characters, with whitespace flattened, JSON-quoted. A cut ends with
+    how many characters are missing: `"…the first 200…(+57)"` (v1.5; it was 80, with a bare
+    `…`). Labels and values are cut the same way. `wait_for` and `{text}` targets check the
+    whole text, also the part the line doesn't show.
 - **`label="…"`** is added only when the label differs from the text, ignoring case and
   whitespace. On Tapwright the label *is* the text, so it never appears.
 - **Duplicates:** when an element and its nearest listed ancestor have the same quoted text
@@ -223,6 +241,11 @@ Network: 2 requests in flight
 Plain lines at the end, starting with `Note: `, for example:
 - `Note: a person used the phone since your last look.`
 - `Note: no screenshot: the app doesn't support it.`
+
+**A person's touch (v1.5).** The note about a person is given once, in the next answer, after
+input from the live viewer and also after a finger on the phone itself; `{ref}` targets are
+`stale` until the next full list either way. Tapline sees a touch inside its app (not one inside
+a `Modal`'s own window, and not one on what iOS draws) and says "the app".
 
 **Change both:** Tapline puts notes in parentheses today, and Tapwright sends them as separate
 text items.
@@ -306,7 +329,7 @@ text items.
 | `not_found` | nothing matches the target, or the ref isn't on the last list | look, then pick another target | both |
 | `ambiguous` | several matches and no `index` | use one of the candidates' refs, or add `index` | both. **Change Tapwright:** it picks silently today |
 | `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (scroll, close the alert), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
-| `stale` | a `ref` from a list made before a person acted from the viewer | look again | both. **Change Tapline:** the host remembers "a person acted since the agent's last list". A look, or an action answer carrying a full list, clears it, and the next answer gets `Note: a person used the app since your last look.` (Tapwright says "the phone"). `id`, `label` and `text` targets keep working |
+| `stale` | a `ref` from a list made before a person acted, from the viewer or (v1.5) with a finger on the phone | look again | both. **Change Tapline:** the host remembers "a person acted since the agent's last list". A look, or an action answer carrying a full list, clears it, and the next answer gets `Note: a person used the app since your last look.` (Tapwright says "the phone"). `id`, `label` and `text` targets keep working |
 | `busy` | a person drove for the whole ~30 s wait | wait a few seconds, retry | both (VIEWER-PROTOCOL "Control") |
 | `paused` | the user paused the agent | ask the user to resume | both |
 | `locked` | the phone is locked | ask the user to unlock it | Tapwright |
@@ -317,6 +340,7 @@ text items.
 | `timeout` | no answer in time; the action may have happened | look before retrying | both |
 | `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today |
 | `unsupported` | this tool, app or phone can't do it | use the alternative named in the message | both |
+| `not_allowed` | a read or a touch outside the apps the agent was given (v1.5). The message's first word is the reason: `outside_apps` (another app is in front, or the call names one), `no_apps` (the agent was given none) | for `outside_apps`, go back to a given app with `open_app`; for `no_apps`, tell the user | Tapwright, in personal mode (it was `unsupported` with the same reason words). Tapline drives one app and never answers it |
 | `internal` | a bug | report it | both |
 
 ## 5. Tools

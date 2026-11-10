@@ -185,7 +185,7 @@ def test_personal_mode_without_an_app_list_runs_nothing():
                            ("open_app", {"app": "com.example.app"}), ("open_url", {"url": "https://example.com"})):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args, scope=Scope(()))
-            assert e.value.code == "unsupported" and str(e.value).startswith("no_apps: "), tool
+            assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps: "), tool
             assert "--apps" in str(e.value) and "--dedicated" in str(e.value)
         assert d.session.actions() == []
         await finish(stop, task)
@@ -208,20 +208,20 @@ def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
         for app in ("com.example.mail", "Mail box"):  # by bundle id or by name: not its app
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "open_app", {"app": app}, scope=mine)
-            assert e.value.code == "unsupported" and str(e.value).startswith("outside_apps: ")
+            assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: ")
         assert s.launched == []
         before = len(s.actions())
         s.foreground = "com.example.mail"  # something took the phone elsewhere
         s.app = ("Mail box", "com.example.mail")  # what a read there would say
         with pytest.raises(Refused) as e:  # a look reads, learns where it is, and shows nothing of it
             await d.run_tool("a", "look", {}, scope=mine)
-        assert e.value.code == "unsupported" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
         before = len(s.actions())
         for tool, args in (("tap", {"target": {"x": 5, "y": 5}}), ("type_text", {"text": "x"}),
                            ("swipe", {"x0": 1, "y0": 1, "x1": 9, "y1": 9}), ("wait_for", {"text": "OK"})):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args, scope=mine)
-            assert e.value.code == "unsupported", tool
+            assert e.value.code == "not_allowed", tool  # AGENT-TOOLS v1.5 (it was `unsupported`)
             assert str(e.value).startswith("outside_apps: Mail box (com.example.mail) is in front and isn't one of the apps")
         assert len(s.actions()) == before  # nothing was read or touched there
         r = await d.run_tool("a", "open_app", {"app": "Example"}, scope=mine)  # the way back always works

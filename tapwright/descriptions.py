@@ -39,6 +39,7 @@ _CORE = (
     '- `timeout`: no answer in time. The action may have happened: `look` before retrying.\n'
     "- `bad_params`: the call's arguments are invalid. Fix the call.\n"
     "- `unsupported`: this tool can't do it. Use the alternative the message names.\n"
+    "- `not_allowed`: outside the apps you were given. The first word is the reason: `outside_apps` (another app is in front, or the call names one: go back with `open_app`) or `no_apps` (you were given none: tell the user).\n"
     '- `internal`: a bug. Report it.\n'
     '\n'
     'Screenshots\n'
@@ -59,7 +60,7 @@ _TAPWRIGHT = (
     '- `press_button` presses Home or volume. `swipe` drags between two points. `close_app` quits an app, and `open_app` launches it.\n'
     "- The header shows `Keyboard: shown` or `hidden`. Its keys aren't listed: type with `type_text`.\n"
     '- Stay in the app under test: if a link takes you elsewhere, go back with `open_app`.\n'
-    "- On the owner's own phone you can read and touch only the apps you were given. `unsupported: outside_apps` means another app is in front and nothing of it is shown: go back with `open_app`. `unsupported: no_apps` means you were given none: tell the user.\n"
+    "- On the owner's own phone you can read and touch only the apps you were given. Anything else answers `not_allowed`, and nothing of another app is shown.\n"
     "- It's the user's own phone. The safety rules above matter most here."
 )
 
@@ -70,7 +71,7 @@ SHARED = {
         'Read the current screen: one line per element (ref, role, text, id, position and size in points,'
         ' actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) '
         "and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full "
-        'list, starting with a header.'
+        'list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.'
     ),
     'tap': (
         'Tap an element, as a finger would. `target` is one of `ref`, `id`, `label`, `text` (with `index`'

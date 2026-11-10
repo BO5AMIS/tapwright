@@ -75,7 +75,7 @@ ID). Note slow screens if they took more than a few seconds.
   go back with `open_app`.
 - **Personal mode is the default.** Add the server with the apps you may use:
   `tapwright mcp --apps com.example.app` (bundle ids or exact names, comma-separated). Tapwright
-  then refuses to read or touch any other app (`unsupported: outside_apps`), and never shows
-  another app's screen. Without `--apps` nothing runs (`unsupported: no_apps`). Only on a phone
+  then refuses to read or touch any other app (`not_allowed: outside_apps`), and never shows
+  another app's screen. Without `--apps` nothing runs (`not_allowed: no_apps`). Only on a phone
   kept for testing, start it with `tapwright mcp --dedicated`: then every app can be used.
 - The owner stops you by pausing in the live view, or by locking the phone.

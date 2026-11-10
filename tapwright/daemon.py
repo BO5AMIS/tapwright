@@ -631,7 +631,7 @@ class Daemon:
         app outside the list is refused. Reading or touching is refused while another app is in front (asked of
         the phone before the call), and an answer never shows another app's screen."""
         if not scope.apps:
-            raise Refused("unsupported", NO_APPS)
+            raise Refused("not_allowed", NO_APPS)
         given = await self._given(scope)
         names = ", ".join(given.values())
         if name in ("open_app", "close_app") and isinstance(args.get("app"), str) and args["app"].strip():
@@ -641,14 +641,14 @@ class Daemon:
                 await self.wait_connected()
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
-                raise Refused("unsupported", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
+                raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
         elif name in ACTIONS and name not in SCOPE_FREE or name == "wait_for":
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
             front = await self._read(self.session.foreground_bundle_id)
             if front not in given:
-                raise Refused("unsupported", _outside(front, self.session.app_names.get(front or ""), names))
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
         answer = await self._run_tool(client_id, name, args)
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
@@ -659,7 +659,7 @@ class Daemon:
         app = (shown.group(1), shown.group(2)) if shown else self.session.app
         if app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image")):
             if name == "look":  # nothing was done, so there is nothing to report but the refusal
-                raise Refused("unsupported", _outside(app[1], app[0], names))
+                raise Refused("not_allowed", _outside(app[1], app[0], names))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
             return {"text": f"{first}Note: {_outside(app[1], app[0], names)}", "image": None, "image_size": None}
@@ -1412,7 +1412,8 @@ class Daemon:
                                                              False, False)
         if up.full:
             tree = snap.tree
-            head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more)
+            head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more,
+                               (tree.above, tree.below))
             return _answer([result, head, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         return _answer([result, *up.lines, *tail], notes)
 

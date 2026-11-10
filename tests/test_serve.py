@@ -72,7 +72,7 @@ def test_serve_runs_is_found_and_stops(home):
         assert len(made) == 1
         with pytest.raises(client.DaemonError) as e:  # personal mode with no app list: nothing runs
             client.call("look", {"screenshot": False}, "agent-1")
-        assert e.value.code == "unsupported" and str(e.value).startswith("no_apps: ")
+        assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps: ")
         client.set_scope(dedicated=True)
         assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         made[0].control.set_paused(True)

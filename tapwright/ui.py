@@ -31,7 +31,7 @@ CONTAINERS = {"Application", "Window", "Other", "Group", "ScrollView", "Table", 
               "NavigationBar", "Toolbar", "StatusBar", "Keyboard", "WebView", "Sheet", "Alert"}
 MAX_ELEMENTS = 200
 MAX_OFFSCREEN = 300  # elements kept from outside the screen, for an `off_screen` answer instead of `not_found`
-TEXT_LIMIT = 80
+TEXT_LIMIT = 200  # AGENT-TOOLS v1.5: at 80, a first-time agent spent a third of its calls reading one cut state line
 # Views that clip their children: what is scrolled out of them is still in the tree, but not on screen.
 CLIPPING = {"ScrollView", "Table", "CollectionView", "WebView"}
 # Characters XML 1.0 forbids, raw or as references; WebDriverAgent sometimes sends them in labels.
@@ -57,8 +57,11 @@ def _text(v) -> str:
 
 
 def clip(text: str, limit: int = TEXT_LIMIT) -> str:
-    """One line, at most `limit` characters, as a JSON string."""
-    return json.dumps(" ".join(text.split())[:limit], ensure_ascii=False)
+    """One line, at most `limit` characters, as a JSON string. A cut ends, inside the quotes, with how many
+    characters are missing: `…(+57)` (AGENT-TOOLS v1.5)."""
+    flat = " ".join(text.split())
+    missing = len(flat) - limit
+    return json.dumps(flat[:limit] + (f"…(+{missing})" if missing > 0 else ""), ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,10 @@ class Tree:
     app: tuple[str, str] | None = None  # (label, bundle id) from the root Application, when it says
     # what would be listed but lies outside the screen or its scroll view (a target naming one is off_screen)
     offscreen: list[Element] = field(default_factory=list)
+    # how many elements lie wholly above and wholly below the screen, for the header (AGENT-TOOLS v1.5): every
+    # one, not only the first MAX_OFFSCREEN, with duplicates folded as in the list; none under an open sheet
+    above: int = 0
+    below: int = 0
     # what an open sheet or other layer hides, each with the line of what is in front of it (a target naming
     # one is covered); what is off screen under a presented sheet is here too
     behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
@@ -303,6 +310,24 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     # layer's own range
     hidden: list[tuple[int, int, tuple[float, float, float, float], bool, tuple[int, int]]] = []
     off_numbers: list[int] = []  # where in the visit order each entry of tree.offscreen lies
+    beyond: list[tuple[int, bool]] = []  # (its place in the visit order, below?) of each element past the top or bottom
+
+    def tally(plain: Element | None, over: Element | None, number: int) -> None:
+        """Count an element that would be listed but lies wholly above or below the screen."""
+        if plain is None or screen is None or (over is not None and _duplicate(over, plain)):
+            return
+        if plain.y + plain.height <= 0:
+            beyond.append((number, False))
+        elif plain.y >= screen[1]:
+            beyond.append((number, True))
+
+    def tally_all(node: ET.Element, over: Element | None, number: int) -> None:
+        if _kind(node) == "Keyboard":
+            return
+        plain = _plain(node)
+        tally(plain, over, number)
+        for child in node:
+            tally_all(child, plain or over, number)
     visits = [0]
     numbered: dict[int, ET.Element] = {}  # each visited node by its number...
     ends: dict[int, int] = {}  # ...and the number after its subtree
@@ -319,6 +344,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
             if screen_rect is not None and not in_keyboard:
                 before = len(tree.offscreen)
+                tally_all(node, parent, visits[0])
                 _offscreen(node, tree.offscreen)
                 off_numbers.extend([visits[0]] * (len(tree.offscreen) - before))
                 visits[0] += 1  # the subtree takes a place in the order, so a later layer's range holds it
@@ -378,7 +404,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 listed = candidate
                 found.append((listed, number, inside))
         elif worth and not visible and screen_rect is not None and not in_keyboard and kind != "Alert":
-            if (plain := _plain(node)) is not None and len(tree.offscreen) < MAX_OFFSCREEN:
+            plain = _plain(node)
+            tally(plain, parent, number)
+            if plain is not None and len(tree.offscreen) < MAX_OFFSCREEN:
                 tree.offscreen.append(plain)  # its centre is past the screen or its scroll view's edge
                 off_numbers.append(number)
         if kind in CLIPPING:
@@ -445,6 +473,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         return next((e for e in inside if e.label or e.identifier), inside[0] if inside else None)
     tree.behind = [(e, front(layer)) for e, layer in under[:MAX_OFFSCREEN]]
     presented = [(a, b, layer) for a, b, _, is_presented, layer in hidden if is_presented]
+    open_side = [below for n, below in beyond if not any(a <= n < b for a, b, _ in presented)]
+    tree.below = sum(open_side)
+    tree.above = len(open_side) - tree.below
     for e, n in zip(tree.offscreen, off_numbers):  # off screen and under a sheet: closing the sheet comes first
         layer = next((layer for a, b, layer in presented if a <= n < b), None)
         if layer is not None and len(tree.behind) < MAX_OFFSCREEN:
@@ -569,11 +600,12 @@ def alert_line(alert: Alert) -> str:
 
 def describe(items: list[Element], screen: tuple[float, float], scale: float | None = None,
              app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
-             more: int = 0) -> str:
+             more: int = 0, off: tuple[int, int] = (0, 0)) -> str:
     """The full list (docs/AGENT-TOOLS.md §3.2): the header lines, then one line per element.
-    `app` is (name, bundle id)."""
+    `app` is (name, bundle id); `off` is how many elements lie (above, below) the screen."""
     size = f"{round(screen[0])}x{round(screen[1])} pt" + (f" @{scale:g}x" if scale else "")
-    lines = [f"Screen {size} · {len(items)} elements"]
+    beyond = ", ".join(f"+{n} {side}" for n, side in ((off[1], "below"), (off[0], "above")) if n > 0)
+    lines = [f"Screen {size} · {len(items)} elements" + (f" ({beyond})" if beyond else "")]
     if app:
         lines.append(f"App: {app[0]} ({app[1]})")
     if alert:
@@ -713,14 +745,16 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     if not hits:
         raise Refused("not_found", miss)
+    if len(hits) > 1 and any(e.in_alert for e in hits):
+        # AGENT-TOOLS v1.5: an alert's own Cancel, not the Cancel behind it. When some matches are in the
+        # alert, only those count, and `index` picks among them
+        hits = [e for e in hits if e.in_alert]
     if target.index is not None:
         if target.index >= len(hits):
             raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "
                                        f"element{'s' if len(hits) != 1 else ''} match {what}")
         return hits[target.index]
-    in_front = [e for e in hits if e.in_alert]
-    if len(hits) > 1 and len(in_front) == 1:
-        return in_front[0]  # an alert's own Cancel, not the Cancel behind it: only the front one can be meant
+
     if len(hits) > 1:
         shown = hits[:MAX_CANDIDATES]
         raise Refused("ambiguous", f"{len(hits)} elements match {what}.\nCandidates:\n"

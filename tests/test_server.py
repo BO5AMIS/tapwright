@@ -121,12 +121,12 @@ def test_a_caller_gets_only_the_apps_it_names_and_none_when_it_names_none():
     d.session.foreground = "com.example.app"
     with TestClient(app) as c:
         r = c.post("/api/look", headers=bare, json={"screenshot": False})
-        assert r.status_code == 400 and r.json()["error"]["message"].startswith("no_apps: ")
+        assert r.status_code == 403 and r.json()["error"]["message"].startswith("no_apps: ")
         mine = {**bare, "X-Tapwright-Apps": "com.example.app"}
         assert c.post("/api/look", headers=mine, json={"screenshot": False}).status_code == 200
         other = {**bare, "X-Tapwright-Apps": "com.example.other"}
         r = c.post("/api/look", headers=other, json={"screenshot": False})
-        assert r.status_code == 400 and r.json()["error"]["message"].startswith("outside_apps: ")
+        assert r.status_code == 403 and r.json()["error"]["message"].startswith("outside_apps: ")
         assert c.post("/api/look", headers=AUTH, json={"screenshot": False}).status_code == 200  # dedicated
 
 

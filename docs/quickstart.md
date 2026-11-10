@@ -122,7 +122,7 @@ Run `tapwright doctor` first. Then the three most common failures:
   **Enable UI Automation** so it doesn't ask again.
 - **The agent gets `not_answering`.** The app in front has frozen. The agent can close it with
   `close_app` and open it again.
-- **The agent gets `unsupported: no_apps` or `outside_apps`.** It was started without an app
+- **The agent gets `not_allowed: no_apps` or `outside_apps`.** It was started without an app
   list, or another app is in front. Add `--apps` (or `--dedicated`), or let it go back with
   `open_app`.
 
