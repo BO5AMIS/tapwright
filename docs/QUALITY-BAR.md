@@ -111,11 +111,11 @@ The targets are the same for both tools: the lab is the same, and the number of 
 doesn't depend on how the touch is made.
 
 Tapline, 2026-11-10, a mid-size model (Claude Sonnet), one run per build: 92 calls and 29 state-only
-reads; after AGENT-TOOLS v1.5, 75 and 12; after v1.6, 52 and 2; with the skill, 53 and 1. A1 held in all
-four. A5 held in all four (every call in the four transcripts checked). A4: no wrong conclusion in any
-report; the one answer a helper called wrong (a missing note) was checked on the phone and had the note,
-which its own log had cut off. The transcripts were not read line by line for A4. So Tapline meets A on
-the last two runs, with one run each where the standard asks for two.
+reads; after AGENT-TOOLS v1.5, 75 and 12; after v1.6, 52 and 2; with the skill, two runs: 53 and 1, then
+49 and 2 (that one with every answer kept whole). A1 held in all five. A5 held in all five (every call in
+the five transcripts checked). A4: no wrong conclusion in any report; the one answer a helper called wrong
+(a missing note) was checked on the phone and had the note, which its own log had cut off. The transcripts
+were not read line by line for A4. So Tapline meets A, on two runs with the skill.
 
 ## Gaps today, with plans
 

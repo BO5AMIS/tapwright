@@ -171,6 +171,7 @@ def _changes(old: list[Element], new: list[Element]) -> tuple[list[str], int]:
 
 
 OFF_LISTED = 5  # up to this many changed off-screen elements get a line each; more become a count
+OFF_SCREEN = "Changes off screen:"  # heads those lines when they follow a full list (in a change block they need none)
 
 
 def off_screen(old: list[Element], new: list[Element], by_place: bool = True,

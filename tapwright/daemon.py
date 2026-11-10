@@ -1572,8 +1572,10 @@ class Daemon:
             tree = snap.tree
             head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more,
                                (tree.above, tree.below))
-            # the full list because most of the screen changed: what changed off screen still follows it
-            return _answer([result, head, *off, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+            # the full list because most of the screen changed: what changed off screen still follows it, under
+            # a heading of its own (bare `~` lines after a list read as a second, broken block)
+            beyond = [changes.OFF_SCREEN, *off] if off else []
+            return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:

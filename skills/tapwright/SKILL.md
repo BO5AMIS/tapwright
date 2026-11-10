@@ -58,7 +58,8 @@ with no element.
 - **`No visible change.`** means nothing changed, on screen or off it.
 - **A sheet, an alert or a new screen answers with the full list:** the first line, then
   `Screen …` and the elements that are in front now. What a sheet hides is left out until it
-  closes; acting on it answers `covered: … close that first.`
+  closes; acting on it answers `covered: … close that first.` When something out of view
+  changed as well, it follows the list under `Changes off screen:`.
 - **The header counts what you can't see:**
   `Screen 430x932 pt @3x · 26 elements (+41 below, +2 above)`. Those 41 are reached by
   scrolling. They are not in the list: acting on one answers `off_screen` and names the call
@@ -93,6 +94,7 @@ with no element.
 | fill a field and send it | `type_text` with `submit: true` |
 | leave a screen, or close a sheet | `back`. If it answers `no_action`, the sheet has a close control of its own: tap that |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
+| pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
 | see pixels (layout, colours, images) | `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
 | answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise |

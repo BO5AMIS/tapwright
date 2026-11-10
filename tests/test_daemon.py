@@ -4093,6 +4093,7 @@ def test_off_screen_changes_follow_a_full_list_that_came_because_most_of_the_scr
         lines = unsettled(r)
         assert lines[1].startswith("Screen ") and lines[-1] == ('~ text "taps=2" id=lab-state @16,1400 398x60 '
                                                                '(off screen; was "taps=1")')
+        assert lines[-2] == "Changes off screen:"  # a heading: bare ~ lines after a list read as a broken block
         # not when the full list was forced: a person acted, so the old off-screen list is no baseline
         s.offscreen = [el("", "text", "taps=3", "lab-state", rect=(16, 1400, 398, 60))]
         assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
