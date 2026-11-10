@@ -313,7 +313,10 @@ class Daemon:
         self.state, self.detail = "connecting", None
         self.preset = "balanced"
         self.ws_clients = 0
-        self.video = None  # a tapwright.video.VideoHub when the H.264 live view is set up (never created here)
+        self.video = None  # a tapwright.video.VideoHub while the H.264 live view is set up (see start_video)
+        self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
+        self._receiver = None  # the AirPlay receiver process that feeds `video`
+        self._video_task: asyncio.Task | None = None
         self.last_request = time.monotonic()
         self._ever_connected = False
         # why the last connect couldn't finish, when the phone said: a PhoneLocked, or an AppNotAnswering
@@ -530,6 +533,8 @@ class Daemon:
                     self._lost.clear()  # a drop noticed while reconnecting is already dealt with
                     self._set_state("live")
                     self.log(f"connected over {self.session.device.via}")
+                    if self.want_video and self._video_task is None:
+                        self._video_task = asyncio.create_task(self.start_video(), name="video")
                     continue
                 await _first(self.backoff[min(attempt, len(self.backoff) - 1)], stop, self._wake)
                 self._wake.clear()
@@ -1423,9 +1428,60 @@ class Daemon:
             raise ConnectionLost("not connected to the phone yet") from None
         return await self.session.device.open_stream()
 
+    async def start_video(self, tries: int = 3, gap: float = 3.0) -> str:
+        """Set up the H.264 live view: the hub, the AirPlay receiver, and Screen Mirroring on the phone, started
+        the way the owner would (mirror.py). The app that was in front comes back afterwards. Returns what
+        happened in words; it never raises, since the JPEG stream stays as the picture."""
+        from . import airplay, mirror, video
+        s = self.session
+        if not video.available():
+            return self._video_note("PyAV isn't installed (pip install tapwright[video])")
+        uxplay = airplay.find()
+        if uxplay is None:
+            return self._video_note("no AirPlay receiver found (install UxPlay, or set TAPWRIGHT_UXPLAY)")
+        try:
+            scale = s.scale or 3.0
+            pixels = (round(s.screen[0] * scale), round(s.screen[1] * scale))
+            receiver = airplay.Receiver(uxplay, 0, pixels, self.log)
+            hub = video.VideoHub(port=0, screen_width=lambda: s.screen[0], mirroring=lambda: receiver.mirroring,
+                                 log=self.log)
+            receiver.args = airplay.command(uxplay, hub.port, pixels)
+            receiver.start()
+            self.video, self._receiver = hub, receiver
+            hub.set_quality(self.preset)
+            said = ""
+            for attempt in range(tries):
+                await asyncio.sleep(gap)  # the receiver takes a moment to show up in the phone's list
+                async with self.control.exclusive():
+                    self._require_connected()
+                    front = await s.foreground_bundle_id()
+                    try:
+                        said = await mirror.start(s, airplay.NAME)
+                    except mirror.MirrorError as e:
+                        said = str(e)
+                        continue
+                    finally:
+                        if front and front != "com.apple.springboard":
+                            await s.launch(front)  # back to the app that was in front
+                break
+            for view in self.control.clients.values():
+                view.dropped = True  # the phone left the app for a moment: every agent's list is old
+            self.broadcast(self.status())
+            return self._video_note(said, ok=receiver.mirroring or said.startswith(("Mirroring", "Already")))
+        except Exception as e:  # the JPEG stream stays: video is an extra
+            return self._video_note(f"couldn't start: {e}")
+
+    def _video_note(self, text: str, ok: bool = False) -> str:
+        self.log(f"video: {text}" if ok else f"video: {text}; the live view stays on the JPEG stream")
+        return text
+
     async def close(self) -> None:
         await self.pump.stop()
         self.hub.close()
+        if self._video_task is not None:
+            self._video_task.cancel()
+        if self._receiver is not None:
+            await asyncio.to_thread(self._receiver.stop)
         if self.video is not None:
             await asyncio.to_thread(self.video.close)  # joins its threads
         try:

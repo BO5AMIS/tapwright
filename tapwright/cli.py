@@ -301,6 +301,9 @@ def main() -> int:
     p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
+    p.add_argument("--video", action="store_true",
+                   help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
+                        "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
     sub.add_parser("view")
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
@@ -325,7 +328,8 @@ def main() -> int:
     if a.cmd == "serve":
         from . import server
         port = a.port if a.port is not None else server.DEFAULT_PORT
-        return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone))
+        return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone,
+                                        video=a.video))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 
 

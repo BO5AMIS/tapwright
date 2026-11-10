@@ -333,7 +333,7 @@ def _lock_instance():
 
 async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: bool = False,
                 phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT,
-                wait_for_other: float = 60.0) -> int:
+                wait_for_other: float = 60.0, video: bool = False) -> int:
     """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
     import uvicorn
 
@@ -378,6 +378,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             token = info["token"] if info.get("token") and not new_token else secrets.token_urlsafe(32)
             actual = sock.getsockname()[1]
             daemon = make_daemon(log.info, phone)
+            daemon.want_video = video  # the H.264 live view, set up once the phone is connected
             app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
             server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
                                                    access_log=False, timeout_graceful_shutdown=3))
