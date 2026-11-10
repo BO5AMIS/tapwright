@@ -107,6 +107,8 @@ with no element.
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
 | drag a slider or a carousel | `swipe` between two points |
 
+**With both tools connected:** when the two tools answer differently, both are right about their own way in: Tapwright does what a finger can do, Tapline what the app's own code allows (Tapline's `back` calls a sheet's own close; Tapwright's needs a gesture the sheet accepts). Test what the user can do with Tapwright; use Tapline to get there faster. Each tool's `was` is from its own last answer: after the other tool acted, read the current value, not the old one.
+
 ## 5. Errors
 
 Every failure is `Error <code>: <message>`, and the message says what to do next.
