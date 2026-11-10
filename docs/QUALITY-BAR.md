@@ -38,11 +38,11 @@ the end with a plan. There are no per-tool targets.
 - **Samples:** at least 20 per speed metric, reported as median and p95. The reliability
   suite runs 3 times per link, and a single miss fails it.
 - **Times** are taken on the computer that runs the tool, with one clock.
-- **The phone is quiet:** Do Not Disturb is on while a suite runs on a phone that gets
-  notifications (an owner's everyday phone). A banner covers the top of the screen for about
-  5 s; a tool that reads through iOS sees the banner instead of the app then. A dedicated test
-  phone needs nothing. Only one tool drives the phone at a time, and the other tool's daemon
-  and streams are stopped.
+- **The phone's notifications:** banners interrupt a suite on a phone that gets them (an
+  owner's everyday phone, or one signed in to the owner's accounts). Don't silence them with a
+  Focus: Focus syncs to the owner's other devices. A tool must wait out a banner, or say it
+  couldn't act. A dedicated test phone with no accounts needs nothing. Only one tool drives the
+  phone at a time, and the other tool's daemon and streams are stopped.
 
 ## Reliability (R): every check, every run, every link
 
