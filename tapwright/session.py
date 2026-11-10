@@ -52,6 +52,7 @@ class Session:
         self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
         # what a sheet hides, each with the element in front that names the sheet (for `covered`)
         self.behind: list[tuple[ui.Element, ui.Element | None]] = []
+        self.front_items: list[ui.Element] = []  # the list as back_point last read it
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -249,7 +250,8 @@ class Session:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
         source = await self._source()
         # what is open on top, as this read shows it: `back` names it when it could close nothing
-        self.behind = ui.read(source, self.screen).behind
+        tree = ui.read(source, self.screen)
+        self.behind, self.front_items = tree.behind, tree.items  # (and what the layer in front shows, for `back`)
         return ui.back_button(source, self.screen)
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:

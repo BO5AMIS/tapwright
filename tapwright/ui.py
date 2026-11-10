@@ -882,6 +882,53 @@ def at_point(items: list[Element], point: tuple[float, float], role: str) -> Ele
 BLANK_GRID = 40.0  # points between the points blank_point tries when no label offers one
 
 
+SHEET_BESIDE = 60.0  # points of screen a sheet must leave free on a side for a touch beside it
+SHEET_GRIP = 14.0  # how far below a sheet's top edge a finger takes hold to pull it down
+SHEET_PULL = 0.7  # the pull, in sheet heights (at least SHEET_PULL_MIN points, and not past the screen)
+SHEET_PULL_MIN = 250.0
+SHEET_MIN_TOP = 20.0  # a sheet's top edge is below the status bar; what starts higher fills the screen
+
+
+def sheet_box(front: Element | None, items: list[Element]) -> tuple[float, float, float, float] | None:
+    """The frame of the sheet that is open in front: the front element's when that is the sheet itself (another
+    listed element sits in it), else the frame around everything listed (with a sheet in front, that is what the
+    sheet shows). None with nothing to go by."""
+    if front is not None and any(e.rect != front.rect and _holds(front.rect, e.center) for e in items):
+        return front.rect
+    rects = [e.rect for e in items if e.width > 0 and e.height > 0]
+    if not rects:
+        return front.rect if front is not None else None
+    x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
+    return x0, y0, max(r[0] + r[2] for r in rects) - x0, max(r[1] + r[3] for r in rects) - y0
+
+
+def beside_sheet(box: tuple[float, float, float, float], screen: tuple[float, float], top: float,
+                 bottom: float) -> tuple[float, float] | None:
+    """Where a person taps to close a sheet from outside it: the middle of the screen it leaves free above it,
+    else below it (between `top` and `bottom`, the bars' edges). None when it leaves less than SHEET_BESIDE
+    points either way: a full-screen one has no outside."""
+    x, y, w, h = box
+    across = min(max(x + w / 2, 0.0), screen[0] - 1)
+    if y - top >= SHEET_BESIDE:
+        return across, (top + y) / 2
+    if bottom - (y + h) >= SHEET_BESIDE:
+        return across, (y + h + bottom) / 2
+    return None
+
+
+def sheet_pull(box: tuple[float, float, float, float],
+               screen: tuple[float, float]) -> tuple[float, float, float, float] | None:
+    """The drag that pulls a sheet down to close it, as x0, y0, x1, y1: from just inside its top edge, straight
+    down. None for something that starts at the top of the screen: that is no sheet to pull, and a drag from
+    the screen's top edge opens Notification Center, which is the owner's."""
+    x, y, w, h = box
+    if y < SHEET_MIN_TOP:
+        return None
+    across = min(max(x + w / 2, 0.0), screen[0] - 1)
+    start = min(y + SHEET_GRIP, screen[1] - 2)
+    return across, start, across, min(start + max(SHEET_PULL * h, SHEET_PULL_MIN), screen[1] - 2)
+
+
 def blank_point(items: list[Element], screen: tuple[float, float], top: float,
                 bottom: float) -> tuple[float, float] | None:
     """A point to touch that does nothing but take focus away from a text field: between `top` and `bottom` (the

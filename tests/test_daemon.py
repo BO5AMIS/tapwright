@@ -3482,6 +3482,76 @@ def test_back_that_changed_nothing_names_what_is_still_open():
     run(go)
 
 
+async def sheet_open(d, front_rect=(0, 647, 430, 285), back_at=None):
+    """The lab's sheet in front of a screen whose "Tap me" it hides; the agent has looked."""
+    d.session.screen = (430.0, 932.0)
+    d.hub.publish(b"A")
+    sheet = el("e1", "other", "", "lab-sheet", rect=front_rect)
+    close = el("e2", "button", "Close", "lab-sheet-close", rect=(20, front_rect[1] + front_rect[3] - 88, 390, 49))
+    await looked(d, [sheet, close])
+    hidden = el("", "button", "Back", "BackButton", rect=(19, 59, 106, 44))
+    d.session.behind = [(hidden, el("e9", "other", "", "lab-sheet", rect=front_rect))]
+    d.session.front_items, d.session.back_at = [sheet, close], back_at
+
+
+def test_back_closes_a_sheet_by_a_touch_beside_it():
+    """What a person does first with a sheet that has no back button: taps what it dims."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await sheet_open(d, back_at=(72.0, 81.0))  # the screen behind has a back button: the sheet hides it
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]  # the backdrop closes it
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        r = await d.run_tool("a", "back", {})
+        assert r["text"].startswith("Closed the sheet.")
+        assert d.session.tap_points == [(215.0, (60.0 + 647.0) / 2)] and "swipe" not in d.session.calls
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_pulls_a_sheet_down_when_the_touch_beside_it_closed_nothing():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await sheet_open(d)
+        real = d.session.swipe
+
+        async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
+            d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]
+            d.session.pulled = (x0, y0, x1, y1)
+            return await real(x0, y0, x1, y1, duration_ms, hold_ms)
+        d.session.swipe = swipe
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        r = await d.run_tool("a", "back", {})
+        assert r["text"].startswith("Closed the sheet.") and len(d.session.tap_points) == 1
+        assert d.session.pulled == (215.0, 661.0, 215.0, 911.0)  # from just inside its top edge, straight down
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_never_drags_from_the_top_of_the_screen():
+    """A layer that fills the screen is no sheet to pull, and a drag from the top edge opens Notification Center."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await sheet_open(d, front_rect=(0, 0, 430, 932))
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {})
+        assert e.value.code == "not_actionable" and "is still open: tap its close control." in str(e.value)
+        assert d.session.tap_points == [] and "swipe" not in d.session.calls
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_target_not_found_while_an_alert_is_up_says_the_alert_hides_it():
     async def go():
         d = make()

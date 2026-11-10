@@ -1403,6 +1403,12 @@ class Daemon:
         if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
+        behind = getattr(s, "behind", [])
+        # A sheet in front with no region of its own to tap. A back button it hides belongs to the screen behind
+        # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
+        # sheet open); one that shows is the sheet's own and is tapped as usual.
+        if behind and not (back.point is not None and not any(ui._holds(e.rect, back.point) for e, _ in behind)):
+            return await self._close_sheet(view)
         if back.point is not None:
             await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
             return "Tapped the back button."
@@ -1411,6 +1417,35 @@ class Daemon:
         width, height = s.screen
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
+
+    async def _close_sheet(self, view) -> str:
+        """Close the sheet in front the two ways a person tries from outside it: a touch beside it, on what it
+        dims, then pulling it down from its top edge. After each, the screen is read: the sheet is closed when the
+        layer in front is gone or is another one. A sheet that takes neither is `no_action`, naming it."""
+        s = self.session
+
+        def front() -> str | None:
+            behind = getattr(s, "behind", [])
+            if not behind:
+                return None
+            return behind[0][1].line(ref=False, actions=False) if behind[0][1] is not None else ""
+        was = front()
+        box = ui.sheet_box(getattr(s, "behind")[0][1], getattr(s, "front_items", None) or view.items)
+        if box is not None:
+            top, bottom = s.last_insets
+            beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
+                                     s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+            if beside is not None:
+                await s.tap(ui.Target(x=beside[0], y=beside[1]))
+                await self._silent_read(view)
+                if front() != was:
+                    return "Closed the sheet."
+            if (pull := ui.sheet_pull(box, s.screen)) is not None:
+                await s.swipe(*pull, 300)
+                await self._silent_read(view)
+                if front() != was:
+                    return "Closed the sheet."
+        raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
 
     async def _settle_pending(self) -> None:
         """XCTest no longer waits for the app to go idle, so after an action that wasn't settled (`look: false`)
