@@ -197,6 +197,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
 
     return Starlette(routes=[
         Route("/", index),
+        Route("/viewer", index),  # the same page: both tools serve it at / and /viewer (AGENT-TOOLS v1.4)
         Route("/stream", stream),
         WebSocketRoute("/ws", ws),
         Route("/api/health", health),

@@ -98,6 +98,19 @@ def test_page_moves_the_token_into_a_cookie():
         assert stranger.get("/").status_code == 401
 
 
+def test_the_page_is_at_viewer_too_with_the_same_rules():
+    """AGENT-TOOLS v1.4, item 4: both tools serve the live view at /viewer as well as /."""
+    app, _ = app_and_daemon()
+    with TestClient(app) as c:
+        r = c.get(f"/viewer?token={TOKEN}", follow_redirects=False)
+        assert r.status_code == 200 and "Tapwright live view" in r.text
+        assert r.headers["set-cookie"].lower().startswith(f"{COOKIE}=")
+        assert c.get("/viewer").status_code == 200
+        assert c.get("/viewer", headers={"sec-fetch-site": "cross-site"}).status_code == 403
+    with TestClient(app) as stranger:
+        assert stranger.get("/viewer").status_code == 401
+
+
 def test_token_link_clicked_on_another_site_still_works():
     app, _ = app_and_daemon()
     with TestClient(app) as c:

@@ -49,8 +49,8 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass
     `force` where it can help), `stale` (look again), `busy` (a person is using the phone: wait a
     few seconds, retry), `paused` (ask the user to resume), `locked` (ask the user to unlock the
-    phone), `reconnecting` (wait, then look; when it says the app in front isn't answering, `close_app`
-    that app, then `open_app` it), `timeout` (look at the screen before retrying,
+    phone), `not_answering` (the app in front stopped answering: `close_app` it, then `open_app` it),
+    `reconnecting` (wait, then look), `timeout` (look at the screen before retrying,
     because the action may have happened).
 
 ## Reporting

@@ -375,8 +375,7 @@ class Daemon:
         if isinstance(self.stuck, PhoneLocked):
             return Refused("locked", "the phone is locked; ask the user to unlock it")
         if isinstance(self.stuck, AppNotAnswering):
-            return Refused("reconnecting", f"{self.stuck}. close_app can still close it; then open_app it again, "
-                                           "or ask the user to close it")
+            return Refused("not_answering", f"{self.stuck}. close_app can still close it; then open_app it again.")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
                                        "wait a few seconds, then look")
 
@@ -493,7 +492,8 @@ class Daemon:
                     if self.stuck is None:
                         self.log(f"connected, but {e}")
                     self.stuck = e
-                    self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
+                    state = "reconnecting" if self._ever_connected else "connecting"
+                    self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, str(e)[:200])
                 except Exception as e:
                     self.stuck = None
                     self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
@@ -1263,7 +1263,7 @@ class Daemon:
             if kind not in ("gesture", "scroll", "text", "key", "button"):
                 return None  # "overlay" comes in part 2; anything else is unknown
             if self.state != "live":
-                return {"type": "error", "code": "locked" if self.state == "locked" else "reconnecting",
+                return {"type": "error", "code": {"locked": "locked", "not-answering": "not_answering"}.get(self.state, "reconnecting"),
                         "message": f"not connected to the phone ({self.detail or self.state})"}
             run, action, point = self._person_action(kind, message)
             self._person_at = time.monotonic()

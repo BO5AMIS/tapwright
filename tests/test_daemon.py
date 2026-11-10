@@ -274,16 +274,19 @@ def test_a_frozen_app_is_named_at_once_and_close_app_ends_it():
         d = make(s, ready_wait=2.0)
         stop, task = await started(d, until=())
         await until_stuck(d)
-        assert d.state in ("connecting", "reconnecting") and d.detail.startswith("JLD (app.jld.mobile) is in front")
+        assert d.state == "not-answering" and d.detail.startswith("JLD (app.jld.mobile) is in front")  # the viewer says so too
         began = asyncio.get_running_loop().time()
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "look", {"screenshot": False})
         assert asyncio.get_running_loop().time() - began < 1.0  # not after the 2 s wait for a connection
-        assert e.value.code == "reconnecting" and "isn't answering" in str(e.value) and "close_app" in str(e.value)
+        assert e.value.code == "not_answering"  # AGENT-TOOLS v1.4
+        assert str(e.value) == ("JLD (app.jld.mobile) is in front and isn't answering, so nothing on the phone can be read. "
+                                "close_app can still close it; then open_app it again.")
+        assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "not_answering"
         assert "wait a few seconds" not in str(e.value)
         with pytest.raises(Refused) as e:  # only the stuck app can be closed while it blocks the phone
             await d.run_tool("a", "close_app", {"app": "Settings"})
-        assert e.value.code == "reconnecting" and s.device.killed == []
+        assert e.value.code == "not_answering" and s.device.killed == []
         r = await d.run_tool("a", "close_app", {"app": "jld"})
         assert r["text"] == "Closed JLD (app.jld.mobile), which wasn't answering."
         assert s.device.killed == ["app.jld.mobile"]
