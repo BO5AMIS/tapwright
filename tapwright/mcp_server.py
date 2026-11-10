@@ -173,7 +173,7 @@ async def type_text(text: str, target: Target | None = None, replace: bool = Tru
 
 @server.tool(description=describe("scroll"), structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
-                 to: Literal["start", "end"] | None = None, target: Target | None = None, look: bool = True,
+                 to: Literal["start", "end", "target"] | None = None, target: Target | None = None, look: bool = True,
                  screenshot: bool = False) -> CallToolResult:
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
                        screenshot=screenshot)

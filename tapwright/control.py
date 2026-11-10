@@ -39,6 +39,7 @@ class ClientView:
     items: list = field(default_factory=list)
     read_at: float = float("-inf")  # the clock when `items` was read
     moved: bool = False  # an action that returned no list ran since: the screen has probably changed
+    unlooked: int = 0  # how many answers since the last list or change block carried none (`look: false`)
     dropped: bool = False  # the connection dropped since `items` was read
     shown: list = field(default_factory=list)  # the list as of the agent's last answer: what changes are measured against
     top_ref: int = 0  # the highest ref number this agent was given: numbers are never reused until a full list

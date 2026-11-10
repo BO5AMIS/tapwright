@@ -77,7 +77,11 @@ def test_look_then_act_by_ref():
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("Tapped e1")
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with what changed after it
-        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."] and r["image"] is None
+        # v1.6: the block is measured from the last list, two answers without one ago, and says so
+        assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change.",
+                                    "Note: changes are since your last list, 3 actions ago."] and r["image"] is None
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "Note:" not in r["text"]  # that block was since the last one
         await finish(stop, task)
     run(go)
 
@@ -3508,11 +3512,11 @@ def test_an_element_with_too_little_showing_is_refused():
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert e.value.code == "not_actionable"
         assert str(e.value) == ('under_tab_bar: e1 cell "Card" @20,845 390x60 is under the tab bar iOS draws; '
-                                'scroll it up first.')
+                                'scroll to it first (scroll with this target and to: "target").')
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "long_press", {"target": {"ref": "e2"}})
         assert str(e.value) == ('covered: e2 cell "Draft" @20,100 390x60 is covered by toolbar @0,90 430x100; '
-                                'scroll it into view first.')
+                                'scroll to it first (scroll with this target and to: "target").')
         assert "tap" not in d.session.calls
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (215.0, 875.0)
@@ -3582,7 +3586,7 @@ def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
                     await d.run_tool("a", "tap", {"target": target, "force": force})
                 assert e.value.code == "not_actionable", target
                 assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
-                                        'scroll it into view first.')
+                                        'scroll to it first (scroll with this target and to: "target").')
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "nowhere"}})
         assert e.value.code == "not_found"
@@ -3632,7 +3636,7 @@ def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_sho
             await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
         assert e.value.code == "not_actionable"
         assert str(e.value) == ('covered: e1 switch "Switch" id=lab-switch checked=false @351,612 63x28 is covered by '
-                                'keyboard @0,614 430x318; scroll it into view first.')
+                                'keyboard @0,614 430x318; scroll to it first (scroll with this target and to: "target").')
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e2"}, "look": False})
         assert d.session.last_point == (382.5, 602.0)  # its centre (615) is under the keyboard: y 590-614 shows
@@ -3886,5 +3890,108 @@ def test_a_phone_asking_for_its_passcode_answers_locked_and_says_which_screen():
                 break
             await asyncio.sleep(0.01)
         assert d.stuck is None and d.state == "live"
+        await finish(stop, task)
+    run(go)
+
+
+# ---- scroll with to: "target" (AGENT-TOOLS v1.6) ----
+class LongList:
+    """A list of rows in a scroll view that fills the screen. A drag moves the rows by the finger's distance,
+    between the list's two ends; the tree and the off-screen list follow, as the phone's would."""
+
+    def __init__(self, d, rows: int = 40, pitch: float = 100.0, screen=(400.0, 800.0)) -> None:
+        self.s, self.screen, self.pitch, self.rows, self.offset = d.session, screen, pitch, rows, 0.0
+        self.lowest = -(rows * pitch - screen[1])
+        real = self.s.scroll
+
+        async def scroll(x0, y0, x1, y1):
+            self.offset = min(0.0, max(self.lowest, self.offset + (y1 - y0)))
+            self.lay()
+            return await real(x0, y0, x1, y1)
+        self.s.scroll = scroll
+        self.lay()
+
+    def lay(self) -> None:
+        shown = [el("e1", "scroll", "", "list", rect=(0, 0, *self.screen))]
+        off = []
+        for i in range(self.rows):
+            row = el("", "button", f"Row {i}", f"row-{i}", rect=(10, i * self.pitch + self.offset, 380, 40))
+            (shown if 0 <= row.center[1] < self.screen[1] else off).append(row)
+        for n, e in enumerate(shown[1:], 2):
+            e.ref = f"e{n}"
+        self.s.tree, self.s.offscreen = shown, off
+
+
+def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
+    """A first-time agent needed five calls to reach one button: off_screen, two scrolls by guess, covered under
+    a bar, a third scroll. One call now, and the off_screen message says which."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "row-30"}})
+        assert str(e.value).endswith('is off screen; scroll to it first (scroll with this target and to: "target").')
+        r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
+        first = r["text"].splitlines()[0]
+        assert first.startswith("Scrolled e1 scroll id=list @0,0 400x800 to e") and 'button "Row 30" id=row-30' in first
+        row = next(e for e in d.session.tree if e.identifier == "row-30")
+        assert 60 <= row.y and row.y + row.height <= 760  # between the bars' insets, not only on the screen
+        assert len(d.session.scrolls) == 4  # 2288 points at 588 a drag: three full drags and the rest
+        assert all(y1 < y0 and y0 - y1 <= 700 * ui.SCROLL_USABLE + 0.01 for _, y0, _, y1 in d.session.scrolls)
+        r = await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False})
+        assert r["text"].startswith("Tapped e") and "row-30" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_a_target_goes_up_as_well_and_does_nothing_when_it_is_already_clear():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        world = LongList(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
+        before = len(d.session.scrolls)
+        r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})  # already there
+        assert len(d.session.scrolls) == before and "No visible change." in r["text"]
+        await d.run_tool("a", "scroll", {"target": {"id": "row-2"}, "to": "target"})  # back up
+        row = next(e for e in d.session.tree if e.identifier == "row-2")
+        assert 60 <= row.y and row.y + row.height <= 760
+        assert all(y1 > y0 for _, y0, _, y1 in d.session.scrolls[before:])  # the finger went down
+        assert world.offset <= 0
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_a_target_stops_at_the_end_of_the_list_and_says_so():
+    """Row 0 sits at the top, under where a bar would be (above the 60-point inset): the list can't bring it lower."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"target": {"id": "row-0"}, "to": "target"})
+        assert len(d.session.scrolls) == 1  # one try, the row didn't move, no more
+        assert "Note: it doesn't scroll further: the target is as far into view as it gets." in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_scroll_to_a_target_needs_an_element_and_no_direction():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        for args in ({"to": "target"}, {"to": "target", "target": {"x": 5, "y": 5}},
+                     {"to": "target", "target": {"id": "row-30"}, "direction": "down"}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "scroll", args)
+            assert e.value.code == "bad_params", args
+        with pytest.raises(Refused) as e:  # a row the list hasn't made: it isn't anywhere in the tree
+            await d.run_tool("a", "scroll", {"to": "target", "target": {"id": "row-99"}})
+        assert e.value.code == "not_found" and d.session.scrolls == []
         await finish(stop, task)
     run(go)

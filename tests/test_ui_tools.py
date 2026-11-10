@@ -685,3 +685,42 @@ def test_what_is_off_screen_under_an_open_sheet_is_not_counted():
     assert (plain.above, plain.below) == (1, 1)
     covered = ui.read(under_window(base, window), PHONE)
     assert (covered.above, covered.below) == (0, 0)
+
+
+# ---- scrolling to an element (AGENT-TOOLS v1.6) ----
+VIEW = (0.0, 60.0, 400.0, 700.0)  # a scroll view between the bars: y 60 to 760
+
+
+def test_scroll_move_is_how_far_the_content_must_go_for_the_element_to_be_inside():
+    assert ui.scroll_move((10, 300, 380, 40), VIEW) == (0.0, 0.0)  # inside: nothing
+    assert ui.scroll_move((10, 3000, 380, 40), VIEW) == (0.0, 760 - 3040 - 8)  # below: up, and 8 points clear
+    assert ui.scroll_move((10, -500, 380, 40), VIEW) == (0.0, 60 + 500 + 8)  # above: down
+    assert ui.scroll_move((10, 40, 380, 40), VIEW) == (0.0, 28.0)  # half under the top bar
+    assert ui.scroll_move((0, 300, 400, 40), VIEW) == (0.0, 0.0)  # as wide as the view: not a move sideways
+    assert ui.scroll_move((600, 300, 100, 40), VIEW) == (400 - 700 - 8, 0.0)  # to the right: left
+    assert ui.scroll_move((0, 100, 400, 900), VIEW) == (0.0, -40.0)  # taller than the view: its top to the top
+    assert ui.scroll_move((0, 60, 400, 900), VIEW) == (0.0, 0.0)
+
+
+def test_scroll_step_drags_the_way_the_content_must_go_within_the_view():
+    x0, y0, x1, y1 = ui.scroll_step((0.0, -2288.0), VIEW)
+    assert x0 == x1 == 200 and y0 - y1 == pytest.approx(700 * ui.SCROLL_USABLE) and 60 < y1 < y0 < 760
+    x0, y0, x1, y1 = ui.scroll_step((0.0, 300.0), VIEW)
+    assert y1 - y0 == 300 and (y0 + y1) / 2 == 410  # the whole distance, centred
+    x0, y0, x1, y1 = ui.scroll_step((0.0, 5.0), VIEW)
+    assert y1 - y0 == ui.SCROLL_MIN_DRAG  # never so short that it lands as a tap
+    x0, y0, x1, y1 = ui.scroll_step((-120.0, 10.0), VIEW)
+    assert y0 == y1 == 410 and x1 - x0 == -120  # along the axis that needs more
+
+
+def test_the_scroll_view_that_holds_an_element_off_screen_is_the_page_not_a_carousel_in_its_column():
+    page = ui.Element("e1", "scroll", rect=(0, 0, 400, 800))
+    carousel = ui.Element("e2", "scroll", rect=(0, 200, 400, 120))
+    inside = ui.Element("e3", "button", label="Card", rect=(20, 220, 100, 80))
+    below = ui.Element("", "button", label="Far", rect=(10, 3000, 380, 40))
+    beside = ui.Element("", "button", label="Card 9", rect=(900, 220, 100, 80))
+    items = [page, carousel, inside]
+    assert ui.scroll_holding(items, inside, (400, 800)) is carousel
+    assert ui.scroll_holding(items, below, (400, 800)) is page
+    assert ui.scroll_holding(items, beside, (400, 800)) is carousel
+    assert ui.scroll_holding([inside], below, (400, 800)) is None

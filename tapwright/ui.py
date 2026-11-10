@@ -970,6 +970,57 @@ def scroll_area_points(direction: str, rect: tuple[float, float, float, float], 
     raise ValueError(f"direction must be up, down, left or right, not {direction!r}")
 
 
+SCROLL_MARGIN = 8.0  # points an element is brought past the edge it came in over, so it isn't flush with a bar
+SCROLL_MIN_DRAG = 20.0  # a shorter drag may land as a tap
+
+
+def scroll_move(element: tuple[float, float, float, float], view: tuple[float, float, float, float],
+                margin: float = SCROLL_MARGIN) -> tuple[float, float]:
+    """How far the content must move (dx, dy; down and right are positive) for the element's rect to lie inside
+    the view's: (0, 0) when it already does. An element larger than the view is brought to the view's start."""
+    def along(lo: float, size: float, start: float, room: float) -> float:
+        if size > room:
+            return 0.0 if abs(lo - start) <= 1.0 else start - lo
+        gap = min(margin, (room - size) / 2)
+        if lo < start:
+            return start - lo + gap
+        if lo + size > start + room:
+            return start + room - (lo + size) - gap
+        return 0.0
+    ex, ey, ew, eh = element
+    vx, vy, vw, vh = view
+    return along(ex, ew, vx, vw), along(ey, eh, vy, vh)
+
+
+def scroll_step(move: tuple[float, float], view: tuple[float, float, float, float]) -> tuple[float, ...]:
+    """The drag (x0, y0, x1, y1) that moves the content toward `move`, along the axis that needs more: the finger
+    goes the way the content must, centred in the view, at most SCROLL_USABLE of it and at least SCROLL_MIN_DRAG."""
+    vx, vy, vw, vh = view
+    cx, cy = vx + vw / 2, vy + vh / 2
+    dx, dy = move
+    vertical = abs(dy) >= abs(dx)
+    want, room = (dy, vh) if vertical else (dx, vw)
+    length = min(max(abs(want), SCROLL_MIN_DRAG), room * SCROLL_USABLE)
+    half = math.copysign(length, want) / 2
+    return (cx, cy - half, cx, cy + half) if vertical else (cx - half, cy, cx + half, cy)
+
+
+def scroll_holding(items: list[Element], element: Element, screen: tuple[float, float]) -> Element | None:
+    """The scroll view that brings an element into view: the one around it; else, for an element above or below
+    the screen, the largest scroll view in its column (the page; a carousel in that column isn't its parent);
+    else, for one to the left or right, the smallest in its row. None when there is none."""
+    inside = scroll_of(items, element)
+    if inside is not None:
+        return inside
+    cx, cy = element.center
+    scrolls = [e for e in items if e.role == "scroll"]
+    if 0 <= cx < screen[0]:
+        column = [e for e in scrolls if e.x <= cx <= e.x + e.width]
+        return max(column, key=lambda e: e.width * e.height, default=None)
+    row = [e for e in scrolls if e.y <= cy <= e.y + e.height]
+    return min(row, key=lambda e: e.width * e.height, default=None)
+
+
 def scroll_container(items: list[Element], screen: tuple[float, float]) -> Element | None:
     """The innermost (smallest) `scroll` element whose rect holds the centre of the screen, else None."""
     return scroll_at(items, (screen[0] / 2, screen[1] / 2))

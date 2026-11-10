@@ -72,7 +72,7 @@ def test_enums_are_literals():
     assert enum("alert", "action") == {"accept", "dismiss", "text"}
     assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
     assert enum("scroll", "direction") == {"up", "down", "left", "right"}
-    assert enum("scroll", "to") == {"start", "end"}
+    assert enum("scroll", "to") == {"start", "end", "target"}
 
 
 def test_read_only_tools_say_so():

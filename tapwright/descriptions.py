@@ -18,7 +18,7 @@ _CORE = (
     '\n'
     'Answers\n'
     '- The first line says what was done, like `Tapped e3 button "Log in" id=login-button @24,610 354x48.`\n'
-    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements; or `No visible change.`; or the full list when the screen changed. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
+    '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements; or `No visible change.`; or the full list when the screen changed or most of it did. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
     '- `Alert:`, `Keyboard:` and similar header lines come first when they changed.\n'
     '- `Settled in 0.31 s.` is how long the screen took to settle. `wait` answers `Waited 1.0 s.` instead.\n'
     '- `Note:` lines come last. Read them.\n'
@@ -91,7 +91,7 @@ SHARED = {
     ),
     'scroll': (
         'Scroll content: `down` shows what is below. `direction` (default `down`), `amount` (0.1-1.0 of '
-        'the scroll area, default 0.8), `to` (`start` or `end`, repeats until nothing changes) and '
+        'the scroll area, default 0.8), `to` (`start` or `end`, repeats until nothing changes; or `target`, until the `target` element is on screen and clear of the bars) and '
         "`target` (the scroll view, or an element inside it; default the screen's main scroll view) shape"
         ' it. Answers what changed.'
     ),
@@ -136,7 +136,10 @@ EXTRA = {
         "It can't see which field is focused, so without a target it uses the only input on screen. A "
         "secure field's value is reported as hidden."
     ),
-    'scroll': "drags on the screen; the main scroll view is the one at the screen's centre.",
+    'scroll': (
+        "drags on the screen; the main scroll view is the one at the screen's centre. `to: \"target\"` drags "
+        'toward the element until it is clear; a row a lazy list has not made yet is `not_found`.'
+    ),
     'toggle': (
         'reads the switch, then taps it only if the value differs. With `look: false` the first line is '
         "`Tapped …`: the new state isn't read."

@@ -82,6 +82,8 @@ PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input
 PACE_TICK = 0.25  # how often the pace is checked
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
+SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
+NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -150,9 +152,16 @@ def _checked(name: str, args: dict) -> dict:
             checked.pop("direction", None)
         if checked.get("direction", "down") not in ("up", "down", "left", "right"):
             raise Refused("bad_params", f"direction must be up, down, left or right, not {args['direction']!r}")
-        if args.get("to") not in (None, "start", "end"):
-            raise Refused("bad_params", f"to must be start or end, not {args['to']!r}")
-        if args.get("to") and "direction" in checked and checked["direction"] not in SCROLL_TO[args["to"]]:
+        if args.get("to") not in (None, "start", "end", "target"):
+            raise Refused("bad_params", f"to must be start, end or target, not {args['to']!r}")
+        if args.get("to") == "target":
+            aim = checked.get("target")
+            if aim is None or aim.point is not None:
+                raise Refused("bad_params", 'to: "target" scrolls to an element: pass it as target (ref, id, label '
+                                            "or text)")
+            if "direction" in checked:
+                raise Refused("bad_params", 'to: "target" finds the direction itself; leave direction out')
+        elif args.get("to") and "direction" in checked and checked["direction"] not in SCROLL_TO[args["to"]]:
             raise Refused("bad_params", f"to {args['to']} scrolls {' or '.join(SCROLL_TO[args['to']])}, not "
                                         f"{args['direction']}; leave direction out, or make them agree")
         if "amount" in checked and not SCROLL_MIN <= checked["amount"] <= SCROLL_MAX:
@@ -736,7 +745,8 @@ class Daemon:
                     # out of range the alert's own elements matched, and that miss is the answer.)
                     self._refuse_behind_alert(view, force=False)
                 self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
-                self._refuse_off_screen(target)
+                if not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
+                    self._refuse_off_screen(target)
             box["note"] = await self._close_keyboard(view, name, target)  # a person would close it before the touch
             s.last_point = None
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
@@ -771,6 +781,7 @@ class Daemon:
             self.unsettled = not looks
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
+            view.unlooked += 0 if reads_only else 1
             return _answer([str(result)], notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
@@ -880,6 +891,7 @@ class Daemon:
         await self.control.sleep(seconds)
         result = f"Waited {seconds:.1f} s."
         if not args.get("look", True):
+            view.unlooked += 1
             return _answer([result], notes)
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
@@ -914,6 +926,7 @@ class Daemon:
             await self.control.sleep(min(WAIT_FOR_POLL, left))
         result = f"Done after {clock() - began:.1f} s."
         if not args.get("look", True):
+            view.unlooked += 1
             return _answer([result], notes)
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         # the last poll is the answer's tree: no read of its own, only the app lookup the polls left out
@@ -964,6 +977,8 @@ class Daemon:
         meanwhile, so "no change at all" would never come), at most MAX_SCROLL_SWIPES times or SCROLL_CAP seconds."""
         s = self.session
         target, to = a.get("target"), a.get("to")
+        if to == "target":
+            return await self._scroll_to(view, target)
         if target is None:
             area = ui.scroll_container(view.items, s.screen)
         elif target.point is not None:
@@ -999,6 +1014,50 @@ class Daemon:
                 note = f"the {to} wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
                 break
         done = Scrolled(f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}.")
+        done.note = note
+        return done
+
+    def _anywhere(self, view, target: ui.Target) -> ui.Element:
+        """The element a target names, on the agent's list or, failing that, among what the last read found off
+        screen. Raises as `resolve` does when it is in neither."""
+        try:
+            return ui.resolve(view.items, target)
+        except Refused as e:
+            if e.code != "not_found":
+                raise
+            return ui.resolve(getattr(self.session, "offscreen", []), dataclasses.replace(target, index=0))
+
+    async def _scroll_to(self, view, target: ui.Target) -> Scrolled:
+        """`scroll` with `to: "target"` (AGENT-TOOLS v1.6): drag the scroll view that holds the element until the
+        element is on screen and clear of the bars. The tree gives the place of an element that is off screen, and
+        an eased drag doesn't slide on, so each drag covers a known distance; the screen is read after each one,
+        and the next drag covers what is left. It stops when the element is clear, when a drag no longer moves it
+        (the end of the list), or at the limits `to: "end"` has. A row a lazy list hasn't made yet is `not_found`."""
+        s = self.session
+        loop = asyncio.get_running_loop()
+        began, note, before, where = loop.time(), "", None, None
+        for drags in range(MAX_SCROLL_SWIPES + 1):
+            element = self._anywhere(view, target)
+            area = ui.scroll_holding(view.items, element, s.screen)
+            where = where or (area.line(actions=False) if area else "the screen")
+            top, bottom = s.last_insets
+            band = (SCROLL_TOP_INSET if top is None else top,
+                    s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+            x, y, w, h = area.rect if area else (0.0, 0.0, *s.screen)
+            y, h = max(y, band[0]), min(y + h, band[1]) - max(y, band[0])
+            move = ui.scroll_move(element.rect, (x, y, w, h))
+            if move == (0.0, 0.0) or h <= 0:
+                break
+            if before is not None and ui._same_rect(before, element.rect):
+                note = "it doesn't scroll further: the target is as far into view as it gets."
+                break
+            if drags == MAX_SCROLL_SWIPES or loop.time() - began >= SCROLL_CAP:
+                note = f"the target wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
+                break
+            before = element.rect
+            await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
+            await self._silent_read(view)  # once the screen is still: where the element is now
+        done = Scrolled(f"Scrolled {where} to {element.line(ref=bool(element.ref), actions=False)}.")
         done.note = note
         return done
 
@@ -1096,7 +1155,7 @@ class Daemon:
             return
         if isinstance(hit, ui.Element):
             raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
-                                            "scroll it into view first.")
+                                            f"{SCROLL_HINT}")
 
     @staticmethod
     def _refuse_disabled(element: ui.Element) -> None:
@@ -1123,9 +1182,9 @@ class Daemon:
             return x + w / 2, y + h / 2
         line = element.line(actions=False)
         if over[0].kind == "TabBar":
-            raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; scroll it up first.")
+            raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; {SCROLL_HINT}")
         if over[0].kind in ui.COVERING_BARS:
-            raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; scroll it into view first.")
+            raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
@@ -1379,6 +1438,7 @@ class Daemon:
             view.read_keyboard = view.keyboard
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
+            view.unlooked = 0
             return text, image
         try:
             text, image = await self._read(read)
@@ -1419,6 +1479,11 @@ class Daemon:
         view.alert_now = view.alert
         view.seen, view.read_at, view.moved, view.dropped = (self.control.generation, self.control.clock(),
                                                              False, False)
+        earlier, view.unlooked = view.unlooked, 0
+        if earlier and not up.full:
+            # the block is measured from the agent's last list, so it holds those actions' changes too: a
+            # first-time agent closed a sheet it had opened with look: false and read "No visible change."
+            notes = [*notes, NOTE_SPAN.format(n=earlier + 1)]
         if up.full:
             tree = snap.tree
             head = ui.describe(up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more,
