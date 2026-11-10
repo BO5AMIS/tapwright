@@ -3566,6 +3566,35 @@ def test_back_pulls_a_sheet_down_when_the_touch_beside_it_closed_nothing():
     run(go)
 
 
+def test_back_finds_the_sheet_inside_a_backdrop_that_fills_the_screen():
+    """As the phone lists the lab's second sheet: the backdrop first, full screen, then the panel. The first
+    build took the backdrop for the sheet, found no room beside it and tried nothing."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.hub.publish(b"A")
+        backdrop = el("e1", "other", "", "lab-sheet2-backdrop", rect=(0, 0, 430, 932))
+        panel = el("e2", "other", "", "lab-sheet2", rect=(0, 690, 430, 242))
+        inside = button("e3", "Sheet 2 button", "lab-sheet2-button", rect=(20, 844, 390, 49))
+        await looked(d, [backdrop, panel, inside])
+        hidden = el("", "button", "Open sheet 2", "lab-open-sheet2", rect=(16, 835, 398, 49))
+        d.session.behind, d.session.front_items = [(hidden, backdrop)], [backdrop, panel, inside]
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            d.session.behind, d.session.tree = [], [button("e5", "Open sheet 2", "lab-open-sheet2")]
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        r = await d.run_tool("a", "back", {})
+        assert r["text"].startswith("Closed the sheet.")
+        assert d.session.tap_points == [(215.0, (60.0 + 690.0) / 2)]  # on the backdrop, above the panel
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
 def test_back_never_drags_from_the_top_of_the_screen():
     """A layer that fills the screen is no sheet to pull, and a drag from the top edge opens Notification Center."""
     async def go():

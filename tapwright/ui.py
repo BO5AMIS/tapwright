@@ -890,15 +890,28 @@ SHEET_PULL_MIN = 250.0
 SHEET_MIN_TOP = 20.0  # a sheet's top edge is below the status bar; what starts higher fills the screen
 
 
-def sheet_box(front: Element | None, items: list[Element]) -> tuple[float, float, float, float] | None:
-    """The frame of the sheet that is open in front: the front element's when that is the sheet itself (another
-    listed element sits in it), else the frame around everything listed (with a sheet in front, that is what the
-    sheet shows). None with nothing to go by."""
-    if front is not None and any(e.rect != front.rect and _holds(front.rect, e.center) for e in items):
+def sheet_box(front: Element | None, items: list[Element],
+              screen: tuple[float, float] | None = None) -> tuple[float, float, float, float] | None:
+    """The frame of the sheet that is open in front: the largest listed element that holds another listed
+    element and doesn't fill the screen. What is first in front is often the sheet's backdrop, which does fill
+    it (seen on the phone 2026-11-10: `lab-sheet2-backdrop @0,0 430x932`, then `lab-sheet2 @0,690 430x242`); the
+    sheet is then the panel inside. With no such element, the front element's own frame, else the frame around
+    everything listed. None with nothing to go by."""
+    def fills(e: Element) -> bool:
+        return screen is not None and e.width * e.height >= LAYER_COVER * screen[0] * screen[1]
+
+    def holds_another(e: Element) -> bool:
+        return any(o is not e and o.rect != e.rect and _holds(e.rect, o.center) for o in items)
+    panels = [e for e in items if e.width > 0 and e.height > 0 and not fills(e) and holds_another(e)]
+    if front is not None and not fills(front) and holds_another(front):
+        return front.rect
+    if panels:
+        return max(panels, key=lambda e: e.width * e.height).rect
+    if front is not None:
         return front.rect
     rects = [e.rect for e in items if e.width > 0 and e.height > 0]
     if not rects:
-        return front.rect if front is not None else None
+        return None
     x0, y0 = min(r[0] for r in rects), min(r[1] for r in rects)
     return x0, y0, max(r[0] + r[2] for r in rects) - x0, max(r[1] + r[3] for r in rects) - y0
 

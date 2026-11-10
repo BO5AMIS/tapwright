@@ -7,6 +7,7 @@ import io
 import json
 import dataclasses
 import math
+import os
 import re
 import time
 import traceback
@@ -335,6 +336,9 @@ class Daemon:
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
+        # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
+        # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
+        self.agent_stream = os.environ.get("TAPWRIGHT_AGENT_STREAM", "1") != "0"
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
         self.preset = "balanced"
@@ -667,7 +671,7 @@ class Daemon:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
-            async with self.pump.watching() if self._connected.is_set() else nullcontext():
+            async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
                 if scope is None:
                     return await self._run_tool(client_id, name, args)
                 return await self._within(scope, client_id, name, args)
@@ -1461,7 +1465,7 @@ class Daemon:
                 return None
             return behind[0][1].line(ref=False, actions=False) if behind[0][1] is not None else ""
         was = front()
-        box = ui.sheet_box(getattr(s, "behind")[0][1], getattr(s, "front_items", None) or view.items)
+        box = ui.sheet_box(getattr(s, "behind")[0][1], getattr(s, "front_items", None) or view.items, s.screen)
         if box is not None:
             top, bottom = s.last_insets
             beside = ui.beside_sheet(box, s.screen, SCROLL_TOP_INSET if top is None else top,
