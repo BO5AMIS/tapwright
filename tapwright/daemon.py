@@ -335,7 +335,7 @@ class Daemon:
         via = (getattr(self.session.device, "via", None) or "").lower()
         via = ("usb" if via == "usb" else "wifi" if via == "local network"
                else "tailscale" if via.startswith("network") else None)
-        return {"type": "status", "protocol": PROTOCOL, "state": self.state, "detail": self.detail, "via": via,
+        return {"type": "status", "protocol": PROTOCOL, "tool": "Tapwright", "state": self.state, "detail": self.detail, "via": via,
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
                 "size": {"w": w, "h": h}, "quality": self.preset,
                 "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
