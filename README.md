@@ -9,8 +9,8 @@ on the phone: your TestFlight builds, development builds, the App Store version.
 Nothing is added to your app, and no Mac or Xcode is needed.
 
 > [!NOTE]
-> Early. The parts that don't need a phone are tested (signing, the WebDriverAgent client,
-> screen reading, the MCP server). The first end-to-end runs on a phone are next; see
+> Early. It works and is measured on one phone (an iPhone 14 Pro Max on iOS 26) from one
+> Windows PC, over USB and Wi-Fi. Nobody but its authors has run it yet; see
 > [Status](#status).
 
 ## How it works
@@ -72,15 +72,22 @@ tapwright smoke --app com.yourcompany.yourapp
 
 It opens the app, prints its first screen as elements, saves a screenshot, and closes it.
 
-**Give it to your agent.** Claude Code:
+**Give it to your agent**, naming the apps it may use. Claude Code:
 
 ```sh
-claude mcp add tapwright -- tapwright mcp
+claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
 ```
 
-Other MCP clients: run `tapwright mcp` (stdio). Then ask, for example: *"Open MyApp on my
-phone, sign up with a test email, and tell me if anything looks broken."*
+- `--apps` takes bundle ids or exact names, comma-separated. The agent is refused every
+  other app (`not_allowed`) and is never shown another app's screen.
+- On a phone kept for testing, with no personal accounts on it, use `--dedicated` instead:
+  the agent may then use every app, the Home screen and system prompts.
+- With neither, the agent can do nothing. That is deliberate: it is your phone.
+
+Other MCP clients: run `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
+on my phone, sign up with a test email, and tell me if anything looks broken."*
 [AGENTS.md](AGENTS.md) is the agent's guide; point your agent at it.
+[docs/quickstart.md](docs/quickstart.md) walks through a first test.
 
 ## Tools
 
@@ -90,7 +97,7 @@ phone, sign up with a test email, and tell me if anything looks broken."*
 | `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot |
 | `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}` |
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
-| `scroll`, `swipe`, `back` | lists and pages; drags between points; up one screen |
+| `scroll`, `swipe`, `back` | lists and pages, to the start, the end, or straight to an element; drags between points; up one screen (an open sheet closes first) |
 | `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
 | `alert` | accept, dismiss or read system alerts (permission prompts) |
 | `press_button` | home, volume |
@@ -121,8 +128,11 @@ you drive. The live view is reachable from this computer only, with an access to
 link.
 
 - Drags play on the phone after you let go: WebDriverAgent can't follow a finger live.
-- About 22 frames per second at most (10 on the Light setting): fine for testing, not for
-  judging animation smoothness.
+- The picture is a stream of JPEG frames, about 26 a second while the screen changes and 5
+  while it is still.
+- `tapwright serve --video` plays the phone's own video instead, 60 frames a second, with
+  nothing installed on the phone. The phone and the computer must be on the same Wi-Fi, and
+  the computer needs an AirPlay receiver: see [docs/setup.md](docs/setup.md).
 - The volume buttons press the phone's real buttons.
 
 Other tools can use the same daemon: the agent tools over HTTP (`POST /api/<tool>`), and the
@@ -147,15 +157,25 @@ Treat it as experimental until it has been confirmed on your phone.
   identifiers (`testID` in React Native) and labels; games and custom-drawn screens show
   little beyond their screenshot.
 - Face ID, Touch ID and the passcode can't be automated; unlock the phone yourself.
-- It's your phone: the agent guide tells agents to stay away from purchases, sending,
-  deleting and account changes unless you asked for exactly that.
+- Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
+  Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
+  on a test device, or an unattended run stops there.
+- It's your phone. An agent gets only the apps you name, and that is enforced. Inside those
+  apps, the agent guide tells agents to stay away from purchases, sending, deleting and
+  account changes unless you asked for exactly that: this part is guidance, not enforcement.
+- Landscape isn't supported yet: the picture arrives sideways.
 
 ## Status
 
 | | |
 |---|---|
-| Tested without a phone | WebDriverAgent download (pinned SHA-256) and re-signing with rcodesign, entitlements included; App Store Connect authentication; the WebDriverAgent HTTP client; screen reading and targeting; the MCP server |
-| Needs a phone | setup end to end, the tunnel over USB and Wi-Fi, WebDriverAgent start-up, all actions; then the network/VPN mode |
+| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated` |
+| Measured over USB | a tap, with its answer: 0.7 s; a look: 0.16 s; typing 1.1 s; a scroll 1.5 s; a person's tap in the live view shows after 0.27 s |
+| Measured over Wi-Fi | slower: a tap 1.15 s, a look 0.38 s |
+| Not done | landscape; a run over 5G or a VPN; a second phone or an iPad; a run by anyone but the authors |
+
+The measurements, and the bar they are held against, are in
+[docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
 
 ## License
 
