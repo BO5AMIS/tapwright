@@ -265,7 +265,8 @@ text items.
   input, the tool closes the keyboard first, without pressing return, and the answer ends with
   `Note: closed the keyboard first.` A person's first tap outside the field often only closes the
   keyboard, and the keyboard covers controls near the bottom; the tool does both steps in one and
-  says so. With a hardware keyboard connected no keyboard shows, and nothing is closed.
+  says so. With a hardware keyboard connected no keyboard shows, and nothing is closed. Nothing is
+  closed for a call the tool refuses, or while a system alert is in front.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;
