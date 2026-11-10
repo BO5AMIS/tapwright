@@ -80,6 +80,7 @@ WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up in
 STILL_FPS = 5
 PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
 PACE_TICK = 0.25  # how often the pace is checked
+LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -512,12 +513,28 @@ class Daemon:
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
         pacer = asyncio.create_task(self._pace(stop), name="pace") if self.pace_tick else None
+        watch = asyncio.create_task(self._watch_loop(stop), name="loop-watch") if self.pace_tick else None
         try:
             await self._supervise(stop)
         finally:
-            if pacer is not None:
-                pacer.cancel()
-                await asyncio.gather(pacer, return_exceptions=True)
+            for helper in (pacer, watch):
+                if helper is not None:
+                    helper.cancel()
+                    await asyncio.gather(helper, return_exceptions=True)
+
+    async def _watch_loop(self, stop: asyncio.Event) -> None:
+        """Say in the log when this process's event loop was held up. The tunnel to the phone is a TCP/IP stack
+        in pure Python on this same loop: while something holds the loop, no packet moves, and a held loop looks
+        from outside like a phone that doesn't answer."""
+        loop = asyncio.get_running_loop()
+        worst, told = 0.0, loop.time()
+        while not stop.is_set():
+            before = loop.time()
+            await asyncio.sleep(LOOP_TICK)
+            worst = max(worst, loop.time() - before - LOOP_TICK)
+            if worst >= LOOP_HELD and loop.time() - told >= LOOP_SAY_EVERY:
+                self.log(f"the event loop was held for {worst:.2f} s; the tunnel's packets waited meanwhile")
+                worst, told = 0.0, loop.time()
 
     # ---- the stream's pace ----
     def _preset_fps(self) -> int:
