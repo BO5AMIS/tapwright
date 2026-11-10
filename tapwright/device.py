@@ -184,9 +184,11 @@ class Device:
         if self.runner and not self.runner.done() and await self.wda_alive():
             self.awaiting_passcode = False
             return
-        if self.awaiting_passcode and self.runner and not self.runner.done() \
-                and await self.passcode_prompt_up() is not False:
-            # still up (or the phone couldn't say): a new start would take the screen from under the person's fingers
+        if self.awaiting_passcode and await self.passcode_prompt_up() is not False:
+            # Still up (or the phone couldn't say): start nothing. A new start takes the screen away and puts a
+            # new one up, under the person's fingers; seen on the phone as the app behind it coming to the front
+            # and going again with every retry. The screen stays up without a runner (measured), so this waits,
+            # still, until the passcode is in or Cancel is tapped; the start after that finds out which.
             raise PasscodeNeeded()
         self.awaiting_passcode = False
         await self._stop_runner()  # iOS may have killed it before its task noticed (measured)

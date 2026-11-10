@@ -334,12 +334,18 @@ def test_a_start_that_waits_for_the_passcode_says_so(monkeypatch):
         with pytest.raises(PasscodeNeeded):  # the screen is still up: nothing is started over it
             await d.start_wda("runner.id", wait=30)
         assert d.runner is pending and not pending.done()
+        pending.cancel()  # the runner gave up (iOS failed the start), and the screen is still up (seen on the phone)
+        await asyncio.gather(pending, return_exceptions=True)
+        with pytest.raises(PasscodeNeeded):
+            await d.start_wda("runner.id", wait=30)
+        assert d.runner is pending  # still nothing new was started over it
 
         async def now_alive():
             return True
-        d.wda_alive = now_alive  # the person typed it: the same start finished
+        monkeypatch.setattr(device_info, "DeviceInfo", _Info)  # the person typed it: the screen is gone
+        d.wda_alive = now_alive
         await d.start_wda("runner.id", wait=30)
-        assert d.runner is pending and not d.awaiting_passcode
+        assert d.runner is not pending and not d.runner.done() and not d.awaiting_passcode  # a new start, and it is up
         await d.close()
 
     asyncio.run(scenario())
