@@ -212,7 +212,12 @@ def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
         assert s.launched == []
         before = len(s.actions())
         s.foreground = "com.example.mail"  # something took the phone elsewhere
-        for tool, args in (("look", {}), ("tap", {"target": {"x": 5, "y": 5}}), ("type_text", {"text": "x"}),
+        s.app = ("Mail box", "com.example.mail")  # what a read there would say
+        with pytest.raises(Refused) as e:  # a look reads, learns where it is, and shows nothing of it
+            await d.run_tool("a", "look", {}, scope=mine)
+        assert e.value.code == "unsupported" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        before = len(s.actions())
+        for tool, args in (("tap", {"target": {"x": 5, "y": 5}}), ("type_text", {"text": "x"}),
                            ("swipe", {"x0": 1, "y0": 1, "x1": 9, "y1": 9}), ("wait_for", {"text": "OK"})):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, args, scope=mine)
@@ -220,10 +225,11 @@ def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
             assert str(e.value).startswith("outside_apps: Mail box (com.example.mail) is in front and isn't one of the apps")
         assert len(s.actions()) == before  # nothing was read or touched there
         r = await d.run_tool("a", "open_app", {"app": "Example"}, scope=mine)  # the way back always works
+        s.app = ("Example", "com.example.app")
         assert r["text"].startswith("Opened Example") and s.launched == ["com.example.app"]
         s.foreground = None  # the phone can't say: closed, not open
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "look", {}, scope=mine)
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=mine)
         assert "can't say which app" in str(e.value)
         await finish(stop, task)
     run(go)

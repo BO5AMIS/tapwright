@@ -627,7 +627,9 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("unsupported", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("look", "wait_for"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name == "wait_for":
+            # A look needs no question first: its own read says which app is in front, and an answer from
+            # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
             front = await self._read(self.session.foreground_bundle_id)
             if front not in given:
@@ -641,6 +643,8 @@ class Daemon:
         shown = APP_LINE.search(answer["text"])
         app = (shown.group(1), shown.group(2)) if shown else self.session.app
         if app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image")):
+            if name == "look":  # nothing was done, so there is nothing to report but the refusal
+                raise Refused("unsupported", _outside(app[1], app[0], names))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
             return {"text": f"{first}Note: {_outside(app[1], app[0], names)}", "image": None, "image_size": None}
