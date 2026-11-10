@@ -882,6 +882,7 @@ def at_point(items: list[Element], point: tuple[float, float], role: str) -> Ele
 BLANK_GRID = 40.0  # points between the points blank_point tries when no label offers one
 
 
+SPRINGBOARD_ROOT = 'bundleId="com.apple.springboard"'  # in the tree's first element when SpringBoard is in front
 SHEET_BESIDE = 60.0  # points of screen a sheet must leave free on a side for a touch beside it
 SHEET_GRIP = 14.0  # how far below a sheet's top edge a finger takes hold to pull it down
 SHEET_PULL = 0.7  # the pull, in sheet heights (at least SHEET_PULL_MIN points, and not past the screen)

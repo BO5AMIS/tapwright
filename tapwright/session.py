@@ -12,6 +12,8 @@ from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSet
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+BANNER_ID = "NotificationShortLookView"  # the identifier of a notification banner in SpringBoard's tree
+BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
@@ -142,6 +144,20 @@ class Session:
                 raise ConnectionLost(str(e)) from e
             raise
 
+    async def _banner_over_an_app(self, source: str | None) -> bool:
+        """Is this tree only a notification banner sliding over the app in front? While one shows, WebDriverAgent
+        answers with SpringBoard's tree: the banner and nothing of the app (seen on the phone 2026-11-10: the
+        answers said "Home screen", the app's elements were `not_found`, and the banner's words, which are the
+        owner's, were what the agent got). The app is still in front (the phone's process list says so), and the
+        banner leaves by itself in a few seconds: the read waits for that. Not for an alert, which is the
+        agent's to answer, nor on the real home screen, where no app is in front."""
+        if not source or BANNER_ID not in source or ui.SPRINGBOARD_ROOT not in source[:600] or "XCUIElementTypeAlert" in source:
+            return False
+        try:
+            return bool(await asyncio.wait_for(self.device.foreground_apps(), 5))
+        except Exception:
+            return False
+
     # ---- seeing ----
     async def _source(self, timeout: float = 60) -> str:
         """The tree as WebDriverAgent's XML. A read normally takes about 0.2 s; one that hasn't answered within
@@ -149,7 +165,13 @@ class Session:
         accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
         try:
             # (asked a second time by _call when the first got no answer: a frozen app answers neither)
-            return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            waited = 0.0
+            while await self._banner_over_an_app(source) and waited < min(BANNER_WAIT, timeout):
+                await asyncio.sleep(BANNER_POLL)
+                waited += BANNER_POLL
+                source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            return source
         except (PhoneLocked, AppNotAnswering):
             raise
         except ConnectionLost as e:

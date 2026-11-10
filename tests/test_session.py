@@ -84,6 +84,36 @@ def test_a_frozen_app_in_front_is_named_instead_of_a_dropped_line(phone):
     assert paths.index("/session/S/wda/locked") < paths.index("/session/S/window/size")
 
 
+def test_a_read_waits_out_a_notification_banner_over_the_app(phone, monkeypatch):
+    """Seen on the phone 2026-11-10: while a banner slid over the app, WebDriverAgent answered with SpringBoard's
+    tree, so the answer said "Home screen", showed the banner's words and found none of the app's elements."""
+    banner = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name=" " label=" " '
+              'bundleId="com.apple.springboard" enabled="true" x="0" y="0" width="430" height="932">'
+              '<XCUIElementTypeOther type="XCUIElementTypeOther" name="NotificationShortLookView" label="A message" '
+              'enabled="true" x="8" y="56" width="414" height="70"/></XCUIElementTypeApplication></AppiumAUT>')
+    app = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="JLD" label="JLD" '
+           'bundleId="app.jld.mobile" enabled="true" x="0" y="0" width="430" height="932">'
+           '<XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-taps" label="Tap me" enabled="true" '
+           'x="16" y="197" width="398" height="120"/></XCUIElementTypeApplication></AppiumAUT>')
+    monkeypatch.setattr(session_module, "BANNER_POLL", 0.001)
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    phone.in_front = ["app.jld.mobile"]
+    reads, real = [banner, banner, app], phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/source" in path:
+            return {"value": reads.pop(0) if len(reads) > 1 else reads[0]}
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    tree = asyncio.run(s.refresh())
+    assert [e.identifier for e in tree.items] == ["lab-taps"] and reads == [app]
+    # on the real home screen no app is in front: nothing is waited for, and the banner is what the phone shows
+    reads[:] = [banner]
+    phone.in_front = []
+    assert [e.identifier for e in asyncio.run(s.refresh()).items] == ["NotificationShortLookView"]
+
+
 def test_one_stalled_read_is_asked_again_and_is_not_a_frozen_app(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a single connection stalled, the app was fine, and the answer
     was "JLD isn't answering" with a reconnect. The read is asked once more on a new connection first."""

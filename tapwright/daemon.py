@@ -282,7 +282,7 @@ ACTIONS = {
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
 SPRINGBOARD = "com.apple.springboard"
-FRONT_RETRIES, FRONT_RETRY = 4, 0.25  # see Daemon._front
+FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told apart after these
 # These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
@@ -685,8 +685,8 @@ class Daemon:
 
     async def _front(self, given: dict[str, str]) -> str | None:
         """The app in front, for personal mode's question before a touch. WebDriverAgent answers SpringBoard
-        for a moment now and then while the app in front shows an alert or finishes a touch (seen on the phone
-        2026-11-10: twice in forty calls, each a false `outside_apps`). When it says SpringBoard and the phone's
+        while a notification banner slides over the app in front (seen on the phone 2026-11-10: twice in forty
+        calls, each a false `outside_apps`; a banner stays for some seconds). When it says SpringBoard and the phone's
         own process list has one of the given apps in the foreground, it is asked again, FRONT_RETRIES times
         FRONT_RETRY s apart at most. Only WebDriverAgent's answer lets a call through; the process list never
         does, and on the real home screen it has no given app, so that refusal isn't delayed."""

@@ -207,6 +207,7 @@ def test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused(
         mine = Scope(("com.example.app",))
         s.foreground = "com.example.app"
         await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        daemon_module.FRONT_RETRY = 0.001  # (the pause between two questions, not what is under test)
         answers = ["com.apple.springboard", "com.apple.springboard", "com.example.app"]
 
         async def flaky():
@@ -235,9 +236,13 @@ def test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused(
         s.device.foreground_apps = running
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and len(asked) == 5
+        assert e.value.code == "not_allowed" and len(asked) == 1 + daemon_module.FRONT_RETRIES
         await finish(stop, task)
-    run(go)
+    pause = daemon_module.FRONT_RETRY
+    try:
+        run(go)
+    finally:
+        daemon_module.FRONT_RETRY = pause
 
 
 def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
