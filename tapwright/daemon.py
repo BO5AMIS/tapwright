@@ -1298,8 +1298,11 @@ class Daemon:
             return
         for e, front in behind:
             if e is hit:
-                raise Refused("not_actionable", f"covered: {hit.line(ref=False, actions=False)} is behind "
-                                                f"{self._front_line(front)}; close that first.")
+                # (AGENT-TOOLS §4, 2026-11-11: "is under the open sheet", which reads right where the sheet is
+                # small and its backdrop is what hides the element)
+                where = "the open sheet" if front is None else f"the open sheet {self._front_line(front)}"
+                raise Refused("not_actionable", f"covered: {hit.line(ref=False, actions=False)} is under "
+                                                f"{where}; close that first.")
 
     def _front_line(self, front: ui.Element | None) -> str:
         """The line of what is open in front, with the ref the agent's list has for it (the read that found it
