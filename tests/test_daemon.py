@@ -3267,6 +3267,9 @@ def test_a_slow_read_in_wait_for_is_a_timeout_not_a_lost_phone():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "wait_for", {"text": "never", "timeout": 0.5})
         assert e.value.code == "timeout" and not lost and d.state == "live"
+        # no read came back: the answer says so, and doesn't claim the text wasn't there
+        assert str(e.value) == ("The phone didn't answer within 0.5 s, so it isn't known whether text \"never\" is on "
+                                "screen; look, then wait again.")
         await finish(stop, task)
     run(go)
 

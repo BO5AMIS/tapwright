@@ -979,17 +979,25 @@ class Daemon:
         began = clock()
         timed_out = Refused("timeout", f'Waited {timeout:g} s for {kind} "{args[kind]}" to '
                                        f"{'disappear' if gone else 'appear'}; it didn't happen.")
+        seen = False  # has the screen been read at all during this wait?
         while True:
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
                 raise timed_out
             # The read gets its own full deadline, so a slow phone isn't taken for a dead one; wait_for's
             # deadline is kept by cancelling the read, which answers `timeout` and leaves the link alone.
+            # "It didn't happen" needs one look at the screen. Over Wi-Fi a read can stall for seconds (seen
+            # 2026-11-10: a 5 s wait answered that a text didn't appear which had been on screen all along; no
+            # read had come back). Then the answer says that the screen wasn't read, not what was on it.
             try:
                 tree = await asyncio.wait_for(
                     self._read(lambda: self.session.refresh(timeout=WAIT_FOR_READ_MAX)), left)
             except asyncio.TimeoutError:
+                if not seen:
+                    raise Refused("timeout", f"The phone didn't answer within {timeout:g} s, so it isn't known "
+                                             f'whether {kind} "{args[kind]}" is on screen; look, then wait again.') from None
                 raise timed_out from None
+            seen = True
             if self._missing(tree.items, target) == gone:
                 break
             left = timeout - (clock() - began)
