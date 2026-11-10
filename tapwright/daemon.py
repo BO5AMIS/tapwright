@@ -281,6 +281,8 @@ ACTIONS = {
     "alert": (lambda s, a: s.alert(a["action"]), CAP),
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
+SPRINGBOARD = "com.apple.springboard"
+FRONT_RETRIES, FRONT_RETRY = 4, 0.25  # see Daemon._front
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told apart after these
 # These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
@@ -681,6 +683,27 @@ class Daemon:
             self._scopes[scope.apps] = given
         return self._scopes[scope.apps]
 
+    async def _front(self, given: dict[str, str]) -> str | None:
+        """The app in front, for personal mode's question before a touch. WebDriverAgent answers SpringBoard
+        for a moment now and then while the app in front shows an alert or finishes a touch (seen on the phone
+        2026-11-10: twice in forty calls, each a false `outside_apps`). When it says SpringBoard and the phone's
+        own process list has one of the given apps in the foreground, it is asked again, FRONT_RETRIES times
+        FRONT_RETRY s apart at most. Only WebDriverAgent's answer lets a call through; the process list never
+        does, and on the real home screen it has no given app, so that refusal isn't delayed."""
+        front = await self._read(self.session.foreground_bundle_id)
+        if front != SPRINGBOARD:
+            return front
+        try:
+            running = set(await asyncio.wait_for(self.session.device.foreground_apps(), 5))
+        except Exception:  # no process list in time: WebDriverAgent's word stands
+            return front
+        for _ in range(FRONT_RETRIES if running & set(given) else 0):
+            await asyncio.sleep(FRONT_RETRY)
+            front = await self._read(self.session.foreground_bundle_id)
+            if front != SPRINGBOARD:
+                break
+        return front
+
     async def _within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """One tool call in personal mode, failing closed. Nothing runs without an app list. Opening or closing an
         app outside the list is refused. Reading or touching is refused while another app is in front (asked of
@@ -701,7 +724,7 @@ class Daemon:
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
-            front = await self._read(self.session.foreground_bundle_id)
+            front = await self._front(given)
             if front not in given:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
         answer = await self._run_tool(client_id, name, args)

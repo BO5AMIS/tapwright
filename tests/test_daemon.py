@@ -196,6 +196,50 @@ def test_personal_mode_without_an_app_list_runs_nothing():
     run(go)
 
 
+def test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused():
+    """Seen on the phone 2026-11-10: twice in forty calls WebDriverAgent named SpringBoard as the app in front
+    while the app under test showed its own alert. The phone's process list had the app in the foreground."""
+    async def go():
+        s = FakeSession()
+        s.app_names = {"com.example.app": "Example"}
+        d = make(s)
+        stop, task = await started(d)
+        mine = Scope(("com.example.app",))
+        s.foreground = "com.example.app"
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        answers = ["com.apple.springboard", "com.apple.springboard", "com.example.app"]
+
+        async def flaky():
+            return answers.pop(0) if answers else "com.example.app"
+
+        async def running():
+            return ["com.example.app"]
+        s.foreground_bundle_id, s.device.foreground_apps = flaky, running
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert r["text"].startswith("Tapped") and answers == []
+        # the real home screen: the process list has no given app in the foreground, so nothing is asked twice
+        asked: list[int] = []
+
+        async def home():
+            asked.append(1)
+            return "com.apple.springboard"
+
+        async def nothing():
+            return []
+        s.foreground_bundle_id, s.device.foreground_apps = home, nothing
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and len(asked) == 1
+        # and SpringBoard that stays, with the app still listed as running in front: refused after the retries
+        asked.clear()
+        s.device.foreground_apps = running
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and len(asked) == 5
+        await finish(stop, task)
+    run(go)
+
+
 def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
     async def go():
         s = FakeSession()
