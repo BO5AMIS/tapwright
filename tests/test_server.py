@@ -111,6 +111,19 @@ def test_the_page_is_at_viewer_too_with_the_same_rules():
         assert stranger.get("/viewer").status_code == 401
 
 
+def test_the_page_carries_the_shared_video_block_and_keeps_it_between_its_markers():
+    """VIEWER-PROTOCOL v1.2: the H.264 player is one block both tools' pages carry unchanged. It only opens
+    /video when the status lists `video` in accepts, which this server doesn't offer yet."""
+    app, d = app_and_daemon()
+    with TestClient(app) as c:
+        page = c.get(f"/?token={TOKEN}").text
+    start, end = page.index("/* video-block:start */"), page.index("/* video-block:end */")
+    block = page[start:end]
+    assert "function createVideoBlock(io)" in block and "`" not in block and "${" not in block
+    assert page.count("/* video-block:start */") == 1 and 'id="screen"' in page
+    assert "video" not in d.status()["accepts"]
+
+
 def test_token_link_clicked_on_another_site_still_works():
     app, _ = app_and_daemon()
     with TestClient(app) as c:
