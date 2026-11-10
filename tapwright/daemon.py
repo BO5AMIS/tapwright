@@ -520,6 +520,7 @@ class Daemon:
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
+        self._agent_touches.start()  # find Tapline's hosts, if any, before the first touch needs them
         pacer = asyncio.create_task(self._pace(stop), name="pace") if self.pace_tick else None
         watch = asyncio.create_task(self._watch_loop(stop), name="loop-watch") if self.pace_tick else None
         try:

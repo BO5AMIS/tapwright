@@ -52,8 +52,10 @@ def test_a_touch_is_announced_to_every_host_with_the_token(tmp_path, monkeypatch
     async def go():
         a, b = await Host().start(), await Host().start()
         monkeypatch.setenv("TAPLINE_PORTS", f"{a.port},{free_port()},{b.port}")  # the middle one: no host there
+        notice = tapline.AgentTouches()
+        assert await notice.scan() == {a.port, b.port}  # the free port has no host
         began = time.monotonic()
-        await tapline.AgentTouches().notify(60)
+        await notice.notify(60)
         took = time.monotonic() - began
         await a.stop()
         await b.stop()
@@ -88,8 +90,10 @@ def test_a_host_that_never_answers_holds_the_touch_up_no_longer_than_the_wait(tm
             await asyncio.sleep(5)
         server = await asyncio.start_server(silent, "127.0.0.1", 0)
         monkeypatch.setenv("TAPLINE_PORTS", str(server.sockets[0].getsockname()[1]))
+        notice = tapline.AgentTouches()
+        await notice.scan()
         began = time.monotonic()
-        await tapline.AgentTouches().notify(60)
+        await notice.notify(60)
         took = time.monotonic() - began
         server.close()
         return took
@@ -104,6 +108,7 @@ def test_the_length_is_kept_within_what_tapline_accepts(tmp_path, monkeypatch):
         host = await Host().start()
         monkeypatch.setenv("TAPLINE_PORTS", str(host.port))
         notice = tapline.AgentTouches()
+        await notice.scan()
         await notice.notify(-5)
         await notice.notify(60_000)
         await host.stop()
@@ -137,6 +142,10 @@ def test_the_agents_touches_are_announced_and_a_persons_are_not(tmp_path, monkey
             if d.state == "live":
                 break
             await asyncio.sleep(0.01)
+        for _ in range(300):  # the daemon looks for Tapline's hosts as it starts
+            if d._agent_touches.hosts:
+                break
+            await asyncio.sleep(0.01)
         await d.run_tool("a", "look", {"screenshot": False})
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert len(host.requests) == 1 and s.touch_hook is None  # set only while the agent acts
@@ -148,3 +157,18 @@ def test_the_agents_touches_are_announced_and_a_persons_are_not(tmp_path, monkey
         await asyncio.wait_for(task, 2)
         await host.stop()
     asyncio.run(go())
+
+def test_no_host_found_means_the_touch_waits_for_nothing(tmp_path, monkeypatch):
+    """On Windows a port with nothing on it takes a second or more to refuse; asking at every touch cost 0.3 s an
+    action (measured 2026-11-11). With no host found, a notice returns at once."""
+    (tmp_path / "token").write_text("t", encoding="utf-8")
+    monkeypatch.setenv("TAPLINE_HOME", str(tmp_path))
+    monkeypatch.setenv("TAPLINE_PORTS", str(free_port()))
+
+    async def go():
+        notice = tapline.AgentTouches()
+        assert await notice.scan() == set()
+        began = time.monotonic()
+        await notice.notify(60)
+        return time.monotonic() - began
+    assert asyncio.run(go()) < 0.05
