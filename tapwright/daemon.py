@@ -22,6 +22,7 @@ from .control import TAP_MS, Controller, Refused, classify
 from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
                      PhoneNotFound)
 from .session import Snapshot
+from .tapline import AgentTouches
 from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of
 
 PROTOCOL = 1
@@ -341,6 +342,7 @@ class Daemon:
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
         # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
         self.agent_stream = os.environ.get("TAPWRIGHT_AGENT_STREAM", "1") != "0"
+        self._agent_touches = AgentTouches()
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
         self.preset = "balanced"
@@ -842,8 +844,17 @@ class Daemon:
             handler = self._handlers.get(name)
             return await (handler(view, args) if handler else call(s, args))
 
+        async def act_as_agent():
+            # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
+            # person's input from the live view, queued separately, is never announced as the agent's
+            self.session.touch_hook = self._agent_touches.notify
+            try:
+                return await act()
+            finally:
+                self.session.touch_hook = None
+
         try:
-            result = await self.control.agent(act)
+            result = await self.control.agent(act_as_agent)
         except Unanswered as e:
             # the line is alive and the session stays; the screen may or may not have changed under the agent's list
             view.moved = True

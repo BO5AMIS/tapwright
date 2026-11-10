@@ -12,6 +12,8 @@ from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSet
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
+KEY_MS = 60  # ms a typed key counts for in the notice to Tapline (see tapline.py)
+SCROLL_MS = 1200  # ms a scroll drag counts for there (an eased drag that ends slowly)
 ACTION_WAIT = 10.0  # seconds a touch may take to be answered beyond its own length (a tap answers in about 0.5 s)
 BANNER_ID = "NotificationShortLookView"  # the identifier of a notification banner in SpringBoard's tree
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
@@ -57,6 +59,9 @@ class Session:
         # what a sheet hides, each with the element in front that names the sheet (for `covered`)
         self.behind: list[tuple[ui.Element, ui.Element | None]] = []
         self.front_items: list[ui.Element] = []  # the list as back_point last read it
+        # Awaited with a touch's length in ms just before each touch while it is set: the daemon sets it for the
+        # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
+        self.touch_hook = None
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -322,9 +327,14 @@ class Session:
         return cx, cy, hit.line(actions=False)
 
     # ---- acting ----
+    async def _touching(self, ms: float) -> None:
+        if self.touch_hook is not None:
+            await self.touch_hook(ms)
+
     async def tap(self, target: ui.Target, hold_ms: int = TAP_MS) -> str:
         self.typed_into = None
         x, y, what = self._target(target)
+        await self._touching(hold_ms)
         await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms), timeout=hold_ms / 1000 + ACTION_WAIT)
         self.last_point = (x, y)
         return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
@@ -366,6 +376,7 @@ class Session:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
                 note = " (couldn't find the focused field to clear, so the old text may remain)"
+        await self._touching(KEY_MS * len(keys))
         await self._call("POST", "/session/{sid}/wda/keys", {"value": list(keys)})
         if field is not None and element and not submit:  # return may move focus on; keys never do
             self.typed_into = (_field_key(field), element)
@@ -444,6 +455,7 @@ class Session:
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
+        await self._touching(duration_ms + hold_ms)
         await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms),
                          timeout=(duration_ms + hold_ms) / 1000 + ACTION_WAIT)
         self.last_point = (x0, y0)
@@ -452,6 +464,7 @@ class Session:
     async def scroll(self, x0: float, y0: float, x1: float, y1: float) -> str:
         """A scroll drag that stops where the finger does (ui.scroll_drag)."""
         self.typed_into = None
+        await self._touching(SCROLL_MS)
         await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1), timeout=2 + ACTION_WAIT)
         self.last_point = (x0, y0)
         return f"scrolled ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
@@ -459,6 +472,7 @@ class Session:
     async def path(self, points: list) -> str:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
         self.typed_into = None
+        await self._touching(points[-1][0])
         await self._call("POST", "/session/{sid}/actions", ui.path(points), timeout=points[-1][0] / 1000 + ACTION_WAIT)
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"
@@ -476,6 +490,7 @@ class Session:
         if name not in KEYS:
             raise Refused("bad_params", f"key must be one of {', '.join(KEYS)}, not {name!r}")
         self.typed_into = None  # a backspace moves the cursor's text; enter may move focus
+        await self._touching(KEY_MS)
         await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
         return f"pressed {name}"
 
@@ -493,6 +508,7 @@ class Session:
         try:
             if action == "text":
                 return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
+            await self._touching(TAP_MS)
             await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
         except DeviceError as e:
             if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
