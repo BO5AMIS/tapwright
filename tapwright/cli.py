@@ -305,10 +305,17 @@ def main() -> int:
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
                    help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--apps", metavar="APP[,APP]",
+                       help="the apps the agent may read and touch, as bundle ids or exact names (personal mode, the "
+                            "default: without this list the agent can do nothing)")
+    scope.add_argument("--dedicated", action="store_true",
+                       help="the phone is kept for testing: the agent may use every app on it")
     a = ap.parse_args()
     if a.cmd == "mcp":
         from . import mcp_server
-        mcp_server.run(screenshots=a.screenshots)
+        apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
+        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated)
         return 0
     if a.cmd == "view":
         return view()

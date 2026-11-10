@@ -28,11 +28,25 @@ def viewer_url(info: dict) -> str:
     return f"{base_url(info)}/?token={info['token']}"
 
 
+SCOPE: dict[str, str] = {}  # the headers that say what this process's agent may use; none: no apps at all
+
+
+def set_scope(apps: list[str] | None = None, dedicated: bool = False) -> None:
+    """Personal mode (the default): the agent may read and touch only `apps` (bundle ids or exact names).
+    `dedicated`: the phone is kept for testing, so there is no limit. The daemon enforces it on every call."""
+    SCOPE.clear()
+    if dedicated:
+        SCOPE["X-Tapwright-Mode"] = "dedicated"
+    elif apps:
+        SCOPE["X-Tapwright-Apps"] = ",".join(apps)
+
+
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,
              client_id: str | None = None) -> dict:
     headers = {"Authorization": f"Bearer {info['token']}", "Content-Type": "application/json"}
     if client_id:
         headers["X-Tapwright-Client"] = client_id
+        headers.update(SCOPE)  # an agent's calls carry the apps it was given, or that the device is dedicated
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base_url(info) + path, data=data, method=method, headers=headers)
     try:

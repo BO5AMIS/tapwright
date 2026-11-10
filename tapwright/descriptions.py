@@ -58,7 +58,8 @@ _TAPWRIGHT = (
     '- System alerts (permissions, notifications) show in the header as `Alert:`. Answer them with `alert`.\n'
     '- `press_button` presses Home or volume. `swipe` drags between two points. `close_app` quits an app, and `open_app` launches it.\n'
     "- The header shows `Keyboard: shown` or `hidden`. Its keys aren't listed: type with `type_text`.\n"
-    '- Any app on the phone can be driven. Stay in the app under test: if a link takes you elsewhere, go back with `open_app`.\n'
+    '- Stay in the app under test: if a link takes you elsewhere, go back with `open_app`.\n'
+    "- On the owner's own phone you can read and touch only the apps you were given. `unsupported: outside_apps` means another app is in front and nothing of it is shown: go back with `open_app`. `unsupported: no_apps` means you were given none: tell the user.\n"
     "- It's the user's own phone. The safety rules above matter most here."
 )
 

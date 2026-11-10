@@ -11,7 +11,7 @@ from PIL import Image
 from tapwright import daemon as daemon_module
 from tapwright import ui
 from tapwright.control import Controller, Refused
-from tapwright.daemon import Daemon
+from tapwright.daemon import Daemon, Scope
 from tapwright.device import AppNotAnswering, ConnectionLost, DeviceError, PhoneLocked
 from tapwright.stream import NO_IDLE_WAIT, PRESETS, Frame
 
@@ -172,6 +172,78 @@ def test_locked_phone():
         assert e.value.code == "locked"
         assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "locked"
+        await finish(stop, task)
+    run(go)
+
+
+def test_personal_mode_without_an_app_list_runs_nothing():
+    """LAUNCH-PLAN D5: on the owner's everyday phone the agent may only use the apps it was given. It fails closed."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for tool, args in (("look", {}), ("tap", {"target": {"x": 5, "y": 5}}), ("apps", {}),
+                           ("open_app", {"app": "com.example.app"}), ("open_url", {"url": "https://example.com"})):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, args, scope=Scope(()))
+            assert e.value.code == "unsupported" and str(e.value).startswith("no_apps: "), tool
+            assert "--apps" in str(e.value) and "--dedicated" in str(e.value)
+        assert d.session.actions() == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
+    async def go():
+        s = FakeSession()
+        s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
+        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
+        d = make(s)
+        stop, task = await started(d)
+        mine = Scope(("com.example.app",))
+        s.foreground = "com.example.app"
+        assert (await d.run_tool("a", "look", {"screenshot": False}, scope=mine))["text"].startswith("Screen")
+        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine))["text"].startswith("Tapped")
+        assert (await d.run_tool("a", "apps", {}, scope=mine))["text"].splitlines()[0].startswith("com.example.app")
+        assert "com.example.mail" not in (await d.run_tool("a", "apps", {}, scope=mine))["text"]
+        for app in ("com.example.mail", "Mail box"):  # by bundle id or by name: not its app
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "open_app", {"app": app}, scope=mine)
+            assert e.value.code == "unsupported" and str(e.value).startswith("outside_apps: ")
+        assert s.launched == []
+        before = len(s.actions())
+        s.foreground = "com.example.mail"  # something took the phone elsewhere
+        for tool, args in (("look", {}), ("tap", {"target": {"x": 5, "y": 5}}), ("type_text", {"text": "x"}),
+                           ("swipe", {"x0": 1, "y0": 1, "x1": 9, "y1": 9}), ("wait_for", {"text": "OK"})):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", tool, args, scope=mine)
+            assert e.value.code == "unsupported", tool
+            assert str(e.value).startswith("outside_apps: Mail box (com.example.mail) is in front and isn't one of the apps")
+        assert len(s.actions()) == before  # nothing was read or touched there
+        r = await d.run_tool("a", "open_app", {"app": "Example"}, scope=mine)  # the way back always works
+        assert r["text"].startswith("Opened Example") and s.launched == ["com.example.app"]
+        s.foreground = None  # the phone can't say: closed, not open
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {}, scope=mine)
+        assert "can't say which app" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_answer_in_personal_mode_never_shows_another_apps_screen():
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        mine = Scope(("com.example.app",))
+        s.foreground = "com.example.app"
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        s.app = ("Mail box", "com.example.mail")  # the tap opens another app: the answer would list its screen
+        s.tree = [button("e1", "Private thing", "private-row")]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "screenshot": True}, scope=mine)
+        assert r["text"].startswith("Tapped e1") and "Private thing" not in r["text"] and r["image"] is None
+        assert r["text"].splitlines()[1].startswith("Note: outside_apps: Mail box (com.example.mail) is in front")
+        r = await d.run_tool("a", "tap", {"target": {"x": 1, "y": 1}}, scope=None)  # a dedicated device: no limit
+        assert "Private thing" in r["text"] or "No visible change" in r["text"]
         await finish(stop, task)
     run(go)
 

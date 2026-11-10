@@ -18,6 +18,7 @@ from starlette.websockets import WebSocket
 
 from . import store
 from .control import Refused
+from .daemon import Scope
 from .errors import HTTP_STATUS
 
 COOKIE = "tapwright_token"
@@ -102,8 +103,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         if not isinstance(args, dict):
             return _error("bad_params", "the body must be a JSON object", 400)
         client = request.headers.get("x-tapwright-client", "anonymous")
+        # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
+        apps = tuple(a.strip() for a in request.headers.get("x-tapwright-apps", "").split(",") if a.strip())
+        scope = None if request.headers.get("x-tapwright-mode") == "dedicated" else Scope(apps)
         try:
-            return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args))
+            return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net

@@ -22,7 +22,7 @@ def test_viewer_page_is_packaged():
 
 
 TOKEN = "t" * 43
-AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Tapwright-Client": "agent-1"}
+AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Tapwright-Client": "agent-1", "X-Tapwright-Mode": "dedicated"}
 
 
 def app_and_daemon():
@@ -109,6 +109,22 @@ def test_the_page_is_at_viewer_too_with_the_same_rules():
         assert c.get("/viewer", headers={"sec-fetch-site": "cross-site"}).status_code == 403
     with TestClient(app) as stranger:
         assert stranger.get("/viewer").status_code == 401
+
+
+def test_a_caller_gets_only_the_apps_it_names_and_none_when_it_names_none():
+    """LAUNCH-PLAN D5: personal mode is the default at the door too. Only `X-Tapwright-Mode: dedicated` lifts it."""
+    app, d = app_and_daemon()
+    bare = {"Authorization": f"Bearer {TOKEN}", "X-Tapwright-Client": "agent-2"}
+    d.session.foreground = "com.example.app"
+    with TestClient(app) as c:
+        r = c.post("/api/look", headers=bare, json={"screenshot": False})
+        assert r.status_code == 400 and r.json()["error"]["message"].startswith("no_apps: ")
+        mine = {**bare, "X-Tapwright-Apps": "com.example.app"}
+        assert c.post("/api/look", headers=mine, json={"screenshot": False}).status_code == 200
+        other = {**bare, "X-Tapwright-Apps": "com.example.other"}
+        r = c.post("/api/look", headers=other, json={"screenshot": False})
+        assert r.status_code == 400 and r.json()["error"]["message"].startswith("outside_apps: ")
+        assert c.post("/api/look", headers=AUTH, json={"screenshot": False}).status_code == 200  # dedicated
 
 
 def test_the_page_carries_the_shared_video_block_and_keeps_it_between_its_markers():

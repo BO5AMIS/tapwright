@@ -20,6 +20,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "HOME", tmp_path)
     monkeypatch.setattr(store, "SERVE_FILE", tmp_path / "serve.json")
     monkeypatch.setattr(client, "start_daemon", lambda: pytest.fail("the running daemon should be found"))
+    monkeypatch.setattr(client, "SCOPE", {})  # each test starts in personal mode with no apps, as a process does
     root = logging.getLogger()
     before = list(root.handlers)
     level = root.level
@@ -69,6 +70,10 @@ def test_serve_runs_is_found_and_stops(home):
         assert client.healthy(info)["protocol"] == 1 and len(info["token"]) >= 32
         assert run(lambda: server.serve(port=0, make_daemon=make_factory(made))) == 0  # found, not doubled
         assert len(made) == 1
+        with pytest.raises(client.DaemonError) as e:  # personal mode with no app list: nothing runs
+            client.call("look", {"screenshot": False}, "agent-1")
+        assert e.value.code == "unsupported" and str(e.value).startswith("no_apps: ")
+        client.set_scope(dedicated=True)
         assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         made[0].control.set_paused(True)
         with pytest.raises(client.DaemonError) as e:

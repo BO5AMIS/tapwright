@@ -36,6 +36,25 @@ NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or v
                "positions may be mid-change.")
 
 
+class Scope(NamedTuple):
+    """Personal mode: the apps an agent may read and touch, as bundle ids or exact names. Empty: none, so
+    nothing runs (it fails closed). A dedicated device has no Scope at all."""
+    apps: tuple[str, ...] = ()
+
+
+NO_APPS = ("no_apps: this agent was started without an app list, so it may not use the phone. Start it with "
+           "`tapwright mcp --apps <bundle id>` for the apps under test, or with `--dedicated` on a device "
+           "kept for testing.")
+SCOPE_FREE = ("open_app", "close_app", "open_url", "press_button")  # how an agent gets back to its app
+APP_LINE = re.compile(r"^App: (.+) \(([^()\s]+)\)$", re.M)  # the header line of a full list: name, bundle id
+
+
+def _outside(bundle: str | None, name: str | None, given: str) -> str:
+    front = "the phone can't say which app" if not bundle else f"{name} ({bundle})" if name else bundle
+    return (f"outside_apps: {front} is in front and isn't one of the apps you were given ({given}), so nothing of it is shown or "
+            "touched. Go back with open_app.")
+
+
 class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
@@ -301,6 +320,7 @@ class Daemon:
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
         self._wake = asyncio.Event()  # connect again now, without waiting out the backoff
+        self._scopes: dict[tuple[str, ...], dict[str, str]] = {}  # each app list seen, as {bundle id: shown}
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
@@ -538,16 +558,19 @@ class Daemon:
                         self._set_state("live")
 
     # ---- agent tools ----
-    async def run_tool(self, client_id: str, name: str, args: dict) -> dict:
+    async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None) -> dict:
         """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
-        Raises Refused with a code from errors.CODES; any other failure is `internal` (logged)."""
+        Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
+        `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit."""
         self.last_request = time.monotonic()
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() else nullcontext():
-                return await self._run_tool(client_id, name, args)
+                if scope is None:
+                    return await self._run_tool(client_id, name, args)
+                return await self._within(scope, client_id, name, args)
         except Refused:
             raise
         except DeviceError as e:  # WebDriverAgent or the link answered with an error; not our bug
@@ -556,6 +579,61 @@ class Daemon:
         except Exception as e:  # one failed step never takes the daemon down
             self.log(f"{name} failed unexpectedly:\n{traceback.format_exc()}")
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
+
+    # ---- personal mode: the agent stays in the apps it was given ----
+    async def _given(self, scope: "Scope") -> dict[str, str]:
+        """{bundle id: how to show it} of the apps in a scope. An entry that looks like a bundle id is taken as
+        it is; a name is looked up among the installed apps, once."""
+        if scope.apps not in self._scopes:
+            given: dict[str, str] = {}
+            for entry in scope.apps:
+                if BUNDLE_ID.match(entry):
+                    given[entry] = entry
+                    continue
+                await self.wait_connected()
+                try:
+                    bundle, shown = await self._app(entry, partial=False)
+                except Refused as e:
+                    raise Refused("unsupported", f'the app list this agent was started with names "{entry}", which '
+                                                 f"can't be used: {e}") from None
+                given[bundle] = shown
+            self._scopes[scope.apps] = given
+        return self._scopes[scope.apps]
+
+    async def _within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
+        """One tool call in personal mode, failing closed. Nothing runs without an app list. Opening or closing an
+        app outside the list is refused. Reading or touching is refused while another app is in front (asked of
+        the phone before the call), and an answer never shows another app's screen."""
+        if not scope.apps:
+            raise Refused("unsupported", NO_APPS)
+        given = await self._given(scope)
+        names = ", ".join(given.values())
+        if name in ("open_app", "close_app") and isinstance(args.get("app"), str) and args["app"].strip():
+            if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
+                bundle, shown = self.stuck.bundle_id, f"{self.stuck.name} ({self.stuck.bundle_id})"
+            else:
+                await self.wait_connected()
+                bundle, shown = await self._app(args["app"], partial=name == "open_app")
+            if bundle not in given:
+                raise Refused("unsupported", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("look", "wait_for"):
+            await self.wait_connected()
+            front = await self._read(self.session.foreground_bundle_id)
+            if front not in given:
+                raise Refused("unsupported", _outside(front, self.session.app_names.get(front or ""), names))
+        answer = await self._run_tool(client_id, name, args)
+        if name == "apps":  # only its own apps: the rest of the phone is the owner's business
+            lines = answer["text"].splitlines()
+            kept = [ln for ln in lines if ln.split(" ", 1)[0] in given or not BUNDLE_ID.match(ln.split(" ", 1)[0])]
+            return {**answer, "text": "\n".join(kept)}
+        # The answer's own App: line says whose screen it lists; without one, the app at the last read does.
+        shown = APP_LINE.search(answer["text"])
+        app = (shown.group(1), shown.group(2)) if shown else self.session.app
+        if app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image")):
+            first = answer["text"].splitlines()[0]
+            first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
+            return {"text": f"{first}Note: {_outside(app[1], app[0], names)}", "image": None, "image_size": None}
+        return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
