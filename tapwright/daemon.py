@@ -366,6 +366,7 @@ class Daemon:
                 "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
 
     def subscribe(self) -> asyncio.Queue:
+        self._asked_for()
         queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._queues.add(queue)
         return queue
@@ -446,7 +447,17 @@ class Daemon:
         self._require_connected()
         return await fn()
 
+    def _asked_for(self) -> None:
+        """A tool call or a viewer wants the phone while it waits behind the passcode screen: put that screen up
+        now if it has gone (the starts thin out when nobody asks, see device.PROMPT_PAUSES)."""
+        if isinstance(self.stuck, PasscodeNeeded):
+            hurry = getattr(self.session.device, "hurry", None)
+            if hurry is not None:
+                hurry()
+                self._wake.set()
+
     async def wait_connected(self) -> None:
+        self._asked_for()
         if self.state == "no-device" or self.stuck is not None:  # waiting won't fix either
             raise self._not_connected()
         try:

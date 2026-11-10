@@ -415,3 +415,57 @@ def test_a_phone_that_cannot_say_whether_the_passcode_screen_is_up_is_left_waiti
         await d.close()
 
     asyncio.run(scenario())
+
+
+def test_starts_behind_the_passcode_screen_thin_out_unless_someone_asks_for_the_phone(monkeypatch):
+    """Each start launches the test runner, and that cost the app in front a frame gap (Tapline measured 0.25 to
+    0.36 s against 0.23 s). After iOS takes the screen away, the first new start comes at once, the next ones
+    after a growing pause; a tool call or a viewer (`hurry`) gets one at once."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    from tapwright import device as device_module
+    from tapwright.device import PasscodeNeeded
+    _fake_phone_side(monkeypatch, _Service)
+    monkeypatch.setattr(device_module, "PROMPT_AFTER", 0.05)
+    monkeypatch.setattr(device_module, "PROMPT_EVERY", 0.05)
+    monkeypatch.setattr(device_module, "PROMPT_PAUSES", (0.0, 60.0, 120.0))
+
+    async def scenario():
+        d = Device(log=lambda *a: None)
+        d.rsd = object()
+
+        async def wda_alive():
+            return False
+        d.wda_alive = wda_alive
+
+        async def start(screen_up: bool):
+            monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)  # each real start puts the screen up
+            if not screen_up:
+                monkeypatch.setattr(device_info, "DeviceInfo", _GoneThenUp)
+            with pytest.raises(PasscodeNeeded):
+                await d.start_wda("runner.id", wait=30)
+            return d.runner
+
+        class _GoneThenUp(_Ctx):
+            """The screen is gone when a start asks first; a start that is made puts it up again."""
+            asked = 0
+
+            async def proclist(self):
+                type(self).asked += 1
+                return [] if type(self).asked <= 1 else await _PromptInfo().proclist()
+
+        first = await start(screen_up=True)
+        _GoneThenUp.asked = 0
+        second = await start(screen_up=False)  # iOS took the screen away: the first new start comes at once
+        assert second is not first
+        _GoneThenUp.asked = 0
+        monkeypatch.setattr(device_info, "DeviceInfo", _Info)  # gone again, and nobody asks
+        with pytest.raises(PasscodeNeeded):
+            await d.start_wda("runner.id", wait=30)
+        assert d.runner is second  # no new start yet: a minute's pause before the second
+        d.hurry()  # a tool call or a viewer
+        _GoneThenUp.asked = 0
+        third = await start(screen_up=False)
+        assert third is not second
+        await d.close()
+
+    asyncio.run(scenario())

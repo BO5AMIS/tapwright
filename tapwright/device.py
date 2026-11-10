@@ -38,6 +38,12 @@ AUTH_PROMPT = "LocalAuthenticationUIService"  # the process that draws iOS's pas
 PROMPT_AFTER = 6.0  # seconds a start may take before the phone is asked whether that screen is up (a start takes 3)
 PROMPT_EVERY = 3.0
 PROMPT_RETRY = 300.0  # seconds after which a start is tried anyway, in case the process list is wrong about the screen
+# iOS fails a start that waits at the passcode screen after a minute or a few, and takes the screen away; only a
+# new start puts it back. Each start launches the test runner, which costs the app in front a longer frame gap
+# (measured by Tapline: 0.25 to 0.36 s where 0.23 s is usual). So with nobody asking for the phone, the starts
+# thin out: the pause before the 1st, 2nd, 3rd... new start after the screen went. A tool call or a viewer asks
+# for one at once (`hurry`).
+PROMPT_PAUSES = (0.0, 30.0, 60.0, 120.0, 300.0)
 
 
 class PasscodeNeeded(PhoneLocked):
@@ -106,6 +112,9 @@ class Device:
         self.runner = None  # the XCUITest task that keeps WebDriverAgent alive
         self.awaiting_passcode = False  # the last start stopped at iOS's passcode screen (see PasscodeNeeded)
         self._launched_at = 0.0  # when the test runner was last started (monotonic clock)
+        self._prompt_rounds = 0  # starts in a row that stopped at the passcode screen
+        self._gone_at: float | None = None  # when that screen was first seen gone, for the pause before the next start
+        self._hurry = False  # see hurry()
 
     # ---- the tunnel ----
     async def connect(self) -> None:
@@ -184,10 +193,18 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
         if self.runner and not self.runner.done() and await self.wda_alive():
-            self.awaiting_passcode = False
+            self.awaiting_passcode, self._prompt_rounds = False, 0
             return
-        if self.awaiting_passcode and time.monotonic() - self._launched_at < PROMPT_RETRY \
-                and await self.passcode_prompt_up() is not False:
+        up = await self.passcode_prompt_up() if self.awaiting_passcode else False
+        if self.awaiting_passcode and up is False and not self._hurry:
+            # the screen is gone (iOS failed the start, or Cancel was tapped) and nobody is asking for the phone:
+            # the next start waits its turn (PROMPT_PAUSES)
+            now = time.monotonic()
+            self._gone_at = now if self._gone_at is None else self._gone_at
+            if now - self._gone_at < PROMPT_PAUSES[min(max(self._prompt_rounds, 1), len(PROMPT_PAUSES)) - 1]:
+                raise PasscodeNeeded()
+        self._hurry = False
+        if self.awaiting_passcode and time.monotonic() - self._launched_at < PROMPT_RETRY and up is not False:
             # Still up (or the phone couldn't say): start nothing. A new start takes the screen away and puts a
             # new one up, under the person's fingers; seen on the phone as the app behind it coming to the front
             # and going again with every retry. The screen stays up without a runner (measured), so this waits,
@@ -215,6 +232,7 @@ class Device:
             run = service.run(cfg)
         self.runner = asyncio.create_task(run, name="webdriveragent")
         began = self._launched_at = time.monotonic()
+        self._gone_at = None
         deadline, ask_at = began + wait, began + PROMPT_AFTER
         while time.monotonic() < deadline:
             if failed.is_set():  # the phone said so: don't wait out the minute
@@ -225,6 +243,7 @@ class Device:
                 raise await self._or_passcode(DeviceError(f"WebDriverAgent stopped while starting: {exc}"))
             if await self.wda_alive():
                 self.log("WebDriverAgent is running")
+                self._prompt_rounds = 0
                 return
             if time.monotonic() >= ask_at:
                 # slower than any start: is iOS waiting for the passcode? The runner is left as it is, so the
@@ -232,6 +251,7 @@ class Device:
                 ask_at = time.monotonic() + PROMPT_EVERY
                 if await self.passcode_prompt_up():
                     self.awaiting_passcode = True
+                    self._prompt_rounds += 1
                     raise PasscodeNeeded()
             try:
                 await asyncio.wait_for(failed.wait(), 0.5)
@@ -256,8 +276,13 @@ class Device:
         """The reason a start failed: the passcode screen when it is up, else `error`."""
         if await self.passcode_prompt_up():
             self.awaiting_passcode = True
+            self._prompt_rounds += 1
             return PasscodeNeeded()
         return error
+
+    def hurry(self) -> None:
+        """Someone is asking for the phone now (a tool call, a viewer): the next start doesn't wait its turn."""
+        self._hurry = True
 
     async def foreground_apps(self) -> list[str]:
         """Bundle ids of the apps iOS has in the foreground, from its process list: that answers while
