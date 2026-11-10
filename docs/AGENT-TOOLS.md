@@ -6,8 +6,11 @@ agreed by both projects and approved by the user. Version 1.2 (2026-11-09) spell
 exact answer and message wording that both tools found while building and cross-checking on a
 real phone, also agreed by both projects and approved by the user. Version 1.3 (2026-11-09) adds
 what the second cross-check found: duplicate folding, bidi marks, `ambiguous` wording, inputs'
-actions, touching the visible part, and the cap note. Both projects agree on it, and the user approved it on 2026-11-09. Each repo keeps an identical copy in `docs/`. It changes only by agreement
-between the two projects and the user's approval, like `VIEWER-PROTOCOL.md`. Each tool's
+actions, touching the visible part, and the cap note. Both projects agree on it, and the user approved it on 2026-11-09. Version 1.4 (2026-11-10) adds: closing the keyboard first, `covered` for what
+an open sheet hides, numbering that carries through full lists, the code `not_answering`, and
+`back` closing what is open on top. The user handed these decisions to the two projects on
+2026-11-10, and both agree on it. Each repo keeps an identical copy in `docs/`. It changes only by
+agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
 
 An agent that has used one tool should be able to use the other without relearning anything:
@@ -194,9 +197,13 @@ Network: 2 requests in flight
 ### 3.4 Refs
 
 `e1`, `e2`… in reading order.
-- A full list renumbers from `e1`.
-- After an action, elements still on screen keep their refs, and new ones get new numbers.
-- A ref from before a full list is invalid.
+- `look` numbers from `e1`.
+- After an action, elements still on screen keep their refs, and new ones get new numbers,
+  counting on from the highest ref given since the last look. That holds for a full list in an
+  action's answer too (v1.4), so a ref the agent still remembers never lands on another element:
+  it answers `not_found`.
+- After another app came to the front, after a person acted, or after the link dropped, nothing
+  is carried: every element gets a new number.
 - **Change Tapwright:** today it renumbers after every action.
 
 ### 3.5 Screenshots
@@ -243,6 +250,22 @@ text items.
   it), as a person would. Example: a card at y 808–898 with the tab bar from 849 is tapped at
   y ≈ 828. The tool refuses only when that part is smaller. `force: true` acts at the
   element's own centre.
+- **Behind an open sheet (v1.4).** A target that matches no listed element but matches one that
+  an open sheet, modal, popover or other layer hides answers:
+  `Error not_actionable: covered: <element line, no ref> is behind <line of what is in front>; close that first.`
+  - "What is in front" is the line, with its ref, of the first element the layer lists that has
+    a label or an id. For example:
+    `covered: button "Save" id=lab-save @16,-40 193x49 is behind e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932; close that first.`
+  - `force` can't help: the element isn't on the list.
+  - For a target that isn't listed, the reasons are tried in this order: `behind_alert`, this
+    one, `off_screen`, then `not_found`. A covering sheet comes before `off_screen`, because
+    scrolling can't help until it is closed.
+- **Closing the keyboard first (v1.4).** When the keyboard is up and the target of a touch (`tap`,
+  `long_press`, `toggle`, or `type_text`'s focusing tap on another input) lies outside the focused
+  input, the tool closes the keyboard first, without pressing return, and the answer ends with
+  `Note: closed the keyboard first.` A person's first tap outside the field often only closes the
+  keyboard, and the keyboard covers controls near the bottom; the tool does both steps in one and
+  says so. With a hardware keyboard connected no keyboard shows, and nothing is closed.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;
@@ -282,6 +305,7 @@ text items.
 | `paused` | the user paused the agent | ask the user to resume | both |
 | `locked` | the phone is locked | ask the user to unlock it | Tapwright |
 | `in_background` | the app is in the background, and only the person can bring it back | ask the user to open the app | Tapline |
+| `not_answering` | the app in front stopped answering (v1.4) | close the app and open it again (`close_app`, then `open_app`, where the tool has them), or ask the user to | both. Tapwright: the app doesn't answer accessibility queries; `close_app` still closes it. Tapline: the app is connected but didn't answer a call, or sent nothing for 45 s, while not in the background |
 | `reconnecting` | the link dropped and is coming back | wait a few seconds, then look | both. Tapline's `disconnected` maps here |
 | `not_connected` | nothing to drive: no app connected, or no phone found | follow the setup steps in the message | both. Replaces Tapline's `no_app` and `unknown_session` |
 | `timeout` | no answer in time; the action may have happened | look before retrying | both |
@@ -301,7 +325,7 @@ text items.
 | `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
 | `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start` or `end`), `target`, `look`, `screenshot` | "down shows what's below". **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
-| `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported` |
+| `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`, and answers `no_action` when the Modal has none |
 | `open_url` | `url`, `look`, `screenshot` | Tapline opens it inside the app; Tapwright opens it on the phone, so another app may take it (the answer says which app came up) |
 | `wait` | `seconds` (0.1–30, required), `look`, `screenshot` | answers `Waited 1.0 s.` and the change block, with no settle line. Out-of-range values are `bad_params`. **Change Tapwright:** today it clamps silently and always takes a screenshot |
 | `wait_for` | one of `text`, `id`, `label`; `gone`; `network_idle`; `timeout` (0.5–30 s, default 10); `look`, `screenshot` | `Done after 1.2 s.` plus the changes, or `timeout`. **Change Tapwright:** new. It polls the screen, its looks are slow (see QUALITY-BAR), and `network_idle` is `unsupported` |
