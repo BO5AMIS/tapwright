@@ -56,9 +56,13 @@ with no element.
 - **`Same screen. Changes:`** then `+` new, `-` gone, `~` changed (with what it was),
   `↕` moved. When most of the screen changed, the full list comes instead.
 - **`No visible change.`** means nothing changed, on screen or off it.
+- **A sheet, an alert or a new screen answers with the full list:** the first line, then
+  `Screen …` and the elements that are in front now. What a sheet hides is left out until it
+  closes; acting on it answers `covered: … close that first.`
 - **The header counts what you can't see:**
   `Screen 430x932 pt @3x · 26 elements (+41 below, +2 above)`. Those 41 are reached by
-  scrolling.
+  scrolling. They are not in the list: acting on one answers `off_screen` and names the call
+  that brings it up.
 - **A change out of view has its own line, without a ref:**
   ```
   Same screen. Changes:
@@ -129,6 +133,9 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
    purchase). That is not a bug, and it must not be reported as one.
 6. **Keep evidence:** the answer lines that show the problem, and a screenshot of that
    moment when the picture matters.
+7. **A control that must not work** (disabled, covered, behind a sheet or an alert) passes
+   when the action is refused with that reason and nothing changed. That refusal is the
+   evidence. Don't use `force` to check it.
 
 An element you can only reach by `x` and `y`, with no id and no label, is a finding too: a
 person using VoiceOver can't reach it either.
@@ -168,7 +175,7 @@ took more than a few seconds (`Settled in` gives the time).
 | a `look` after every action | read the action's answer; it has the changes |
 | a `look` to read one value that an answer already showed | use the `~` line, also when it says `off screen` |
 | scrolling by guess to find something | `scroll` with the target and `to: "target"`; the header says whether more lies below |
-| `force: true` to get past a refusal | fix the cause. With a real touch, `force` lands on whatever is in front |
+| `force: true` to get past a refusal | fix the cause. The refusal's message offers `force` for one case only: you have decided the refusal itself is wrong. Then say in the report that you forced it. With a real touch, `force` lands on whatever is in front, and the answer says so |
 | retrying at once after `timeout` | `look` first: the action may have happened, and a retry would do it twice |
 | `wait` with a guessed number of seconds | `wait_for` what you are waiting for |
 | reading "No visible change." after `look: false` steps as "nothing happened" | read the note: the block covers all of them |
