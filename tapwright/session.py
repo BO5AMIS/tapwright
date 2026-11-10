@@ -179,6 +179,10 @@ class Session:
                 await asyncio.sleep(BANNER_POLL)
                 waited += BANNER_POLL
                 source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            if waited:
+                still = " and it is still there" if await self._banner_over_an_app(source) else ""
+                getattr(self.device, "log", lambda *a: None)(
+                    f"a notification banner was over the app: the read waited {waited:.1f} s{still}")
             return source
         except (PhoneLocked, AppNotAnswering):
             raise
