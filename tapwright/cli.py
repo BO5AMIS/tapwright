@@ -284,9 +284,7 @@ def skill(a) -> int:
     except OSError as e:
         print(f"couldn't install the skill: {e}")
         return 1
-    print(f"Installed the {skills.NAME} skill:")
-    for path in written:
-        print(f"  {path}")
+    print(skills.installed_text(written))
     return 0
 
 

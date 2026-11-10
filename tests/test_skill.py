@@ -61,6 +61,7 @@ def test_install_writes_both_homes_and_replaces_only_its_own_folder(tmp_path, ca
     stale = tmp_path / ".agents" / "skills" / "tapwright"
     stale.mkdir(parents=True)
     (stale / "old.md").write_text("from an older version", encoding="utf-8")
+    (stale / "SKILL.md").write_text("---\nname: tapwright\ndescription: an older copy\n---\n", encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["tapwright", "skill", "install", "--project", str(tmp_path)])
     assert cli.main() == 0
     for home in (".claude/skills", ".agents/skills"):
@@ -68,9 +69,24 @@ def test_install_writes_both_homes_and_replaces_only_its_own_folder(tmp_path, ca
             assert (tmp_path / home / "tapwright" / name).read_bytes() == (SHIPPED / name).read_bytes()
     assert not (stale / "old.md").exists() and (other / "SKILL.md").read_text(encoding="utf-8") == "theirs"
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "Installed the tapwright skill:" and len(out) == 3
-    assert out[1].strip() == str(tmp_path / ".claude" / "skills" / "tapwright")
-    assert out[2].strip() == str(tmp_path / ".agents" / "skills" / "tapwright")
+    assert out[0] == "Installed the tapwright skill:"  # these three lines are the same shape in Tapline
+    assert out[1] == "  " + str(tmp_path / ".claude" / "skills" / "tapwright")
+    assert out[2] == "  " + str(tmp_path / ".agents" / "skills" / "tapwright")
+    assert out[3] == "" and out[4].startswith("Claude Code reads the first (type /tapwright)")
+    assert any("[mcp_servers.tapwright]" in line and "--apps" in line for line in out[5:])  # never without the app list
+
+
+def test_install_leaves_a_folder_of_that_name_that_is_not_the_skill(tmp_path, capsys, monkeypatch):
+    """Someone's own folder called `tapwright` under .agents/skills: nothing is written, in either place."""
+    theirs = tmp_path / ".agents" / "skills" / "tapwright"
+    theirs.mkdir(parents=True)
+    (theirs / "notes.md").write_text("mine", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["tapwright", "skill", "install", "--project", str(tmp_path)])
+    assert cli.main() == 1
+    said = capsys.readouterr().out
+    assert "exists and is not the tapwright skill. Move it away first; nothing was written." in said
+    assert (theirs / "notes.md").read_text(encoding="utf-8") == "mine"
+    assert not (tmp_path / ".claude" / "skills" / "tapwright").exists()
 
 
 def test_install_for_the_user_goes_under_the_home_folder(tmp_path, monkeypatch):
