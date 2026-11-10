@@ -166,9 +166,9 @@ async def long_press(target: Target, seconds: float = 1.0, force: bool = False, 
 
 @server.tool(description=describe("type_text"), structured_output=False)
 async def type_text(text: str, target: Target | None = None, replace: bool = True, submit: bool = False,
-                    look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, look=look,
-                       screenshot=screenshot)
+                    force: bool = False, look: bool = True, screenshot: bool = False) -> CallToolResult:
+    return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, force=force,
+                       look=look, screenshot=screenshot)
 
 
 @server.tool(description=describe("scroll"), structured_output=False)

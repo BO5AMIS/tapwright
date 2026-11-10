@@ -9,7 +9,7 @@ EXPECTED = {
     "look": {"screenshot", "width", "labels"},
     "tap": {"target", "force", "look", "screenshot"},
     "long_press": {"target", "seconds", "force", "look", "screenshot"},
-    "type_text": {"text", "target", "replace", "submit", "look", "screenshot"},
+    "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot"},
     "scroll": {"direction", "amount", "to", "target", "look", "screenshot"},
     "toggle": {"target", "value", "force", "look", "screenshot"},
     "back": {"look", "screenshot"},
@@ -31,7 +31,7 @@ DEFAULTS = {
     "look": {"screenshot": True, "width": 600, "labels": False},
     "tap": {"force": False, "look": True, "screenshot": False},
     "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False},
-    "type_text": {"target": None, "replace": True, "submit": False, "look": True, "screenshot": False},
+    "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": False},
     # no default direction in the schema: it is down, or the way `to` goes (as Tapline declares it)
     "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False},
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False},

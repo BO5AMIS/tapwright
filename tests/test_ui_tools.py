@@ -388,7 +388,7 @@ def test_what_a_sheet_hides_is_kept_apart_with_what_is_in_front_of_it():
     tree = ui.read(bottom_sheet(lab_base()), PHONE)
     behind = {e.identifier or e.label: front for e, front in tree.behind}
     assert {"lab-base", "Base row"} <= set(behind)
-    assert set(behind.values()) == {tree.items[0].line(actions=False)}  # the sheet's first named element, with its ref
+    assert all(front is tree.items[0] for front in behind.values())  # the sheet's first named element
     assert tree.items[0].identifier == "lab-sheet" and tree.items[0].ref == "e1"
     assert not {e.identifier for e, _ in tree.behind} & {e.identifier for e in tree.items if e.identifier}
     assert ui.read(lab_base(), PHONE).behind == []
@@ -407,7 +407,7 @@ def test_what_is_off_screen_behind_a_share_sheet_is_behind_it_too():
         node("Other", 0, 0, 430, 932, "dismiss popup", name="PopoverDismissRegion"), pop])
     tree = ui.read(under_window(base, window), PHONE)
     assert {e.identifier for e, _ in tree.behind} == {"lab-far", "lab-save", "lab-base"}
-    assert all(front.startswith('e1 other "dismiss popup" id=PopoverDismissRegion') for _, front in tree.behind)
+    assert all(front.line().startswith('e1 other "dismiss popup" id=PopoverDismissRegion') for _, front in tree.behind)
     plain = ui.read(under_window(base), PHONE)  # no sheet: off screen is only off screen
     assert plain.behind == [] and {e.identifier for e in plain.offscreen} == {"lab-far", "lab-save"}
 

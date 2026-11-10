@@ -162,7 +162,7 @@ class Tree:
     offscreen: list[Element] = field(default_factory=list)
     # what an open sheet or other layer hides, each with the line of what is in front of it (a target naming
     # one is covered); what is off screen under a presented sheet is here too
-    behind: list[tuple[Element, str]] = field(default_factory=list)
+    behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -438,11 +438,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     for i, e in enumerate(tree.items, 1):
         e.ref = f"e{i}"
 
-    def front(layer: tuple[int, int]) -> str:
-        """The line of what the layer shows first with a name: what the agent closes or answers."""
+    def front(layer: tuple[int, int]) -> Element | None:
+        """What the layer shows first with a name: what the agent closes or answers. The element, not its
+        line: its ref here is this read's, and the agent's list may know it under another."""
         inside = [e for e, n, _ in shown[:MAX_ELEMENTS] if layer[0] <= n < layer[1]]
-        named = next((e for e in inside if e.label or e.identifier), inside[0] if inside else None)
-        return named.line(actions=False) if named else "what is open in front of it"
+        return next((e for e in inside if e.label or e.identifier), inside[0] if inside else None)
     tree.behind = [(e, front(layer)) for e, layer in under[:MAX_OFFSCREEN]]
     presented = [(a, b, layer) for a, b, _, is_presented, layer in hidden if is_presented]
     for e, n in zip(tree.offscreen, off_numbers):  # off screen and under a sheet: closing the sheet comes first

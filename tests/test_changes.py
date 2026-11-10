@@ -331,6 +331,27 @@ def test_back_to_a_screen_with_a_done_button_elsewhere_gets_a_fresh_ref():
     assert refs(changes.carry_refs(old, new, moves_content=False)) == ["e1"]  # a tap: a move is news, not a swap
 
 
+def test_a_read_with_no_action_before_it_keeps_the_refs_of_what_stayed():
+    """`moves_content=None`: the re-read a target is resolved on. A first-time agent saw `Lab sheet` and an icon
+    go and come back under new refs on almost every answer, because each such read counted as moved content."""
+    old = [el("e1", role="text", label="Lab sheet", y=20), el("e2", role="image", label="gearshape.fill", y=60),
+           el("e3", label="Edit", x=200, y=100), el("e4", label="Edit", x=200, y=200)]
+    same = [replace(e) for e in old]
+    assert refs(changes.carry_refs(old, same, moves_content=None)) == ["e1", "e2", "e3", "e4"]
+    assert refs(changes.carry_refs(old, same, moves_content=True)) == ["e5", "e6", "e7", "e8"]  # after a scroll: all new
+
+
+def test_a_read_with_no_action_before_it_still_sees_content_that_moved():
+    """The list scrolled by itself (or a person's flick is still running): the unique rows agree on a move, so the
+    rule for moved content holds, and the button that stayed put is another row's."""
+    old = [el(f"e{i + 1}", role="text", label=f"Row {c}", y=100 * i) for i, c in enumerate("ABCDE")]
+    old.append(el("e6", label="Edit", x=200, y=10))
+    new = [el(f"e{i + 1}", role="text", label=f"Row {c}", y=100 * i) for i, c in enumerate("CDEFG")]
+    new.append(el("e6", label="Edit", x=200, y=10))
+    carried = changes.carry_refs(old, new, moves_content=None)
+    assert refs(carried)[:3] == ["e3", "e4", "e5"] and "e6" not in refs(carried)
+
+
 def test_fixed_elements_do_not_make_a_stay_look_like_a_match():
     """A nav title and tab items outnumber the scrolled elements: the estimate is zero, so there is none."""
     fixed = [el(f"e{i + 1}", role="text", label=f"Fixed {i}", y=i * 5) for i in range(3)]

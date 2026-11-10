@@ -159,7 +159,7 @@ def _checked(name: str, args: dict) -> dict:
     if name == "type_text":
         if not isinstance(args.get("text"), str):
             raise Refused("bad_params", f"text must be a string, not {args.get('text')!r}")
-        for key in ("replace", "submit"):
+        for key in ("replace", "submit", "force"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
     if name == "wait_for":
@@ -764,7 +764,7 @@ class Daemon:
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:
-            raise Refused("not_actionable", "no_action: nothing changed after back.")
+            raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
         # a toggle that changed nothing on the stream is not trusted: the tree says whether the switch flipped
         if (not done.changed and name != "toggle" and not (full[0] or view.moved)
                 and (mark[1] is view.read_mark[1] or alike(mark[1], view.read_mark[1]))):
@@ -916,7 +916,7 @@ class Daemon:
             if len(inputs) > 1:
                 shown = "\n".join([*(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES]),
                                    *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES),
-                                   'Retry with one of the refs, or add "index" (0-based).'])
+                                   "Retry with one of the refs as the target."])  # no target, so no `index` to add
                 raise Refused("ambiguous", f"{len(inputs)} inputs on screen; pass a target to pick one:\n"
                                            f"Candidates:\n{shown}")
             field = inputs[0]
@@ -929,9 +929,14 @@ class Daemon:
             field = ui.resolve(view.items, target)
             if field.role != "input":
                 raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
-        self._guard(view, field)  # the focusing tap is a touch: refused where tap would be, and made where it shows
+        # the focusing tap is a touch: refused where tap would be, and made where it shows; `force` as for tap
+        self._refuse_disabled(field)
+        at = None
+        if not a.get("force"):
+            self._guard(view, field)
+            at = self._touch_point(field)
         await self.session.type_text(a["text"], replace=bool(a.get("replace", True)), submit=bool(a.get("submit", False)),
-                                     target=ui.Target(ref=field.ref), at=self._touch_point(field))
+                                     target=ui.Target(ref=field.ref), at=at)
         done = Typed(f"Typed into {field.line(actions=False)}.")
         done.field = field
         return done
@@ -974,7 +979,8 @@ class Daemon:
                 break  # the swipe left the screen as the one before did: the end of the list
             previous = settled  # (with no stream there is nothing to compare: every swipe is made)
             if loop.time() - began >= SCROLL_CAP:
-                note = f"stopped after {SCROLL_CAP:g} s; the list may keep loading."
+                # the screen still changed after every swipe: more may be loading, or the list is long
+                note = f"the {to} wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
                 break
         done = Scrolled(f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}.")
         done.note = note
@@ -1042,10 +1048,26 @@ class Daemon:
             hit = ui.resolve([e for e, _ in behind], dataclasses.replace(target, index=0))
         except Refused:
             return
-        front = next((line for e, line in behind if e is hit), None)
-        if front is not None:
-            raise Refused("not_actionable", f"covered: {hit.line(ref=False, actions=False)} is behind {front}; "
-                                            "close that first.")
+        for e, front in behind:
+            if e is hit:
+                raise Refused("not_actionable", f"covered: {hit.line(ref=False, actions=False)} is behind "
+                                                f"{self._front_line(front)}; close that first.")
+
+    def _front_line(self, front: ui.Element | None) -> str:
+        """The line of what is open in front, with the ref the agent's list has for it (the read that found it
+        numbered it for itself); with no ref when the agent's list doesn't have it."""
+        if front is None:
+            return "what is open in front of it"
+        plain = front.line(ref=False, actions=False)
+        known = next((e for e in self.session.items if e.line(ref=False, actions=False) == plain), None)
+        return known.line(actions=False) if known is not None else plain
+
+    def _still_open(self) -> str:
+        """For a `back` that changed nothing: what is open on top, if the last read found a layer in front."""
+        behind = getattr(self.session, "behind", [])
+        if not behind:
+            return "."
+        return f"; {self._front_line(behind[0][1])} is still open: tap its close control."
 
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's
@@ -1187,7 +1209,8 @@ class Daemon:
         view.read_keyboard = tree.keyboard
         known = {e.ref for e in view.items}  # what came back may get its old ref: look in both lists
         held = sorted([*view.items, *(e for e in view.shown if e.ref not in known)], key=lambda e: (e.y, e.x))
-        view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=True)  # the screen may be anything
+        # no action of the agent's came before this read: the content moved only if the elements say so
+        view.items = changes.carry_refs(held, s.items, view.top_ref, moves_content=None)
         view.top_ref = max(view.top_ref, changes.highest(view.items))
         view.read_at, view.read_mark = self.control.clock(), mark  # the next target in the same window needn't read again
         s.items = view.items

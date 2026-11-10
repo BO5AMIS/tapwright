@@ -136,10 +136,14 @@ EXTRA = {
         "secure field's value is reported as hidden."
     ),
     'scroll': "drags on the screen; the main scroll view is the one at the screen's centre.",
-    'toggle': 'reads the switch, then taps it only if the value differs.',
+    'toggle': (
+        'reads the switch, then taps it only if the value differs. With `look: false` the first line is '
+        "`Tapped …`: the new state isn't read."
+    ),
     'back': (
-        "taps the navigation bar's back button (never a Cancel, Close or Done), or swipes from the left "
-        'edge when there is no navigation bar; `no_action` when nothing changed.'
+        "closes an open popover with a touch outside it; else taps the navigation bar's back button (never "
+        'a Cancel, Close or Done), or swipes from the left edge when there is no navigation bar; '
+        '`no_action` when nothing changed.'
     ),
     'open_url': 'opens it on the phone, so another app may take it. The answer says which app came up.',
     'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',

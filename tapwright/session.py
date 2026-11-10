@@ -50,7 +50,8 @@ class Session:
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
         self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
-        self.behind: list[tuple[ui.Element, str]] = []  # what a sheet hides, with what is in front (for `covered`)
+        # what a sheet hides, each with the element in front that names the sheet (for `covered`)
+        self.behind: list[tuple[ui.Element, ui.Element | None]] = []
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is

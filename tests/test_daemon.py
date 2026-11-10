@@ -781,7 +781,7 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
             await d.run_tool("a", "tap", {"target": {"label": "7", "index": 5}, "look": False})
         assert e.value.code == "not_found"
         r = await d.run_tool("a", "tap", {"target": {"text": "8"}, "look": False})  # text, exact: the one "8"
-        assert r["text"].startswith('Tapped e9 button "8"')  # re-reads (the not_found one reads twice) give id-less refs new numbers
+        assert r["text"].startswith('Tapped e3 button "8"')  # the re-reads in between moved nothing: its ref stays
         await finish(stop, task)
     run(go)
 
@@ -2710,7 +2710,7 @@ def test_type_text_without_a_target_and_several_inputs_is_ambiguous():
         message = str(e.value)
         assert e.value.code == "ambiguous"
         assert message.startswith("2 inputs on screen; pass a target to pick one:\nCandidates:\n")
-        assert message.endswith('\nRetry with one of the refs, or add "index" (0-based).')
+        assert message.endswith('\nRetry with one of the refs as the target.')  # no target, so no index to add
         assert re.search(r'\n  e\d+ input "Name"', message) and re.search(r'\n  e\d+ input "Email"', message)
         assert not d.session.typed
         await finish(stop, task)
@@ -2891,7 +2891,7 @@ def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_en
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
         assert 1 <= picture.swipes < 15 and ends[0][0] < ends[0][1]  # the finger moves down: content moves up
         assert r["text"].splitlines() == ["Scrolled the screen up.",
-                                          "Note: stopped after 0.3 s; the list may keep loading."]
+                                          "Note: the start wasn't reached in 0.3 s; scroll again to go on."]
         await picture.stop()
         await finish(stop, task)
     run(go)
@@ -3281,7 +3281,7 @@ def test_type_text_ambiguity_says_how_many_more_inputs_there_are():
         lines = str(e.value).splitlines()
         assert lines[0].startswith("7 inputs on screen;") and len(lines) == 2 + 5 + 2
         assert lines[-2] == '  (+2 more; use a ref or "index")'
-        assert lines[-1] == 'Retry with one of the refs, or add "index" (0-based).'
+        assert lines[-1] == 'Retry with one of the refs as the target.'
         await finish(stop, task)
     run(go)
 
@@ -3355,6 +3355,46 @@ def test_force_overrides_behind_alert_and_a_point_is_never_checked():
         assert d.session.calls.count("tap") == 1
         await d.run_tool("a", "tap", {"target": {"x": 20, "y": 120}, "look": False})  # a real touch lands where it lands
         assert d.session.calls.count("tap") == 2
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_takes_force_as_tap_does():
+    """The focusing tap is a touch: behind an alert it is refused, and `force` makes it anyway (2026-11-10)."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_alert = ALERT
+        name = el("e2", "input", "Name", "name-field", rect=(10, 100, 300, 44))
+        await looked(d, [alerted()[0], name])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"target": {"ref": "e2"}, "text": "x", "look": False})
+        assert str(e.value).startswith("behind_alert: ") and "type_text" not in d.session.calls
+        r = await d.run_tool("a", "type_text", {"target": {"ref": "e2"}, "text": "x", "force": True, "look": False})
+        assert r["text"].startswith("Typed into e2 input") and d.session.calls.count("type_text") == 1
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"target": {"ref": "e2"}, "text": "x", "force": "yes"})
+        assert e.value.code == "bad_params"
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_that_changed_nothing_names_what_is_still_open():
+    """A first-time agent called `back` twice on a sheet it can't close: the answer now says what to do."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        sheet = el("e1", "other", "", "lab-sheet", rect=(0, 647, 430, 285))
+        await looked(d, [sheet, el("e2", "button", "Close", "lab-sheet-close", rect=(20, 844, 390, 49))])
+        hidden = el("", "button", "Tap me", "lab-taps", rect=(16, 197, 398, 120))
+        d.session.behind = [(hidden, el("e9", "other", "", "lab-sheet", rect=(0, 647, 430, 285)))]
+        feeder = FrameFeeder(d.hub).start(then=b"A")  # the swipe changes nothing on the screen
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {})
+        assert str(e.value) == ("no_action: nothing changed after back; e1 other id=lab-sheet @0,647 430x285 "
+                                "is still open: tap its close control.")
+        await feeder.stop()
         await finish(stop, task)
     run(go)
 
@@ -3560,7 +3600,8 @@ def test_a_target_behind_an_open_sheet_is_covered_naming_the_sheet():
         await looked(d, [el("e1", "other", "dismiss popup", "PopoverDismissRegion", rect=(0, 0, 430, 932))])
         save = el("", "button", "Save", "lab-save", rect=(16, -40, 193, 49))
         front = 'e1 other "dismiss popup" id=PopoverDismissRegion @0,0 430x932'
-        d.session.behind = [(save, front)]
+        # the read that found the layer numbered it for itself: the message carries the ref of the agent's list
+        d.session.behind = [(save, el("e7", "other", "dismiss popup", "PopoverDismissRegion", rect=(0, 0, 430, 932)))]
         d.session.offscreen = [save]  # behind the sheet wins: scrolling can't help until it is closed
         for target in ({"id": "lab-save"}, {"label": "Save"}, {"text": "sav"}):
             for force in (False, True):

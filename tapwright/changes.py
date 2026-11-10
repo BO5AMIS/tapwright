@@ -51,10 +51,15 @@ def _content_shift(pairs: list[tuple[Element, Element]]) -> tuple[float, float] 
     return round(best[0]), round(best[1])
 
 
-def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_content: bool = False) -> list[Element]:
+def carry_refs(old: list[Element], new: list[Element], used: int = 0,
+               moves_content: bool | None = False) -> list[Element]:
     """`new` (a fresh read, in reading order) with the refs of the elements still on screen, and new
     numbers for the others, counted on from the highest ref in use. `used` is the highest number this
     agent was ever given, so a ref that went away is never handed to another element.
+
+    `moves_content` None is a read with no action of the agent's before it (the re-read a target is
+    resolved on): the content counts as moved only if the unique elements agree that it did. Calling
+    every such read a move gave each element without an identifier a new ref on almost every answer.
 
     A key (see _key) that is unique in both lists keeps its ref however far the element moved, except
     an element with neither identifier nor text, which keeps it only if it stayed put. A key shared by
@@ -69,9 +74,11 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0, moves_cont
     for e in new:
         after.setdefault(_key(e), []).append(e)
     kept: dict[int, str] = {}  # id(new element) -> the ref it keeps
-    content_moved = moves_content
     pairs = [(before[key][0], group[0]) for key, group in after.items()
              if len(group) == 1 and len(before.get(key, [])) == 1]
+    if moves_content is None:
+        moves_content = _content_shift(pairs) is not None
+    content_moved = moves_content
     shift = _content_shift(pairs) if moves_content else None
     for was, now in pairs:
         if moves_content and not was.identifier:
