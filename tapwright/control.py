@@ -47,7 +47,7 @@ class ClientView:
     keyboard: bool = False  # whether the keyboard was shown at the last answer
     read_keyboard: bool = False  # whether the keyboard showed on the newest read of any kind (answers and silent reads)
     alert_now: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert on the newest read of any kind
-    read_frame: bytes | None = None  # the stream frame at that moment: the picture that matches the list
+    read_frame: "Frame | None" = None  # the stream frame at that moment: the picture that matches the list
     read_mark: tuple[int, "Frame | None"] = (0, None)  # (seq, the newest stream frame) when `items` was read
 
 

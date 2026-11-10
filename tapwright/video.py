@@ -24,7 +24,10 @@ import time
 from fractions import Fraction
 from typing import Callable
 
+from PIL import Image
+
 from .rtp import Depacketizer, split_annexb
+from .stream import ALIKE_SCALE, Picture
 
 LIVE_WINDOW = 3.0  # seconds: frames this recent mean the phone is mirroring
 BACKLOG = 0.25  # seconds of pictures a slow viewer may have queued before it is resynced
@@ -150,6 +153,24 @@ def _even(n: float) -> int:
     return max(2, int(n) // 2 * 2)
 
 
+_PLANAR_YUV = frozenset({"yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p"})
+
+
+def _grey_thumb(frame) -> Image.Image:
+    """The decoded frame at 1/ALIKE_SCALE size in grey. The luma plane of a planar YUV frame is the grey
+    picture already, so no colour conversion happens."""
+    if frame.format.name in _PLANAR_YUV:
+        plane = frame.planes[0]
+        grey = Image.frombuffer("L", (frame.width, frame.height), bytes(plane), "raw", "L", plane.line_size, 1)
+        return grey.reduce(ALIKE_SCALE)
+    return frame.to_image().reduce(ALIKE_SCALE).convert("L")
+
+
+def picture_of(frame) -> Picture:
+    """A stream.Picture of one decoded av.VideoFrame: pixels are converted only when someone asks."""
+    return Picture(frame.to_image, lambda: _grey_thumb(frame))
+
+
 class Subscription:
     """One viewer's feed, read from asyncio: `await get()` gives the config (a dict) first, then pictures
     (bytes) starting with a key frame, or None once closed. A viewer that falls behind by more than about
@@ -222,6 +243,7 @@ class VideoHub:
         self._cv = threading.Condition()
         self._stop = threading.Event()
         self._last = None  # the last decoded frame (av.VideoFrame)
+        self._picture: tuple[object, Picture] | None = None  # (the frame, its Picture), made on the first `newest`
         self._pending = None  # the newest decoded frame that is not encoded yet
         self._pending_at = 0.0
         self._last_frame_at = -math.inf
@@ -261,6 +283,17 @@ class VideoHub:
         if time.monotonic() - self._last_frame_at < LIVE_WINDOW:
             return True
         return self._last is not None and self._mirroring is not None and bool(self._mirroring())
+
+    def newest(self) -> tuple[Picture, float] | None:
+        """The newest decoded picture and when it arrived (monotonic clock), or None before the first one.
+        The same Picture comes back until a newer frame is decoded. Safe from any thread; nothing is converted here."""
+        with self._cv:
+            frame, at = self._last, self._last_frame_at
+            if frame is None:
+                return None
+            if self._picture is None or self._picture[0] is not frame:
+                self._picture = (frame, picture_of(frame))
+            return self._picture[1], at
 
     def stats(self) -> dict:
         return {**self._counts, "lost": self._depay.lost, "restarts": self._depay.restarts,

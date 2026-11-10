@@ -1,6 +1,7 @@
 """Stand-ins for tests: a clock that runs only when told, and (Task 5) a fake Session."""
 import asyncio
 import io
+import time
 
 from PIL import Image
 
@@ -56,13 +57,36 @@ class FrameFeeder:
             await asyncio.gather(self._task, return_exceptions=True)
 
 
+class FakeVideo:
+    """A video hub's `live` and `newest()`, for the feeder: `show` makes a picture the newest one."""
+
+    def __init__(self) -> None:
+        self.live = True
+        self.current = None
+        self.qualities: list[str] = []
+
+    def show(self, picture, arrived: float | None = None) -> None:
+        self.current = (picture, time.monotonic() if arrived is None else arrived)
+
+    def newest(self):
+        return self.current
+
+    def set_quality(self, preset: str) -> None:
+        self.qualities.append(preset)
+
+    def close(self) -> None:
+        pass
+
+
 class FakeDevice:
     def __init__(self) -> None:
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
+        self.opened = 0  # how often the MJPEG stream was asked for
 
     async def open_stream(self):
+        self.opened += 1
         raise ConnectionLost("no stream in tests")
 
     async def kill_app(self, bundle_id: str) -> int:

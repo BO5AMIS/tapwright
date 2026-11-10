@@ -20,7 +20,7 @@ from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
 from .device import AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PhoneLocked, PhoneNotFound
 from .session import Snapshot
-from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, StreamPump, alike
+from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
@@ -309,7 +309,8 @@ class Daemon:
         self.settle_quiet = settle_quiet
         self.control = control or Controller()
         self.hub = FrameHub()
-        self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log)
+        self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
+                               suspended=self._fed_by_video)
         self.log = log
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
@@ -319,6 +320,8 @@ class Daemon:
         self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
         self._receiver = None  # the AirPlay receiver process that feeds `video`
         self._video_task: asyncio.Task | None = None
+        self._feeder: PictureFeeder | None = None  # feeds `hub` from `video` while the hub is live (_start_feeder)
+        self._feeder_task: asyncio.Task | None = None
         self.last_request = time.monotonic()
         self._ever_connected = False
         # why the last connect couldn't finish, when the phone said: a PhoneLocked, or an AppNotAnswering
@@ -471,13 +474,17 @@ class Daemon:
     async def _quicken(self) -> None:
         """Back to the preset's rate before an action, so its settle (and the person's picture) has every frame.
         Only after a quiet spell; a failure to change the rate never stops the action."""
-        if self._fps is not None and self._fps < self._preset_fps():
+        if self._fps is not None and self._fps < self._preset_fps() and not self._fed_by_video():
             try:
                 await self._set_fps(self._preset_fps())
             except ConnectionLost:
                 raise
             except DeviceError as e:
                 self.log(f"pace: couldn't raise the frame rate: {e}")
+
+    def _fed_by_video(self) -> bool:
+        """Is the AirPlay video the hub's source now (so the MJPEG stream stays closed)?"""
+        return self._feeder is not None and self._feeder.feeding
 
     async def _pace(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -495,6 +502,8 @@ class Daemon:
 
     async def _pace_once(self) -> None:
         """Slow the stream when nothing has happened for a while, and quicken it when the screen changes."""
+        if self._fed_by_video():
+            return  # the MJPEG stream is closed: there is no frame rate to set
         now = time.monotonic()
         frame = self.hub.latest
         if frame is not None and frame is not self._pace_seen:
@@ -1265,7 +1274,7 @@ class Daemon:
         view.read_mark = self._mark()
         frame = self.hub.latest
         fresh = frame is not None and self.hub.now_ms() - frame.at <= self.shot_fresh * 1000
-        view.read_frame = frame.jpeg if fresh else None
+        view.read_frame = frame if fresh else None
 
     def _mark(self) -> tuple[int, Frame | None]:
         """(seq, the newest frame): where the stream stood at this moment."""
@@ -1286,13 +1295,12 @@ class Daemon:
             return None
         return int(width), bool(args.get("labels", False))
 
-    async def _newest_frame(self) -> bytes | None:
+    async def _newest_frame(self) -> Frame | None:
         """The newest stream frame if it's recent, else the next one if it comes soon, else None."""
         latest = self.hub.latest
         if latest is not None and self.hub.now_ms() - latest.at <= self.shot_fresh * 1000:
-            return latest.jpeg
-        frame = await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
-        return frame.jpeg if frame else None
+            return latest
+        return await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
 
     async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True) -> dict:
         """Add the picture to an answer: from the stream (full resolution), else the phone's /screenshot.
@@ -1303,7 +1311,11 @@ class Daemon:
             return answer
         width, labels = shot
         try:
-            source = view.read_frame if at_read else await self._newest_frame()
+            frame = view.read_frame if at_read else await self._newest_frame()
+            try:
+                source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
+            except PictureGone:  # it was one of the older pictures, whose pixels are let go
+                source = None
             if source is None:
                 source = await self._read(self.session.screenshot_png)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
@@ -1504,6 +1516,7 @@ class Daemon:
             receiver.args = airplay.command(uxplay, hub.port, pixels)
             receiver.start()
             self.video, self._receiver = hub, receiver
+            self._start_feeder()
             hub.set_quality(self.preset)
             said = ""
             for attempt in range(tries):
@@ -1527,11 +1540,21 @@ class Daemon:
         except Exception as e:  # the JPEG stream stays: video is an extra
             return self._video_note(f"couldn't start: {e}")
 
+    def _start_feeder(self) -> None:
+        """While `video` is live its pictures feed `hub` (and the MJPEG stream stays closed); when it isn't, the
+        MJPEG stream does, as before. The feeder checks which, so mirroring may stop and start again."""
+        if self._feeder_task is None and self.video is not None:
+            self._feeder = PictureFeeder(self.video, self.hub, log=self.log)
+            self._feeder_task = asyncio.create_task(self._feeder.run(), name="feeder")
+
     def _video_note(self, text: str, ok: bool = False) -> str:
         self.log(f"video: {text}" if ok else f"video: {text}; the live view stays on the JPEG stream")
         return text
 
     async def close(self) -> None:
+        if self._feeder_task is not None:
+            self._feeder_task.cancel()
+            await asyncio.gather(self._feeder_task, return_exceptions=True)
         await self.pump.stop()
         self.hub.close()
         if self._video_task is not None:
