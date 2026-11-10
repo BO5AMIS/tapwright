@@ -236,7 +236,7 @@ class Update:
 
 def update(old: list[Element], new: list[Element], app_changed: bool = False, used: int = 0,
            shown: list[Element] | None = None, full: bool = False, header: list[str] | None = None,
-           moves_content: bool = False) -> Update:
+           moves_content: bool | None = False) -> Update:
     """After an action: carry the refs over, and say what changed. The full list instead when the app changed,
     when there was no list before, or when more than max(8, half the new list) of the elements changed, or
     when nothing is left of a list that had elements (a column of `-` lines would only hide that the screen is

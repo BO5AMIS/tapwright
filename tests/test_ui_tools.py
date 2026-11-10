@@ -438,7 +438,41 @@ def test_the_keyboard_window_is_no_layer_and_hides_nothing():
         node("Keyboard", 0, 589, 430, 243, children=[node("Key", 4, 596, 43, 56, "q")])])
     window = node("Other", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932), strip, keys])
     shown = labels(ui.elements(under_window(lab_base(), window), PHONE))
-    assert {"Base action", "Base row", "Next keyboard"} <= set(shown)
+    assert {"Base action", "Base row"} <= set(shown)
+
+
+def test_the_keyboards_own_keys_and_views_are_not_listed_but_a_bar_above_the_keys_is():
+    """Seen on the phone 2026-11-10: every answer that showed or hid the keyboard listed `other id=inputView`,
+    "Next keyboard" and "Dictate" twice. They are the keyboard's, in its window, beside or below the keys. An
+    app's own bar over the keyboard ("Done") is in that window too, above the keys: it stays."""
+    strip = node("Other", 0, 631, 430, 301, children=[
+        node("Button", 2, 864, 81, 69, "Next keyboard"), node("Button", 347, 864, 81, 69, "Dictate", name="dictation")])
+    keys = node("Other", 0, 631, 430, 243, children=[
+        node("Keyboard", 0, 631, 430, 243, children=[node("Key", 4, 640, 43, 56, "q")])])
+    done = node("Toolbar", 0, 587, 430, 44, children=[node("Button", 360, 590, 60, 38, "Done")])
+    view = node("Other", 0, 587, 430, 345, name="inputView", children=[done, keys, strip])
+    window = node("Window", 0, 0, 430, 932, children=[node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932), view])])
+    tree = ui.read(phone(node("Window", 0, 0, 430, 932, children=[lab_base()]), window), PHONE)
+    shown = labels(tree.items)
+    assert tree.keyboard and "Done" in shown and "Base action" in shown
+    assert not {"Next keyboard", "Dictate"} & set(shown) and "inputView" not in {e.identifier for e in tree.items}
+    assert "Next keyboard" in labels(ui.read(phone(node("Window", 0, 0, 430, 932, children=[lab_base()]), window),
+                                             PHONE, keyboard=True).items)  # with the keys asked for, all of them
+
+
+def test_an_off_screen_element_exposed_twice_is_kept_once():
+    """React Native exposes a text as a view with the identifier and a text inside it, same words, same place.
+    On screen that is one line; off screen it was two, so every off-screen change was said twice (seen on the
+    phone 2026-11-10)."""
+    def state(y):
+        return node("Other", 16, y, 398, 68, "taps=1", name="lab-state", children=[node("StaticText", 16, y, 398, 68, "taps=1")])
+    content = node("Other", 0, -400, 430, 2400, children=[
+        state(-326), node("Button", 16, 300, 398, 48, "Top", name="lab-top"),
+        node("Other", 0, 1400, 430, 300, children=[state(1500)])])
+    tree = ui.read(under_window(node("ScrollView", 0, 0, 430, 932, children=[content])), PHONE)
+    assert [(e.identifier, e.y) for e in tree.offscreen] == [("lab-state", -326), ("lab-state", 1500)]
+    assert (tree.above, tree.below) == (1, 1)
 
 
 def test_elements_past_the_screen_are_kept_apart_as_off_screen():

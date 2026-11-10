@@ -2145,7 +2145,23 @@ def test_a_bundle_id_that_does_not_exist_is_not_found():
 def test_open_app_waits_up_to_four_seconds_and_close_app_looks_at_nothing():
     assert daemon_module.ACTIONS["open_app"][1] == daemon_module.LONG_CAP
     assert daemon_module.ACTIONS["close_app"][1] is None
-    assert {"back", "open_app"} <= set(daemon_module.MOVES_CONTENT) and "launch_app" not in daemon_module.MOVES_CONTENT
+    assert {"back", "open_app"} <= set(daemon_module.MAY_MOVE_CONTENT) and "launch_app" not in daemon_module.MAY_MOVE_CONTENT
+
+
+def test_opening_the_screen_that_is_already_open_keeps_every_ref():
+    """Seen on the phone 2026-11-10: open_url to the lab while the lab was open answered `+ e30 header "Lab"`
+    and `- header "Lab"` for each element without an identifier: the same things, renumbered."""
+    async def go():
+        s = FakeSession()
+        s.tree = [button("e1", "OK", "ok-button"), el("e2", "header", "Lab", rect=(199, 70, 32, 22)),
+                  el("e3", "text", "Switch", rect=(16, 640, 57, 22)), el("e4", "image", "gear", rect=(376, 93, 26, 26))]
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "open_url", {"url": "app://lab"})
+        assert "+ " not in r["text"] and "- " not in r["text"] and "No visible change." in r["text"]
+        await finish(stop, task)
+    run(go)
 
 
 def test_close_app_by_name():
@@ -3966,6 +3982,24 @@ class LongList:
         for n, e in enumerate(shown[1:], 2):
             e.ref = f"e{n}"
         self.s.tree, self.s.offscreen = shown, off
+
+
+def test_scroll_to_a_text_goes_to_the_exact_match_off_screen_before_a_partial_one_on_screen():
+    """Seen on the phone 2026-11-10: `{text: "Alert"}` found the state line on screen, which reads
+    "… alert=none …", answered "already on screen", and the Alert button below was never reached."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d, ids=False, labels=lambda i: "state alert=none" if i == 1 else "Alert" if i == 30 else f"Row {i}")
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"target": {"text": "Alert"}, "to": "target"})
+        first = r["text"].splitlines()[0]
+        assert first.startswith("Scrolled ") and 'button "Alert"' in first and "already on screen" not in first
+        await d.run_tool("a", "scroll", {"to": "start", "look": False})
+        r = await d.run_tool("a", "scroll", {"target": {"text": "state"}, "to": "target"})  # only a partial match exists
+        assert "is already on screen" in r["text"].splitlines()[0]
+        await finish(stop, task)
+    run(go)
 
 
 def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():

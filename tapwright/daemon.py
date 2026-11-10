@@ -282,7 +282,11 @@ ACTIONS = {
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
 }
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
-MOVES_CONTENT = ("scroll", "swipe", "back", "open_app", "open_url", "press_button")  # identical elements can't be told apart after these
+MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told apart after these
+# These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
+# move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
+# the phone 2026-11-10: open_url to the screen already open).
+MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button")
 READS = ("look", "apps")
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
@@ -842,8 +846,8 @@ class Daemon:
         to_target = name == "scroll" and args.get("to") == "target"
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
-        answer = await self._after(view, str(result), notes, full[0], name in MOVES_CONTENT and not to_target,
-                                   done.seconds, drifted=to_target)
+        moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
+        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -1067,6 +1071,15 @@ class Daemon:
     def _anywhere(self, view, target: ui.Target) -> ui.Element:
         """The element a target names, on the agent's list or, failing that, among what the last read found off
         screen. Raises as `resolve` does when it is in neither."""
+        off = getattr(self.session, "offscreen", [])
+        if target.text is not None:
+            # {text} is an exact match first, then a part of one: an element off screen that is exactly the text
+            # comes before one on screen that only contains it (seen on the phone 2026-11-10: "Alert" found the
+            # state line, which reads "… alert=none …", and the Alert button below the screen was never reached)
+            want = ui._norm(target.text)
+            if (not any(want in (ui._norm(e.label), ui._norm(e.value)) for e in view.items)
+                    and any(want in (ui._norm(e.label), ui._norm(e.value)) for e in off)):
+                return ui.resolve(sorted([*view.items, *off], key=lambda e: (e.y, e.x)), target)
         try:
             return ui.resolve(view.items, target)
         except Refused as e:
@@ -1074,7 +1087,8 @@ class Daemon:
                 raise
             # on screen and off it together, in reading order: an `index` counts through both, and several
             # matches without one are `ambiguous` (the first off-screen one may lie the other way)
-            everything = sorted([*view.items, *getattr(self.session, "offscreen", [])], key=lambda e: (e.y, e.x))
+            everything = sorted([*view.items, *off], key=lambda e: (e.y, e.x))
+
             return ui.resolve(everything, target)
 
     async def _scroll_to(self, view, target: ui.Target) -> Scrolled:
@@ -1543,7 +1557,7 @@ class Daemon:
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
-    async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool = False,
+    async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,
                      seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
@@ -1580,7 +1594,7 @@ class Daemon:
         # person acted, the line dropped, the agent had never looked). A place only says "the same element" when
         # nothing can have moved the content since the agent's last answer.
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
-        still = not (moves_content or drifted or view.unlooked)
+        still = not (moves_content is not False or drifted or view.unlooked)
         off = (changes.off_screen(off_was, view.shown_off, by_place=still, listed=listed_before)
                if same_app and not full else [])
         if off and not up.full:

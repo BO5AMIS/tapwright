@@ -334,18 +334,25 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     screen_rect = (0.0, 0.0, *screen) if screen else None
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
-             in_alert: bool, parent: Element | None = None, inside: tuple[int, ...] = (), depth: int = -1) -> None:
+             in_alert: bool, parent: Element | None = None, inside: tuple[int, ...] = (), depth: int = -1,
+             keys_top: float | None = None) -> None:
         kind = _kind(node)
         depth = 0 if kind == "Application" else depth  # levels below the application
         x, y, w, h = rect = _rect(node)
         label, name, value = _text(node.get("label")), _text(node.get("name")), _text(node.get("value"))
         traits = {t.strip() for t in (node.get("traits") or "").split(",")}
         left, top, right, bottom = clip
+        # The keyboard's window holds more than the Keyboard node: the views around it, and the globe and
+        # dictation keys beside or below the keys. None of that is the app's (seen on the phone 2026-11-10: four
+        # such lines in every answer that showed or hid the keyboard). What sits above the keys there stays
+        # listed: an app's own bar over the keyboard ("Done") lives in the same window.
+        keys_top = keyboard_windows.get(node, keys_top)
+        in_keyboard = in_keyboard or (keys_top is not None and y >= keys_top - 1 and node not in keyboard_holders)
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
             if screen_rect is not None and not in_keyboard:
                 before = len(tree.offscreen)
                 tally_all(node, parent, visits[0])
-                _offscreen(node, tree.offscreen)
+                _offscreen(node, tree.offscreen, parent)
                 off_numbers.extend([visits[0]] * (len(tree.offscreen) - before))
                 visits[0] += 1  # the subtree takes a place in the order, so a later layer's range holds it
             return  # nothing in this subtree is on screen
@@ -386,6 +393,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             worth = True
         else:
             worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
+        worth = worth and node not in keyboard_holders
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
@@ -406,7 +414,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         elif worth and not visible and screen_rect is not None and not in_keyboard and kind != "Alert":
             plain = _plain(node)
             tally(plain, parent, number)
-            if plain is not None and len(tree.offscreen) < MAX_OFFSCREEN:
+            if (plain is not None and len(tree.offscreen) < MAX_OFFSCREEN
+                    and not (tree.offscreen and _duplicate(tree.offscreen[-1], plain))):
                 tree.offscreen.append(plain)  # its centre is past the screen or its scroll view's edge
                 off_numbers.append(number)
         if kind in CLIPPING:
@@ -414,7 +423,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         spans = []  # the numbers each child's subtree used
         for child in node:
             start = visits[0]
-            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside, depth + 1)
+            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside, depth + 1, keys_top)
             spans.append((start, visits[0]))
         ends[number] = visits[0]
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
@@ -429,6 +438,18 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
     parents = {child: up for up in root.iter() for child in up}
+    # On the phone the keyboard has a window of its own: Window > a full-screen view > [an empty view, the strip
+    # with the globe key, the views holding the Keyboard node].
+    keyboard_holders: set[ET.Element] = set()  # the views a keyboard sits in, below its window
+    keyboard_windows: dict[ET.Element, float] = {}  # the highest of them, and where its keys begin
+    for n in root.iter():
+        if _kind(n) == "Keyboard" and _rect(n)[3] > 0:
+            window, up = n, parents.get(n)
+            while up is not None and _kind(up) not in ("Window", "Application"):
+                keyboard_holders.add(up)
+                window, up = up, parents.get(up)
+            if window is not n:
+                keyboard_windows[window] = min(_rect(n)[1], keyboard_windows.get(window, math.inf))
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
@@ -507,15 +528,20 @@ def _plain(node: ET.Element) -> Element | None:
                    kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")))
 
 
-def _offscreen(node: ET.Element, out: list[Element]) -> None:
+def _offscreen(node: ET.Element, out: list[Element], over: Element | None = None) -> None:
     """Add a subtree that lies wholly outside the screen (or its scroll view) to `out`, in reading order, up to
-    MAX_OFFSCREEN. A keyboard's keys are never targets: its subtree is skipped (a parked one sits below the screen)."""
+    MAX_OFFSCREEN. A keyboard's keys are never targets: its subtree is skipped (a parked one sits below the screen).
+    An element that only repeats the one it is in (`over`; React Native exposes a text twice) is added once, as
+    on screen: seen on the phone 2026-11-10 as every off-screen change said twice."""
     if len(out) >= MAX_OFFSCREEN or _kind(node) == "Keyboard":
         return
-    if (plain := _plain(node)) is not None:
+    plain = _plain(node)
+    if plain is not None and over is not None and _duplicate(over, plain):
+        plain = None
+    if plain is not None:
         out.append(plain)
     for child in node:
-        _offscreen(child, out)
+        _offscreen(child, out, plain or over)
 
 
 def _keyboard_view(keyboard: ET.Element, parents: dict[ET.Element, ET.Element],
