@@ -28,7 +28,7 @@ def make(session=None, **options) -> Daemon:
     settings = dict(control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None, heartbeat=0.02,
                     backoff=(0.01,), ready_wait=2.0, stream_linger=0, stream_retry=0.01,
                     settle_still=0.03, settle_first_frame=0.01, settle_fallback=0.0, settle_quiet=0.03,
-                    shot_wait=0.01, shot_fresh=1.0)
+                    shot_wait=0.01, shot_fresh=1.0, pace_tick=None)  # pacing has its own tests
     settings.update(options)
     return Daemon(session or FakeSession(), **settings)
 
@@ -172,6 +172,88 @@ def test_locked_phone():
         assert e.value.code == "locked"
         assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "locked"
+        await finish(stop, task)
+    run(go)
+
+
+def rates(session) -> list[int]:
+    """The stream frame rates the daemon set, in order (connect and quality settings included)."""
+    return [c[1]["mjpegServerFramerate"] for c in session.calls
+            if isinstance(c, tuple) and c[0] == "settings" and "mjpegServerFramerate" in c[1]]
+
+
+async def until(check, tries: int = 300) -> None:
+    for _ in range(tries):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never happened")
+
+
+def paced(**options) -> Daemon:
+    """A daemon whose stream pace reacts within tens of ms: quiet after 50 ms of no agent, person or change."""
+    return make(pace_tick=0.01, pace_quiet=(0.05, 0.05, 0.05), **options)
+
+
+def test_a_still_screen_slows_the_stream_and_an_agent_call_quickens_it_first():
+    """The stream costs the phone about 2.6% of a core per frame a second (88% at balanced, DVT, 2026-11-10)."""
+    async def go():
+        d = paced()
+        stop, task = await started(d)
+        feeder = FrameFeeder(d.hub).start(then=b"same picture")
+        await until(lambda: rates(d.session)[-1:] == [daemon_module.STILL_FPS])
+        r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
+        assert r["text"] == "Tapped (5, 5)."
+        calls = d.session.calls
+        quick = max(i for i, c in enumerate(calls) if isinstance(c, tuple) and c[0] == "settings"
+                    and c[1].get("mjpegServerFramerate") == 30)
+        assert quick < calls.index("tap")  # back to the preset's rate before the gesture, for the settle
+        await until(lambda: rates(d.session)[-1:] == [daemon_module.STILL_FPS])  # quiet again afterwards
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_persons_input_quickens_the_stream_before_it_reaches_the_phone():
+    async def go():
+        d = paced()
+        stop, task = await started(d)
+        feeder = FrameFeeder(d.hub).start(then=b"same picture")
+        await until(lambda: rates(d.session)[-1:] == [daemon_module.STILL_FPS])
+        assert await d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.5], [60, 0.5, 0.5]]}) is None
+        calls = d.session.calls
+        quick = max(i for i, c in enumerate(calls) if isinstance(c, tuple) and c[0] == "settings"
+                    and c[1].get("mjpegServerFramerate") == 30)
+        assert quick < calls.index("tap")  # so the picture after the tap comes at full rate (V1)
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_changing_screen_keeps_the_stream_fast_and_no_stream_sends_nothing():
+    async def go():
+        d = paced()
+        stop, task = await started(d)
+        await asyncio.sleep(0.2)
+        assert rates(d.session) == [30]  # no frames, so no pacing: only the connect's own rate
+        feeder = FrameFeeder(d.hub).start(churn=True)  # a new picture every frame: an animation
+        await asyncio.sleep(0.3)
+        assert daemon_module.STILL_FPS not in rates(d.session)
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_quality_change_sets_its_rate_and_the_still_rate_never_exceeds_it():
+    async def go():
+        d = paced()
+        stop, task = await started(d)
+        feeder = FrameFeeder(d.hub).start(then=b"same picture")
+        await until(lambda: rates(d.session)[-1:] == [daemon_module.STILL_FPS])
+        await d.set_quality("light")
+        assert 10 in rates(d.session)
+        await until(lambda: rates(d.session)[-1:] == [min(daemon_module.STILL_FPS, 10)])
+        await feeder.stop()
         await finish(stop, task)
     run(go)
 

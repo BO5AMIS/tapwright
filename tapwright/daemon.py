@@ -51,6 +51,15 @@ SCROLL_TO = {"end": ("down", "right"), "start": ("up", "left")}  # the direction
 SCROLL_TOP_INSET, SCROLL_BOTTOM_INSET = 60.0, 40.0  # points a swipe keeps off the screen's edges when no bar says more
 WAIT_FOR_READ_MAX = 5.0  # the longest one tree read in `wait_for` may take
 WAIT_FOR_MIN_LEFT = 0.1  # with less time than this left, `wait_for` gives up instead of reading again
+# The stream's pace. Every frame WebDriverAgent captures costs the phone, mostly in iOS's testmanagerd: about 88% of
+# a core at balanced's ~27 fps and 38% at light's ~10 fps (DVT sysmontap, the lab animating, 2026-11-10). So the
+# stream runs at its preset's rate while something happens, and at STILL_FPS once nothing has: no agent call for
+# the first quiet span (the stream's own linger, so an agent between steps never waits for the rate to rise), no
+# person's input for the second, no change on the screen for the third. STILL_FPS keeps the longest gap
+# between frames at 0.2 s (V3: at most 0.25 s).
+STILL_FPS = 5
+PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
+PACE_TICK = 0.25  # how often the pace is checked
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
@@ -261,8 +270,15 @@ class Daemon:
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
-                 settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0) -> None:
+                 settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
+                 pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET) -> None:
         self.session = session
+        # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
+        # streams at now (None until connected)
+        self.pace_tick, self.pace_quiet = pace_tick, pace_quiet
+        self._fps: int | None = None
+        self._person_at = self._changed_at = -math.inf  # monotonic: a person's last input, the screen's last change
+        self._pace_seen: Frame | None = None  # the newest frame at the last check
         # screenshots: how long to wait for a stream frame before asking the phone, and how old one may be
         self.shot_wait, self.shot_fresh = shot_wait, shot_fresh
         self.unsettled = False  # the last action returned without a settle: the screen may still be moving, for every client
@@ -400,11 +416,70 @@ class Daemon:
             else:
                 await s.ensure()
             await s.settings({**PRESETS[self.preset], **NO_IDLE_WAIT})
+            self._fps = self._preset_fps()
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
+        pacer = asyncio.create_task(self._pace(stop), name="pace") if self.pace_tick else None
+        try:
+            await self._supervise(stop)
+        finally:
+            if pacer is not None:
+                pacer.cancel()
+                await asyncio.gather(pacer, return_exceptions=True)
+
+    # ---- the stream's pace ----
+    def _preset_fps(self) -> int:
+        return int(PRESETS[self.preset]["mjpegServerFramerate"])
+
+    async def _set_fps(self, fps: int) -> None:
+        await self.session.settings({"mjpegServerFramerate": fps})
+        self._fps = fps
+
+    async def _quicken(self) -> None:
+        """Back to the preset's rate before an action, so its settle (and the person's picture) has every frame.
+        Only after a quiet spell; a failure to change the rate never stops the action."""
+        if self._fps is not None and self._fps < self._preset_fps():
+            try:
+                await self._set_fps(self._preset_fps())
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                self.log(f"pace: couldn't raise the frame rate: {e}")
+
+    async def _pace(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            await _first(self.pace_tick, stop)
+            if stop.is_set():
+                return
+            try:
+                await self._pace_once()
+            except ConnectionLost as e:
+                self.lost(str(e))
+            except Refused:
+                pass  # not connected, or paused: the next check tries again
+            except Exception as e:
+                self.log(f"pace: {e}")
+
+    async def _pace_once(self) -> None:
+        """Slow the stream when nothing has happened for a while, and quicken it when the screen changes."""
+        now = time.monotonic()
+        frame = self.hub.latest
+        if frame is not None and frame is not self._pace_seen:
+            if not alike(frame, self._pace_seen):  # a first frame counts as a change: nothing says it's still yet
+                self._changed_at = now
+            self._pace_seen = frame
+        if self.state != "live" or self._fps is None or frame is None or self.hub.fps() == 0:
+            return  # nothing streams, so the pace costs nothing
+        agent, person, still = self.pace_quiet
+        busy = (now - self.last_request < agent or now - self._person_at < person or now - self._changed_at < still)
+        want = self._preset_fps() if busy else min(STILL_FPS, self._preset_fps())
+        if want != self._fps:
+            await self.control.read(lambda: self._connected_only(lambda: self._set_fps(want)))
+
+    async def _supervise(self, stop: asyncio.Event) -> None:
         attempt = failures = 0
         while not stop.is_set():
             if self.state not in ("live", "locked"):
@@ -520,6 +595,7 @@ class Daemon:
 
         async def act():
             self._require_connected()
+            await self._quicken()
             s = self.session
             # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
             # from it is read for again before it is not_found
@@ -1176,7 +1252,12 @@ class Daemon:
                 return {"type": "error", "code": "locked" if self.state == "locked" else "reconnecting",
                         "message": f"not connected to the phone ({self.detail or self.state})"}
             run, action, point = self._person_action(kind, message)
-            await self.control.person(lambda: self._connected_only(run))
+            self._person_at = time.monotonic()
+
+            async def quickened():
+                await self._quicken()  # so the picture after the input comes at full rate (V1)
+                return await run()
+            await self.control.person(lambda: self._connected_only(quickened))
             self._announce("person", action, point=self._point(point))
             return None
         except Refused as e:
@@ -1223,6 +1304,7 @@ class Daemon:
             raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
         if self.state in ("live", "locked"):
             await self._read(lambda: self.session.settings({**PRESETS[preset], **NO_IDLE_WAIT}))
+            self._fps = int(PRESETS[preset]["mjpegServerFramerate"])  # full rate; the pace slows it again when still
         self.preset = preset
         self.broadcast(self.status())
 
