@@ -3896,6 +3896,30 @@ def test_a_phone_asking_for_its_passcode_answers_locked_and_says_which_screen():
     run(go)
 
 
+def test_a_call_after_the_passcode_was_typed_gets_the_phone_not_the_last_starts_answer():
+    """Seen on the phone 2026-11-10: the passcode was in, nothing had been started since (the starts thin
+    out), and a tap answered `locked` 20 s before the phone was back. The call's own start is what counts."""
+    from tapwright.device import PasscodeNeeded
+
+    async def go():
+        s = FakeSession()
+        hurried: list[int] = []
+        s.device.hurry = lambda: hurried.append(1)
+        s.stuck = PasscodeNeeded()
+        d = make(s, backoff=(30.0,))  # nothing more is started by itself while this test runs
+        stop, task = await started(d, until=())
+        await until_stuck(d)
+        tried = s.calls.count("ensure")
+        with pytest.raises(Refused) as e:  # the screen is still up: one more start says so, then `locked`
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert e.value.code == "locked" and s.calls.count("ensure") == tried + 1 and hurried == [1]
+        s.stuck = None  # the user typed it; no start has noticed
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["text"].startswith("Screen ") and d.state == "live" and d.stuck is None
+        await finish(stop, task)
+    run(go)
+
+
 # ---- scroll with to: "target" (AGENT-TOOLS v1.6) ----
 class LongList:
     """A list of rows in a scroll view that fills the screen. A drag moves the rows by the finger's distance,

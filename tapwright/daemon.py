@@ -349,6 +349,8 @@ class Daemon:
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
         self._wake = asyncio.Event()  # connect again now, without waiting out the backoff
+        self._connecting = False  # a connect is under way
+        self._attempts = 0  # connects that ended, either way
         self._scopes: dict[tuple[str, ...], dict[str, str]] = {}  # each app list seen, as {bundle id: shown}
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
@@ -447,17 +449,31 @@ class Daemon:
         self._require_connected()
         return await fn()
 
-    def _asked_for(self) -> None:
+    def _asked_for(self) -> bool:
         """A tool call or a viewer wants the phone while it waits behind the passcode screen: put that screen up
-        now if it has gone (the starts thin out when nobody asks, see device.PROMPT_PAUSES)."""
+        now if it has gone (the starts thin out when nobody asks, see device.PROMPT_PAUSES). True when a start
+        was asked for."""
         if isinstance(self.stuck, PasscodeNeeded):
             hurry = getattr(self.session.device, "hurry", None)
             if hurry is not None:
                 hurry()
                 self._wake.set()
+                return True
+        return False
+
+    async def _next_start(self) -> None:
+        """Wait for a connect that began after now to end (or for the line to come up). What the last start
+        found may be minutes old: the person may have typed the passcode since, with nothing started to notice
+        (seen on the phone 2026-11-10: a tap answered `locked` 20 s before the phone was back). A connect
+        already under way may have looked before it was asked to hurry, so the one after it counts."""
+        need = self._attempts + (2 if self._connecting else 1)
+        deadline = time.monotonic() + self.ready_wait
+        while self._attempts < need and not self._connected.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
 
     async def wait_connected(self) -> None:
-        self._asked_for()
+        if self._asked_for():
+            await self._next_start()
         if self.state == "no-device" or self.stuck is not None:  # waiting won't fix either
             raise self._not_connected()
         try:
@@ -556,8 +572,13 @@ class Daemon:
         attempt = failures = 0
         while not stop.is_set():
             if self.state not in ("live", "locked"):
+                self._connecting = True
                 try:
-                    await self._connect()
+                    try:
+                        await self._connect()
+                    finally:
+                        self._connecting = False
+                        self._attempts += 1
                 except NotSetUp as e:
                     self._set_state("no-device", f"needs setup: {e}")
                 except PhoneNotFound:
