@@ -15,7 +15,8 @@ much is missing, a match in the alert in front wins over matches behind it, a pe
 the phone leaves the same note as viewer input, `type_text` takes `force`, and a call outside the
 apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds what a second first-time agent ran into: `scroll` with
 `to: "target"` brings an element onto the screen, changes off screen are shown, a note says when a
-change block covers more than one action, and a forced action says so. Each repo keeps an
+change block covers more than one action, a forced action says so, typing into the next field of
+a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -97,7 +98,7 @@ Settled in 0.31 s.
 - **Then the changes.** The block always starts with `Same screen. Changes:`.
 - **Header lines that changed come first:** `Alert: "<title>" [Button] …` when an OS or app
   alert appears or changes, `Alert: gone` when it closes, `Keyboard: shown` or
-  `Keyboard: hidden` (Tapwright), and `Network: N requests in flight` (Tapline). `Note:`
+  `Keyboard: hidden` when the keyboard came or went, and `Network: N requests in flight` (Tapline). `Note:`
   lines stay at the end of the answer. Then:
   - `+ <element line>` for a new element, with its ref and `[actions]`;
   - `- <role> "<text>"` for a gone element, with no ref and no position. Without text it's
@@ -174,7 +175,7 @@ Network: 2 requests in flight
   scroll into view has more below than the count says. Scroll to reach them. What an open
   sheet or popover hides isn't counted: scrolling can't reach it until the sheet is closed.
 - `Route:` and `Network:` are Tapline only.
-- `Keyboard:` is Tapwright only. Its keys aren't listed; type with `type_text`.
+- `Keyboard:` comes from both (Tapline since v1.6). Its keys aren't listed; type with `type_text`.
 - `Alert:` comes from both. Tapwright can press its buttons with `alert`; Tapline can't press
   OS alerts and says so.
 - An empty screen shows `(nothing visible; the app may still be loading)`.
@@ -321,15 +322,18 @@ text items.
     one, `off_screen`, then `not_found`. A covering sheet comes before `off_screen`, because
     scrolling can't help until it is closed.
 - **Closing the keyboard first (v1.4).** When the keyboard is up and the target of a touch (`tap`,
-  `long_press`, `toggle`, or `type_text`'s focusing tap on another input) lies outside the focused
-  input, the tool closes the keyboard first, without pressing return, and the answer ends with
-  `Note: closed the keyboard first.` A person's first tap outside the field often only closes the
-  keyboard, and the keyboard covers controls near the bottom; the tool does both steps in one and
-  says so. With a hardware keyboard connected no keyboard shows, and nothing is closed. Nothing is
+  `long_press`, `toggle`, or `type_text`'s focusing tap on another input that the keyboard covers)
+  lies outside the focused input, the tool closes the keyboard first, without pressing return, and
+  the answer ends with `Note: closed the keyboard first.` A person's first tap outside the field
+  often only closes the keyboard, and the keyboard covers controls near the bottom; the tool does
+  both steps in one and says so. For another input that shows above the keyboard, nothing is closed
+  (v1.6): focus moves to it, as a person's tap moves it, and there is no note. If the focus doesn't
+  move, the keyboard is closed the old way. With a hardware keyboard connected no keyboard shows,
+  and nothing is closed. Nothing is
   closed for a call the tool refuses, or while a system alert is in front. The note is given only
-  when the keyboard is still closed as the call answers: Tapwright's `type_text` focuses the new
-  input, so the keyboard is up again and it leaves the note out; Tapline's `type_text` sets the
-  value without focusing, so it keeps the note.
+  when the keyboard is still closed as the call answers: Tapwright's `type_text` into a covered
+  input focuses it after closing, so the keyboard is up again and it leaves the note out; Tapline's
+  `type_text` sets the value without focusing, so it keeps the note.
 - `no_action` means the element, or the screen for `back`, doesn't take this action, and
   `force` doesn't help. Examples:
   - `type_text` into something that isn't an input;
@@ -392,7 +396,7 @@ text items.
 | `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `force`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
 | `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start`, `end` or `target`), `target`, `look`, `screenshot` | "down shows what's below". **`to: "target"` (v1.6)** scrolls the scroll views that hold the `target` element until its whole rect is on screen and clear of the bars, 8 pt inside the edge it came in over (an element larger than that space is brought to its start). It answers `Scrolled <scroll view line> to <element line>.` and the changes; when it stops before the element is clear, the first line says `toward` in place of `to`, so it never reads like success. An element that is clear already: nothing is scrolled, the first line is `<element line> is already on screen.`, and the change block follows. Without a target, with a point as target, or with a `direction`, it is `bad_params`. When it stops before the element is clear: `Note: it doesn't scroll further: the target is as far into view as it gets.` (the end of the scroll view), or for Tapwright's drags `Note: the target wasn't reached in 12 s; scroll again to go on.` A tap still doesn't scroll by itself. A row a lazy list hasn't made yet is `not_found`. **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
-| `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`, and answers `no_action` when the Modal has none |
+| `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`. A sheet without one that closes on a tap on its backdrop gets that tap from both tools (v1.6); one with neither answers `no_action`, and the message names the sheet |
 | `open_url` | `url`, `look`, `screenshot` | Tapline opens it inside the app; Tapwright opens it on the phone, so another app may take it (the answer says which app came up) |
 | `wait` | `seconds` (0.1–30, required), `look`, `screenshot` | answers `Waited 1.0 s.` and the change block, with no settle line. Out-of-range values are `bad_params`. **Change Tapwright:** today it clamps silently and always takes a screenshot |
 | `wait_for` | one of `text`, `id`, `label`; `gone`; `network_idle`; `timeout` (0.5–30 s, default 10); `look`, `screenshot` | `Done after 1.2 s.` plus the changes, or `timeout`. **Change Tapwright:** new. It polls the screen, its looks are slow (see QUALITY-BAR), and `network_idle` is `unsupported` |
