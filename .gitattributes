@@ -3,3 +3,7 @@ tapwright/viewer.html text eol=lf
 # The agent skill ships twice (skills/ for installers, tapwright/skill/ in the package): one set of bytes.
 skills/** text eol=lf
 tapwright/skill/** text eol=lf
+# The three shared documents are byte for byte the same as Tapline's: LF on every checkout.
+docs/AGENT-TOOLS.md text eol=lf
+docs/QUALITY-BAR.md text eol=lf
+docs/VIEWER-PROTOCOL.md text eol=lf
