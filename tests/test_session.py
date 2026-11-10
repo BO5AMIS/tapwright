@@ -8,7 +8,7 @@ from fakes import image_bytes
 from tapwright import session as session_module
 from tapwright import ui as ui_module
 from tapwright.control import Refused
-from tapwright.device import ConnectionLost, DeviceError, NotSetUp
+from tapwright.device import AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PhoneLocked
 from tapwright.session import Session
 
 
@@ -18,6 +18,14 @@ class Recorder:
         self.requests, self.started, self.closed = [], [], False
         self.fail = {}  # path suffix -> exception to raise once
         self.close_error = None
+        self.locked = True  # what /wda/locked answers
+        self.in_front: list[str] = []  # the bundle ids iOS has in the foreground (its process list)
+
+    async def foreground_apps(self):
+        return list(self.in_front)
+
+    async def user_apps(self):
+        return [{"bundle_id": "app.jld.mobile", "name": "JLD", "version": "1.0", "build": "1"}]
 
     async def connect(self):
         self.rsd = "tunnel"
@@ -43,7 +51,7 @@ class Recorder:
         if path.endswith("/window/size"):
             return {"value": {"width": 430, "height": 932}}
         if path.endswith("/wda/locked"):
-            return {"value": True}
+            return {"value": self.locked}
         return {"value": None}
 
 
@@ -60,6 +68,35 @@ def test_session_starts_once_then_costs_nothing(phone):
     count = len(phone.requests)
     asyncio.run(s.ensure())
     assert len(phone.requests) == count  # no /status round trip before every call
+
+
+def test_a_frozen_app_in_front_is_named_instead_of_a_dropped_line(phone):
+    """2026-11-10: JLD froze in front; every read hung behind it and the daemon said 'reconnecting' for hours."""
+    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    phone.fail["/window/size"] = ConnectionLost("WebDriverAgent didn't answer GET /session/S/window/size within 10 s")
+    s = Session(phone)
+    with pytest.raises(AppNotAnswering) as e:
+        asyncio.run(s.ensure())
+    assert (e.value.bundle_id, e.value.name) == ("app.jld.mobile", "JLD") and s.sid is None
+    assert str(e.value) == "JLD (app.jld.mobile) is in front and isn't answering, so nothing on the phone can be read"
+    paths = [path for _, path, _ in phone.requests]
+    # asked before the first read of the app: once that read hangs, nothing else gets an answer
+    assert paths.index("/session/S/wda/locked") < paths.index("/session/S/window/size")
+
+
+def test_a_locked_phone_at_connect_is_named(phone):
+    phone.locked, phone.in_front = True, ["app.jld.mobile"]
+    phone.fail["/window/size"] = ConnectionLost("didn't answer")
+    with pytest.raises(PhoneLocked):
+        asyncio.run(Session(phone).ensure())
+
+
+def test_a_hang_with_no_app_in_front_stays_a_dropped_line(phone):
+    phone.locked = False
+    phone.fail["/window/size"] = ConnectionLost("didn't answer")
+    with pytest.raises(ConnectionLost) as e:
+        asyncio.run(Session(phone).ensure())
+    assert type(e.value) is ConnectionLost
 
 
 def test_not_set_up(monkeypatch):

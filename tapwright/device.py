@@ -30,6 +30,19 @@ class ConnectionLost(DeviceError):
     """The tunnel or WebDriverAgent stopped answering: a dead line, not an error reply."""
 
 
+class PhoneLocked(ConnectionLost):
+    """WebDriverAgent runs, but the phone is locked, so nothing on the screen can be read until it's unlocked."""
+
+
+class AppNotAnswering(ConnectionLost):
+    """WebDriverAgent runs, but the app in front never answers it, so every read of the screen hangs behind
+    that app (2026-11-10: a development build froze mid-reload and stayed in front for hours)."""
+
+    def __init__(self, bundle_id: str, name: str):
+        super().__init__(f"{name} ({bundle_id}) is in front and isn't answering, so nothing on the phone can be read")
+        self.bundle_id, self.name = bundle_id, name
+
+
 class PhoneNotFound(DeviceError):
     """No phone on USB, and none paired on the local network."""
 
@@ -188,6 +201,28 @@ class Device:
             except asyncio.TimeoutError:
                 pass
         raise DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)")
+
+    async def foreground_apps(self) -> list[str]:
+        """Bundle ids of the apps iOS has in the foreground, from its process list: that answers while
+        WebDriverAgent is stuck behind a frozen app. SpringBoard isn't an application there (measured)."""
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
+            procs = await info.proclist()
+        return [p["bundleIdentifier"] for p in procs
+                if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")]
+
+    async def kill_app(self, bundle_id: str) -> int:
+        """End every process of that app, as swiping it away in the app switcher does; how many there were.
+        Works while the app is frozen, unlike WebDriverAgent's terminate, which waits on it."""
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+        async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
+            pids = [p["pid"] for p in await info.proclist() if p.get("bundleIdentifier") == bundle_id]
+            for pid in pids:
+                await control.kill(pid)
+        return len(pids)
 
     async def wda_alive(self) -> bool:
         try:

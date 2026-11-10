@@ -60,9 +60,14 @@ class FakeDevice:
     def __init__(self) -> None:
         self.rsd = "tunnel"
         self.via = "USB"
+        self.killed: list[str] = []  # bundle ids whose processes kill_app ended
 
     async def open_stream(self):
         raise ConnectionLost("no stream in tests")
+
+    async def kill_app(self, bundle_id: str) -> int:
+        self.killed.append(bundle_id)
+        return 1
 
 
 def button(ref: str, label: str, identifier: str = "", rect=(10, 10, 100, 40), **fields) -> ui.Element:
@@ -110,6 +115,8 @@ class FakeSession:
         self.holds: list = []  # the hold at the end of each swipe, in ms
         self.moves: list = []  # each scroll swipe's move, in ms (the raw swipe tool's aren't recorded)
         self.offscreen: list = []  # elements the last read found outside the screen (tests set it)
+        # what every connect raises: a PhoneLocked, or an AppNotAnswering until kill_app ends that app
+        self.stuck: Exception | None = None
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -127,6 +134,8 @@ class FakeSession:
         if self.ensure_delay:
             await asyncio.sleep(self.ensure_delay)
         self.device.rsd = "tunnel"
+        if self.stuck is not None and getattr(self.stuck, "bundle_id", None) not in self.device.killed:
+            raise self.stuck
         self.sid = "S"
 
     async def reset(self):

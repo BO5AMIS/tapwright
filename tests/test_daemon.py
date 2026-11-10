@@ -12,7 +12,7 @@ from tapwright import daemon as daemon_module
 from tapwright import ui
 from tapwright.control import Controller, Refused
 from tapwright.daemon import Daemon
-from tapwright.device import ConnectionLost, DeviceError
+from tapwright.device import AppNotAnswering, ConnectionLost, DeviceError, PhoneLocked
 from tapwright.stream import NO_IDLE_WAIT, PRESETS, Frame
 
 SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
@@ -172,6 +172,66 @@ def test_locked_phone():
         assert e.value.code == "locked"
         assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "locked"
+        await finish(stop, task)
+    run(go)
+
+
+async def until_stuck(d: Daemon) -> None:
+    for _ in range(300):
+        if d.stuck is not None:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"never stuck: {d.state} {d.detail}")
+
+
+def test_a_frozen_app_is_named_at_once_and_close_app_ends_it():
+    """2026-11-10: JLD froze in front. Agents were told 'reconnecting… wait a few seconds' for hours."""
+    async def go():
+        s = FakeSession()
+        s.stuck = AppNotAnswering("app.jld.mobile", "JLD")
+        d = make(s, ready_wait=2.0)
+        stop, task = await started(d, until=())
+        await until_stuck(d)
+        assert d.state in ("connecting", "reconnecting") and d.detail.startswith("JLD (app.jld.mobile) is in front")
+        began = asyncio.get_running_loop().time()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert asyncio.get_running_loop().time() - began < 1.0  # not after the 2 s wait for a connection
+        assert e.value.code == "reconnecting" and "isn't answering" in str(e.value) and "close_app" in str(e.value)
+        assert "wait a few seconds" not in str(e.value)
+        with pytest.raises(Refused) as e:  # only the stuck app can be closed while it blocks the phone
+            await d.run_tool("a", "close_app", {"app": "Settings"})
+        assert e.value.code == "reconnecting" and s.device.killed == []
+        r = await d.run_tool("a", "close_app", {"app": "jld"})
+        assert r["text"] == "Closed JLD (app.jld.mobile), which wasn't answering."
+        assert s.device.killed == ["app.jld.mobile"]
+        r = await d.run_tool("a", "look", {"screenshot": False})  # waits for the reconnect the close starts
+        assert r["text"].startswith("Screen") and d.state == "live" and d.stuck is None
+        assert "reset" not in s.calls  # a stuck app is no reason to rebuild the tunnel
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_phone_locked_at_connect_answers_locked():
+    async def go():
+        s = FakeSession()
+        s.stuck = PhoneLocked("the phone is locked")
+        d = make(s)
+        stop, task = await started(d, until=())
+        await until_stuck(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"x": 1, "y": 1}})
+        assert e.value.code == "locked" and "unlock" in str(e.value)
+        with pytest.raises(Refused) as e:  # nothing to close: the phone itself is locked
+            await d.run_tool("a", "close_app", {"app": "Example"})
+        assert e.value.code == "locked" and s.device.killed == []
+        s.stuck = None  # the user unlocks it; the next connect (within the backoff) finds it so
+        for _ in range(300):
+            if d.state == "live":
+                break
+            await asyncio.sleep(0.01)
+        assert d.stuck is None
+        assert (await d.run_tool("a", "look", {"screenshot": False}))["text"].startswith("Screen")
         await finish(stop, task)
     run(go)
 

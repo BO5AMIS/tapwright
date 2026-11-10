@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from . import changes, ui
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import ConnectionLost, DeviceError, NotSetUp, PhoneNotFound
+from .device import AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PhoneLocked, PhoneNotFound
 from .session import Snapshot
 from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, StreamPump, alike
 
@@ -280,8 +280,11 @@ class Daemon:
         self.ws_clients = 0
         self.last_request = time.monotonic()
         self._ever_connected = False
+        # why the last connect couldn't finish, when the phone said: a PhoneLocked, or an AppNotAnswering
+        self.stuck: PhoneLocked | AppNotAnswering | None = None
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
+        self._wake = asyncio.Event()  # connect again now, without waiting out the backoff
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
@@ -353,6 +356,11 @@ class Daemon:
         is coming back."""
         if self.state == "no-device":
             return Refused("not_connected", f"no phone to drive ({self.detail}); fix that, then try again")
+        if isinstance(self.stuck, PhoneLocked):
+            return Refused("locked", "the phone is locked; ask the user to unlock it")
+        if isinstance(self.stuck, AppNotAnswering):
+            return Refused("reconnecting", f"{self.stuck}. close_app can still close it; then open_app it again, "
+                                           "or ask the user to close it")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
                                        "wait a few seconds, then look")
 
@@ -367,7 +375,7 @@ class Daemon:
         return await fn()
 
     async def wait_connected(self) -> None:
-        if self.state == "no-device":
+        if self.state == "no-device" or self.stuck is not None:  # waiting won't fix either
             raise self._not_connected()
         try:
             await asyncio.wait_for(self._connected.wait(), self.ready_wait)
@@ -383,7 +391,7 @@ class Daemon:
                 s.sid = None
                 try:
                     await s.ensure()
-                except NotSetUp:
+                except (NotSetUp, PhoneLocked, AppNotAnswering):  # the tunnel is fine: rebuilding it won't help
                     raise
                 except Exception as e:
                     self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
@@ -406,16 +414,24 @@ class Daemon:
                     self._set_state("no-device", f"needs setup: {e}")
                 except PhoneNotFound:
                     self._set_state("no-device", "phone not found: plug it in and unlock it")
+                except (PhoneLocked, AppNotAnswering) as e:
+                    if self.stuck is None:
+                        self.log(f"connected, but {e}")
+                    self.stuck = e
+                    self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
                 except Exception as e:
+                    self.stuck = None
                     self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
                 else:
                     attempt = failures = 0
+                    self.stuck = None
                     self._ever_connected = True
                     self._lost.clear()  # a drop noticed while reconnecting is already dealt with
                     self._set_state("live")
                     self.log(f"connected over {self.session.device.via}")
                     continue
-                await _first(self.backoff[min(attempt, len(self.backoff) - 1)], stop)
+                await _first(self.backoff[min(attempt, len(self.backoff) - 1)], stop, self._wake)
+                self._wake.clear()
                 attempt += 1
                 continue
             await _first(self.heartbeat, stop, self._lost)
@@ -480,6 +496,8 @@ class Daemon:
         target = args.get("target")
         view = self.control.client(client_id)
         notes = [NOTE_PERSON] if view.seen < self.control.person_generation else []
+        if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
+            return await self._close_stuck(self.stuck, args["app"], notes)
         await self.wait_connected()
         if name == "apps":
             return await self._apps(notes)
@@ -635,6 +653,23 @@ class Daemon:
         bundle_id, shown = await self._app(a["app"], partial=False)
         await self.session.terminate(bundle_id)
         return f"Closed {shown}."
+
+    async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
+        """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
+        terminate would wait on the app), then connect again at once. Only that app: the rest can wait."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        if query.strip().lower() not in (stuck.bundle_id.lower(), stuck.name.lower()):
+            raise self._not_connected()
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        await device.kill_app(stuck.bundle_id)
+        self.log(f"closed {stuck.bundle_id}, which wasn't answering")
+        self.stuck = None
+        self._wake.set()
+        self._announce("agent", "close_app", label=stuck.name)
+        return _answer([f"Closed {stuck.name} ({stuck.bundle_id}), which wasn't answering."], notes)
 
     async def _wait(self, view, args: dict, notes: list, shot) -> dict:
         """Sleep outside the phone's queue (a person may act meanwhile), then answer with what changed."""

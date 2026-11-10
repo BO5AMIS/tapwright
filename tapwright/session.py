@@ -7,9 +7,11 @@ from dataclasses import dataclass
 
 from . import store, ui
 from .control import TAP_MS, Refused
-from .device import ConnectionLost, Device, DeviceError, NotSetUp
+from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PhoneLocked
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
+LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
+FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
 
@@ -61,9 +63,33 @@ class Session:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
         sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
-        size = (await self.device.http("GET", f"/session/{sid}/window/size"))["value"]
+        # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
+        locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        try:
+            size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
+        except ConnectionLost as e:
+            raise await self._why_stuck(bool(locked), e) from e
         self.screen = (float(size["width"]), float(size["height"]))
         self.sid = sid  # committed last: a failure above leaves no half-started session
+
+    async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
+        """The first read of a fresh WebDriverAgent hung: say why when the phone can tell. A locked phone, or
+        the app iOS has in front (from its process list), else the dead line it looked like."""
+        if locked:
+            return PhoneLocked("the phone is locked")
+        try:
+            in_front = await self.device.foreground_apps()
+        except Exception:
+            return lost
+        if not in_front:
+            return lost
+        bundle = in_front[0]
+        if bundle not in self.app_names:
+            try:
+                await self.read_app_names()
+            except Exception:
+                pass  # the bundle id names it well enough
+        return AppNotAnswering(bundle, self.app_names.get(bundle) or bundle)
 
     async def reset(self) -> None:
         """Drop the connection; the next request reconnects and starts WebDriverAgent again."""
