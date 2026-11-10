@@ -18,8 +18,12 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 4. Run `tapwright setup …`. Relay what the phone shows: **Trust This Computer?**, and if
    setup says so, turning on Developer Mode (Settings > Privacy & Security > Developer
    Mode, restart, confirm), then run setup again.
-5. `tapwright smoke --app <one of their bundle ids>` proves the chain. Then add the MCP
-   server to your host (Claude Code: `claude mcp add tapwright -- tapwright mcp`).
+5. `tapwright smoke --app <one of their bundle ids>` proves the chain. If the phone shows
+   **Enter iPhone Passcode for "XCTest"**, the user enters it; suggest Settings > Developer >
+   Enable UI Automation, which stops the phone asking.
+6. Add the MCP server to your host with the apps the user wants tested (Claude Code:
+   `claude mcp add tapwright -- tapwright mcp --apps <bundle id>`). Without `--apps` every
+   call is refused. `--dedicated` is only for a phone kept for testing.
 
 ## Testing an app
 
@@ -36,8 +40,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    draw each element's ref on the picture. `look: false` on an action returns only its first line.
 5. A screen may still be loading: `wait_for` text, an id or a label (or `gone`), instead of
    guessing a delay with `wait`.
-6. Lists: `scroll` until the element you need appears, or `scroll` with `to: "end"`. `down`
-   shows what is below.
+6. Lists: the first line of a list says how much lies off screen (`+41 below`). To reach an
+   element there, `scroll` with it as `target` and `to: "target"`: one call brings it on
+   screen. `to: "end"` and `to: "start"` go to a list's ends; `down` shows what is below.
 7. Text: `type_text` into a target; without one it types into the only field. `replace` clears
    first (the default); `submit` presses return. Switches: `toggle`. `back` goes up one screen.
 8. System alerts (notifications, location, tracking) show as `Alert:` in the list. Answer them
@@ -49,7 +54,8 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass
     `force` where it can help), `stale` (look again), `busy` (a person is using the phone: wait a
     few seconds, retry), `paused` (ask the user to resume), `locked` (ask the user to unlock the
-    phone), `not_answering` (the app in front stopped answering: `close_app` it, then `open_app` it),
+    phone, or to enter its passcode when the message says the phone is asking for it),
+    `not_allowed` (the app isn't one you were given: go back with `open_app`), `not_answering` (the app in front stopped answering: `close_app` it, then `open_app` it),
     `reconnecting` (wait, then look), `timeout` (look at the screen before retrying,
     because the action may have happened).
 
