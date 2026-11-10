@@ -281,3 +281,23 @@ def test_a_pump_closes_its_connection_when_it_becomes_suspended():
             assert hub.latest.seq == seq and len(conns) == 1  # nothing published, nothing reopened
         await pump.stop()
     asyncio.run(go())
+
+
+def test_a_picture_that_cannot_be_read_never_takes_the_feed():
+    """A review of the feeder: it called itself feeding before it had read the picture, so one unreadable picture
+    kept the JPEG stream closed with nothing published, and logged 30 times a second."""
+    async def go():
+        def broken():
+            raise RuntimeError("plane has no buffer")
+        said = []
+        video, hub = FakeVideo(), FrameHub()
+        feeder = PictureFeeder(video, hub, log=said.append)
+        video.show(Picture(lambda: image(), broken))
+        for _ in range(3):
+            await feeder.step()
+        assert not feeder.feeding and hub.latest is None and len(said) == 1
+        good = Counting(image())
+        video.show(good.picture())
+        await feeder.step()
+        assert feeder.feeding and hub.latest is not None
+    asyncio.run(go())

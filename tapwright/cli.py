@@ -301,6 +301,9 @@ def main() -> int:
     p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
+    p.add_argument("--settle-on-video", action="store_true",
+                   help="experimental, with --video: actions watch the video's frames and the JPEG stream stays "
+                        "closed (faster over Wi-Fi; a stalled mirror can make an action answer 'No visible change')")
     p.add_argument("--video", action="store_true",
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
@@ -329,7 +332,7 @@ def main() -> int:
         from . import server
         port = a.port if a.port is not None else server.DEFAULT_PORT
         return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone,
-                                        video=a.video))
+                                        video=a.video, settle_on_video=a.settle_on_video))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 
 

@@ -319,6 +319,10 @@ class Daemon:
         self.ws_clients = 0
         self.video = None  # a tapwright.video.VideoHub while the H.264 live view is set up (see start_video)
         self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
+        # `--settle-on-video`: actions watch the video's frames and the JPEG stream stays closed. Off unless asked:
+        # a mirror that stalls sends nothing, exactly as a still screen does, so an action could answer "No
+        # visible change" for a screen that changed. Not for use until a check against the phone guards that.
+        self.settle_on_video = False
         self._receiver = None  # the AirPlay receiver process that feeds `video`
         self._video_task: asyncio.Task | None = None
         self._feeder: PictureFeeder | None = None  # feeds `hub` from `video` while the hub is live (_start_feeder)
@@ -727,7 +731,10 @@ class Daemon:
                     # the app may have been mid-redraw: one more look, once it is still, before saying so
                     await self._silent_read(view)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
-                self._refuse_behind_alert(view, force=False)  # an alert hides the app's elements: say so, not "not found"
+                if self._missing(s.items, dataclasses.replace(target, index=None)):
+                    # an alert hides the app's elements: say so, not "not found". (When only the `index` is
+                    # out of range the alert's own elements matched, and that miss is the answer.)
+                    self._refuse_behind_alert(view, force=False)
                 self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 self._refuse_off_screen(target)
             box["note"] = await self._close_keyboard(view, name, target)  # a person would close it before the touch
@@ -1076,7 +1083,9 @@ class Daemon:
         behind = getattr(self.session, "behind", [])
         if not behind:
             return "."
-        return f"; {self._front_line(behind[0][1])} is still open: tap its close control."
+        front = behind[0][1]
+        named = self._front_line(front) if front is not None else "a sheet or menu"
+        return f"; {named} is still open: tap its close control."
 
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's
@@ -1549,7 +1558,8 @@ class Daemon:
             receiver.args = airplay.command(uxplay, hub.port, pixels)
             receiver.start()
             self.video, self._receiver = hub, receiver
-            self._start_feeder()
+            if self.settle_on_video:
+                self._start_feeder()
             hub.set_quality(self.preset)
             said = ""
             for attempt in range(tries):

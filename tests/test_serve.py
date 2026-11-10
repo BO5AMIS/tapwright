@@ -115,6 +115,21 @@ def test_stop_with_an_open_stream_does_not_hang(home):
     assert "error" not in result and result["code"] == 0
 
 
+def test_a_daemon_that_drops_the_line_while_stopping_is_not_a_failed_stop(monkeypatch):
+    """`serve --stop` asked a daemon with an open stream to stop, and now and then the connection was reset
+    before the answer came: the stop had worked, and the command ended in a traceback."""
+    def reset(*a, **k):
+        raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+    monkeypatch.setattr(client.urllib.request, "urlopen", reset)
+    client.shutdown({"port": 1, "token": "t"})  # no exception
+
+    def refused(*a, **k):
+        raise client.DaemonError("unauthorized", "missing or wrong token")
+    monkeypatch.setattr(client, "_request", refused)
+    with pytest.raises(client.DaemonError):
+        client.shutdown({"port": 1, "token": "t"})
+
+
 def test_the_lock_keeps_a_second_daemon_out(home):
     made = []
     lock = server._lock_instance()

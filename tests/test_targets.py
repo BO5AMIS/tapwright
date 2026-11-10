@@ -202,3 +202,12 @@ def test_of_several_matches_the_one_in_the_alert_is_the_target():
                     target).code == "ambiguous"
     assert ui.resolve([behind, front, other], ui.Target(label="Cancel", index=1)) is other  # an index picks among those
     assert ui.resolve([behind, front], ui.Target(label="Cancel", index=0)) is front
+
+
+def test_an_index_past_the_alerts_matches_says_what_it_counted():
+    behind = ui.Element("e1", "button", label="Cancel", rect=(10, 100, 100, 40), actions=("tap",))
+    front = ui.Element("e2", "button", label="Cancel", rect=(100, 500, 100, 44), actions=("tap",), in_alert=True)
+    miss = code(ui.resolve, [behind, front], ui.Target(label="Cancel", index=1))
+    assert miss.code == "not_found"
+    assert str(miss) == ('index 1 is out of range: only 1 element matches label "Cancel" in the alert '
+                         "(matches behind it don't count)")

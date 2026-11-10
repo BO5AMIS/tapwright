@@ -359,3 +359,47 @@ def test_a_failed_start_behind_the_passcode_screen_is_named(monkeypatch):
     monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)
     with pytest.raises(PasscodeNeeded):
         asyncio.run(_start(30))
+
+
+def test_the_passcode_screen_is_never_the_app_in_front(monkeypatch):
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
+    monkeypatch.setattr(dvt_provider, "DvtProvider", _Ctx)
+    monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)
+    d = Device(log=lambda *a: None)
+    d.rsd = object()
+    assert asyncio.run(d.foreground_apps()) == []
+    assert asyncio.run(d.passcode_prompt_up()) is True
+
+
+def test_a_phone_that_cannot_say_whether_the_passcode_screen_is_up_is_left_waiting(monkeypatch):
+    """Not known is not gone: a new start would take the screen away from under the person's fingers."""
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    from tapwright import device as device_module
+    from tapwright.device import PasscodeNeeded
+    _fake_phone_side(monkeypatch, _Service)
+    monkeypatch.setattr(device_info, "DeviceInfo", _PromptInfo)
+    monkeypatch.setattr(device_module, "PROMPT_AFTER", 0.2)
+
+    class _Broken(_Ctx):
+        async def proclist(self):
+            raise ConnectionResetError("the developer service dropped")
+
+    async def scenario():
+        d = Device(log=lambda *a: None)
+        d.rsd = object()
+
+        async def wda_alive():
+            return False
+        d.wda_alive = wda_alive
+        with pytest.raises(PasscodeNeeded):
+            await d.start_wda("runner.id", wait=30)
+        pending = d.runner
+        monkeypatch.setattr(device_info, "DeviceInfo", _Broken)
+        assert await d.passcode_prompt_up() is None
+        with pytest.raises(PasscodeNeeded):
+            await d.start_wda("runner.id", wait=30)
+        assert d.runner is pending and not pending.done()
+        await d.close()
+
+    asyncio.run(scenario())

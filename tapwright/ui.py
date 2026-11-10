@@ -745,14 +745,16 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     if not hits:
         raise Refused("not_found", miss)
+    where = ""
     if len(hits) > 1 and any(e.in_alert for e in hits):
         # AGENT-TOOLS v1.5: an alert's own Cancel, not the Cancel behind it. When some matches are in the
         # alert, only those count, and `index` picks among them
-        hits = [e for e in hits if e.in_alert]
+        hits, where = [e for e in hits if e.in_alert], " in the alert (matches behind it don't count)"
     if target.index is not None:
         if target.index >= len(hits):
             raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "
-                                       f"element{'s' if len(hits) != 1 else ''} match {what}")
+                                       f"element{'s' if len(hits) != 1 else ''} match{'es' if len(hits) == 1 else ''} "
+                                       f"{what}{where}")
         return hits[target.index]
 
     if len(hits) > 1:

@@ -271,6 +271,7 @@ class PictureFeeder:
         self.tick, self.idle = 1.0 / rate, idle  # seconds between frames while feeding, and between checks if not
         self.feeding = False
         self._last: Picture | None = None
+        self._bad: Picture | None = None  # a picture whose pixels couldn't be read: not fed, and said once
         self._kept: deque[Picture] = deque(maxlen=kept)  # only the newest few keep their pixels (5 MB each)
 
     async def run(self) -> None:
@@ -291,13 +292,24 @@ class PictureFeeder:
         if newest is None:
             return
         picture, arrived = newest
+        if picture is self._bad:
+            return
+        if picture is not self._last:
+            try:
+                await asyncio.to_thread(picture.thumb)  # the grey thumb, off the event loop, before anyone compares it
+            except Exception as e:
+                # nothing can be fed from it: hand the frames back to the JPEG stream until a readable picture comes
+                self._bad = picture
+                if self.feeding:
+                    self.feeding = False
+                self.log(f"video: a picture couldn't be read ({e}); frames come from the JPEG stream meanwhile")
+                return
         if not self.feeding:
             self.feeding = True
             self.log("video: frames come from the phone's AirPlay video; the JPEG stream stays closed")
         if picture is self._last:
             self.hub.publish_frame(picture)
             return
-        await asyncio.to_thread(picture.thumb)  # the grey thumb, off the event loop, before anyone compares it
         if len(self._kept) == self._kept.maxlen:
             self._kept[0].release()
         self._kept.append(picture)

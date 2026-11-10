@@ -142,4 +142,10 @@ def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
 
 
 def shutdown(info: dict) -> None:
-    _request(info, "POST", "/api/shutdown", {})
+    """Ask the daemon to stop. It may drop the connection before its answer is out (seen now and then with a
+    stream open): that is the stop happening, not a failure, so `tapwright serve --stop` doesn't end in a
+    traceback. A refusal (a wrong token) is still raised."""
+    try:
+        _request(info, "POST", "/api/shutdown", {})
+    except (OSError, ValueError, http.client.HTTPException):
+        pass

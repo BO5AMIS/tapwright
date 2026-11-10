@@ -360,3 +360,16 @@ def test_fixed_elements_do_not_make_a_stay_look_like_a_match():
     carried = changes.carry_refs(old, new, moves_content=True)
     assert "e4" not in refs(carried)
     assert changes.carry_refs(old, new)[3].ref == "e4"  # after a tap it is the same button
+
+
+def test_a_read_with_no_action_before_it_gives_a_text_that_moved_alone_a_new_ref():
+    """Row 3's "Delete" was the only one on screen; the list moved by itself and now another row's is, somewhere
+    else. Too few elements to agree on a move, so nothing says it is the same button: a new ref. (After a plain
+    action, a unique text keeps its ref wherever it went.)"""
+    old = [el("e1", role="text", label="Title", y=0), el("e2", label="Delete", x=200, y=300)]
+    new = [el("e1", role="text", label="Title", y=0), el("e2", label="Delete", x=200, y=500)]
+    assert refs(changes.carry_refs(old, new, moves_content=None)) == ["e1", "e3"]
+    assert refs(changes.carry_refs(old, new, moves_content=False)) == ["e1", "e2"]
+    with_id = [replace(old[1], identifier="row-delete")]
+    moved = [replace(with_id[0], rect=(200, 500, 100, 40))]
+    assert refs(changes.carry_refs(with_id, moved, moves_content=None)) == ["e2"]  # an identifier is the same element

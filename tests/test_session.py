@@ -784,3 +784,17 @@ def test_dismiss_keyboard_is_true_on_success_false_on_a_refusal_and_raises_on_a_
     phone.fail["/wda/keyboard/dismiss"] = ConnectionLost("line is dead")
     with pytest.raises(ConnectionLost):
         asyncio.run(s.dismiss_keyboard())
+
+
+def test_a_read_that_hangs_behind_the_passcode_screen_is_the_passcode_screen(phone):
+    """iOS asks for the passcode again now and then, also with WebDriverAgent already up. A review found that
+    the hang was then blamed on "the app in front", and `close_app` would have closed the passcode screen."""
+    from tapwright.device import PasscodeNeeded
+    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+
+    async def prompt_up():
+        return True
+    phone.passcode_prompt_up = prompt_up
+    phone.fail["/window/size"] = ConnectionLost("didn't answer")
+    with pytest.raises(PasscodeNeeded):
+        asyncio.run(Session(phone).ensure())

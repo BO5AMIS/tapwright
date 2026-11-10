@@ -130,7 +130,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
 
         async def parts():
             async with daemon.pump.watching() as hub:
-                seq = 0
+                seq, sent = 0, None
                 yield b"--frame\r\n"  # each part then ends with the next boundary, so a browser shows it at once
                 while True:
                     frame = await hub.next_after(seq, timeout=15)
@@ -139,6 +139,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                             return
                         continue
                     seq = frame.seq
+                    picture = getattr(frame, "picture", None)
+                    if picture is not None and picture is sent:
+                        continue  # a still screen's picture, published again for the settle: the viewer has it
+                    sent = picture
                     w, h = daemon.session.screen
                     try:
                         jpeg = await jpeg_of(frame)  # a video picture is encoded off the loop, once
@@ -338,7 +342,7 @@ def _lock_instance():
 
 async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: bool = False,
                 phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT,
-                wait_for_other: float = 60.0, video: bool = False) -> int:
+                wait_for_other: float = 60.0, video: bool = False, settle_on_video: bool = False) -> int:
     """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
     import uvicorn
 
@@ -384,6 +388,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             actual = sock.getsockname()[1]
             daemon = make_daemon(log.info, phone)
             daemon.want_video = video  # the H.264 live view, set up once the phone is connected
+            daemon.settle_on_video = video and settle_on_video
             app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
             server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
                                                    access_log=False, timeout_graceful_shutdown=3))

@@ -76,7 +76,8 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0,
     kept: dict[int, str] = {}  # id(new element) -> the ref it keeps
     pairs = [(before[key][0], group[0]) for key, group in after.items()
              if len(group) == 1 and len(before.get(key, [])) == 1]
-    if moves_content is None:
+    unknown = moves_content is None
+    if unknown:
         moves_content = _content_shift(pairs) is not None
     content_moved = moves_content
     shift = _content_shift(pairs) if moves_content else None
@@ -85,6 +86,10 @@ def carry_refs(old: list[Element], new: list[Element], used: int = 0,
             # no identifier: a same-named element elsewhere may be another row's. It keeps its ref only
             # if it moved the way the content did; with no estimate of that, never.
             ok = shift is not None and _moved_by(was, now, shift)
+        elif unknown:
+            # nothing says the content moved, and no action says it shouldn't have: the same text somewhere
+            # else may be another row's (a list that scrolled by itself, by less than three rows we can match)
+            ok = bool(_key(was)[1] == "id" or _stayed(was, now))
         else:
             ok = bool(_key(was)[1] == "id" or was.text or _stayed(was, now))
         if ok:

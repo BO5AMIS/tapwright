@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from . import store, ui
 from .control import TAP_MS, Refused
-from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PhoneLocked
+from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
@@ -80,6 +80,11 @@ class Session:
         the app iOS has in front (from its process list), else the dead line it looked like."""
         if locked:
             return PhoneLocked("the phone is locked")
+        try:
+            if await self.device.passcode_prompt_up():
+                return PasscodeNeeded()  # iOS asks again now and then, also with WebDriverAgent already up
+        except Exception:
+            pass
         try:
             in_front = await self.device.foreground_apps()
         except Exception:
@@ -242,7 +247,10 @@ class Session:
 
     async def back_point(self) -> ui.Back:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
-        return ui.back_button(await self._source(), self.screen)
+        source = await self._source()
+        # what is open on top, as this read shows it: `back` names it when it could close nothing
+        self.behind = ui.read(source, self.screen).behind
+        return ui.back_button(source, self.screen)
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""

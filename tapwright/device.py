@@ -184,8 +184,10 @@ class Device:
         if self.runner and not self.runner.done() and await self.wda_alive():
             self.awaiting_passcode = False
             return
-        if self.awaiting_passcode and self.runner and not self.runner.done() and await self.passcode_prompt_up():
-            raise PasscodeNeeded()  # still up: a new start would take the screen away from under the person's fingers
+        if self.awaiting_passcode and self.runner and not self.runner.done() \
+                and await self.passcode_prompt_up() is not False:
+            # still up (or the phone couldn't say): a new start would take the screen from under the person's fingers
+            raise PasscodeNeeded()
         self.awaiting_passcode = False
         await self._stop_runner()  # iOS may have killed it before its task noticed (measured)
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
@@ -232,16 +234,16 @@ class Device:
         raise await self._or_passcode(
             DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)"))
 
-    async def passcode_prompt_up(self) -> bool:
+    async def passcode_prompt_up(self) -> bool | None:
         """Is iOS's passcode screen in front (from the process list, which answers without WebDriverAgent)?
-        False when the phone can't be asked."""
+        None when the phone couldn't be asked: not known, which is not the same as gone."""
         from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         try:
             async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
                 procs = await asyncio.wait_for(info.proclist(), 10)
         except Exception:
-            return False
+            return None
         return any(p.get("foregroundRunning") and p.get("name") == AUTH_PROMPT for p in procs)
 
     async def _or_passcode(self, error: DeviceError) -> DeviceError:
@@ -258,8 +260,11 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
             procs = await info.proclist()
+        # iOS calls its passcode screen an application too: it is never "the app in front" (closing it as a
+        # frozen app would take the screen away from the person typing)
         return [p["bundleIdentifier"] for p in procs
-                if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")]
+                if p.get("foregroundRunning") and p.get("isApplication") and p.get("bundleIdentifier")
+                and p.get("name") != AUTH_PROMPT]
 
     async def kill_app(self, bundle_id: str) -> int:
         """End every process of that app, as swiping it away in the app switcher does; how many there were.
