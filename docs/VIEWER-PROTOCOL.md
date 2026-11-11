@@ -12,7 +12,7 @@ adds `tool` to the status and `overlay` to `accepts`, for the one viewer page bo
 serve (`viewer.html`, identical in both repos). Version 1.4 (2026-11-11) adds an optional `caption` to
 `action` messages: a short plain-language name for the step, which the page shows to people watching. It also
 defines `kind`. Without a caption the page makes one from `kind` and `label`. Agreed between the two projects
-for the owner's presentation view.
+for the owner's presentation view. Version 1.5 (2026-11-12) adds a person's confirmation of an agent's touch (AGENT-TOOLS 1.8 §11): the messages `confirm`, `confirm_answer` and `confirm_closed`, and the page's prompt for them. It also writes down the page's keyboard and screen reader behaviour. Agreed between the two projects under the plan the owner approved on 2026-11-12.
 
 - **Server:** a tool's own process: Tapline's host, or `tapwright serve`.
 - **Client:** the viewer page, or an adapter.
@@ -129,6 +129,7 @@ JSON text messages. Both sides ignore types and fields they don't know.
 | `{ "type": "pause", "on": true }` | pause or resume the agent |
 | `{ "type": "overlay", "on": true }` | send overlays (`false` to stop); servers send none until asked, since reading the elements can be slow |
 | `{ "type": "quality", "preset": "sharp" \| "balanced" \| "light" }` | stream quality, for everyone watching |
+| `{ "type": "confirm_answer", "id", "allow": true \| false }` | the person's answer to a `confirm`. The first answer from any viewer wins; an unknown, expired or answered `id` is ignored. |
 
 **Server to client**
 
@@ -138,6 +139,8 @@ JSON text messages. Both sides ignore types and fields they don't know.
 | `{ "type": "overlay", "rev", "at", "elements": [{ "ref", "type", "label", "id", "rect": { "x", "y", "w", "h" } }] }` | the elements on screen while overlays are on. `rev` matches `X-Tree-Rev` when the server has revisions; `at` is when it was read, so a client can dim an overlay older than the latest action. |
 | `{ "type": "action", "by": "agent" \| "person", "kind", "label", "caption", "rect", "point", "at", "ok", "code", "reason" }` | What was just done, for the viewer to show: a highlight or touch mark, and a caption. `rect`, `point` (in 0..1), `at`, `ok`, `label`, `caption` and `reason` are optional; when `ok` is `false`, `code` says why (see errors), and with `code` `not_actionable`, `reason` is the reason word from AGENT-TOOLS §4 (`covered`, `off_screen`, `disabled`, `under_tab_bar`, `behind_alert`, `no_action`). `kind` is the step's name (see "Kinds"). `label` is the element's name, for the page's details view. `caption` is the step in plain words, for people (see "Captions"). |
 | `{ "type": "error", "message", "code" }` | `code`, optional and machine-readable: `busy` (a person is driving), `paused`, `stale` (the screen changed; look again), `locked`, `reconnecting`, `not_answering` (the app in front doesn't answer; close it and open it again), `unsupported`, `unauthorized`, `not_actionable` (the input reached the app, but a real touch there would do nothing or couldn't reach what's there; the message starts with the reason word, as in AGENT-TOOLS.md §4, e.g. `no_action: Nothing at (120, 640) takes a touch.`), `internal` (a bug or a failure on the phone side; the message says which) |
+| `{ "type": "confirm", "id", "by": "agent", "kind", "caption", "word", "expires" }` | an agent's touch needs a person's OK (AGENT-TOOLS §11.3). `kind` and `caption` as in `action`; `word` is the policy word that matched; `expires` is epoch ms (120 s after the request). A viewer that connects while a request is open is sent it too. |
+| `{ "type": "confirm_closed", "id", "allow" }` | someone answered (or it expired: `allow` false): every viewer closes that prompt. |
 
 ## Steps: kinds and captions
 
@@ -222,6 +225,17 @@ These are listed so both tools show them the same way. They are the page's own b
   briefly instead.
 - **The caption is announced politely to screen readers** (the existing `announce` region), at most once a
   second.
+- **Confirmation prompt:** a dialog over the phone (`role="alertdialog"`), titled "Allow this step?", with the
+  caption, the policy word, **Allow once** and **Don't allow**. Focus starts on Don't allow; Escape means Don't
+  allow; Enter and Space press the focused button; Tab and the arrow keys move between the two. While it is
+  open the rest of the page is inert and no key reaches the phone. Requests queue: one shows at a time. It
+  closes on `confirm_closed` or at `expires`, and focus goes back where it was.
+- **Keyboard:** every control works by keyboard with a visible focus ring. A key pressed on one of the page's
+  own controls, or inside its menu, drawer or dialog, never goes to the phone. Escape closes the More panel,
+  then the Steps drawer, and focus returns to the button that opened it.
+- **Screen readers:** the phone picture is named "Live view of the phone"; the caption is a polite live
+  region, spoken at most once a second (a step that comes sooner waits rather than being dropped).
+- **Contrast:** `prefers-contrast: more` strengthens borders and text; forced colors use the system's.
 
 ## Control
 

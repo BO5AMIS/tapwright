@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, and the rule for secure fields. Both projects agree on it under the plan the owner approved on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -244,6 +244,10 @@ Network: 2 requests in flight
   reads them from the value or the selected flag.
 - **The list holds up to 200 elements,** then `(+N more below; scroll)`.
 
+- A secure (password) field's value is never shown as text. Its line shows one `•` per character
+  (`value="••••••"`), which is what iOS itself reports. `type_text` into it answers
+  `Typed into <line>. The value is hidden (secure field).` The action log (§12) never holds it either.
+
 ### 3.4 Refs
 
 `e1`, `e2`… in reading order.
@@ -386,6 +390,15 @@ text items.
     `is not a switch`, `is not an input`, `is not inside a scroll view`. At a point:
     `Nothing at (x, y) takes <a tap, typing, a toggle, a scroll>.`
 
+- New code **`expect_failed`**: a step's expectation in `run` (§9) didn't hold. What the agent does: look,
+  then fix the step or report a bug. Raised by both.
+- `stale` also covers a touch by position (Tapwright): `Error stale: the screen around (x, y) changed since your
+  last look; look again, or pass force: true to touch there anyway.` It compares the picture within 40 pt of the
+  point with the moment of the agent's last list; after an answer without a list (`look: false`) it isn't
+  checked. Tapline may adopt it where it has pictures.
+- `not_allowed` gets two more reason words (§11): `needs_confirmation` (a person must OK this touch first)
+  and `blocked` (the policy forbids it; don't look for another way).
+
 | Code | Meaning | What the agent does | Raised by |
 |---|---|---|---|
 | `not_found` | nothing matches the target, or the ref isn't on the last list | look, then pick another target | both |
@@ -400,6 +413,7 @@ text items.
 | `reconnecting` | the link dropped and is coming back | wait a few seconds, then look | both. Tapline's `disconnected` maps here |
 | `not_connected` | nothing to drive: no app connected, or no phone found | follow the setup steps in the message | both. Replaces Tapline's `no_app` and `unknown_session` |
 | `timeout` | no answer in time; the action may have happened | look before retrying | both. Tapwright adds two messages for a phone that gave one request no answer while the line is alive (over Wi-Fi a single request can stall). After a touch: `the phone didn't answer within <N> s; the action may have happened: look before you retry.`, after the touch's own length plus 10 s; the session stays. From `wait_for`, when not one read of the screen came back in its time, or in 3 s if that is longer: `The phone didn't answer within <N> s, so it isn't known whether <kind> "<value>" is on screen; look, then wait again.` It says "it didn't happen" only after it has read the screen at least once |
+| `expect_failed` | an expectation of a `run` step didn't hold (§9.2) | look, then fix the step or report the bug | both |
 | `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today |
 | `unsupported` | this tool, app or phone can't do it | use the alternative named in the message | both |
 | `not_allowed` | a read or a touch outside the apps the agent was given (v1.5). The message's first word is the reason: `outside_apps` (another app is in front, or the call names one), `no_apps` (the agent was given none) | for `outside_apps`, go back to a given app with `open_app`; for `no_apps`, tell the user | Tapwright, in personal mode (it was `unsupported` with the same reason words). Tapline drives one app and never answers it |
@@ -424,6 +438,8 @@ text items.
 | `apps` | none | the apps the agent can drive, with the current one marked. Tapline: the connected apps. Tapwright: the installed apps. **Change Tapwright:** `list_apps` becomes `apps` |
 | `open_app` | `app` (id or name) | Shared description: "Drive this app from now on." Tapline selects that connected app (today's `select_app`). Tapline can't launch apps, so when the app isn't connected it answers `not_connected` with how to connect it, and the description says so. Tapwright launches the app or brings it to the front (today's `launch_app`). An exact id wins (Tapline: a session id; Tapwright: a bundle id). Otherwise names match ignoring case. Several matches give `Error ambiguous: N connected apps match "X". Pick one by its session id:` (Tapwright: `installed apps` and `bundle id`), followed by their `apps` lines |
 | `viewer` | none | the live view's link. **Change Tapwright:** new; today only `tapwright view` gives it |
+| `run` | `steps` (1–50, required), `trace`, `dry_run`, `look`, `screenshot` | §9 |
+| `audit` | `types`, `look` | §10 |
 
 ### 5.2 Extras: only where a tool can do them, same conventions
 
@@ -436,8 +452,11 @@ text items.
 | `swipe` (`x0, y0, x1, y1, seconds`) | both (Tapline since v1.6) | Tapwright makes a real drag. Tapline drags through React Native's own touch system (a pan view, a sheet's swipe to close); a gesture that react-native-gesture-handler or a native view handles (sliders, maps), or a drag along a native scroll view, answers `no_action` there and its message names what can make it |
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
 | `compare_screen`, `filmstrip` | Tapline now; Tapwright in part 2 | both are image work. Tapwright's 22 fps stream suits `filmstrip`; part 2's planned `watch` becomes `filmstrip` |
-| `record`, `replay` | Tapline now; Tapwright later | scripts by id, label or text work for both |
+| `record`, `replay` | both (v1.8) | scripts by id, label or text work for both (§9.4) |
 | `logs`, `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
+
+`dry_run` (§11.4) is a parameter of every touch tool (`tap`, `long_press`, `toggle`, `type_text`, `swipe`,
+`scroll`, `back`) and of `run` (v1.8).
 
 Tools that are only in one tool must name the alternative in their `unsupported` message.
 For example, Tapline: `Error unsupported: Tapline can't press OS alerts; ask the user, or use
@@ -470,7 +489,7 @@ Tapwright.`
   the same guidance. Tool-specific sentences go at the end.
 - The MCP `instructions` share one core text: the workflow, targets, codes and safety rules.
   Each tool adds a tool-specific part.
-- Read-only tools set `readOnlyHint`: `look`, `apps`, `viewer`, `wait`, `wait_for`, `logs`,
+- Read-only tools set `readOnlyHint`: `look`, `apps`, `viewer`, `wait`, `wait_for`, `audit`, `logs`,
   `check_layout`, `compare_screen`.
 
 ## 8. Agreed with the Tapline agent (2026-11-09)
@@ -493,3 +512,234 @@ returns `paused` at once. That already matches VIEWER-PROTOCOL "Control".
 
 Still to check, by Tapwright: whether WebDriverAgent shows the header trait (§3.3), and what
 checking `covered` costs (`hittable`, §4).
+
+## 9. Batches and scripts
+
+### 9.1 A step
+
+A step is one tool call written as an object: `{"tool": "<name>", ...its parameters, "expect": {...}}`.
+Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
+`wait_for`, and where the tool has them `alert`, `press_button`, `rotate`, `open_app`, `close_app`,
+`app_command`. Not
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`. A step's own `look` and
+`screenshot` are ignored; the batch answers once.
+
+Targets are resolved when the step runs, against the screen as it is then. Refs (`{ref}`) are allowed in
+`run` (they resolve against the latest list, which every step keeps current, §3.4) but not in a saved script
+(§9.4).
+
+### 9.2 `expect`
+
+Optional on every step. One of `text`, `id`, `label` (same matching as `wait_for`), with optional:
+- `gone: true`: it must not be on screen;
+- `value`: with `id` or `label`, the element's value must equal it (a switch: `"on"`/`"off"`);
+- `timeout`: seconds, 0.5–30, default **2**.
+
+After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout.
+
+### 9.3 `run`
+
+Runs the steps in order and stops at the first step whose call fails or whose expectation doesn't hold. The
+executor is the tool's choice (a host loop, a runner on the phone, inside the app); the answer is the same.
+
+**Answer when every step held:**
+```
+Ran 5 of 5 steps in 3.4 s.
+Same screen. Changes:
+~ text "Trips: 0" id=trip-count @16,120 398x22 (was "Trips: 1")
+```
+- Line 1: `Ran <n> of <n> steps in <s> s.`
+- Then the change block for the whole batch: everything since the list the agent had before the call, with
+  the usual rules (§3.1: full list when most of the screen changed, off-screen changes, refs kept).
+- Then notes, each once, prefixed with its step: `Note (step 2): closed the keyboard first.`
+
+**Answer when a step stopped it** (`isError: true`; the code is the failing step's code, or `expect_failed`):
+```
+Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): text "Saved" didn't appear within 2 s.
+Same screen. Changes:
++ e51 text "Name is required" @16,300 398x18
+```
+```
+Error not_actionable: Ran 1 of 4 steps; stopped at step 2 (tap "Delete"): covered: e47 button "Delete" is covered by e45 button "Cancel"; close it or pass force: true.
+```
+- `Ran <k>` counts steps whose action and expectation both held. The failing step's action may have
+  happened (a tap that ran but whose expectation failed); the change block shows what it did.
+- `(<step>)` names the step: its tool and its target as the agent wrote it (`tap "Save"`, `tap id=save`,
+  `type_text "Email"`, `scroll down`, `wait 1.0`).
+- After the first line: the change block since the batch began, then notes. Steps after it don't run.
+
+**`trace: true`** adds one line per step that ran, after line 1: two spaces, the step's number, its own first
+answer line and its time: `  1. Tapped e3 button "Save" id=save @24,610 354x48. (0.2 s)`.
+
+**Limits:** at most 50 steps (`bad_params` above that); the batch as a whole times out at 120 s (`timeout`,
+with `Ran <k> of <n>` in the message). A person taking over between steps stops the batch the usual way
+(`busy` or `paused` after the wait, §6), with `Ran <k> of <n>` in the message. Policy checks (§11) apply to
+every step; a `needs_confirmation` stops the batch at that step.
+
+### 9.4 Scripts: `record`, `replay`, and the file
+
+A script is a saved batch:
+```json
+{"format": "agent-tools-script", "version": 1, "name": "sign up then plan a trip",
+ "app": "com.example.app", "fresh": true,
+ "steps": [{"tool": "tap", "target": {"id": "signup"}, "expect": {"text": "Create account"}}]}
+```
+- `app`: bundle id (Tapwright) or app name/id (Tapline). `fresh` (default true): close and reopen the app
+  first where the tool can; Tapline reloads the JS instead.
+- Refs are `bad_params` in a script (they don't survive a session). Targets by `id`, `label`, `text`, or
+  `{x, y}` (kept, but a replay of a point target answers `Note (step N): a point target; it breaks when the layout changes.`).
+- A step may carry `route` (the screen's route names when it was recorded, e.g. `["Tabs", "Explore"]`). A
+  tool that knows routes (Tapline) checks it after the step and its expectation: a step that ends on another
+  screen stops the replay with `expect_failed: … it ended on Tabs › Trips; the recording ended on Tabs ›
+  Explore`. Tools without routes ignore it; it is never passed to the step's own call.
+- A script may begin with steps that bring the app to a known state (`app_command` for sign-in, sample
+  data or a reset, where the tool has it) instead of relying on `fresh`: Tapline's reload keeps the app's
+  storage.
+- **`record`** (`start: true` with optional `name`, then `stop: true` with `path`): every action that
+  succeeds while recording becomes a step. The target is saved as the best of: the element's `id`, else its
+  `label`, else its `text`, else the point. When that target matches several elements at record time, its
+  `index` is saved too. An action that failed isn't saved. `stop` answers
+  `Saved 12 steps to <path>.`
+- **`replay`** (`path`, `look`, `screenshot`): runs the file like `run` and answers the same way.
+- **CLI, no agent:** `tapwright replay FILE…` / `tapline replay FILE…` run scripts in order; each prints the
+  `run` answer. Exit code 0 if all held, 1 if one stopped, 2 if a script couldn't start (no phone, no app,
+  bad file). `--junit out.xml` writes one test case per script (the stop message as the failure).
+
+## 10. Accessibility audit: `audit`
+
+Checks the screen in front for accessibility problems and answers with a report in one shared format.
+
+- `types` (optional, default all): any of `contrast`, `hit_region`, `description`, `dynamic_type`,
+  `clipped_text`, `trait`, `element_detection`, `overlap`, `duplicate_id`. A type the tool can't check is
+  listed in the answer's last line, never an error.
+- Tapwright runs XCTest's own audit (`performAccessibilityAudit`, iOS 17+: contrast, hit_region,
+  description, dynamic_type, clipped_text, trait, element_detection) and adds `duplicate_id` from the tree.
+- Tapline runs its checks in the app (contrast, hit_region, description, clipped_text, trait: a pressable
+  without a role or a switch without a state, overlap, duplicate_id) and adds each issue's source, as a path
+  relative to the app's project, never absolute (`at src/screens/SignUpScreen.tsx:112`).
+
+**Answer:**
+```
+Audit of "Sign up": 3 issues (contrast 1, hit_region 1, description 1).
+1. contrast: e12 text "Already have an account?" @16,700 220x18: the text is hard to read against its background. Fix: raise the contrast to at least 4.5:1.
+2. hit_region: e15 button "×" @390,60 20x20: too small to tap reliably (20x20 pt). Fix: make it at least 44x44 pt.
+3. description: e9 button @16,60 30x30: no label, so VoiceOver says only "button". Fix: give it an accessibility label.
+Checked: contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, duplicate_id. Not checked here: overlap.
+```
+- Issue line: `<n>. <type>: <element line or "the screen">: <what is wrong>. Fix: <how>.`, plus Tapline's
+  `   at <file>:<line>` on its own line when known.
+- At most 30 issues; then `(+N more issues; pass types to narrow it.)`.
+- None: `Audit of "Sign up": no issues found.` and the `Checked:` line.
+- The name in quotes is the screen's title where the tool knows it (Tapline: the route's), else the app's
+  name (Tapwright: XCTest gives no screen title).
+- An element off screen is audited only where the tool can (XCTest audits what is on screen).
+
+## 11. Safety policy, confirmation and dry runs
+
+### 11.1 The policy
+
+Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy applies:
+```json
+{"version": 1,
+ "confirm": ["Buy", "Purchase", "Subscribe", "Pay", "Delete", "Remove", "Send", "Post", "Publish",
+             "Sign out", "Log out", "Erase"],
+ "block": [],
+ "apps": {"com.example.app": {"confirm": [], "block": ["Delete account"]}}}
+```
+- A word matches the touched element's own label or text, whole words, ignoring case (`Delete trip` matches
+  `Delete`; `Deleted` doesn't). For a point target, the element under the point.
+- Touches checked: `tap`, `long_press`, `toggle`. Nothing is checked on `type_text`'s `submit` (the form's
+  button tap is what the policy checks), and not `alert` answers (permission prompts are what a new user
+  answers). testIDs and accessibility identifiers are never matched.
+- Per-app lists replace the global ones for that app. `"confirm": []` turns confirmation off (a dedicated
+  test device with test data).
+- `--no-policy` is the same as `{"confirm": [], "block": []}`.
+
+### 11.2 Answers
+
+- Blocked: `Error not_allowed: blocked: button "Delete account" is blocked by the policy ("Delete account"); don't try another way.`
+- Needs a person's OK:
+  `Error not_allowed: needs_confirmation: button "Delete trip" needs a person's OK (policy word "Delete"). The live view asks them now; when they allow it, make the same call again. If nobody is watching, ask your user.`
+- The agent may never confirm by itself. There is no parameter that skips the check.
+
+### 11.3 The person's OK (VIEWER-PROTOCOL 1.5)
+
+- Server → viewer: `{"type": "confirm", "id": "c7", "by": "agent", "kind": "tap", "caption": "Tap \"Delete trip\"", "word": "Delete", "expires": <ms>}`.
+- The viewer shows it over the phone: the caption, **Allow once** and **Don't allow**, keyboard reachable
+  (Enter = Don't allow by default, focus starts on Don't allow).
+- Viewer → server: `{"type": "confirm_answer", "id": "c7", "allow": true}`. Any viewer may answer; the
+  first answer wins; the request expires after 120 s.
+- An allow lets exactly one matching call through within 120 s: the same tool on the same element. Its
+  answer ends `Note: a person allowed this.` A refusal or expiry: the retry answers needs_confirmation again,
+  with `They declined.` or `Nobody answered.` added.
+- The live view is the only place a request is answered, for both tools: a prompt on the phone could be
+  pressed by an agent.
+
+### 11.4 Dry run
+
+`dry_run: true` on a touch tool resolves the target and runs every check, then touches nothing:
+`Would tap e12 button "Delete trip" at 215,640.` plus, when the policy applies, ` It needs a person's OK (policy word "Delete").`
+On `run`: checks every step's parameters, resolves step 1 only (later steps depend on what step 1 does) and
+answers `Would run 5 steps; step 1 would tap e12 button "Sign up" at 215,640.`
+
+## 12. Action log
+
+- One JSON object per line, appended to `~/.tapwright/log/actions-YYYY-MM-DD.jsonl` (Tapline:
+  `~/.tapline/log/…`). Files older than 14 days are deleted at start. `--no-log` turns it off.
+- Fields: `t` (ISO 8601 UTC, ms), `source` (`tapwright` | `tapline`), `by` (`agent` | `person`), `tool`,
+  `target` (as given), `element` (its line without the ref; none for a point), `ok`, `code` and `reason` (on
+  failure), `ms`, `app`, `batch` (`{"id": "...", "step": 3}` inside `run`), `dry_run`, `confirmed` (true when
+  a person's OK let it through).
+- Typed text is never logged, only its length: `"chars": 12`. Secure fields: never anything but the length.
+- The viewer's Steps list and this log describe the same actions, with the same captions (VIEWER-PROTOCOL
+  1.4 tables).
+
+## 13. Answer size
+
+**Measured** (2026-11-12, Tapline). Text tokens were estimated as characters / 3.6, the same estimate for
+both tools; screenshots were counted apart, as w×h/750. Error answers are left out.
+- Tapline: 321 answers from the five cold-agent runs.
+- Tapwright: 141 answers from its agent sessions.
+
+| | look median / p95 | action median / p95 |
+|---|---|---|
+| Tapline | 307 / 464 | 114 / 450 (changes only: 69 / 158; a full list: 340 median) |
+| Tapwright | 226 / 383 | 230 / 413 |
+
+The bench records the same numbers on the lab (`J6` rows, report only), for a before and after on equal
+screens.
+
+**Rules** (simulated on the 321 Tapline answers: the action median goes from 114 to 77 tokens, −32%, and
+all tokens fall by 11%):
+
+1. **An action's first line names the element without its position and size.**
+   Example: `Tapped e3 button "Log in" id=login-button.` The list or change block that follows has
+   `@x,y wxh`. This covers every action verb (Tapped, Long-pressed, Typed into, Toggled, Scrolled…), and
+   the first line of a dry run, `Would tap e12 button "Delete trip" at 215,640.`, keeps its point.
+2. **A `~` line shows the element's `@x,y wxh` and `[actions]` only when they are among what changed.**
+   Example: `~ e6 text "20" (was "17")`. A move keeps its own `↕` line, with the position.
+3. **A long old value is cut to what changed.** An old value of 40 characters or less is shown whole. A
+   longer one is cut to the part that differs, plus 12 characters on each side, with `…` where it was cut:
+   - Count characters as Unicode code points.
+   - `p` is the length of the common prefix of the old and new values.
+   - `s` is the length of the common suffix of what remains of each after `p`.
+   - The shown text is `old[max(0, p−12) .. len−max(0, s−12)]`, with `…` before it when the start is above
+     0 and `…` after it when the end is below `len`.
+   - When nothing would be cut, the whole value stays.
+   - This applies to each old value in `(was …)` and `(off screen; was …)`.
+
+   Examples:
+   - `pressed=- typed= typed2= switch=off taps=2 long=0 slow=0 anim=off sheet=closed alert=none` → typed
+     becomes `hello` → `(was "…sed=- typed= typed2= swi…")`
+   - `Total: 12 items in your basket, delivery on Thursday 14 May` → `(was "…delivery on Thursday 14 May")`
+   - `Tap me 17` → `(was "Tap me 17")` (40 characters or less: whole)
+4. **The list leaves out the actions a role implies.** Those are: `[tap]` on a button, tab or link;
+   `[tap, type]` on an input; `[toggle]` on a switch; `[scroll]` on a scroll view. Any other set is listed in
+   full, for example `e4 button "Save" [tap, longPress]` or `e9 text "Help" [tap]`. The shared instructions
+   carry this line: "A button, tab or link can be tapped, an input typed into, a switch toggled and a scroll
+   view scrolled; other actions are listed in brackets."
+5. *(Tapline only, below 1%.)* type_text's first line leaves out `value=`, because the sentence `Value is
+   now "…"` says it.
+
+**Guard.** The 16:00 cold-agent run and the A-charter run decide whether the rules stay. If any misread is
+traced to a rule, that rule is rolled back: rule 4 first, then rule 3.
