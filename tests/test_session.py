@@ -177,6 +177,30 @@ def test_the_session_follows_the_phone_into_landscape_and_back(phone):
     assert s.screen == (430.0, 932.0) and s.turn == 0
 
 
+def test_turning_from_one_landscape_side_to_the_other_is_followed(phone, monkeypatch):
+    """Seen on the phone 2026-11-11: from landscape left straight to landscape right the tree stays 932x430, and the
+    turn stayed the old side's (the frames came upside down). In landscape the side is asked again now and then."""
+    monkeypatch.setattr(session_module, "TURN_RECHECK", 0.0)
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    s.screen = (430.0, 932.0)
+    z, real = [270], phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/source" in path:
+            return {"value": '<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="C" '
+                             'label="C" enabled="true" x="0" y="0" width="932" height="430"/></AppiumAUT>'}
+        if path.endswith("/rotation"):
+            return {"value": {"x": 0, "y": 0, "z": z[0]}}
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    asyncio.run(s.refresh())
+    assert s.turn == 270
+    z[0] = 90
+    asyncio.run(s.refresh())
+    assert s.turn == 90
+
+
 def test_one_stalled_touch_keeps_the_session_and_says_it_is_not_known(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a tap got no answer for 30 s, then WebDriverAgent was started
     again, though it answered every other request. A touch can't be sent twice, so the caller hears that the

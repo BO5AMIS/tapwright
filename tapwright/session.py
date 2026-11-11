@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import re
+import time
 from dataclasses import dataclass
 
 from . import store, ui
@@ -23,8 +24,10 @@ BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a bann
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
-# How far to turn a captured frame clockwise for each WebDriverAgent rotation z: to be checked on the phone
-TURN_FOR_Z = {90: 270, 270: 90}
+# How far to turn a captured frame clockwise for each WebDriverAgent rotation z (checked on the phone 2026-11-11 with
+# Calculator in each landscape side: the frame turned this way reads upright)
+TURN_FOR_Z = {90: 90, 270: 270}
+TURN_RECHECK = 1.0  # seconds: in landscape, how often which side is asked again (the tree can't tell the sides apart)
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -69,6 +72,7 @@ class Session:
         # Degrees the stream's frames are turned clockwise to stand upright: 0 in portrait. In landscape the tree
         # and window are 932x430 while WebDriverAgent's frames stay as captured (measured 2026-11-11).
         self.turn = 0
+        self._turn_asked = -float("inf")
         # Awaited with a touch's length in ms just before each touch while it is set: the daemon sets it for the
         # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
         self.touch_hook = None
@@ -177,12 +181,16 @@ class Session:
         if root is None:
             return
         w, h = float(root.group(1)), float(root.group(2))
-        if w <= 0 or h <= 0 or (w > h) == (self.screen[0] > self.screen[1]):
+        if w <= 0 or h <= 0:
             return
+        same = (w > h) == (self.screen[0] > self.screen[1])
+        if same and (w <= h or time.monotonic() - self._turn_asked < TURN_RECHECK):
+            return  # (in landscape the phone may have turned to the other side: asked again now and then)
         self.screen = (w, h)
         if w <= h:
             self.turn = 0
             return
+        self._turn_asked = time.monotonic()
         try:
             z = int((await self._call("GET", "/session/{sid}/rotation", timeout=LOCK_WAIT)).get("value", {}).get("z", 0))
         except (DeviceError, TypeError, ValueError):
