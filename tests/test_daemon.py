@@ -4327,6 +4327,21 @@ def test_scroll_to_a_text_goes_to_the_exact_match_off_screen_before_a_partial_on
     run(go)
 
 
+def test_scroll_to_the_end_stops_as_soon_as_the_tree_shows_nothing_past_the_edge():
+    """Over Wi-Fi waiting for the pictures to repeat took 4 to 14 s. Where the tree has the rows past the edge (React
+    Native renders the whole list), the read after a drag says when the end is reached."""
+    async def go():
+        d = make(settle_still=0.03, settle_quiet=0.03)
+        stop, task = await started(d)
+        rows = LongList(d, rows=12)  # 12 rows of 100 pt in an 800 pt screen: two drags of 0.8 reach the end
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"to": "end", "look": False})
+        assert r["text"].startswith("Scrolled") and rows.offset == rows.lowest
+        assert len(d.session.scrolls) <= 2  # no extra drag to see the pictures repeat
+        await finish(stop, task)
+    run(go)
+
+
 def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
     """A first-time agent needed five calls to reach one button: off_screen, two scrolls by guess, covered under
     a bar, a third scroll. One call now, and the off_screen message says which."""

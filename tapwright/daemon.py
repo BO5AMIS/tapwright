@@ -1211,6 +1211,12 @@ class Daemon:
                 s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
         x0, y0, x1, y1 = ui.scroll_area_points(direction, area.rect if area else (0.0, 0.0, *s.screen),
                                                a.get("amount", 0.8), band)
+        bounds = area.rect if area else (0.0, 0.0, *s.screen)
+        # Whether the tree shows what lies past the list's edge. Where it does (React Native renders a whole list),
+        # the end is reached when a read after a drag shows nothing past it any more: no waiting for the pictures
+        # to repeat, which over Wi-Fi took 4 to 14 s. A list that keeps only its visible rows shows nothing past
+        # its edge either way: it is scrolled as before, until the pictures stop changing.
+        beyond = bool(to) and direction in ("up", "down") and self._more_beyond(direction, bounds)
         loop = asyncio.get_running_loop()
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
@@ -1220,6 +1226,10 @@ class Daemon:
                 break
             await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
             settled = self._mark()[1]
+            if beyond:
+                await self._silent_read(view)
+                if not self._more_beyond(direction, bounds):
+                    break  # the tree said there was more past that edge, and now there is none: reached
             if alike(settled, previous):
                 break  # the swipe left the screen as the one before did: the end of the list
             previous = settled  # (with no stream there is nothing to compare: every swipe is made)
@@ -1230,6 +1240,20 @@ class Daemon:
         done = Scrolled(f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}.")
         done.note = note
         return done
+
+    def _more_beyond(self, direction: str, bounds: tuple[float, float, float, float]) -> bool:
+        """Does the last read have elements past the scroll area's top (`up`) or bottom (`down`) edge, within its
+        width? What a list holds beyond its edge is in the tree (React Native renders it, UIKit keeps nearby rows);
+        an empty answer means its start (or end) is on screen."""
+        x, y, w, h = bounds
+        for e in getattr(self.session, "offscreen", []):
+            if e.x + e.width <= x or e.x >= x + w:
+                continue  # beside the area (a carousel's cards), not past its edge
+            if direction == "up" and e.y + e.height <= y + 1:
+                return True
+            if direction == "down" and e.y >= y + h - 1:
+                return True
+        return False
 
     def _anywhere(self, view, target: ui.Target) -> ui.Element:
         """The element a target names, on the agent's list or, failing that, among what the last read found off
