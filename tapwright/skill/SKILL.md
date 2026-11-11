@@ -192,5 +192,7 @@ took more than a few seconds (`Settled in` gives the time).
 | calling `back` again when it answered `no_action` | the message names what is open: tap its close control |
 | using `x` and `y` because a ref went stale | `look`, then use the id or the new ref |
 | reporting "couldn't sign in" as a bug | list it under what you couldn't test |
+| typing a password with `look: false` and moving on | iOS may open its "Use Strong Password?" sheet on a password field, and the keys typed meanwhile can go missing. Read the answer's `Value is now`; if the sheet is up, tap "Choose My Own Password" (never accept a suggested password: it would be saved to the owner's keychain), then type again |
+| leaving the app when iOS asks for a permission ("Would Like to Send You Notifications") | the prompt is the app's: answer it with `alert`, as a new user would. The header shows the home screen behind it; the app is still under it |
 | treating a touch that a notification took as the app's bug | a touch near the top can land on a banner that came down at that moment. Tapwright then opens your app again and says `came to the front after the touch`: look, then do the step again, unless the app was meant to open that app. Report it only if it keeps happening |
 | reporting a button that does nothing on one spot only | take a `screenshot`. A grey cursor ring there, or a dark menu with Home and Notification Center, is iOS AssistiveTouch, which the element list doesn't show. Tap well outside the menu once to close it, and tell the user to disconnect the pointer |
