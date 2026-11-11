@@ -177,7 +177,9 @@ experimental.
   asked for exactly that: this part is guidance, not enforcement.
 - Notification banners cover the top of the screen for a few seconds. Tapwright waits them
   out and won't touch under one, which can slow a run on a phone that gets notifications.
-  Don't silence them with a Focus: iOS shares a Focus with your other devices.
+  Don't silence them with a Focus: iOS shares a Focus with your other devices. On a test phone,
+  switch off Allow Notifications per app in Settings > Notifications instead; that stays on the
+  one phone.
 - Landscape: `rotate` turns the phone; the live view, screenshots and touches follow it (checked
   on both sides: taps, typing, scrolling, the keyboard, a live-view tap).
 - AssistiveTouch: with a mouse or other pointer connected, iOS shows a cursor, and a tap on
