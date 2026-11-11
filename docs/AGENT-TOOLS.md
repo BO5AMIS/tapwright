@@ -533,7 +533,7 @@ Targets are resolved when the step runs, against the screen as it is then. Refs 
 
 Optional on every step. One of `text`, `id`, `label` (same matching as `wait_for`), with optional:
 - `gone: true`: it must not be on screen;
-- `value`: with `id` or `label`, the element's value must equal it (a switch: `"on"`/`"off"`);
+- `value`: with `id` or `label`, the element's value must equal it (a switch: `"on"` or `"off"`; `"true"` and `"false"` also work, as its line shows `checked=`);
 - `timeout`: seconds, 0.5–30, default **2**.
 
 After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout.

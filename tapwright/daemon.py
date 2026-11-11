@@ -133,6 +133,7 @@ SYSTEM_IN_FRONT = "the home screen, Notification Center or Control Center"
 RECHECK_WITHIN = 5.0  # seconds: a banner's theft shows within about one; later, the agent or a person moved on
 NOTE_KEYBOARD = "closed the keyboard first."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
+KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
@@ -970,6 +971,8 @@ class Daemon:
         points = [n for n, step in enumerate(data["steps"], 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
+        if data.get("fresh", True) and data.get("app"):
+            notes.append("Note: the app was closed and opened again first (the script's \"fresh\").")
         return await self._batch(client_id, data["steps"], scope, args, notes)
 
     async def _dry_batch(self, client_id: str, steps: list[dict], scope: "Scope | None") -> dict:
@@ -1080,7 +1083,7 @@ class Daemon:
                 found = ui.resolve(view.items, target)
             except Refused:
                 found = None
-            if isinstance(found, ui.Element) and batch.value_of(found) == expect["value"]:
+            if isinstance(found, ui.Element) and batch.has_value(found, expect["value"]):
                 return None
             if self.control.clock() >= deadline:
                 return batch.expect_failed(expect)
@@ -2062,6 +2065,11 @@ class Daemon:
         if (blank := ui.blank_point([*view.items, *hidden], s.screen, top, bottom)) is not None:
             await s.tap(ui.Target(x=blank[0], y=blank[1]))
             await self._silent_read(view)
+        if view.read_keyboard and (drag := self._dismiss_drag(view.items, top, bottom)) is not None:
+            # many lists close the keyboard when dragged (keyboardDismissMode on-drag, as a person flicks a list
+            # down to hide it); a short pull down at its top moves the content at most a little, and back
+            await s.swipe(*drag, duration_ms=250)
+            await self._silent_read(view)
         app = self._bundle()
         # WebDriverAgent's dismissal looks for a key that hides the keyboard; an iPhone keyboard often has none, and the
         # search takes about 4 s: once it failed in an app, it isn't tried there again this session
@@ -2071,6 +2079,16 @@ class Daemon:
             elif app is not None:
                 self._no_dismiss.add(app)
         return "" if view.read_keyboard else NOTE_KEYBOARD
+
+    @staticmethod
+    def _dismiss_drag(items: list[ui.Element], top: float, bottom: float) -> tuple[float, float, float, float] | None:
+        """A short pull down near the top of the biggest scroll view above the keyboard (x0, y0, x1, y1), or None."""
+        views = [e for e in items if e.role == "scroll" and not e.in_alert and e.y + 60 < bottom and e.y + e.height > top]
+        if not views:
+            return None
+        v = max(views, key=lambda e: e.width * e.height)
+        x, y = v.x + v.width / 2, max(v.y, top) + 20
+        return x, y, x, min(y + 40, bottom - 10)
 
     def _under_keyboard(self, target: ui.Target) -> bool:
         """Is the target an element the last read found past its scroll view's edge but still on the phone's
@@ -2248,6 +2266,10 @@ class Daemon:
                                             f"list to its top; {SCROLL_HINT}")
         if over[0].kind == "TabBar":
             raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; {SCROLL_HINT}")
+        scrolls = any(e.role == "scroll" and ui._holds(e.rect, element.center) for e in self.session.items)
+        if over[0].kind == "Keyboard" and not scrolls:  # it stayed up; no scrolling moves a tab bar from under it
+            raise Refused("not_actionable", f"covered: {line} is under the keyboard, and this app doesn't close it on a "
+                                            f"touch outside the field; {KEYBOARD_HINT}")
         if over[0].kind in ui.COVERING_BARS:
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
@@ -2382,7 +2404,8 @@ class Daemon:
                  y + h / 2 if shown is None else shown[1])
         over = next((b for b in switch.covered_by if ui._holds(b.rect, point)), None)
         if over is not None:
-            hint = SCROLL_HINT if over.kind in ui.COVERING_BARS else "move or close it first."
+            hint = (KEYBOARD_HINT if over.kind == "Keyboard" else SCROLL_HINT if over.kind in ui.COVERING_BARS
+                    else "move or close it first.")
             raise Refused("not_actionable", f"covered: {switch.line(actions=False)} is covered by {over.line}; {hint}")
         return point
 

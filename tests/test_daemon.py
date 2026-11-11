@@ -4091,7 +4091,8 @@ def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_sho
         d.session.screen = (430.0, 932.0)
         await looked(d, [el("e1", "switch", "Switch", "lab-switch", rect=(351, 612, 63, 28), checked=False,
                             covered_by=(KEYBOARD,)),
-                         el("e2", "switch", "Tall", rect=(351, 590, 63, 50), checked=False, covered_by=(KEYBOARD,))])
+                         el("e2", "switch", "Tall", rect=(351, 590, 63, 50), checked=False, covered_by=(KEYBOARD,)),
+                         el("e3", "scroll", "", rect=(0, 100, 430, 749))])  # the form scrolls: that is the way out
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
         assert e.value.code == "not_actionable"
@@ -5153,5 +5154,20 @@ def test_a_point_tap_with_force_or_after_an_answer_without_a_list_is_not_checked
         d.hub.publish(block_jpeg((30, 30, 70, 70)))
         await d.run_tool("a", "tap", {"target": {"x": 100, "y": 100}, "look": False})
         assert d.session.calls.count("tap") == 2
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_tab_under_a_keyboard_that_stays_up_says_how_to_close_it():
+    """A first-time agent was told to scroll to a tab under the keyboard (2026-11-12); no scroll moves a tab bar."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "button", "Settings", "tab-settings", rect=(286, 849, 144, 50), covered_by=(KEYBOARD,))])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert str(e.value).endswith("is under the keyboard, and this app doesn't close it on a touch outside the field; "
+                                     "type_text into the field with submit: true closes it (it presses return).")
         await finish(stop, task)
     run(go)

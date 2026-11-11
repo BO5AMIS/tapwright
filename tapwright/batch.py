@@ -109,6 +109,13 @@ def value_of(element: ui.Element) -> str:
     return element.value
 
 
+def has_value(element: ui.Element, want: str) -> bool:
+    """Does the element hold the expected value? A switch also takes "true" and "false", as its line shows it."""
+    if element.checked is not None:
+        want = {"true": "on", "false": "off"}.get(want.strip().lower(), want.strip().lower())
+    return value_of(element) == want
+
+
 def load_script(path: str) -> dict:
     """A script file (§9.4), checked."""
     try:

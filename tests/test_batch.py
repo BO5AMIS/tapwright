@@ -213,3 +213,9 @@ def test_record_saves_under_its_name_with_a_wait_for_as_the_steps_expect_and_rep
         assert e.value.code == "bad_params" and 'no saved script called "nope" (saved: save it)' in str(e.value)
         await finish(stop, task)
     run(go)
+
+
+def test_a_switch_expectation_also_takes_true_and_false():
+    switch = el("e4", "switch", "Alerts", "alerts", rect=(10, 400, 300, 44), checked=True)
+    assert batch.has_value(switch, "on") and batch.has_value(switch, "true") and batch.has_value(switch, "True")
+    assert not batch.has_value(switch, "false")
