@@ -215,6 +215,10 @@ doesn't skip it, and `alert` answers are never checked. `tapwright mcp --policy 
 words as JSON: `confirm` and `block` lists, and per app lists that replace them for that app (a block
 is final: `not_allowed: blocked`); `--no-policy` turns the check off, for a test phone with test data.
 `dry_run: true` on a touch tool says what it would do, policy included, and touches nothing.
+The policy guards against mistakes, not against an agent set on getting around it: the live view's
+link, and with it the Allow button, are on the same computer the agent runs on. Only the live view page
+can answer (a request carries a random id, and an answer from anything but the page is ignored), but an
+agent with a shell could still forge one. Use a test phone with test data for agents you don't trust.
 
 A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
 the agent's last look: a sheet or a banner that came in meanwhile would take the touch.
