@@ -4,6 +4,38 @@ What Tapwright measures against, how, and the latest numbers. The targets are th
 [quality bar](QUALITY-BAR.md), the same for Tapwright and Tapline. The runner is the shared benchmark in
 Tapline's repository (`bench/`): it drives a tool through MCP exactly as an agent does.
 
+## 1.1.0, 2026-11-12
+
+The same lab, phone and runner as below, at commit `47985a2` (AGENT-TOOLS 1.8: batches, the audit, the policy,
+shorter answers). Three runs, minutes apart: Appium's prebuilt WebDriverAgent over USB, and Tapwright's own build
+(Appium's 16.15.3 plus a fast tap, `bo5amis/WebDriverAgent` tw-16.15.3.1) over USB and over Wi-Fi. Median / p95,
+in seconds.
+
+| | Appium runner, USB | Tapwright runner, USB | Tapwright runner, Wi-Fi | Target (USB; Wi-Fi) |
+|---|---|---|---|---|
+| Tap (S1) | 0.69 / 0.70 | **0.49** / 0.83 | **0.93 / 1.07** | 0.7 / 1.2; 1.0 / 1.5 |
+| Type | 0.75 / 0.83 | 0.75 / 1.10 | 1.13 / 1.56 | 0.7 / 1.2; 1.0 / 1.5 |
+| Toggle | 0.65 / 0.70 | **0.45** / 1.16 | **0.83 / 1.13** | 0.7 / 1.2; 1.0 / 1.5 |
+| Scroll, by a real touch | 1.45 / 1.73 | 1.45 / 1.91 | 1.82 / 2.38 | 1.5 / 2.0 |
+| Look, text only (S2) | 0.16 / 0.20 | 0.16 / 0.18 | 0.35 / 0.59 | 0.5 / 1 |
+| Look with a screenshot (S3) | 0.23 / 0.25 | 0.21 / 0.25 | 0.35 / 0.56 | 0.8 / 1.5 |
+| Start to ready (S5) | 1.73 | (cold: 16.4) | 2.70 | 5 |
+| A person's tap to the picture (V1) | 0.23 / 0.25 | **0.13** / 0.15 | 0.27 / 0.63 | 0.3 / 0.5 |
+| Frames a second (V2) | 27.1 | 27.4 | 25.1 | 15 |
+| An agent's tap while someone watches (V7) | 0.68 | 0.49 | 0.91 / 1.40 | 0.7; 1.0 |
+| Reliability R1 to R6 | 0 misses | 1 (R3: the share sheet didn't open once) | 0 misses | 0 |
+
+- **Tapwright's own runner is the default from 1.1.** A tap is 29% faster over USB, and over Wi-Fi a tap and a
+  toggle are within Wi-Fi's own bar for the first time (1.0 had 1.03 / 1.55 s). The touch itself takes about
+  0.25 s on the phone instead of 0.4: the runner hands it to XCTest without waiting for the app to go idle,
+  and the read after it confirms what happened, as before. Its p95 is less even (one slow read in 20 is
+  enough). `TAPWRIGHT_WDA=appium tapwright setup --force` goes back to Appium's runner.
+- **Still over the bar:** typing over USB (0.75 s, both runners) and over Wi-Fi (1.13 s), the Wi-Fi scroll,
+  and the Wi-Fi V1 p95.
+- **Answer size (J6), same lab:** look 431 tokens (p95 447), an action's answer 12 tokens (p95 423, when a new
+  screen answers with its whole list); a look's screenshot 1,040 image tokens.
+- **The cold start** (16.4 s) came from stopping the daemon just before the run; a warm start is 1.7 s.
+
 ## Setup
 
 | | |
