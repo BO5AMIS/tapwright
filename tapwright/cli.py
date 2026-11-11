@@ -19,7 +19,7 @@
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      connect an agent in one go: register the MCP server and install the skill
-  tapwright replay FILE... [--junit OUT] [--dedicated]
+  tapwright replay FILE|NAME... [--junit OUT] [--dedicated]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
 
@@ -483,7 +483,7 @@ def replay(a) -> int:
     from .control import Refused
     results: list[tuple[str, str, str, float]] = []  # (file, "ok" | "failed" | "error", message, seconds)
     for f in a.files:
-        path = str(Path(f).resolve())
+        path = str(Path(f).resolve()) if Path(f).exists() else str(batch.named(f))  # a file, else a saved name
         began = time.monotonic()
         try:
             data = batch.load_script(path)

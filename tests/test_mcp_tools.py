@@ -27,9 +27,9 @@ EXPECTED = {
     "audit": {"types"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot"},
     "record": {"start", "stop", "name", "path"},
-    "replay": {"path", "look", "screenshot"},
+    "replay": {"name", "path", "look", "screenshot"},
 }
-REQUIRED = {"run": ["steps"], "replay": ["path"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
+REQUIRED = {"run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
             "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
 DEFAULTS = {

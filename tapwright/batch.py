@@ -168,5 +168,34 @@ def _matches(element: ui.Element, kind: str, value: str) -> bool:
     return element.text == value
 
 
+def scripts_dir() -> Path:
+    """Where `record` saves a script by its name, and `replay` finds it: ~/.tapwright/scripts."""
+    from .store import HOME
+    return HOME / "scripts"
+
+
+def named(name: str) -> Path:
+    """The file of a saved script: its name, made safe for a file name."""
+    safe = "".join(c if c.isalnum() or c in "-_ ." else "-" for c in name).strip(" .") or "recording"
+    return scripts_dir() / f"{safe}.json"
+
+
+def saved() -> list[str]:
+    """The names of the saved scripts, sorted."""
+    folder = scripts_dir()
+    return sorted(p.stem for p in folder.glob("*.json")) if folder.is_dir() else []
+
+
+def resolve(name: str | None, path: str | None) -> str:
+    """The file to replay: `path` as given, else the saved script called `name`."""
+    if path:
+        return path
+    file = named(name or "")
+    if not file.exists():
+        known = ", ".join(saved()) or "none yet"
+        raise Refused("bad_params", f'no saved script called "{name}" (saved: {known})')
+    return str(file)
+
+
 def script(name: str, app: str | None, steps: list[dict]) -> dict:
     return {"format": FORMAT, "version": VERSION, "name": name, "app": app, "fresh": True, "steps": steps}

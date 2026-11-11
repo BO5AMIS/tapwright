@@ -188,3 +188,28 @@ def test_a_fresh_replay_reopens_the_app_and_waits_for_what_step_one_aims_at(tmp_
         assert calls.index("terminate") < calls.index("launch") < len(calls) - 1 - calls[::-1].index("tap")
         await finish(stop, task)
     run(go)
+
+
+def test_record_saves_under_its_name_with_a_wait_for_as_the_steps_expect_and_replay_finds_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "scripts_dir", lambda: tmp_path)
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = list(FORM)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "replay", {})
+        assert r["text"].startswith("No saved scripts yet")
+        await d.run_tool("a", "record", {"start": True, "name": "save it"})
+        await d.run_tool("a", "tap", {"target": {"id": "save"}, "look": False})
+        await d.run_tool("a", "wait_for", {"id": "save", "timeout": 3, "look": False})
+        r = await d.run_tool("a", "record", {"stop": True})
+        assert r["text"] == f"Saved 1 steps to {tmp_path / 'save it.json'}."
+        saved = json.loads((tmp_path / "save it.json").read_text("utf-8"))
+        assert saved["steps"] == [{"tool": "tap", "target": {"id": "save"}, "expect": {"id": "save", "timeout": 3.0}}]
+        assert (await d.run_tool("a", "replay", {}))["text"] == "Saved scripts: save it."
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"name": "nope"})
+        assert e.value.code == "bad_params" and 'no saved script called "nope" (saved: save it)' in str(e.value)
+        await finish(stop, task)
+    run(go)

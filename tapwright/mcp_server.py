@@ -245,8 +245,10 @@ async def record(start: bool = False, stop: bool = False, name: str | None = Non
 
 
 @server.tool(description=describe("replay"), structured_output=False)
-async def replay(path: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("replay", path=str(Path(path).resolve()), look=look, screenshot=screenshot)
+async def replay(name: str | None = None, path: str | None = None, look: bool = True,
+                 screenshot: bool = False) -> CallToolResult:
+    return await _tool("replay", **({"name": name} if name else {}),
+                       **({"path": str(Path(path).resolve())} if path else {}), look=look, screenshot=screenshot)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("audit"), structured_output=False)

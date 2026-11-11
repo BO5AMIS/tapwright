@@ -862,6 +862,10 @@ class Daemon:
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
             return await self._batch_tool(client_id, name, args, scope)
+        if name == "wait_for" and client_id in self._recording:
+            answer = await self._run_tool_inner(client_id, name, args, scope)
+            self._record_expect(client_id, args)
+            return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
             aimed = self._aim_for_recording(client_id, name, args)
@@ -901,6 +905,19 @@ class Daemon:
             return None
         return batch.recorded_target(args.get("target"), self.control.client(client_id).items)
 
+    def _record_expect(self, client_id: str, args: dict) -> None:
+        """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
+        rec = self._recording[client_id]
+        kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
+        if not rec["steps"] or kind is None or "expect" in rec["steps"][-1]:
+            return
+        expect: dict = {kind: args[kind]}
+        if args.get("gone"):
+            expect["gone"] = True
+        if args.get("timeout") is not None:
+            expect["timeout"] = min(max(float(args["timeout"]), batch.EXPECT_MIN), batch.EXPECT_MAX)
+        rec["steps"][-1]["expect"] = expect
+
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
         """An action that succeeded while this agent records becomes a step of its script."""
         rec = self._recording.get(client_id)
@@ -926,9 +943,14 @@ class Daemon:
             if args.get("dry_run"):
                 return await self._dry_batch(client_id, steps, scope)
             return await self._batch(client_id, steps, scope, args)
-        if not isinstance(args.get("path"), str) or not args["path"]:
-            raise Refused("bad_params", "replay needs the path of a script file")
-        data = batch.load_script(args["path"])
+        for key in ("name", "path"):
+            if args.get(key) is not None and (not isinstance(args[key], str) or not args[key]):
+                raise Refused("bad_params", f"{key} must be a non-empty string, not {args[key]!r}")
+        if not args.get("name") and not args.get("path"):
+            names = batch.saved()
+            return _answer([f"Saved scripts: {', '.join(names)}." if names else
+                            "No saved scripts yet: record one with record start: true, then stop: true."])
+        data = batch.load_script(batch.resolve(args.get("name"), args.get("path")))
         if data.get("fresh", True) and data.get("app"):
             # a known start: the app closed and opened again (Tapline reloads its JS instead)
             await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
@@ -970,14 +992,15 @@ class Daemon:
                 raise Refused("bad_params", f"name must be a string, not {name!r}")
             self._recording[client_id] = {"name": name, "app": None, "steps": []}
             return _answer(["Recording: every action that succeeds from now on is saved as a step. Call record with "
-                            "stop: true and a path to save the script."])
+                            "stop: true to save the script (under its name, or to a path)."])
         if args.get("stop"):
-            path = args.get("path")
-            if not isinstance(path, str) or not path:
-                raise Refused("bad_params", "record with stop: true needs a path to save the script to")
             rec = self._recording.get(client_id)
             if rec is None:
                 raise Refused("bad_params", "nothing is being recorded; start with record start: true")
+            path = args.get("path")
+            if path is not None and (not isinstance(path, str) or not path):
+                raise Refused("bad_params", f"path must be a file path, not {path!r}")
+            path = path or str(batch.named(rec["name"]))
             try:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
                 pathlib.Path(path).write_text(json.dumps(batch.script(rec["name"], rec["app"], rec["steps"]),
@@ -986,7 +1009,8 @@ class Daemon:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
             return _answer([f"Saved {len(rec['steps'])} steps to {path}."])
-        raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true with a path")
+        raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
+                                    "path)")
 
     async def _batch(self, client_id: str, steps: list[dict], scope: "Scope | None", args: dict,
                      notes: list[str] | None = None) -> dict:

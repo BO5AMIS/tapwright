@@ -109,7 +109,7 @@ Settled in 0.31 s.
     `(was text="…", value="…")`, naming each one. The fields are text, label, value,
     checked, selected, disabled and actions. An input that showed its placeholder and now
     holds a value reads `(was placeholder "<old>")` (v1.7). **A frame never appears in `~`**;
-  - `~ <element line without a ref> (off screen; was "<old>")` for an element that lies above
+  - `~ <element line without a ref, position or [actions]> (off screen; was "<old>")` (§13) for an element that lies above
     or below the screen, before and now, whose text, label, value, checked, selected or
     disabled changed (v1.6): the effect of a tap that is scrolled out of view. Off-screen
     elements that are new, gone or moved aren't listed (a scroll moves all of them). Up to 5
