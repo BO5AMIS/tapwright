@@ -418,3 +418,18 @@ def test_the_server_reads_the_header_and_refuses_a_bad_one():
             assert r.status_code == 400 and r.json()["error"]["code"] == "bad_params"
             assert "policy" in r.json()["error"]["message"]
         assert json.dumps(d.session.calls.count("tap")) == "1"
+
+
+def test_a_viewer_that_connects_while_a_request_is_open_is_sent_it():
+    async def go():
+        d = make()
+        d._queues_seen = d.subscribe()
+        stop, task = await ready(d)
+        assert d.open_confirms() == []
+        await refused(d, "tap", TAP)
+        (ask,) = d.open_confirms()
+        assert ask["type"] == "confirm" and ask["id"] == "c1" and ask["word"]
+        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": False})
+        assert d.open_confirms() == []
+        await finish(stop, task)
+    run(go)

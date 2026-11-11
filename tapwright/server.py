@@ -227,6 +227,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         queue = daemon.subscribe()
         daemon.ws_clients += 1
         queue.put_nowait(daemon.status())
+        for ask in getattr(daemon, "open_confirms", lambda: [])():  # a request made before this viewer came
+            queue.put_nowait(ask)
 
         async def send_all():  # the only writer on this socket
             while True:

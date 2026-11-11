@@ -341,6 +341,7 @@ class Confirm:
     key: tuple[str, ...]  # the element: its id, else its role, label and text
     until: float
     state: str = "pending"
+    message: dict | None = None  # what viewers were sent, for one that connects while it is open
 
 
 def _brief(e: ui.Element) -> str:
@@ -2169,9 +2170,10 @@ class Daemon:
             self._confirm_seq += 1
             request = Confirm(f"c{self._confirm_seq}", tool, key, now + CONFIRM_TTL)
             self._confirms[request.id] = request
-            self.broadcast({"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                            "caption": step_caption(tool, what, a), "word": word,
-                            "expires": int((time.time() + CONFIRM_TTL) * 1000)})
+            request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
+                               "caption": step_caption(tool, what, a), "word": word,
+                               "expires": int((time.time() + CONFIRM_TTL) * 1000)}
+            self.broadcast(request.message)
         return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"). The live view asks them "
                 "now; when they allow it, make the same call again. If nobody is watching, ask your user." + said)
 
@@ -2729,6 +2731,11 @@ class Daemon:
                 if attempt == 2:
                     raise Refused("reconnecting", "lost the connection to the phone; try again") from None
                 await self.wait_connected()
+
+    def open_confirms(self) -> list[dict]:
+        """The `confirm` messages still waiting for an answer, for a viewer that connects now (VIEWER-PROTOCOL 1.5)."""
+        now = self.control.clock()
+        return [c.message for c in self._confirms.values() if c.state == "pending" and c.until > now and c.message]
 
     # ---- a person, from the live view ----
     async def viewer_message(self, message: dict) -> dict | None:
