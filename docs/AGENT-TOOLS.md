@@ -272,6 +272,15 @@ input from the live viewer and also after a finger on the phone itself; `{ref}` 
 `stale` until the next full list either way. Tapline sees a touch inside its app (not one inside
 a `Modal`'s own window, and not one on what iOS draws) and says "the app".
 
+**A touch a notification took (Tapwright only).** A notification banner that comes down at the moment
+of a real touch near the top of the screen can take that touch and bring another app to the front.
+Tapwright then opens the app again and says so, for example: `Note: Mail (com.apple.mobilemail) came to
+the front after the touch: a notification banner over the top of the screen can take a touch there. Went
+back to Example (com.example.app); the touch may not have reached it. Look, then try again.` A permission
+prompt the touch raised doesn't count. Tapline's touches go through the app's own touch system, so a
+banner can't take them; when its app leaves the front for any reason, the next call answers
+`in_background`, and calls work again once the app is back in front. Either way the agent is told.
+
 **Change both:** Tapline puts notes in parentheses today, and Tapwright sends them as separate
 text items.
 
