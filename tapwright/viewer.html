@@ -393,6 +393,42 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 }
 #notice.on { opacity: 1; }
 #notice { bottom: auto; top: 12px; }
+/* The More menu: everything technical (Details, boxes, picture quality, the phone's keys), out of the bar. Drawn
+   by the page itself, so it follows the theme; a native select's list is drawn by the system (light text on white
+   in dark mode on Windows, seen by the owner). */
+.more { position: relative; }
+#more-btn[aria-expanded="true"] { background: var(--pressed); border-color: var(--accent); color: var(--accent); }
+#more-menu {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  top: calc(100% + 14px);
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.45);
+}
+.menu-group { display: flex; flex-direction: column; gap: 8px; }
+.menu-label { color: var(--text); opacity: 0.9; font-size: 12px; font-weight: 650; letter-spacing: 0.02em; }
+.menu-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg { display: flex; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 999px; }
+.seg button { flex: 1; min-height: 32px; padding: 0 10px; border: 0; background: transparent; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel-solid); }
+#phone-keys .menu-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+#phone-keys button { padding: 0 6px; }
+/* short visible names in the menu; the buttons' aria-labels keep the full ones */
+#more-menu #vol-down, #more-menu #vol-up { font-size: 0; }
+#more-menu #vol-down::after { content: "Vol \2212"; font-size: 14px; }
+#more-menu #vol-up::after { content: "Vol +"; font-size: 14px; }
+@media (max-width: 560px) {
+  #more-menu { position: fixed; left: 16px; right: 16px; width: auto; max-width: none; }
+}
 /* Presentation view (VIEWER-PROTOCOL 1.4): people see the step in plain words under the phone and a ripple at
    the touch. The element's name beside a touch, the boxes and the coordinates are the Details view's. */
 body:not(.details) .mark .tag { display: none; }
@@ -501,18 +537,36 @@ body:not(.details) .mark .tag { display: none; }
   <div id="tools" role="toolbar" aria-label="Viewer controls">
     <button type="button" id="pause" aria-pressed="false">Pause agent</button>
     <button type="button" id="steps-btn" aria-expanded="false" aria-controls="steps">Steps</button>
-    <button type="button" id="details" aria-pressed="false">Details</button>
-    <button type="button" id="boxes" aria-pressed="false" hidden>Boxes</button>
-    <label class="q" id="quality-wrap" hidden>Quality
-      <select id="quality" aria-label="Stream quality">
-        <option value="sharp">Sharp</option>
-        <option value="balanced" selected>Balanced</option>
-        <option value="light">Light</option>
-      </select>
-    </label>
-    <button type="button" id="home" hidden>Home</button>
-    <button type="button" id="vol-down" aria-label="Volume down" hidden>Volume down</button>
-    <button type="button" id="vol-up" aria-label="Volume up" hidden>Volume up</button>
+    <div class="more">
+      <button type="button" id="more-btn" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu">More</button>
+      <div id="more-menu" hidden>
+        <div class="menu-row">
+          <button type="button" id="details" aria-pressed="false">Details</button>
+          <button type="button" id="boxes" aria-pressed="false" hidden>Boxes</button>
+        </div>
+        <div class="menu-group" id="quality-wrap" role="group" aria-labelledby="quality-label" hidden>
+          <span class="menu-label" id="quality-label">Picture</span>
+          <div class="seg" id="quality-seg">
+            <button type="button" data-q="sharp" aria-pressed="false">Sharp</button>
+            <button type="button" data-q="balanced" aria-pressed="true">Balanced</button>
+            <button type="button" data-q="light" aria-pressed="false">Light</button>
+          </div>
+          <select id="quality" aria-label="Stream quality" hidden>
+            <option value="sharp">Sharp</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="light">Light</option>
+          </select>
+        </div>
+        <div class="menu-group" id="phone-keys" hidden>
+          <span class="menu-label">Phone</span>
+          <div class="menu-row">
+            <button type="button" id="home" hidden>Home</button>
+            <button type="button" id="vol-down" aria-label="Volume down" hidden>Volume down</button>
+            <button type="button" id="vol-up" aria-label="Volume up" hidden>Volume up</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </header>
 <main id="stage">
@@ -1195,6 +1249,8 @@ function createVideoBlock(io) {
     $("quality-wrap").hidden = !accepts.quality;
     var q = status && status.quality;
     if ((q === "sharp" || q === "balanced" || q === "light") && document.activeElement !== $("quality")) $("quality").value = q;
+    syncQuality();
+    $("phone-keys").hidden = !(accepts.home || accepts.volume);
     $("home").hidden = !accepts.home;
     $("vol-down").hidden = !accepts.volume;
     $("vol-up").hidden = !accepts.volume;
@@ -1691,6 +1747,45 @@ function createVideoBlock(io) {
   /* The drawn keys are a mouse shortcut for the toolbar's buttons (which stay the keyboard's way). */
   $("key-vol-up").addEventListener("click", function () { if (accepts.volume) $("vol-up").click(); });
   $("key-vol-down").addEventListener("click", function () { if (accepts.volume) $("vol-down").click(); });
+
+  /* The More menu. The picture quality is three buttons drawn by the page; the select stays (hidden) as the one
+     source of the value, so whatever drives it keeps working. */
+  function syncQuality() {
+    var v = $("quality").value;
+    var all = $("quality-seg").querySelectorAll("button");
+    for (var i = 0; i < all.length; i++) all[i].setAttribute("aria-pressed", all[i].getAttribute("data-q") === v ? "true" : "false");
+  }
+  $("quality-seg").addEventListener("click", function (ev) {
+    var b = ev.target && ev.target.closest ? ev.target.closest("button[data-q]") : null;
+    if (!b) return;
+    var sel = $("quality");
+    if (sel.value !== b.getAttribute("data-q")) {
+      sel.value = b.getAttribute("data-q");
+      sel.dispatchEvent(new Event("change"));
+    }
+    syncQuality();
+  });
+  $("quality").addEventListener("change", syncQuality);
+  function setMore(open) {
+    var menu = $("more-menu");
+    /* on a narrow screen the menu spans the width, just under the button */
+    menu.style.top = open && window.innerWidth <= 560 ? Math.round($("bar").getBoundingClientRect().bottom + 12) + "px" : "";
+    menu.hidden = !open;
+    $("more-btn").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  $("more-btn").addEventListener("click", function () {
+    setMore($("more-menu").hidden);
+    release(this);
+  });
+  document.addEventListener("pointerdown", function (ev) {
+    if (!$("more-menu").hidden && ev.target && !ev.target.closest(".more")) setMore(false);
+  }, true);
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && !$("more-menu").hidden) {
+      setMore(false);
+      $("more-btn").focus();
+    }
+  });
 
   /* Steps drawer and the Details view (VIEWER-PROTOCOL 1.4, presentation view). Details is remembered per
      browser; storage may be unavailable (a private window), and then it simply starts off. */
