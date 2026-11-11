@@ -11,6 +11,8 @@ MOVE_PT = 1.0  # a frame moved when x, y, width or height differ by more than th
 #                XML has whole points, so rounding alone can move a value by 1)
 MOVED_LISTED = 5  # up to this many moved elements get a line each; more become a count
 FULL_MIN = 8  # the full list replaces the changes above max(FULL_MIN, half the new list)
+WHOLE_OLD = 40  # an old value this long or shorter is shown whole in `(was …)`; a longer one is cut to what changed
+OLD_CONTEXT = 12  # characters of the old value kept on each side of what changed
 
 
 def highest(items: list[Element]) -> int:
@@ -115,17 +117,40 @@ def _flag(v: bool) -> str:
     return f'"{str(v).lower()}"'
 
 
+def cut_old(old: str, new: str) -> str:
+    """The part of an old value worth showing beside the new one (AGENT-TOOLS 1.8 §13 rule 3): the whole of it
+    when it has 40 characters or fewer, else what differs plus 12 characters each side, with `…` where it was
+    cut. Counted in code points; `p` is the common prefix, `s` the common suffix of what follows it."""
+    old, new = " ".join(old.split()), " ".join(new.split())
+    if len(old) <= WHOLE_OLD:
+        return old
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    s = 0
+    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
+        s += 1
+    start, end = max(0, p - OLD_CONTEXT), len(old) - max(0, s - OLD_CONTEXT)
+    return ("…" if start > 0 else "") + old[start:end] + ("…" if end < len(old) else "")
+
+
+def _old(old: str, new: str) -> str:
+    """An old value as `(was …)` quotes it: cut to what changed, then as `clip` writes any text."""
+    return clip(cut_old(old, new))
+
+
 def _was(old: Element, new: Element) -> list[str]:
     """`field=<old value>` for each of text, value, checked, selected, disabled and actions that changed.
     A value that only mirrors the text, and a switch's value (it is `checked`), aren't fields of their own.
     The frame is never one: a moved or resized element is a `↕`."""
     out = []
     if old.text != new.text:
-        out.append(("text", clip(old.text)))
+        out.append(("text", _old(old.text, new.text)))
     if (old.value != new.value and old.checked is None and new.checked is None
             and (old.value != old.text or new.value != new.text)):
         # an input that showed its placeholder: `(was placeholder "…")` (AGENT-TOOLS v1.7)
-        out.append(("value", f"placeholder {clip(old.placeholder)}" if old.shows_placeholder else clip(old.value)))
+        out.append(("value", f"placeholder {_old(old.placeholder, new.value)}" if old.shows_placeholder
+                    else _old(old.value, new.value)))
     if old.checked != new.checked:
         out.append(("checked", "null" if old.checked is None else _flag(old.checked)))
     if old.selected != new.selected:
@@ -160,7 +185,9 @@ def _changes(old: list[Element], new: list[Element]) -> tuple[list[str], int]:
             continue
         was = _was(o, e)
         if was:
-            modified.append(f"~ {e.line()} (was {', '.join(was)})")
+            # the position and the actions only when they are among what changed (rule 2)
+            modified.append(f"~ {e.line(actions=o.actions != e.actions, place=_frame_moved(o, e))} "
+                            f"(was {', '.join(was)})")
         elif _frame_moved(o, e):
             moved.append(e)
     lines = added + gone + modified
@@ -214,7 +241,7 @@ def off_screen(old: list[Element], new: list[Element], by_place: bool = True,
             continue
         fields = _was(was, replace(e, actions=was.actions))  # what it can do isn't news off screen
         if fields:
-            lines.append(f"~ {e.line(ref=False, actions=False)} (off screen; was {', '.join(fields)})")
+            lines.append(f"~ {e.line(ref=False, actions=False, place=False)} (off screen; was {', '.join(fields)})")
     if len(lines) > OFF_LISTED:
         lines = [*lines[:OFF_LISTED], f"~ {len(lines) - OFF_LISTED} more changed off screen"]
     return lines

@@ -70,7 +70,7 @@ def test_a_unique_key_keeps_its_ref_however_far_it_moved_and_a_move_shows():
     new = [el("e1", label="General", y=100, actions=("tap",))]
     carried = changes.carry_refs(old, new)
     assert refs(carried) == ["e7"]
-    assert changes.diff(old, carried) == ['- button "Other"', '↕ e7 button "General" @0,100 100x40 [tap]']
+    assert changes.diff(old, carried) == ['- button "Other"', '↕ e7 button "General" @0,100 100x40']
 
 
 def test_a_value_only_element_is_keyed_by_its_value():
@@ -106,12 +106,12 @@ def test_added_gone_and_changed_lines():
            el("e5", label="Done", y=250, actions=("tap",))]
     carried = changes.carry_refs(old, new)
     assert changes.diff(old, carried) == [
-        '+ e6 button "Done" @0,250 100x40 [tap]',
+        '+ e6 button "Done" @0,250 100x40',
         '- text "Loading"',
-        '~ e2 switch "Airplane Mode" checked=true @0,50 100x40 [toggle] (was "false")',
-        '~ e3 cell "Wi-Fi" value="Home" @0,100 100x40 [tap] (was "Off")',
-        '~ e4 button "Save" @0,150 100x40 [tap] (was "true")',
-        '~ e5 tab "General" selected @0,200 100x40 (was "false")',
+        '~ e2 switch "Airplane Mode" checked=true (was "false")',
+        '~ e3 cell "Wi-Fi" value="Home" (was "Off")',
+        '~ e4 button "Save" (was "true")',
+        '~ e5 tab "General" selected (was "false")',
     ]
 
 
@@ -125,7 +125,7 @@ def test_a_changed_text_is_one_field_even_though_label_and_value_both_moved():
     old = [el("e1", role="text", label="2 items", value="2 items", identifier="count")]
     new = [el("e1", role="text", label="3 items", value="3 items", identifier="count")]
     [line] = changes.diff(old, changes.carry_refs(old, new))
-    assert line == '~ e1 text "3 items" id=count @0,0 100x40 (was "2 items")'
+    assert line == '~ e1 text "3 items" id=count (was "2 items")'
 
 
 def test_several_changed_fields_are_named():
@@ -177,7 +177,61 @@ def test_a_frame_change_of_more_than_one_point_is_a_move_and_one_point_is_not():
 def test_the_frame_never_appears_in_a_changed_line():
     old = [el("e1", role="cell", label="Wi-Fi", value="Off", y=0, actions=("tap",))]
     new = [el("e1", role="cell", label="Wi-Fi", value="On", y=80, w=120, actions=("tap",))]
-    assert changes.diff(old, changes.carry_refs(old, new)) == ['~ e1 cell "Wi-Fi" value="On" @0,80 120x40 [tap] (was "Off")']
+    assert changes.diff(old, changes.carry_refs(old, new)) == ['~ e1 cell "Wi-Fi" value="On" @0,80 120x40 (was "Off")']
+
+
+def test_a_changed_line_gives_the_position_and_the_actions_only_when_they_changed():
+    """AGENT-TOOLS 1.8 §13 rule 2."""
+    old = [el("e6", role="text", identifier="n", label="17", y=0)]
+    [line] = changes.diff(old, changes.carry_refs(old, [el("e6", role="text", identifier="n", label="20", y=0)]))
+    assert line == '~ e6 text "20" id=n (was "17")'
+    [line] = changes.diff(old, changes.carry_refs(old, [el("e6", role="text", identifier="n", label="20", y=90)]))
+    assert line == '~ e6 text "20" id=n @0,90 100x40 (was "17")'
+    [line] = changes.diff(old, changes.carry_refs(old, [el("e6", role="text", identifier="n", label="20", y=0, actions=("tap",))]))
+    assert line == '~ e6 text "20" id=n [tap] (was text="17", actions="")'
+    [moved] = changes.diff(old, changes.carry_refs(old, [replace(old[0], rect=(0, 90, 100, 40))]))
+    assert moved == '↕ e6 text "17" id=n @0,90 100x40'  # a move keeps its own line, with the position
+
+
+STATE = "pressed=- typed= typed2= switch=off taps=2 long=0 slow=0 anim=off sheet=closed alert=none"
+
+
+def was(old, new):
+    [line] = changes.diff([el("e1", role="text", label=old)], [el("e1", role="text", label=new)])
+    return line.split(" (was ", 1)[1][:-1]
+
+
+def test_a_long_old_value_is_cut_to_what_changed():
+    """AGENT-TOOLS 1.8 §13 rule 3, with the spec's and Tapline's examples."""
+    assert was(STATE, STATE.replace("typed=", "typed=hello")) == '"…sed=- typed= typed2= swi…"'
+    assert was("Total: 12 items in your basket, delivery on Thursday 14 May",
+               "Total: 12 items in your basket, delivery on Friday 15 May") == '"…delivery on Thursday 14 May"'
+    assert was("3 trips planned for the spring, 2 of them shared with friends",
+               "4 trips planned for the spring, 2 of them shared with friends") == '"3 trips plann…"'
+    assert was("Tap me 17", "Tap me 18") == '"Tap me 17"'
+
+
+def test_cut_old_counts_code_points_and_keeps_a_value_that_would_lose_nothing():
+    assert changes.cut_old("x" * 40, "y") == "x" * 40  # 40 characters: whole
+    assert changes.cut_old("x" * 41, "y") == "x" * 41  # nothing in common: nothing to cut
+    old = "é" * 50 + "X" + "é" * 50
+    assert changes.cut_old(old, "é" * 50 + "Y" + "é" * 50) == "…" + "é" * 12 + "X" + "é" * 12 + "…"
+    emoji = "😀" * 50 + "X" + "😀" * 50  # one code point each, though two UTF-16 units
+    assert changes.cut_old(emoji, "😀" * 50 + "Y" + "😀" * 50) == "…" + "😀" * 12 + "X" + "😀" * 12 + "…"
+    assert changes.cut_old("abc" * 20, "") == "abc" * 20  # nothing in common with the new value
+    assert changes.cut_old("ab" * 30, "ab" * 30 + "c") == "…" + "ab" * 6  # the old is the start of the new
+
+
+def test_the_cut_applies_off_screen_and_to_an_input_that_showed_its_placeholder():
+    old = [el("", role="text", label=STATE, identifier="state", y=1400)]
+    new = [el("", role="text", label=STATE.replace("taps=2", "taps=3"), identifier="state", y=1400)]
+    [line] = changes.off_screen(old, new)
+    assert line.endswith('(off screen; was "…ch=off taps=2 long=0 slow…")')
+    hint = "Type the name of the person you want to invite to this trip"
+    field = el("e1", role="input", label="Name", value=hint, placeholder=hint, actions=("tap", "type"))
+    typed = replace(field, value=hint[:20] + "!")  # the first 20 characters were kept: 12 + 8 of context
+    [line] = changes.diff([field], [typed])
+    assert line.endswith('(was placeholder "… name of the person you want to invite to this trip")')
 
 
 def test_update_keeps_refs_and_headlines_the_changes():
@@ -312,7 +366,7 @@ def test_elements_that_scrolled_together_keep_their_refs_and_show_as_moved():
     new = [replace(e, rect=(0, e.y - 150, 100, 40)) for e in old]
     carried = changes.carry_refs(old, new, moves_content=True)
     assert refs(carried) == ["e1", "e2", "e3"]
-    assert changes.diff(old, carried)[0] == '↕ e1 button "General" @0,150 100x40 [tap]'
+    assert changes.diff(old, carried)[0] == '↕ e1 button "General" @0,150 100x40'
 
 
 def test_too_few_agreeing_pairs_means_no_idless_element_keeps_its_ref():
@@ -379,7 +433,7 @@ def test_a_read_with_no_action_before_it_gives_a_text_that_moved_alone_a_new_ref
 def test_a_changed_element_off_screen_gets_a_line_without_a_ref():
     old = [el("", role="text", label="taps=1", identifier="lab-state", y=1400), el("", label="Row 9", y=1500)]
     new = [el("", role="text", label="taps=2", identifier="lab-state", y=1400), el("", label="Row 9", y=1500)]
-    assert changes.off_screen(old, new) == ['~ text "taps=2" id=lab-state @0,1400 100x40 (off screen; was "taps=1")']
+    assert changes.off_screen(old, new) == ['~ text "taps=2" id=lab-state (off screen; was "taps=1")']
     assert changes.off_screen(old, old) == []
 
 
@@ -387,9 +441,9 @@ def test_off_screen_an_identifier_follows_its_element_and_a_place_only_counts_wh
     old = [el("", role="text", label="taps=1", identifier="lab-state", y=1400), el("", label="Edit", y=1500)]
     scrolled = [el("", role="text", label="taps=2", identifier="lab-state", y=1100), el("", label="Delete", y=1500)]
     after_scroll = changes.off_screen(old, scrolled, by_place=False)  # the row at 1500 is another row now
-    assert after_scroll == ['~ text "taps=2" id=lab-state @0,1100 100x40 (off screen; was "taps=1")']
+    assert after_scroll == ['~ text "taps=2" id=lab-state (off screen; was "taps=1")']
     in_place = changes.off_screen(old, [old[0], el("", label="Delete", y=1500)])
-    assert in_place == ['~ button "Delete" @0,1500 100x40 (off screen; was "Edit")']
+    assert in_place == ['~ button "Delete" (off screen; was "Edit")']
     twice = [el("", label="A", identifier="row", y=1400), el("", label="B", identifier="row", y=1500)]
     moved = [el("", label="C", identifier="row", y=1450), el("", label="D", identifier="row", y=1550)]
     assert changes.off_screen(twice, moved) == []  # an identifier two elements share names neither
@@ -432,7 +486,7 @@ def test_an_element_that_was_listed_and_is_off_screen_now_is_compared_with_what_
     listed = [el("e7", role="text", label="taps=1", identifier="lab-state", y=700)]
     now_off = [el("", role="text", label="taps=2", identifier="lab-state", y=-300)]
     assert changes.off_screen([], now_off, by_place=False, listed=listed) == [
-        '~ text "taps=2" id=lab-state @0,-300 100x40 (off screen; was "taps=1")']
+        '~ text "taps=2" id=lab-state (off screen; was "taps=1")']
     assert changes.off_screen([], now_off, by_place=False) == []  # without the list there is nothing to compare with
     unchanged = [el("", role="text", label="taps=1", identifier="lab-state", y=-300)]
     assert changes.off_screen([], unchanged, by_place=False, listed=listed) == []
@@ -443,9 +497,9 @@ def test_an_empty_input_shows_its_placeholder_and_typing_into_it_says_so():
     Wayfare's empty Name field for filled in (2026-11-11)."""
     empty = ui.Element("e1", "input", "Name", "name", value="Alex Morgan", placeholder="Alex Morgan",
                        rect=(20, 100, 380, 50), actions=("tap", "type"))
-    assert empty.line() == 'e1 input "Name" id=name placeholder="Alex Morgan" @20,100 380x50 [tap, type]'
+    assert empty.line() == 'e1 input "Name" id=name placeholder="Alex Morgan" @20,100 380x50'
     typed = replace(empty, value="abc")
-    assert typed.line() == 'e1 input "Name" id=name value="abc" @20,100 380x50 [tap, type]'
+    assert typed.line() == 'e1 input "Name" id=name value="abc" @20,100 380x50'
     assert changes._was(empty, typed) == ['placeholder "Alex Morgan"']
     assert changes._was(typed, empty) == ['"abc"']  # cleared again: the placeholder is back on the line
     assert "value=" not in empty.line() and "placeholder=" not in typed.line()

@@ -44,11 +44,11 @@ def test_the_settings_screen_as_lines():
     assert lines == [
         'e1 navigationbar id=Settings @0,59 430x96',
         'e2 header "Settings" @16,103 200x40',
-        'e3 scroll id=com.apple.settings.root @0,155 430x777 [scroll]',
-        'e4 input "Search" @16,163 398x36 [tap, type]',
+        'e3 scroll id=com.apple.settings.root @0,155 430x777',
+        'e4 input "Search" @16,163 398x36',
         'e5 cell "Airplane Mode" id=airplane-mode-cell @16,215 398x52 [tap]',
         'e6 text "Airplane Mode" @60,229 200x24',
-        'e7 switch "Airplane Mode" checked=false @349,224 51x31 [toggle]',
+        'e7 switch "Airplane Mode" checked=false @349,224 51x31',
         'e8 cell "Wi-Fi, Home" id=Wi-Fi value="Home" @16,268 398x52 [tap]',
         'e9 cell "Bluetooth" value="On" @16,321 398x52 [tap]',
         'e10 cell "Notifications" disabled @16,400 398x52 [tap]',
@@ -65,10 +65,10 @@ def test_header_with_every_line():
         "App: Settings (com.apple.Preferences)",
         'Alert: "Reset All Settings?" [Cancel] [Reset]',
         "Keyboard: shown",
-        'e1 input "Search" value="wifi" @16,163 398x36 [tap, type]',
+        'e1 input "Search" value="wifi" @16,163 398x36',
         'e2 text "Reset All Settings?" @94,376 242x22',
-        'e3 button "Cancel" @78,490 137x50 [tap]',
-        'e4 button "Reset" @215,490 137x50 [tap]',
+        'e3 button "Cancel" @78,490 137x50',
+        'e4 button "Reset" @215,490 137x50',
     ]
 
 
@@ -93,9 +93,9 @@ def test_the_header_without_the_optional_lines():
 def test_calculator_text_buttons_and_the_same_label_twice():
     items = ui.read(load("calculator"), SCREEN).items
     assert [e.line() for e in items][:3] == ['e1 text "42" @326,294 88x87',
-                                             'e2 button "clear" id=AC @14,420 90x90 [tap]',
-                                             'e3 button "7" @14,520 90x90 [tap]']
-    assert [e.line() for e in items][-1] == 'e7 button "7" id=7-memory @14,620 90x90 [tap]'
+                                             'e2 button "clear" id=AC @14,420 90x90',
+                                             'e3 button "7" @14,520 90x90']
+    assert [e.line() for e in items][-1] == 'e7 button "7" id=7-memory @14,620 90x90'
 
 
 def test_roles_actions_and_unknown_types():
@@ -129,11 +129,11 @@ def test_switch_state_selected_and_disabled():
     on = one("Switch", "Bluetooth", value="1")
     off = one("Switch", "Bluetooth", value="0")
     assert (on.checked, off.checked) == (True, False)
-    assert on.line() == 'e1 switch "Bluetooth" checked=true @10,10 100x40 [toggle]'  # no value="1" as well
+    assert on.line() == 'e1 switch "Bluetooth" checked=true @10,10 100x40'  # no value="1" as well
     assert one("Button", "Wi-Fi").checked is None
     picked = one("Tab", "Bluetooth", traits="Button,Selected", enabled="false")
     assert picked.selected and not picked.enabled
-    assert picked.line() == 'e1 tab "Bluetooth" disabled selected @10,10 100x40 [tap]'
+    assert picked.line() == 'e1 tab "Bluetooth" disabled selected @10,10 100x40'
     assert not one("Tab", "Bluetooth", traits="Button").selected
 
 
@@ -154,17 +154,44 @@ def test_the_line_clips_flattens_and_quotes_text():
     odd = one("StaticText", 'Say "hi"', value='Say "hi" now')
     assert odd.line() == 'e1 text "Say \\"hi\\"" value="Say \\"hi\\" now" @10,10 100x40'
     assert one("TextField", "Email", value="a@b.example").line() == \
-        'e1 input "Email" value="a@b.example" @10,10 100x40 [tap, type]'
+        'e1 input "Email" value="a@b.example" @10,10 100x40'
     only_value = one("StaticText", value="Home")
     assert only_value.text == "Home" and only_value.line() == 'e1 text "Home" @10,10 100x40'
 
 
 def test_line_without_a_ref_or_without_actions():
     e = ui.read(load("calculator"), SCREEN).items[1]
-    assert e.line(ref=False) == 'button "clear" id=AC @14,420 90x90 [tap]'
+    assert e.line(ref=False) == 'button "clear" id=AC @14,420 90x90'
     assert e.line(actions=False) == 'e2 button "clear" id=AC @14,420 90x90'
     assert e.line(ref=False, actions=False) == 'button "clear" id=AC @14,420 90x90'
     assert e.rect == (14.0, 420.0, 90.0, 90.0) and e.center == (59.0, 465.0)
+
+
+def test_a_line_leaves_out_the_position_on_request():
+    e = ui.Element("e3", "button", "Log in", "login-button", rect=(24, 610, 354, 48), actions=("tap",))
+    assert e.line(place=False) == 'e3 button "Log in" id=login-button'
+    assert e.line(place=False, ref=False) == 'button "Log in" id=login-button'
+
+
+def test_the_actions_a_role_implies_are_not_listed_and_any_other_set_is():
+    """AGENT-TOOLS 1.8 §13 rule 4."""
+    def line(role, *actions):
+        return ui.Element("e1", role, "X", rect=(0, 0, 10, 10), actions=actions).line()
+    for role, actions in (("button", ("tap",)), ("tab", ("tap",)), ("link", ("tap",)),
+                          ("input", ("tap", "type")), ("switch", ("toggle",)), ("scroll", ("scroll",))):
+        assert line(role, *actions) == f'e1 {role} "X" @0,0 10x10'
+    assert line("button", "tap", "longPress") == 'e1 button "X" @0,0 10x10 [tap, longPress]'
+    assert line("cell", "tap") == 'e1 cell "X" @0,0 10x10 [tap]'
+    assert line("text", "tap") == 'e1 text "X" @0,0 10x10 [tap]'
+    assert line("input", "tap") == 'e1 input "X" @0,0 10x10 [tap]'
+    assert line("button") == 'e1 button "X" @0,0 10x10'
+
+
+def test_without_place_takes_the_position_off_the_end_of_a_first_line_only():
+    assert ui.without_place('Tapped e3 button "Log in" id=login-button @24,610 354x48.') == \
+        'Tapped e3 button "Log in" id=login-button.'
+    assert ui.without_place("Tapped (215, 640).") == "Tapped (215, 640)."
+    assert ui.without_place('Tapped e3 button "At @1,2 3x4 now".') == 'Tapped e3 button "At @1,2 3x4 now".'
 
 
 def test_visibility_comes_from_the_rect():
@@ -211,7 +238,7 @@ def test_the_clip_applies_to_web_views_and_collection_views():
 def test_find_by_id_uses_the_raw_name_even_when_it_equals_the_label():
     e = one("Button", "Login", name="Login")
     assert e.identifier == "" and e.name == "Login"  # not shown: it only mirrors the label
-    assert e.line() == 'e1 button "Login" @10,10 100x40 [tap]'
+    assert e.line() == 'e1 button "Login" @10,10 100x40'
     assert ui.resolve([e], ui.Target(id="Login")) is e
     assert ui.resolve([one("Button", "OK", name="ok-button")], ui.Target(id="ok-button")).label == "OK"
 
@@ -266,7 +293,7 @@ def test_a_wrapper_and_its_text_with_the_same_label_and_rect_are_one_element():
     """React Native exposes a wrapper and its text as two elements: list one."""
     text = node("Button", "Sign in", rect=(10, 10, 200, 40))
     [e] = _wrapped(node("Button", "Sign in", name="sign-in", rect=(10, 10, 200, 40), children=[text]))
-    assert e.line() == 'e1 button "Sign in" id=sign-in @10,10 200x40 [tap]'  # the ancestor stays
+    assert e.line() == 'e1 button "Sign in" id=sign-in @10,10 200x40'  # the ancestor stays
     [e] = _wrapped(node("Button", "Sign in", rect=(10.4, 10, 200.9, 40), children=[text]))
     assert e.ref == "e1"  # rects equal within 1 pt
 
@@ -288,7 +315,7 @@ def test_roles_may_differ_and_the_one_with_actions_is_listed():
 def test_an_other_wrapper_around_an_input_lists_only_the_input():
     field = node("TextField", "Email", value="me@example.com", rect=(10, 10, 200, 40))
     [e] = _wrapped(node("Other", "Email", rect=(10, 10, 200, 40), children=[field]))
-    assert e.line() == 'e1 input "Email" value="me@example.com" @10,10 200x40 [tap, type]'
+    assert e.line() == 'e1 input "Email" value="me@example.com" @10,10 200x40'
     [e] = _wrapped(node("Other", "Email", name="email-wrapper", rect=(10, 10, 200, 40), children=[field]))
     assert e.role == "input"  # an identifier only one of them carries doesn't keep both
 
@@ -354,6 +381,6 @@ def test_unlabeled_pairs_are_never_collapsed():
 def test_a_calculator_key_is_a_button_but_the_keyboards_keys_stay_hidden():
     pad = node("Other", rect=(0, 400, 430, 400), children=[node("Key", "7", "Seven", rect=(14, 520, 90, 90))])
     [e] = [e for e in ui.elements(xml(pad), SCREEN) if e.type == "Key"]
-    assert (e.role, e.actions, e.line()) == ("button", ("tap",), 'e1 button "7" id=Seven @14,520 90x90 [tap]')
+    assert (e.role, e.actions, e.line()) == ("button", ("tap",), 'e1 button "7" id=Seven @14,520 90x90')
     board = node("Keyboard", rect=(0, 600, 430, 300), children=[node("Key", "q", rect=(10, 620, 40, 50))])
     assert [e.type for e in ui.elements(xml(board), SCREEN)] == []

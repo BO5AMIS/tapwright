@@ -428,7 +428,7 @@ def test_look_reads_the_tree_the_app_and_the_scale(phone):
     text, image = asyncio.run(s.look(screenshot=False))
     assert image is None and s.scale == 3.0
     assert text.splitlines() == ["Screen 430x932 pt @3x · 1 elements", "App: Settings (com.apple.Preferences)",
-                                 'e1 button "Wi-Fi" id=wifi @16,215 398x52 [tap]']
+                                 'e1 button "Wi-Fi" id=wifi @16,215 398x52']
     assert [e.ref for e in s.items] == ["e1"]
     asyncio.run(s.look(screenshot=False))
     assert [p for _, p, _ in phone.requests].count("/session/S/wda/screen") == 1  # the scale is read once
@@ -730,7 +730,7 @@ def test_snapshot_is_the_tree_the_app_and_the_scale_and_sets_items(phone):
     s = Session(phone)
     asyncio.run(s.read_scale())
     snap = asyncio.run(s.snapshot())
-    assert [e.line() for e in snap.tree.items] == ['e1 button "Wi-Fi" id=wifi @16,215 398x52 [tap]']
+    assert [e.line() for e in snap.tree.items] == ['e1 button "Wi-Fi" id=wifi @16,215 398x52']
     assert snap.app == ("Settings", "com.apple.Preferences") == s.app and snap.scale == 2.0
     assert s.items is snap.tree.items
     asyncio.run(s.reset())

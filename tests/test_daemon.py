@@ -74,7 +74,7 @@ def test_look_then_act_by_ref():
         assert r["text"].startswith("Screen 400x800") and r["image"]
         assert r["image_size"] == [600, 1200]  # no stream frame here: the phone's screenshot, resized
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert r == {"text": 'Tapped e1 button "OK" id=ok-button @10,100 100x40.', "image": None, "image_size": None}
+        assert r == {"text": 'Tapped e1 button "OK" id=ok-button.', "image": None, "image_size": None}
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("Tapped e1")
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with what changed after it
@@ -828,8 +828,8 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
         assert e.value.code == "ambiguous" and str(e.value) == (
-            '2 elements match label "7".\nCandidates:\n  e1 button "7" @10,100 100x40 [tap]\n'
-            '  e2 button "7" id=seven-again @10,60 100x40 [tap]\nRetry with one of the refs, or add "index" (0-based).')
+            '2 elements match label "7".\nCandidates:\n  e1 button "7" @10,100 100x40\n'
+            '  e2 button "7" id=seven-again @10,60 100x40\nRetry with one of the refs, or add "index" (0-based).')
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
         assert r["text"].startswith('Tapped e2 button "7" id=seven-again')
@@ -931,9 +931,9 @@ def test_type_text_takes_the_same_target_or_none():
         d.session.tree = [ui.Element("e1", "input", "Name", "name-field", rect=(10, 100, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "type_text", {"text": "hi", "look": False})  # the only input
-        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,100 100x40.'
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field.'
         r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "name-field"}, "look": False})
-        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,100 100x40.'
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field.'
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "hi", "target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
@@ -949,7 +949,7 @@ def test_a_silent_re_read_keeps_the_agents_refs_on_the_same_elements():
         d.session.tree = [button("e1", "Other", "other-button"), button("e2", "OK", "ok-button", rect=(10, 300, 100, 40))]
         d.control.clock.t += 5.0
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False})
-        assert r["text"].startswith('Tapped e1 button "OK" id=ok-button @10,300') and d.session.calls.count("refresh") == 1
+        assert r["text"].startswith('Tapped e1 button "OK" id=ok-button') and d.session.calls.count("refresh") == 1
         assert [e.ref for e in d.control.client("a").items] == ["e2", "e1"]  # Other is new: e2
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # the old ref taps OK's new place
         assert r["text"].startswith('Tapped e1 button "OK"') and d.session.last_point == (60.0, 320.0)
@@ -1069,8 +1069,8 @@ def test_an_action_answers_with_what_changed_and_the_refs_stay():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done-button", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert unsettled(r) == ['Tapped e1 button "OK" id=ok-button @10,100 100x40.', "Same screen. Changes:",
-                                '+ e2 button "Done" id=done-button @10,60 100x40 [tap]']
+        assert unsettled(r) == ['Tapped e1 button "OK" id=ok-button.', "Same screen. Changes:",
+                                '+ e2 button "Done" id=done-button @10,60 100x40']
         assert SETTLED.fullmatch(r["text"].splitlines()[-1])
         assert r["image"] is None  # a screenshot only when asked
         d.session.tree = [button("e1", "OK", "ok-button")]
@@ -1089,7 +1089,7 @@ def test_a_new_app_or_a_screen_the_agent_has_not_seen_gets_the_full_list():
         stop, task = await started(d)
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})  # no look yet
         assert unsettled(r)[1:4] == ["Screen 400x800 pt @3x · 1 elements", "App: Example (com.example.app)",
-                                               'e1 button "OK" id=ok-button @10,100 100x40 [tap]']
+                                               'e1 button "OK" id=ok-button @10,100 100x40']
         d.session.app = ("Settings", "com.apple.Preferences")
         d.session.tree = [button("e1", "Wi-Fi"), button("e2", "Bluetooth", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"text": "OK"}})
@@ -1198,10 +1198,10 @@ def test_changes_are_measured_against_the_last_answer_not_the_last_full_list():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 160, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,160 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,160 100x40']
         d.session.tree = [button("e1", "A", "a"), button("e2", "B", "b", rect=(10, 60, 100, 40))]  # back where the look had it
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,60 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '↕ e2 button "B" id=b @10,60 100x40']
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # and now nothing moved
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
@@ -1216,7 +1216,7 @@ def test_a_silent_re_read_does_not_hide_what_changed_from_the_agent():
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Late", "late", rect=(10, 60, 100, 40))]
         d.control.clock.t += 5.0
         r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})  # re-reads, then answers
-        assert unsettled(r)[1:] == ["Same screen. Changes:", '+ e2 button "Late" id=late @10,60 100x40 [tap]']
+        assert unsettled(r)[1:] == ["Same screen. Changes:", '+ e2 button "Late" id=late @10,60 100x40']
         await finish(stop, task)
     run(go)
 
@@ -1320,7 +1320,7 @@ def test_the_keyboard_showing_and_hiding_heads_the_change_block_before_the_eleme
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert unsettled(r)[1:4] == ["Same screen. Changes:", "Keyboard: shown",
-                                               '+ e2 button "Done" id=done @10,60 100x40 [tap]']
+                                               '+ e2 button "Done" id=done @10,60 100x40']
         d.session.last_keyboard = False
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert unsettled(r)[1:3] == ["Same screen. Changes:", "Keyboard: hidden"]
@@ -2327,7 +2327,7 @@ def test_toggle_with_a_value_taps_only_when_it_differs():
         stop, task = await started(d)
         await looked(d, [switch(False)])
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": False})
-        assert r["text"] == 'e1 switch "Wi-Fi" checked=false @300,100 60x30 is already false.'
+        assert r["text"] == 'e1 switch "Wi-Fi" checked=false is already false.'
         assert d.session.last_point is None and "tap" not in d.session.calls
         d.session.tree = [switch(True)]
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True, "force": True})
@@ -2440,7 +2440,7 @@ def test_toggle_that_did_not_flip_says_so_and_a_wanted_value_not_reached_is_refu
                          actions=("toggle",), type="Switch")
         await looked(d, [off])  # a switch whose tap changes nothing
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" checked=false @300,100 60x30, but it is still checked=false.'
+        assert r["text"].splitlines()[0] == 'Tapped e1 switch "Wi-Fi" checked=false, but it is still checked=false.'
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "value": True})
         assert e.value.code == "not_actionable"
@@ -2550,7 +2550,7 @@ def test_toggle_without_a_look_claims_no_new_state():
         stop, task = await started(d)
         await looked(d, [switch(False)])
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
-        assert r["text"] == 'Tapped e1 switch "Wi-Fi" @300,100 60x30.'
+        assert r["text"] == 'Tapped e1 switch "Wi-Fi".'
         await finish(stop, task)
     run(go)
 
@@ -2831,7 +2831,7 @@ def test_type_text_into_a_target_replaces_by_default_and_reads_the_value_back():
         r = await d.run_tool("a", "type_text", {"text": "Ada", "target": {"ref": "e1"}})
         assert d.session.typed == [("Ada", True, False, ui.Target(ref="e1"))]
         lines = r["text"].splitlines()
-        assert lines[0] == 'Typed into e1 input "Name" value="Ada" @10,100 300x44. Value is now "Ada".'
+        assert lines[0] == 'Typed into e1 input "Name" value="Ada". Value is now "Ada".'
         assert lines[1] == "Same screen. Changes:" and lines[2].startswith('~ e1 input "Name" value="Ada"')
         assert "(was " in lines[2] and SETTLED.fullmatch(lines[3])
         await finish(stop, task)
@@ -2849,7 +2849,7 @@ def test_the_change_block_is_a_literal_diff_that_includes_the_field_typed_into()
         lines = r["text"].splitlines()
         assert lines[0].endswith('Value is now "eggs".')
         assert lines[1] == "Same screen. Changes:"
-        assert lines[2] == '~ e1 input "Food" value="eggs" @10,100 300x44 [tap, type] (was "egg")'
+        assert lines[2] == '~ e1 input "Food" value="eggs" (was "egg")'
         r = await d.run_tool("a", "type_text", {"text": "eggs", "target": {"ref": "e1"}})
         assert r["text"].splitlines()[1:3] == ["Same screen. Changes:", "No visible change."]
         await finish(stop, task)
@@ -2968,7 +2968,7 @@ def test_scroll_stays_inside_the_scroll_area_over_the_screen_centre():
         await looked(d, [AREA])
         r = await d.run_tool("a", "scroll", {"direction": "down", "amount": 0.5, "look": False})
         assert d.session.last_point == (200.0, 550.0)
-        assert r["text"] == 'Scrolled e1 scroll "List" @0,100 400x600 down.'
+        assert r["text"] == 'Scrolled e1 scroll "List" down.'
         await finish(stop, task)
     run(go)
 
@@ -3450,7 +3450,7 @@ def test_type_text_does_not_take_the_value_from_another_input_that_got_the_ref()
         d.session.app = ("Other", "com.example.other")  # a new app renumbers the list from e1
         r = await d.run_tool("a", "type_text", {"text": "Ada", "target": {"ref": "e1"}, "submit": True})
         first = r["text"].splitlines()[0]
-        assert first == 'Typed into e1 input "Name" @10,100 300x44.' and "zzz" not in first
+        assert first == 'Typed into e1 input "Name".' and "zzz" not in first
         await finish(stop, task)
     run(go)
 
@@ -3464,7 +3464,7 @@ def test_a_secure_field_never_has_its_value_shown():
         d.session.tree = [el("e1", "input", "Password", value="••••", rect=(10, 100, 300, 44), secure=True)]
         r = await d.run_tool("a", "type_text", {"text": "hunter2", "target": {"ref": "e1"}})
         first = r["text"].splitlines()[0]
-        assert first == 'Typed into e1 input "Password" value="••••" @10,100 300x44. The value is hidden (secure field).'
+        assert first == 'Typed into e1 input "Password" value="••••". The value is hidden (secure field).'
         assert "Value is now" not in r["text"]
         await finish(stop, task)
     run(go)
@@ -3815,7 +3815,7 @@ def test_a_card_under_the_tab_bar_is_tapped_where_it_shows():
         for target in ({"ref": "e1"}, {"label": "Card"}, {"text": "Card"}):
             r = await d.run_tool("a", "tap", {"target": target, "look": False})
             assert d.session.last_point == (215.0, 828.5)  # the middle of y 808-849, not of the whole card
-            assert re.fullmatch(r'Tapped e\d cell "Card" @20,808 390x90 at its visible part \(215, 828\)\.', r["text"])
+            assert re.fullmatch(r'Tapped e\d cell "Card" at its visible part \(215, 828\)\.', r["text"])
         await looked(d, [card])
         r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}, "look": False})
         assert d.session.last_point == (215.0, 828.5) and r["text"].startswith("Long-pressed e")
@@ -4049,7 +4049,7 @@ def test_toggle_touches_the_control_of_a_switch_that_is_a_whole_row():
                          el("e2", "switch", "Notify", rect=(351, 612, 63, 28), checked=False)])
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
         assert d.session.last_point == (358.0, 159.5)
-        assert r["text"].startswith('Tapped e1 switch "Allow Notifications" @40,145 350x29.')
+        assert r["text"].startswith('Tapped e1 switch "Allow Notifications".')
         await d.run_tool("a", "toggle", {"target": {"ref": "e2"}, "look": False})
         assert d.session.calls[-1] == "tap" and d.session.last_point in (None, (382.5, 626.0))  # a switch-sized one: as before
         await finish(stop, task)
@@ -4100,7 +4100,7 @@ def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_sho
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e2"}, "look": False})
         assert d.session.last_point == (382.5, 602.0)  # its centre (615) is under the keyboard: y 590-614 shows
-        assert r["text"] == 'Tapped e2 switch "Tall" @351,590 63x50 at its visible part (382, 602).'
+        assert r["text"] == 'Tapped e2 switch "Tall" at its visible part (382, 602).'
         await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (382.5, 626.0)  # forced: its own centre
         await finish(stop, task)
@@ -4791,7 +4791,7 @@ def test_scroll_to_the_start_of_a_list_already_there_answers_at_once():
         LongList(d, rows=20)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
-        assert r["text"].splitlines()[0] == "e1 scroll id=list @0,0 400x800 is already at its start."
+        assert r["text"].splitlines()[0] == "e1 scroll id=list is already at its start."
         assert d.session.scrolls == []
         await finish(stop, task)
     run(go)
@@ -4823,7 +4823,7 @@ def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
         assert str(e.value).endswith('is off screen; scroll to it first (scroll with this target and to: "target").')
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
         first = r["text"].splitlines()[0]
-        assert first.startswith("Scrolled e1 scroll id=list @0,0 400x800 to e") and 'button "Row 30" id=row-30' in first
+        assert first.startswith("Scrolled e1 scroll id=list to e") and 'button "Row 30" id=row-30' in first
         row = next(e for e in d.session.tree if e.identifier == "row-30")
         assert 60 <= row.y and row.y + row.height <= 760  # between the bars' insets, not only on the screen
         assert len(d.session.scrolls) == 4  # 2288 points at 588 a drag: three full drags and the rest
@@ -4845,7 +4845,7 @@ def test_scroll_to_a_target_goes_up_as_well_and_does_nothing_when_it_is_already_
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})  # already there
         assert len(d.session.scrolls) == before and "No visible change." in r["text"]
         # nothing was dragged, so it doesn't say "Scrolled" (v1.6, at Tapline's ask)
-        assert r["text"].splitlines()[0].endswith('button "Row 30" id=row-30 @10,712 380x40 is already on screen.')
+        assert r["text"].splitlines()[0].endswith('button "Row 30" id=row-30 is already on screen.')
         await d.run_tool("a", "scroll", {"target": {"id": "row-2"}, "to": "target"})  # back up
         row = next(e for e in d.session.tree if e.identifier == "row-2")
         assert 60 <= row.y and row.y + row.height <= 760
@@ -4907,7 +4907,7 @@ def test_a_tap_whose_effect_is_off_screen_shows_it_instead_of_no_visible_change(
         s.tap = tap
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert unsettled(r)[1:] == ["Same screen. Changes:",
-                                    '~ text "taps=2" id=lab-state @16,1400 398x60 (off screen; was "taps=1")']
+                                    '~ text "taps=2" id=lab-state (off screen; was "taps=1")']
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # the same state again: now nothing changed
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change."]
         await feeder.stop()
@@ -4974,8 +4974,7 @@ def test_off_screen_changes_follow_a_full_list_that_came_because_most_of_the_scr
         s.offscreen = [el("", "text", "taps=2", "lab-state", rect=(16, 1400, 398, 60))]
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})
         lines = unsettled(r)
-        assert lines[1].startswith("Screen ") and lines[-1] == ('~ text "taps=2" id=lab-state @16,1400 398x60 '
-                                                               '(off screen; was "taps=1")')
+        assert lines[1].startswith("Screen ") and lines[-1] == '~ text "taps=2" id=lab-state (off screen; was "taps=1")'
         assert lines[-2] == "Changes off screen:"  # a heading: bare ~ lines after a list read as a broken block
         # not when the full list was forced: a person acted, so the old off-screen list is no baseline
         s.offscreen = [el("", "text", "taps=3", "lab-state", rect=(16, 1400, 398, 60))]

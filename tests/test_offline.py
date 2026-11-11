@@ -60,8 +60,8 @@ def test_direction_marks_are_dropped():
 def test_describe_is_compact():
     text = ui.describe(ui.elements(SOURCE, SCREEN), SCREEN)
     assert text.splitlines()[0] == "Screen 402x874 pt · 4 elements"
-    assert 'e3 button "Log in" id=login-button @24,610 354x48 [tap]' in text
-    assert text.splitlines()[4] == 'e4 button "Log in with Apple" id=apple-login disabled @24,670 354x48 [tap]'
+    assert 'e3 button "Log in" id=login-button @24,610 354x48' in text
+    assert text.splitlines()[4] == 'e4 button "Log in with Apple" id=apple-login disabled @24,670 354x48'
 
 
 def test_gestures():

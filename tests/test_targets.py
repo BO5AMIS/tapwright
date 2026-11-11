@@ -114,8 +114,8 @@ def test_several_matches_are_ambiguous_with_candidates():
     e = code(ui.resolve, list_, ui.Target(label="7"))
     assert e.code == "ambiguous"
     assert str(e) == ('2 elements match label "7".\nCandidates:\n'
-                      '  e3 button "7" @14,520 90x90 [tap]\n'
-                      '  e7 button "7" id=7-memory @14,620 90x90 [tap]\n'
+                      '  e3 button "7" @14,520 90x90\n'
+                      '  e7 button "7" id=7-memory @14,620 90x90\n'
                       'Retry with one of the refs, or add "index" (0-based).')
 
 

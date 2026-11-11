@@ -369,11 +369,11 @@ class Toggled(Noted):
     def verdict(self, now: ui.Element, alert: bool) -> str:
         """The first line from the switch as it reads after the tap. Raises when a wanted value wasn't reached
         (unless an alert is up: it may be asking to confirm)."""
-        line = now.line(actions=False)
+        line = now.line(actions=False, place=False)
         if now.checked == self.flipped:
             return f"Toggled {line}."
         if self.want is not None and not alert:
-            raise Refused("not_actionable", f"no_action: {line} didn't change")
+            raise Refused("not_actionable", f"no_action: {now.line(actions=False)} didn't change")
         return f"Tapped {line}, but it is still checked={'true' if now.checked else 'false'}."
 
 
@@ -389,7 +389,7 @@ class Typed(Noted):
             and (bool(old.identifier) or now.label == old.label)
 
     def verdict(self, now: ui.Element) -> str:
-        line = now.line(actions=False)
+        line = now.line(actions=False, place=False)
         if now.secure:
             return f"Typed into {line}. The value is hidden (secure field)."
         return f"Typed into {line}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
@@ -1814,7 +1814,7 @@ class Daemon:
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
             await typed()
-        done = Typed(f"Typed into {field.line(actions=False)}.")
+        done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         return done
@@ -1860,7 +1860,7 @@ class Daemon:
             # are none, so the list is already at its start (or end). No drag, and no wait for pictures to repeat
             # (13 s over Wi-Fi, 2026-11-11). (A list that keeps only its visible rows shows none either way and
             # is scrolled as before.)
-            return Scrolled(f"{area.line(actions=False) if area else 'The screen'} is already at its {to}.")
+            return Scrolled(f"{area.line(actions=False, place=False) if area else 'The screen'} is already at its {to}.")
         self._dry(a, f"Would scroll {direction}{f' to the {to}' if to else ''}: swipe from ({x0:g}, {y0:g}) to ({x1:g}, {y1:g}).")
         loop = asyncio.get_running_loop()
         began, previous, note = loop.time(), self._mark()[1], ""
@@ -1882,7 +1882,7 @@ class Daemon:
                 # the screen still changed after every swipe: more may be loading, or the list is long
                 note = f"the {to} wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
                 break
-        done = Scrolled(f"Scrolled {area.line(actions=False) if area else 'the screen'} {direction}.")
+        done = Scrolled(f"Scrolled {area.line(actions=False, place=False) if area else 'the screen'} {direction}.")
         done.note = note
         return done
 
@@ -1943,7 +1943,7 @@ class Daemon:
                     view.moved = True
                 raise
             area = ui.scroll_holding(view.items, element, s.screen)
-            where = where or (area.line(actions=False) if area else "the screen")
+            where = where or (area.line(actions=False, place=False) if area else "the screen")
             top, bottom = s.last_insets
             band = (SCROLL_TOP_INSET if top is None else top,
                     s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
@@ -1970,7 +1970,7 @@ class Daemon:
             seen.append(element.rect)
             await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
             await self._silent_read(view)  # once the screen is still: where the element is now
-        line = element.line(ref=bool(element.ref), actions=False)
+        line = element.line(ref=bool(element.ref), actions=False, place=False)
         if clear and not seen:  # nothing was dragged: "Scrolled" would read as if the layout had moved
             return Scrolled(f"{line} is already on screen.")
         done = Scrolled(f"Scrolled {where} to {line}." if clear else f"Scrolled {where} toward {line}.")
@@ -2233,12 +2233,12 @@ class Daemon:
                 x, y = (round(c) for c in found)
                 raise Refused("stale", f"the screen around ({x}, {y}) changed since your last look; "
                                        "look again, or pass force: true to touch there anyway.")
-            return await s.tap(target, hold_ms=hold_ms)
+            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             said = self._police(tool, a, found)  # `force` skips the checks above, never the policy
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
-            done = Noted(await s.tap(target, hold_ms=hold_ms))  # at its centre, whatever is drawn there
+            done = Noted(ui.without_place(await s.tap(target, hold_ms=hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
@@ -2247,9 +2247,9 @@ class Daemon:
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         if point is None:
-            return await s.tap(target, hold_ms=hold_ms)
+            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
         await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
-        return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
+        return f"{verb} {found.line(actions=False, place=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     def _moved_under(self, view, x: float, y: float) -> bool:
         """Has the picture around a point changed since the list the agent last had? A touch by position is aimed
@@ -2320,14 +2320,14 @@ class Daemon:
                 point = self._switch_control(view.items, found, shown)
         want = a.get("value")
         if want is not None and found.checked == want:
-            return Unchanged(f"{line} is already {'true' if want else 'false'}.")
+            return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
         said = self._police("toggle", a, found)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
         where = "" if shown is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
-        done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}{where}.")
+        done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False, place=False)}{where}.")
         done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
         done.note = forced
         return done

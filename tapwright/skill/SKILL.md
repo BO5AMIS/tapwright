@@ -37,10 +37,10 @@ themselves; what follows is what they can't tell you.
 ```
 tap {"target": {"id": "login-button"}}
 
-Tapped e3 button "Log in" id=login-button @24,610 354x48.
+Tapped e3 button "Log in" id=login-button.
 Same screen. Changes:
 + e9 text "Wrong password" @24,560 354x20
-~ e2 input "Password" id=password @24,500 354x48 [tap, type] (was "hunter2")
+~ e2 input "Password" id=password (was "hunter2")
 Settled in 0.31 s.
 ```
 
@@ -52,7 +52,12 @@ with no element.
 
 ## 3. Reading an answer
 
-- **The first line** says what was done and to which element.
+- **The first line** says what was done and to which element, without its position.
+- **Short lines:** a `~` line gives `@x,y WxH` only when the element moved or was resized, and
+  `[actions]` only when they changed. A button, tab or link can be tapped, an input typed into, a
+  switch toggled and a scroll view scrolled; other actions are listed in brackets.
+- **A long old value is cut to what changed:** `(was "…delivery on Thursday 14 May")`. A value of
+  40 characters or fewer is shown whole.
 - **`Same screen. Changes:`** then `+` new, `-` gone, `~` changed (with what it was),
   `↕` moved. When most of the screen changed, the full list comes instead.
 - **`No visible change.`** means nothing changed, on screen or off it.
@@ -67,7 +72,7 @@ with no element.
 - **A change out of view has its own line, without a ref:**
   ```
   Same screen. Changes:
-  ~ text "taps=2" id=lab-state @16,1400 398x60 (off screen; was "taps=1")
+  ~ text "taps=2" id=lab-state (off screen; was "taps=1")
   ```
   The action worked. You don't need to scroll there to check.
 - **After answers you asked to be short (`look: false`), the next block covers them too:**

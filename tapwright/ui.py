@@ -2,7 +2,7 @@
 WebDriverAgent's accessibility tree (`SOURCE_PATH`, XML), so they're testable without a phone.
 
 An element line looks like:
-    e12 button "Log in" id=login-button @24,610 354x48 [tap]
+    e12 button "Log in" id=login-button @24,610 354x48
 Positions and sizes are in points (the phone's coordinate space, what taps use).
 Format and vocabulary: docs/AGENT-TOOLS.md §3.
 """
@@ -47,6 +47,10 @@ ROLES = {"Button": "button", "Key": "button", "Link": "link", "StaticText": "tex
 # What an agent can do with an element, inferred from its role.
 ROLE_ACTIONS = {"button": ("tap",), "link": ("tap",), "cell": ("tap",), "tab": ("tap",), "input": ("tap", "type"),
                 "switch": ("toggle",), "scroll": ("scroll",)}
+# The actions an element line leaves out because the instructions say them (AGENT-TOOLS 1.8 §13 rule 4): a
+# button, tab or link taps, an input taps and types, a switch toggles, a scroll view scrolls. A cell's `[tap]`
+# and any other set are listed.
+IMPLIED_ACTIONS = {role: acts for role, acts in ROLE_ACTIONS.items() if role != "cell"}
 
 _BIDI_MARKS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"))
 
@@ -124,10 +128,12 @@ class Element:
         (AGENT-TOOLS v1.7: the line says `placeholder=`, so an agent doesn't take the field for filled in)."""
         return bool(self.placeholder) and self.value == self.placeholder
 
-    def line(self, ref: bool = True, actions: bool = True) -> str:
+    def line(self, ref: bool = True, actions: bool = True, place: bool = True) -> str:
         """`<ref> <role> "<text>" [id=…] [value="…"] [disabled] [selected] [checked=…] @x,y WxH [actions]`.
         `ref=False` leaves the ref out (a gone element has no ref any more); `actions=False` leaves
-        out the `[actions]`. The label is the quoted text, so there is no separate `label=`."""
+        out the `[actions]`; `place=False` leaves out `@x,y WxH` (an action's first line, AGENT-TOOLS 1.8 §13
+        rule 1). The actions a role implies are never listed (rule 4). The label is the quoted text, so there
+        is no separate `label=`."""
         parts = [self.ref] if ref else []
         parts.append(self.role)
         if self.text:
@@ -145,10 +151,20 @@ class Element:
             parts.append("selected")
         if self.checked is not None:
             parts.append(f"checked={'true' if self.checked else 'false'}")
-        parts.append(f"@{round(self.x)},{round(self.y)} {round(self.width)}x{round(self.height)}")
-        if actions and self.actions:
+        if place:
+            parts.append(f"@{round(self.x)},{round(self.y)} {round(self.width)}x{round(self.height)}")
+        if actions and self.actions and self.actions != IMPLIED_ACTIONS.get(self.role):
             parts.append(f"[{', '.join(self.actions)}]")
         return " ".join(parts)
+
+
+_PLACE_AT_END = re.compile(r" @-?\d+,-?\d+ \d+x\d+(?=\.$)")
+
+
+def without_place(answer: str) -> str:
+    """An action's first line without the element's `@x,y WxH` at its end (AGENT-TOOLS 1.8 §13 rule 1), for a
+    line Session wrote with the position in it. A line with none comes back as it was."""
+    return _PLACE_AT_END.sub("", answer)
 
 
 @dataclass(frozen=True)
