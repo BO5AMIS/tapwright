@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs the Tapwright MCP server (`tapwright mcp --apps <bundle id>`) and an iPhone that went through `tapwright setup`. Works from Windows, Linux or macOS.
 metadata:
   tool: tapwright
-  interface: AGENT-TOOLS v1.7
+  interface: AGENT-TOOLS v1.8
 ---
 
 # Tapwright: test an app on a real iPhone
@@ -101,6 +101,9 @@ with no element.
 | wait for a load, a spinner or a new screen | `wait_for` with `text`, `id` or `label` (`gone: true` for a spinner), not `wait` |
 | set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
+| do a known sequence (fill a form, submit, check the result) | `run` with the steps, each an ordinary call, and an `expect` on the step that should change something: `{"tool": "tap", "target": {"id": "save"}, "expect": {"text": "Saved"}}`. One call instead of five; it stops at the first step that fails, says which, and keeps that step's own error code |
+| leave the user a test they can rerun | `record` with `start: true`, do the flow, then `record` with `stop: true` and a `path`. `replay` runs it; people run it in CI with `tapwright replay FILE --junit out.xml` |
+| check the screen's accessibility | `audit`. Report each issue it lists with its element and fix; they are real findings for the developer |
 | leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
@@ -125,13 +128,14 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `not_found` | `look`, then pick another target |
 | `ambiguous` | use one of the listed refs, or add `index` |
 | `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: `scroll` with `to: "target"`, close what is in front, answer the alert. `covered` also means a row under the status bar with too little showing below it: `scroll` it down |
-| `stale` | a person changed the screen since your list: `look` again |
+| `stale` | a person changed the screen since your list, or (a touch at `x`, `y`) the picture there changed since your last look: `look` again |
 | `busy` | a person is using the phone: wait a few seconds, retry |
 | `paused`, `locked` | ask the user (to resume; to unlock or enter the passcode) |
 | `not_allowed` | the first word is why. `outside_apps`, `no_apps`: you weren't given this app, so go back with `open_app`, or tell the user. `needs_confirmation`: a button with a policy word (Delete, Buy, Send, Sign out ...) needs a person's OK and the live view asks them; when they allow it, make the same call again, once; if nobody is watching, ask the user. `blocked`: final, tell the user. Never work around the last two (another element, a point, `force`) |
 | `not_answering` | the app froze: `close_app`, then `open_app` |
 | `reconnecting` | wait a few seconds, then `look` |
 | `timeout` | the action may have happened: `look` before you retry |
+| `expect_failed` | a `run` step's expectation didn't hold: the first line says which step and what was expected. Look, then decide: a bug to report, or a step to fix |
 | `bad_params` | fix the call |
 | `internal` | a bug in the tool: report it with the call you made |
 
