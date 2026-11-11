@@ -346,7 +346,9 @@ class Daemon:
         self._agent_touches = AgentTouches()
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
-        self.preset = "balanced"
+        self.preset = os.environ.get("TAPWRIGHT_PRESET", "balanced")  # (a trial switch: the stream's preset at start)
+        if self.preset not in PRESETS:
+            self.preset = "balanced"
         self.ws_clients = 0
         self.video = None  # a tapwright.video.VideoHub while the H.264 live view is set up (see start_video)
         self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
