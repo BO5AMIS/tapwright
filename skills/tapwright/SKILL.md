@@ -105,6 +105,7 @@ with no element.
 | answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise. `Alert:` in the header is a system alert; an app's own alert is ordinary elements: tap its button |
 | start a run from a clean app | `close_app`, then `open_app` |
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
+| open a link a person would scan as a QR code (pairing Tapline, an Expo project, a deep link) | `open_url` with the link itself, then answer the app's prompt (Tapline's "Connect for testing?": tap Connect). Ask for the link as text; don't ask the user to scan. A pairing link works once: never log it or put it in a file |
 | drag a slider or a carousel | `swipe` between two points |
 
 **With both tools connected:** when the two tools answer differently, both are right about their own way in: Tapwright does what a finger can do, Tapline what the app's own code allows (Tapline's `back` calls a sheet's own close; Tapwright's needs a gesture the sheet accepts). Test what the user can do with Tapwright; use Tapline to get there faster. Each tool's `was` is from its own last answer: after the other tool acted, read the current value, not the old one.
