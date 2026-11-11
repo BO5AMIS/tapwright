@@ -52,12 +52,50 @@ tapwright setup --p12 dev.p12 --p12-password PASSWORD --profile tapwright.mobile
 Setup ends with WebDriverAgent installed (it appears as *WebDriverAgentRunner-Runner*)
 and the phone paired for network use.
 
+Run setup again any time. It skips what is done (WebDriverAgent installed and signed for
+more than 14 more days, network pairing saved) and ends with the next two commands.
+`--force` does every step again.
+
 ## 4. Check
 
 ```sh
 tapwright doctor
 tapwright smoke --app <bundle id of one of your apps>
 ```
+
+Then connect your agent. One command registers the MCP server and installs the skill:
+
+```sh
+tapwright install --client claude --apps <bundle id>      # or --client codex, --client cursor
+```
+
+- Claude Code: it runs `claude mcp add` for you (user scope; `--project DIR` for one
+  project). If `claude` is not on the PATH, it prints the exact command.
+- Codex: it edits `[mcp_servers.tapwright]` in `~/.codex/config.toml`. Other servers and
+  comments stay as they are.
+- Cursor: it edits `mcpServers.tapwright` in `~/.cursor/mcp.json` (`.cursor/mcp.json` with
+  `--project DIR`).
+- Run it again to change the apps: it updates the entry, never adds a second one.
+- It needs `--apps` or `--dedicated`, like `tapwright mcp`. Without either, the agent can do
+  nothing.
+
+### Keeping it working
+
+The development profile and certificate last a year. Then WebDriverAgent stops starting.
+
+- `tapwright doctor` warns, with the date, 30 days before the profile or certificate runs
+  out. The agent's first answer of a session carries the same warning.
+- `tapwright doctor --fix` (phone on USB, `tapwright serve` stopped) repairs, step by step,
+  and says what it did:
+  1. The developer disk image is not mounted: it mounts it.
+  2. WebDriverAgent is missing from the phone, or its signature ends within 14 days or has
+     ended: it signs it again with the profile and certificate you already have, and
+     installs it.
+  3. The network pairing port is stale: it looks for the phone on the Wi-Fi and saves the
+     current port (as `tapwright probe` does).
+- `--fix` never makes a certificate or a profile. If the profile itself has run out, or is
+  about to, it says so: run `tapwright setup` again with your App Store Connect key (it
+  makes the new profile and installs WebDriverAgent again).
 
 The first start of a session mounts Apple's developer disk image on the phone (downloaded
 once, needs internet) and starts WebDriverAgent; that takes up to a minute. Later starts
@@ -119,7 +157,7 @@ tapwright serve --video
 |---|---|
 | no iPhone on USB | unlock the phone; another cable or port; Windows: open Apple Devices once |
 | "the profile doesn't include this iPhone" | run setup with the API key (it makes a new profile), or make one that lists the phone |
-| WebDriverAgent doesn't start | phone unlocked and screen on; Developer Mode on; run setup again to reinstall |
+| WebDriverAgent doesn't start | phone unlocked and screen on; Developer Mode on; `tapwright doctor --fix` (or run setup again) to reinstall |
 | the phone shows "Enter iPhone Passcode for XCTest" | enter it; then Settings > Developer > Enable UI Automation, so it doesn't ask again |
 | works on USB, not on Wi-Fi | same network, no client isolation; run `tapwright probe` with the phone on the Wi-Fi |
 | actions do nothing on a screen | look again: the screen may have changed; system alerts need `alert` |

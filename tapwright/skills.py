@@ -13,10 +13,10 @@ SOURCE = Path(__file__).parent / "skill"
 HOMES = (".claude/skills", ".agents/skills")  # under a project's folder, or under the user's home
 
 
-def targets(project: str | None = None) -> list[Path]:
-    """The folders the skill is written to: under `project`, else under the user's home."""
-    base = Path(project).expanduser() if project else Path.home()
-    return [base / home / NAME for home in HOMES]
+def targets(project: str | None = None, home: Path | None = None) -> list[Path]:
+    """The folders the skill is written to: under `project`, else under the user's home (`home`, for tests)."""
+    base = Path(project).expanduser() if project else (home or Path.home())
+    return [base / sub / NAME for sub in HOMES]
 
 
 def is_this_skill(folder: Path) -> bool:
@@ -28,13 +28,13 @@ def is_this_skill(folder: Path) -> bool:
     return re.search(rf"^name: {NAME}\s*$", text.split("\n---", 1)[0], re.M) is not None
 
 
-def install(project: str | None = None) -> list[Path]:
+def install(project: str | None = None, home: Path | None = None) -> list[Path]:
     """Copy the skill into each target and return the folders written. A copy of this skill already there is
     replaced; a folder of that name that is something else is left alone, with an error, before anything is
     written. Raises OSError (FileNotFoundError, FileExistsError) with the sentence to print."""
     if project and not Path(project).expanduser().is_dir():
         raise FileNotFoundError(f"{Path(project).expanduser()} is not a folder. Pass the project's folder to --project.")
-    where = targets(project)
+    where = targets(project, home)
     for target in where:  # check both before writing either, so a refusal leaves nothing half done
         if target.exists() and not is_this_skill(target):
             raise FileExistsError(f"{target} exists and is not the {NAME} skill. Move it away first; nothing was written.")

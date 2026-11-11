@@ -80,7 +80,19 @@ tapwright smoke --app com.yourcompany.yourapp
 
 It opens the app, prints its first screen as elements, saves a screenshot, and closes it.
 
-**Give it to your agent**, naming the apps it may use. Claude Code:
+Run setup again any time: it skips what is done and ends with the next two commands. To keep
+it working, `tapwright doctor` warns 30 days before the signing runs out, and
+`tapwright doctor --fix` (phone on USB) repairs what it can.
+
+**Give it to your agent**, naming the apps it may use. One command registers the MCP server
+with your agent and installs the skill (`--client claude`, `codex` or `cursor`; run it again to
+change the apps, it never adds a second entry):
+
+```sh
+tapwright install --client claude --apps com.yourcompany.yourapp
+```
+
+By hand, for Claude Code:
 
 ```sh
 claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
@@ -93,12 +105,12 @@ claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
   the agent may then use every app, the Home screen and system prompts.
 - With neither, the agent can do nothing. That is deliberate: the phone may be yours.
 
-Other MCP clients: run `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
+Other MCP clients: register `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
 on my phone, sign up with a test email, and tell me if anything looks broken."*
 [AGENTS.md](https://github.com/bo5amis/tapwright/blob/main/AGENTS.md) is the agent's guide; point your agent at it.
 [docs/quickstart.md](https://github.com/bo5amis/tapwright/blob/main/docs/quickstart.md) walks through a first test.
 
-**Give your agent the skill.** It teaches an agent how to test with Tapwright: the loop, how
+**The skill** (`install` already did this; the command is for the skill alone). It teaches an agent how to test with Tapwright: the loop, how
 to read an answer, what to do on each error, how to report, and the mistakes agents make.
 
 ```sh

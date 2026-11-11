@@ -38,9 +38,25 @@ Never print the key's contents, and never copy the key file anywhere else.
    If the phone shows **Enter iPhone Passcode for "XCTest"** (Enable UI Automation), the user
    enters it. Suggest Settings > Developer > **Enable UI Automation**, which stops the phone
    asking again. On a phone kept for testing this should always be on.
-5. Add the MCP server to the agent host, naming the apps the user wants tested.
+5. Connect the agent, naming the apps the user wants tested. One command registers the MCP
+   server and installs this skill:
+   ```sh
+   tapwright install --client claude --apps com.example.app   # or --client codex, --client cursor
+   ```
+   Run it again to change the apps: it updates the entry. Setup run a second time skips
+   what is done and ends with this step.
 
-## The MCP server, per host
+## Keeping it working
+
+The signing lasts a year. `tapwright doctor` warns 30 days before it ends, and the first
+answer of a session carries the same warning: tell the user. `tapwright doctor --fix`
+(phone on USB) mounts the developer disk image, installs or re-signs WebDriverAgent with the
+stored profile, and refreshes the network pairing. It never makes a new profile: when it says
+so, ask the user for the App Store Connect key and run `tapwright setup` again.
+
+## The MCP server, by hand, per host
+
+`tapwright install` does the following for you.
 
 The server is a stdio command:
 
@@ -99,4 +115,4 @@ Run `tapwright doctor` first.
 | every call answers `not_allowed: no_apps` | the server was added without `--apps` |
 | `not_allowed: outside_apps` | another app is in front: `open_app` the app under test |
 | `not_answering` | the app in front froze: `close_app`, then `open_app` |
-| WebDriverAgent doesn't start | phone unlocked, Developer Mode on; run `tapwright setup` again |
+| WebDriverAgent doesn't start | phone unlocked, Developer Mode on; run `tapwright doctor --fix` (or `tapwright setup` again) |
