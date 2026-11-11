@@ -893,7 +893,12 @@ class Daemon:
             return _answer([str(result)], notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
-        landed = await self._toggle_landed(view, result) if isinstance(result, Toggled) else None
+        if isinstance(result, Toggled):
+            landed = await self._toggle_landed(view, result)
+        elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
+            landed = await self._typed_landed(view, result, args["text"])
+        else:
+            landed = None
         if landed is not None:
             done = Settled(landed[1], True, False)
         else:
@@ -957,6 +962,26 @@ class Daemon:
             now = next((e for e in snap.tree.items if (e.role, e.identifier or "", e.label if not e.identifier else "")
                         == (old.role, old.identifier or "", old.label if not old.identifier else "")), None)
             if now is not None and now.checked == result.flipped:
+                if len(snap.tree.items) != len(view.items):
+                    return None
+                return snap, loop.time() - began
+            await asyncio.sleep(TOGGLE_POLL)
+        return None
+
+    async def _typed_landed(self, view, result: "Typed", text: str) -> tuple[Snapshot, float] | None:
+        """As _toggle_landed, for typing: the field holds the typed text as soon as the keys call returns, and the
+        screen's wait after it (0.2 to 0.4 s on the phone) only saw the caret blink. The first read that shows the
+        field with exactly that text is the answer, unless anything else appeared or went away in it."""
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        old = result.field
+        while loop.time() - began < TOGGLE_LAND_WAIT:
+            snap = await self._read(lambda: self.session.snapshot())
+            if snap.tree.alert is not None:
+                return None
+            same = [e for e in snap.tree.items if e.role == old.role and (
+                e.identifier == old.identifier if old.identifier else e.label == old.label)]
+            if len(same) == 1 and not same[0].secure and same[0].value == text:
                 if len(snap.tree.items) != len(view.items):
                     return None
                 return snap, loop.time() - began

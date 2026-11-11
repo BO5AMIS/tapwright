@@ -2504,6 +2504,30 @@ def test_a_toggle_that_is_an_agents_first_call_still_says_what_the_switch_did():
     run(go)
 
 
+def test_typing_answers_as_soon_as_the_field_reads_the_text():
+    """The field holds the text as soon as the keys go out; the wait for a still screen after it (0.2 to 0.4 s on the
+    phone) only saw the caret blink."""
+    async def go():
+        d = make(settle_still=5.0, settle_quiet=5.0)  # a still-screen wait would take seconds here
+        stop, task = await started(d)
+        field = el("e1", "input", "Email", "email", rect=(10, 100, 300, 40))
+        await looked(d, [field])
+        real = d.session.type_text
+
+        async def type_text(text, **kw):
+            d.session.tree = [el("e1", "input", "Email", "email", rect=(10, 100, 300, 40), value=text)]
+            return await real(text, **kw)
+        d.session.type_text = type_text
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "hi"})
+        assert asyncio.get_running_loop().time() - began < 1.0
+        assert 'Value is now "hi"' in r["text"].splitlines()[0]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
 def test_toggle_followed_by_a_confirm_alert_is_not_refused():
     async def go():
         d = make()
