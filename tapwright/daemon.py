@@ -14,7 +14,7 @@ import traceback
 from contextlib import nullcontext
 from typing import NamedTuple
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import changes, ui
 from . import session as session_module
@@ -24,8 +24,8 @@ from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, Pas
                      PhoneNotFound)
 from .session import Snapshot
 from .tapline import AgentTouches
-from .stream import (NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of,
-                     turn_jpeg)
+from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
+                     alike, jpeg_of, turn_jpeg)
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
@@ -36,6 +36,7 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
+STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
@@ -1776,6 +1777,10 @@ class Daemon:
         verb = "Long-pressed" if hold_ms > 300 else "Tapped"
         found = ui.resolve(s.items, target)
         if isinstance(found, tuple):
+            if not a.get("force") and self._moved_under(view, *found):
+                x, y = (round(c) for c in found)
+                raise Refused("stale", f"the screen around ({x}, {y}) changed since your last look; look again, or "
+                                       "pass force: true to touch there anyway.")
             return await s.tap(target, hold_ms=hold_ms)
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
@@ -1787,6 +1792,26 @@ class Daemon:
             return await s.tap(target, hold_ms=hold_ms)
         await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
         return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
+
+    def _moved_under(self, view, x: float, y: float) -> bool:
+        """Has the picture around a point changed since the list the agent last had? A touch by position is aimed
+        at what that list's moment showed there; if something moved in (a sheet, a banner, a scrolled row) the
+        touch would land on something else. Only a fresh stream frame against the frame of the agent's last read
+        can tell; without both, or after the agent chose an answer without a list (`look: false`), it can't, and
+        the touch goes ahead as before."""
+        (_, was), now = view.read_mark, self.hub.latest
+        if view.moved or was is None or now is None or now is was or self.hub.now_ms() - now.at > FRESH_FRAME * 1000:
+            return False
+        a, b = was.thumb, now.thumb
+        w, h = self.session.screen
+        if a is None or b is None or a.size != b.size or (a.width > a.height) != (w > h):
+            return False
+        sx, sy = a.width / w, a.height / h
+        box = (max(0, int((x - STALE_AREA) * sx)), max(0, int((y - STALE_AREA) * sy)),
+               min(a.width, int((x + STALE_AREA) * sx) + 1), min(a.height, int((y + STALE_AREA) * sy) + 1))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return False
+        return ImageChops.difference(a.crop(box), b.crop(box)).getextrema()[1] > ALIKE_TOLERANCE
 
     def _forced(self, view, element: ui.Element) -> str:
         """The note for a touch made with `force` at the centre of an element that the checks would have refused,

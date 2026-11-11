@@ -5110,3 +5110,49 @@ def test_the_live_view_gets_the_elements_name_and_a_plain_caption():
     assert "secret" not in caption("type_text", 'Typed into e3 input "Email".', {"text": "secret"})
     long = caption("tap", 'Tapped e4 cell "' + "x" * 80 + '".', {})
     assert len(long) <= daemon_module.CAPTION_MAX
+
+
+def block_jpeg(box: tuple[int, int, int, int] | None = None) -> bytes:
+    """A white 160x320 px frame (the fake screen is 400x800 pt, so 0.4 px a point), with a black box if given."""
+    im = Image.new("L", (160, 320), 255)
+    if box:
+        im.paste(0, box)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def test_a_point_tap_is_refused_when_the_picture_there_moved_since_the_last_look():
+    """W3 (from PhoneUse): a touch by position is aimed at what the last list's moment showed there. A sheet or a
+    banner that came in since would take the touch, so the tool says stale; elsewhere, or with force, it taps."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(block_jpeg())
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.hub.publish(block_jpeg((30, 30, 50, 50)))  # something new around (100, 100) pt
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"x": 100, "y": 100}, "look": False})
+        assert e.value.code == "stale" and str(e.value).startswith("the screen around (100, 100) changed since")
+        assert "tap" not in d.session.calls
+        await d.run_tool("a", "tap", {"target": {"x": 100, "y": 700}, "look": False})  # far from the change
+        assert d.session.calls.count("tap") == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_point_tap_with_force_or_after_an_answer_without_a_list_is_not_checked():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(block_jpeg())
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.hub.publish(block_jpeg((30, 30, 50, 50)))
+        await d.run_tool("a", "tap", {"target": {"x": 100, "y": 100}, "force": True, "look": False})
+        assert d.session.calls.count("tap") == 1
+        # that answer came without a list: the agent chose to act without one, so the next point tap goes ahead
+        d.hub.publish(block_jpeg((30, 30, 70, 70)))
+        await d.run_tool("a", "tap", {"target": {"x": 100, "y": 100}, "look": False})
+        assert d.session.calls.count("tap") == 2
+        await finish(stop, task)
+    run(go)
