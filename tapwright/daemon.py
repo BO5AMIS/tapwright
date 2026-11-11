@@ -1317,7 +1317,9 @@ class Daemon:
                 return False
         if name == "type_text" and (field is None or field.role != "input"):
             return False  # it refuses typing into this itself
-        if name == "type_text" and not shown_inputs and field.y + field.height <= keyboard_top:
+        if name == "type_text" and not shown_inputs and keyboard_top - field.y >= MIN_VISIBLE:
+            # at least 10 pt of it show above the keyboard: a person taps that part and focus moves (AGENT-TOOLS
+            # §4, v1.6; the lab's second field shows 17 pt, and closing first cost 2 s there)
             return False
         return field is None or not await self.session.is_focused(field)  # a non-input is outside by definition
 

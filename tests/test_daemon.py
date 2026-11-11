@@ -4119,6 +4119,30 @@ def test_type_text_into_another_input_above_the_keyboard_leaves_the_keyboard_up(
     run(go)
 
 
+@pytest.mark.parametrize("top,closes", [(483, False), (495, True)])
+def test_type_text_into_an_input_partly_under_the_keyboard(top, closes):
+    """AGENT-TOOLS §4 (v1.6): with at least 10 pt of it above the keyboard, a person taps that part and focus moves;
+    with less, the keyboard is closed first. The lab's second field shows 17 pt (closing first cost 2 s there)."""
+    async def go():
+        d, stop, task = await keyboard_up()
+        part = el("e7", "input", "Field C", "c", rect=(10, top, 300, 40), covered_by=(KEYBOARD_BAR,))
+        d.session.tree = [*d.session.tree, part]
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.tap_points.clear()
+        blank = (60.0, 80.0)  # the touch on the label "Title" that closes the keyboard
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            if (target.x, target.y) == blank:  # the keyboard goes, and with it what it covered
+                d.session.tree = [*d.session.tree[:-1], el("e7", "input", "Field C", "c", rect=(10, top, 300, 40))]
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        await d.run_tool("a", "type_text", {"target": {"id": "c"}, "text": "x"})
+        assert (blank in d.session.tap_points) == closes
+        await finish(stop, task)
+    run(go)
+
+
 def test_type_text_closes_the_keyboard_after_all_when_the_other_input_did_not_take_focus():
     """Some apps give the first tap outside the focused field to the keyboard: then the old way, and a second tap."""
     async def go():
