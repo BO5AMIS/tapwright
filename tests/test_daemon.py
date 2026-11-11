@@ -4949,6 +4949,26 @@ def test_an_agents_tap_reaches_the_live_view_with_its_caption():
     run(go)
 
 
+def test_a_refused_touch_reaches_the_live_view_with_its_reason():
+    """VIEWER-PROTOCOL 1.4: people watching see the step the agent tried and why a finger couldn't do it."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        queue = d.subscribe()
+        await looked(d, [el("e1", "button", "Save trip", "trip-save", enabled=False)])
+        with pytest.raises(Refused):
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        sent = []
+        while not queue.empty():
+            m = queue.get_nowait()
+            if m["type"] == "action":
+                sent.append(m)
+        assert [(m["kind"], m["ok"], m.get("code"), m.get("reason"), m.get("caption"), m.get("label")) for m in sent] \
+            == [("tap", False, "not_actionable", "disabled", 'Tap "Save trip"', "Save trip")]
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_live_view_gets_the_elements_name_and_a_plain_caption():
     """VIEWER-PROTOCOL 1.4: `label` is the element's name, `caption` the step in plain words. The whole answer line
     drawn beside a touch covered the keys around it (recording the demo, 2026-11-11)."""

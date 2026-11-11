@@ -504,12 +504,14 @@ class Daemon:
         return {"x": round(point[0] / w, 4), "y": round(point[1] / h, 4)}
 
     def _announce(self, by: str, kind: str, label: str | None = None, point=None, ok: bool = True,
-                  code: str | None = None, caption: str | None = None) -> None:
+                  code: str | None = None, caption: str | None = None, reason: str | None = None) -> None:
         message = {"type": "action", "by": by, "kind": kind, "at": int(time.time() * 1000), "ok": ok}
         if label:
             message["label"] = label
         if caption:
             message["caption"] = caption
+        if reason:
+            message["reason"] = reason
         if point:
             message["point"] = point
         if code:
@@ -967,6 +969,14 @@ class Daemon:
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
+        except Refused as e:
+            # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
+            if e.code == "not_actionable":
+                said = str(e)
+                word = said.split(":", 1)[0] if ":" in said else ""
+                self._announce("agent", name, label=element_name(said) or None, ok=False, code=e.code,
+                               reason=word if word.isidentifier() else None, caption=step_caption(name, said, args))
+            raise
         if isinstance(result, Noted) and result.note:
             notes = [*notes, result.note]
         # The keyboard note is given only when the keyboard is still closed as the call answers (AGENT-TOOLS
