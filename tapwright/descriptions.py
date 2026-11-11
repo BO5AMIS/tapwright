@@ -125,6 +125,13 @@ SHARED = {
 }
 
 EXTRA = {
+    'audit': (
+        'Check the screen in front for accessibility problems and get a report: low contrast, tap targets smaller '
+        'than 44x44 pt, elements with no useful label, text that is cut off or does not grow with the text size, '
+        'wrong traits, and duplicate ids. Each issue names the element and says how to fix it. `types` narrows it '
+        '(contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, duplicate_id). '
+        "Runs Apple's own XCTest audit on the phone (iOS 17+); it can take a few seconds."
+    ),
     'look': 'reads the whole phone; the header may add `Keyboard:`.',
     'tap': (
         "makes a real touch at the element's centre, or at the centre of its visible part when a bar "

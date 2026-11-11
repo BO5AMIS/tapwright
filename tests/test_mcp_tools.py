@@ -24,6 +24,7 @@ EXPECTED = {
     "press_button": {"name", "look", "screenshot"},
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot"},
     "rotate": {"to", "look", "screenshot"},
+    "audit": {"types"},
 }
 REQUIRED = {"tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
@@ -39,7 +40,7 @@ DEFAULTS = {
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False},
 }
-READ_ONLY = {"look", "apps", "viewer", "wait", "wait_for"}
+READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for"}
 
 
 def listed() -> dict:

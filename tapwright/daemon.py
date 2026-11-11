@@ -16,7 +16,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, changes, ui
+from . import actionlog, audit, changes, ui
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -276,6 +276,10 @@ def _checked(name: str, args: dict) -> dict:
     for key in ("look", "screenshot", "labels"):
         if key in args and not isinstance(args[key], bool):
             raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if name == "audit" and args.get("types") is not None:
+        types = args["types"]
+        if not isinstance(types, list) or not types or any(t not in audit.TYPES for t in types):
+            raise Refused("bad_params", f"types must be a list of: {', '.join(audit.TYPES)}; not {types!r}")
     if name == "wait":
         seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, a string isn't one to us
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not WAIT_MIN <= seconds <= WAIT_MAX:
@@ -385,7 +389,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps")
+READS = ("look", "apps", "audit")
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
 REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
@@ -924,7 +928,7 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name == "wait_for":
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -978,6 +982,8 @@ class Daemon:
             return await self._wait(view, args, notes, shot)
         if name == "wait_for":
             return await self._wait_for(view, args, notes, shot)
+        if name == "audit":
+            return await self._audit(view, args, notes)
         if name == "look":
             await self._settle_pending()
             return await self._look(view, shot, [], notes)
@@ -1394,6 +1400,19 @@ class Daemon:
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
         return await self._add_shot(answer, view, shot)
+
+    async def _audit(self, view, args: dict, notes: list) -> dict:
+        """AGENT-TOOLS §10: XCTest's own accessibility audit of the screen in front, plus `duplicate_id` from the
+        tree, as one report. The tree is read first so each issue is named by the agent's current element line."""
+        types = list(args.get("types") or audit.TYPES)
+        asked = [audit.XCTEST[t] for t in types if t in audit.XCTEST]
+        await self._settle_pending()
+        await self._read(lambda: self._silent_read(view))
+        issues = await self._read(lambda: self.session.audit(asked)) if asked else []
+        app = getattr(self.session, "app", None) or ""
+        name = self.session.app_names.get(app) or app or "the screen"
+        text = audit.report(f'"{name}"', issues, view.items, types)
+        return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
 
     async def _wait_for(self, view, args: dict, notes: list, shot) -> dict:
         """Poll the fast tree (outside the phone's queue between reads) until the text, id or label is

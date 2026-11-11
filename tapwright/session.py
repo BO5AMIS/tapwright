@@ -13,6 +13,7 @@ from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
+AUDIT_TIMEOUT = 60.0  # seconds: XCTest's audit walks the whole screen, element by element
 LOCK_WAIT = 5.0  # seconds: /wda/locked answers in about 10 ms, since it doesn't read the app (measured)
 FIRST_READ_WAIT = 10.0  # seconds: the window size, the first read of the app; past this the app is stuck
 BANNER_ZONE = 200.0  # points from the top: where a notification banner can lie (a touch lower down is never held)
@@ -365,6 +366,14 @@ class Session:
         tree = ui.read(source, self.screen)
         self.behind, self.front_items = tree.behind, tree.items  # (and what the layer in front shows, for `back`)
         return ui.back_button(source, self.screen)
+
+    async def audit(self, types: list[str]) -> list[dict]:
+        """XCTest's accessibility audit of the app in front (iOS 17+), through WebDriverAgent: one dict per issue
+        with `auditType`, `compactDescription`, `detailedDescription` and `elementAttributes` (type, label, name,
+        rect). `types` are XCUIAccessibilityAuditType names; empty is all of them."""
+        found = (await self._call("POST", "/session/{sid}/wda/performAccessibilityAudit", {"auditTypes": types},
+                                  timeout=AUDIT_TIMEOUT)).get("value")
+        return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""

@@ -126,6 +126,7 @@ repository too.
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `open_url` | deep links |
 | `viewer` | the link to the live view |
+| `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
 screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`

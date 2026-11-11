@@ -204,6 +204,12 @@ class FakeSession:
         self.scale_reads += 1
         return 3.0
 
+    audit_issues: list = []  # what `audit` answers: WebDriverAgent's issue dicts
+
+    async def audit(self, types):
+        self._record(("audit", tuple(types)))
+        return list(self.audit_issues)
+
     async def refresh(self, timeout=None):
         self._record("refresh")
         self.read_timeouts.append(timeout)
