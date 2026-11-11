@@ -4231,9 +4231,24 @@ def test_in_personal_mode_a_given_apps_permission_prompt_can_be_seen_and_answere
         began = asyncio.get_running_loop().time()
         r = await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
         assert "outside_apps" not in r["text"]  # the prompt is shown, not withheld
+        assert asyncio.get_running_loop().time() - began < 2.0  # no banner wait: a prompt doesn't leave by itself
+        answer_alert = s.alert
+
+        async def answered(action):  # the prompt fades and the app is back in front a moment later
+            s.last_alert = None
+
+            async def back():
+                await asyncio.sleep(0.3)
+                s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
+                s.tree = [button("e1", "Remind me", "remind")]
+            asyncio.get_running_loop().create_task(back())
+            return await answer_alert(action)
+        s.alert = answered
         r = await d.run_tool("a", "alert", {"action": "accept"}, scope=mine)
         assert "alert" in d.session.calls and "outside_apps" not in r["text"]
-        assert asyncio.get_running_loop().time() - began < 2.0  # no banner wait: a prompt doesn't leave by itself
+        assert r["text"].startswith("alert accepted") and s.launched == []  # the app's screen, nothing reopened
+        s.alert = answer_alert
+        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
         # a prompt naming another app is not the given app's
         s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
                                 (60.0, 300.0, 300.0, 200.0))

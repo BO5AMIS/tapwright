@@ -365,6 +365,7 @@ ACTIONS = {
 }
 SPRINGBOARD = "com.apple.springboard"
 PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own system prompt is in front
+PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its prompt is answered
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
@@ -849,6 +850,24 @@ class Daemon:
             return False  # the phone can't say: refuse, the safe side
         return bool(running & set(named))
 
+    async def _back_from_prompt(self, client_id: str, given: dict[str, str], answer: dict) -> dict:
+        """After a given app's own permission prompt is answered, the app comes back as the prompt fades. The
+        answer's read can come mid-fade and show SpringBoard, which personal mode withholds; a first-time agent then
+        reopened the app for nothing (2026-11-11). So wait for the app, up to PROMPT_RETURN_WAIT s, and answer
+        with its screen."""
+        shown = APP_LINE.search(answer["text"])  # as the check below decides: the App: line, else the last read's app
+        app = shown.group(2) if shown else (self.session.app or (None, None))[1]
+        if app in given:
+            return answer
+        loop = asyncio.get_running_loop()
+        until = loop.time() + PROMPT_RETURN_WAIT
+        while await self._read(self.session.foreground_bundle_id) not in given:
+            if loop.time() >= until:
+                return answer
+            await asyncio.sleep(0.25)
+        fresh = await self._run_tool(client_id, "look", {"screenshot": False})
+        return {**fresh, "text": answer["text"].splitlines()[0] + "\n" + fresh["text"]}
+
     async def _within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """One tool call in personal mode, failing closed. Nothing runs without an app list. Opening or closing an
         app outside the list is refused. Reading or touching is refused while another app is in front (asked of
@@ -857,6 +876,7 @@ class Daemon:
             raise Refused("not_allowed", NO_APPS)
         given = await self._given(scope)
         names = ", ".join(given.values())
+        front = None
         if name in ("open_app", "close_app") and isinstance(args.get("app"), str) and args["app"].strip():
             if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
                 bundle, shown = self.stuck.bundle_id, f"{self.stuck.name} ({self.stuck.bundle_id})"
@@ -874,6 +894,8 @@ class Daemon:
             if front not in given and front != PROMPT_FRONT:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
         answer = await self._run_tool(client_id, name, args)
+        if name == "alert" and front == PROMPT_FRONT:
+            answer = await self._back_from_prompt(client_id, given, answer)
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
             kept = [ln for ln in lines if ln.split(" ", 1)[0] in given or not BUNDLE_ID.match(ln.split(" ", 1)[0])]
