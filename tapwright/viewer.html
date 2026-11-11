@@ -134,7 +134,7 @@ body {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-#announce {
+#announce, .sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -162,7 +162,7 @@ select option { background: #ffffff; color: #111827; }
   select option { background: #1b2029; color: #e8ebf0; }
 }
 button:hover, select:hover { border-color: var(--btn-line-hover); }
-button[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); color: var(--accent); }
+button[aria-pressed="true"], #pause[data-paused="true"] { background: var(--pressed); border-color: var(--accent); color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); padding-left: 6px; }
 @media (pointer: coarse) {
@@ -374,6 +374,7 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 }
 @media (prefers-reduced-motion: reduce) {
   .mark { animation: none; }
+  .mark.pending.gone { transition: none; }
   .key.live:active { transform: none; }
 }
 #notice {
@@ -468,6 +469,8 @@ body:not(.details) .mark .tag { display: none; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* nearly opaque: the pill can sit over the picture, and its text must read on any of it */
+  background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease-out, transform 0.2s ease-out;
@@ -553,6 +556,49 @@ body:not(.details) .mark .tag { display: none; }
   .mark.ring::after { animation: none; opacity: 0; }
   #caption { transition: none; }
 }
+/* The caption's text sits in its own span: the visible words are hidden from screen readers, and the live region
+   (the pill itself) holds a second, throttled copy that is spoken, at most once a second. */
+#caption-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#steps-list:focus-visible { outline-offset: -2px; }
+/* More contrast asked for by the system: solid panels, darker text, stronger borders, a thicker focus ring. */
+@media (prefers-contrast: more) {
+  :root {
+    --text: #000000;
+    --muted: #1f2937;
+    --line: #374151;
+    --btn-line-hover: #000000;
+    --panel: #ffffff;
+    --panel-solid: #ffffff;
+    --btn: #ffffff;
+    --accent: #0a4a9e;
+    --pressed: #cfe3ff;
+    --dot-idle: #4b5563;
+  }
+  :focus-visible { outline-width: 3px; }
+  #bar, #steps, #more-menu, #confirm-card, #caption, .seg, button, select { border-width: 2px; }
+  .seg button { border-width: 0; }
+  .menu-label { opacity: 1; }
+  #frame:focus-visible + #glass { box-shadow: 0 0 0 calc(var(--b) - var(--edge) + 1px) var(--bezel), inset 0 0 0 4px var(--accent); }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root {
+    --text: #ffffff;
+    --muted: #d1d7e0;
+    --line: #c9d1db;
+    --btn-line-hover: #ffffff;
+    --panel: #10131a;
+    --panel-solid: #10131a;
+    --btn: #10131a;
+    --accent: #a5d8ff;
+    --pressed: #1d3550;
+    --dot-idle: #9aa4b2;
+  }
+}
+/* Windows high contrast and the like: the system's colours; keep the on/off states and the focus visible. */
+@media (forced-colors: active) {
+  button[aria-pressed="true"], #pause[data-paused="true"], #more-btn[aria-expanded="true"] { border-color: Highlight; box-shadow: inset 0 0 0 2px Highlight; }
+  #frame:focus-visible { outline: 2px solid Highlight; outline-offset: 4px; }
+}
 </style>
 </head>
 <body>
@@ -564,11 +610,11 @@ body:not(.details) .mark .tag { display: none; }
     <span id="announce" role="status" aria-live="polite"></span>
   </div>
   <div id="tools" role="toolbar" aria-label="Viewer controls">
-    <button type="button" id="pause" aria-pressed="false">Pause agent</button>
+    <button type="button" id="pause">Pause agent</button>
     <button type="button" id="steps-btn" aria-expanded="false" aria-controls="steps">Steps</button>
     <div class="more">
-      <button type="button" id="more-btn" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu">More</button>
-      <div id="more-menu" hidden>
+      <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="more-menu">More</button>
+      <div id="more-menu" role="dialog" aria-label="More options" hidden>
         <div class="menu-row">
           <button type="button" id="details" aria-pressed="false">Details</button>
           <button type="button" id="boxes" aria-pressed="false" hidden>Boxes</button>
@@ -604,7 +650,7 @@ body:not(.details) .mark .tag { display: none; }
     <span class="key" id="key-vol-up" aria-hidden="true" title="Volume up"></span>
     <span class="key" id="key-vol-down" aria-hidden="true" title="Volume down"></span>
     <span class="key" id="key-side" aria-hidden="true"></span>
-    <div id="frame" tabindex="0" role="img" aria-label="Live phone screen">
+    <div id="frame" tabindex="0" role="img" aria-label="Live view of the phone" aria-describedby="frame-hint">
       <img id="screen" class="pic" alt="">
       <div id="empty">Waiting for the first frame</div>
       <div id="overlay" aria-hidden="true"></div>
@@ -613,13 +659,14 @@ body:not(.details) .mark .tag { display: none; }
     </div>
     <div id="glass" aria-hidden="true"><div id="island"></div></div>
   </div>
-  <div id="caption" aria-hidden="true"></div>
+  <span id="frame-hint" hidden></span>
+  <div id="caption" role="status" aria-live="polite" aria-atomic="true"><span id="caption-text" aria-hidden="true"></span><span id="caption-sr" class="sr-only"></span></div>
   <aside id="steps" aria-label="Steps" hidden>
     <div class="steps-head">
       <h2>Steps</h2>
       <button type="button" id="steps-close" aria-label="Close steps">&times;</button>
     </div>
-    <ol id="steps-list"></ol>
+    <ol id="steps-list" role="list" tabindex="0" aria-label="Recent steps"></ol>
     <p id="steps-empty">No steps yet. Each touch, typing and scroll shows here.</p>
   </aside>
   <div id="notice" role="alert"></div>
@@ -1280,7 +1327,8 @@ function createVideoBlock(io) {
     }
     var pause = $("pause");
     pause.textContent = paused ? "Resume agent" : "Pause agent";
-    pause.setAttribute("aria-pressed", paused ? "true" : "false");
+    /* The name already says which way it goes (Pause or Resume), so no aria-pressed on top of it. */
+    pause.setAttribute("data-paused", paused ? "true" : "false");
     $("empty").textContent = streamLive || videoOn || haveFrame ? "Waiting for the next frame" : "Waiting for the first frame";
   }
 
@@ -1310,6 +1358,8 @@ function createVideoBlock(io) {
       drawOverlay();
     }
     frame.classList.toggle("can-point", canPoint());
+    $("frame-hint").textContent = accepts.text || accepts.enter || accepts.backspace
+      ? "Keys typed while this has the focus go to the phone." : "";
   }
 
   /* Frames. */
@@ -1576,19 +1626,30 @@ function createVideoBlock(io) {
   var stepsList = $("steps-list");
   var steps = [];
   var lastSpoken = 0;
+  var speakTimer = 0;
+  /* The caption pill is a polite live region. What it speaks is a second copy of the words, at most once a second:
+     a step that comes sooner waits for the second to pass (and a newer one replaces it), so none is lost. */
+  function speak(text) {
+    clearTimeout(speakTimer);
+    var wait = lastSpoken + 1000 - Date.now();
+    var say = function () {
+      speakTimer = 0;
+      lastSpoken = Date.now();
+      $("caption-sr").textContent = text;
+    };
+    if (wait <= 0) say();
+    else speakTimer = setTimeout(say, wait);
+  }
   function noteStep(m) {
     var text = captionOf(m);
     if (!text) return;
     var cls = (m.by === "person" ? "person" : "agent") + (m.ok === false ? " fail" : "");
-    captionEl.textContent = text;
+    $("caption-text").textContent = text;
     captionEl.className = "on " + cls;
     clearTimeout(noteStep.timer);
     noteStep.timer = setTimeout(function () { captionEl.classList.remove("on"); }, m.ok === false ? 4000 : 2500);
     var now = Date.now();
-    if (now - lastSpoken >= 1000) { /* politely, at most once a second */
-      lastSpoken = now;
-      $("announce").textContent = text;
-    }
+    speak(text);
     steps.unshift({ text: text, cls: cls, icon: KIND_ICON[String(m.kind || "")] || "\u2022", at: now });
     if (steps.length > 50) steps.length = 50;
     if (!$("steps").hidden) renderSteps();
@@ -1695,6 +1756,13 @@ function createVideoBlock(io) {
   var askTimer = null;
   var askFrom = null;
   var askSpace = false;
+  /* While the dialog is up the rest of the page is inert: no focus, no clicks, and it is out of the way of screen readers. */
+  function setBehind(on) {
+    ["bar", "device", "steps"].forEach(function (name) {
+      if (on) $(name).setAttribute("inert", "");
+      else $(name).removeAttribute("inert");
+    });
+  }
   function addAsk(m) {
     if (typeof m.id !== "string" || !m.id) return;
     asks.push({
@@ -1711,8 +1779,14 @@ function createVideoBlock(io) {
     $("confirm-text").textContent = asking.caption;
     $("confirm-word").textContent = asking.word ? "Policy word: \"" + asking.word + "\"" : "";
     askFrom = document.activeElement;
+    if (!$("more-menu").hidden) {
+      /* an open menu would be left half-usable behind the dialog: close it, and come back to its button */
+      if (askFrom && $("more-menu").contains(askFrom)) askFrom = $("more-btn");
+      setMore(false);
+    }
     $("confirm").hidden = false;
     $("confirm-deny").focus();
+    setBehind(true);
     var left = asking.expires - Date.now();
     if (!(left > 0 && left <= 120000)) left = 120000;
     var id = asking.id;
@@ -1726,6 +1800,7 @@ function createVideoBlock(io) {
     clearTimeout(askTimer);
     asking = null;
     $("confirm").hidden = true;
+    setBehind(false);
     if (askFrom && typeof askFrom.focus === "function" && document.contains(askFrom)) askFrom.focus();
     askFrom = null;
     if (expired) notify("The request ran out");
@@ -1899,19 +1974,69 @@ function createVideoBlock(io) {
     menu.hidden = !open;
     $("more-btn").setAttribute("aria-expanded", open ? "true" : "false");
   }
+  /* The controls of the open menu, in order; the hidden ones (and the hidden select) are left out. */
+  function menuItems() {
+    return Array.prototype.filter.call($("more-menu").querySelectorAll("button"), function (b) {
+      return !b.closest("[hidden]");
+    });
+  }
+  function focusMenuItem(last) {
+    var items = menuItems();
+    if (items.length) items[last ? items.length - 1 : 0].focus();
+  }
   $("more-btn").addEventListener("click", function () {
-    setMore($("more-menu").hidden);
-    release(this);
+    var open = $("more-menu").hidden;
+    setMore(open);
+    /* opened with the keyboard: the focus goes in, so the arrow keys and Escape work from the first press */
+    if (open && !viaPointer) focusMenuItem(false);
+    else release(this);
   });
   document.addEventListener("pointerdown", function (ev) {
     if (!$("more-menu").hidden && ev.target && !ev.target.closest(".more")) setMore(false);
   }, true);
-  document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape" && !$("more-menu").hidden) {
-      setMore(false);
-      $("more-btn").focus();
-    }
+  /* Tab out of the menu closes it (the focus goes where Tab sends it). */
+  document.querySelector(".more").addEventListener("focusout", function (ev) {
+    if (!$("more-menu").hidden && ev.relatedTarget && !this.contains(ev.relatedTarget)) setMore(false);
   });
+  /* Escape closes what is open, the menu first and then the Steps drawer, and gives the focus back to the
+     button that opened it when it was inside. Arrow keys, Home and End move between the menu's controls;
+     Down or Up on the More button opens it. Returns true when the key was used. */
+  function navigateKeys(ev) {
+    var active = document.activeElement;
+    var key = ev.key;
+    if (key === "Escape") {
+      if (!$("more-menu").hidden) {
+        var inMenu = !!(active && active.closest && active.closest(".more"));
+        setMore(false);
+        if (inMenu) $("more-btn").focus();
+        return true;
+      }
+      if (!$("steps").hidden) {
+        var inDrawer = !!(active && (active === $("steps-btn") || $("steps").contains(active)));
+        setSteps(false);
+        if (inDrawer) $("steps-btn").focus();
+        return true;
+      }
+      return false;
+    }
+    if (active === $("more-btn") && (key === "ArrowDown" || key === "ArrowUp")) {
+      if ($("more-menu").hidden) setMore(true);
+      focusMenuItem(key === "ArrowUp");
+      return true;
+    }
+    if (!$("more-menu").hidden && active && $("more-menu").contains(active) &&
+        (key.indexOf("Arrow") === 0 || key === "Home" || key === "End")) {
+      var items = menuItems();
+      var at = items.indexOf(active);
+      if (!items.length) return true;
+      var to = key === "Home" ? 0 : key === "End" ? items.length - 1
+        : (key === "ArrowDown" || key === "ArrowRight") ? (at + 1) % items.length
+        : (at <= 0 ? items.length - 1 : at - 1);
+      items[to].focus();
+      return true;
+    }
+    return false;
+  }
 
   /* Steps drawer and the Details view (VIEWER-PROTOCOL 1.4, presentation view). Details is remembered per
      browser; storage may be unavailable (a private window), and then it simply starts off. */
@@ -1921,8 +2046,11 @@ function createVideoBlock(io) {
     if (open) renderSteps();
   }
   $("steps-btn").addEventListener("click", function () {
-    setSteps($("steps").hidden);
-    release(this);
+    var open = $("steps").hidden;
+    setSteps(open);
+    /* opened with the keyboard: the focus goes into the drawer (Escape or Close brings it back to this button) */
+    if (open && !viaPointer) $("steps-close").focus();
+    else release(this);
   });
   $("steps-close").addEventListener("click", function () {
     setSteps(false);
@@ -2082,10 +2210,23 @@ function createVideoBlock(io) {
   function inToolbar(target) {
     return !!(target && target.closest && target.closest("#bar"));
   }
+  /* One of the page's own controls (or something inside the bar, the menu, the drawer or the dialog) has the focus:
+     its keys are its own, and nothing it receives goes to the phone. */
+  function inOwnControl(target) {
+    return !!(target && target.closest &&
+      target.closest("#bar, #more-menu, #steps, #confirm, button, select, input, textarea, [contenteditable]"));
+  }
   document.addEventListener("keydown", function (ev) {
     if (ev.defaultPrevented || ev.isComposing) return;
-    if (inToolbar(ev.target)) {
-      if (ev.key === "Escape") letGo(document.activeElement);
+    if (ev.key === "Escape" || ev.key.indexOf("Arrow") === 0 || ev.key === "Home" || ev.key === "End") {
+      if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && navigateKeys(ev)) {
+        ev.preventDefault();
+        return;
+      }
+    }
+    if (inOwnControl(ev.target)) {
+      /* with nothing open to close, Escape lets go of a toolbar control so the keys go to the phone again */
+      if (ev.key === "Escape" && inToolbar(ev.target)) letGo(document.activeElement);
       return;
     }
     /* Ctrl, Alt and Meta make shortcuts, which stay the browser's. But AltGr (Alt Gr on a
@@ -2109,7 +2250,7 @@ function createVideoBlock(io) {
     }
   });
   document.addEventListener("paste", function (ev) {
-    if (!accepts.text || inToolbar(ev.target)) return;
+    if (!accepts.text || inOwnControl(ev.target)) return;
     var text = ev.clipboardData ? ev.clipboardData.getData("text") : "";
     if (!text) return;
     ev.preventDefault();
