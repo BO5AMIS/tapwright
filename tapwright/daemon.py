@@ -122,7 +122,7 @@ def _size(jpeg: bytes | None) -> list[int] | None:
         return None
 
 
-MARK_NAME_MAX = 24  # characters of an element's name in the live view (VIEWER-PROTOCOL 1.4)
+MARK_NAME_MAX = 32  # characters of an element's name in the live view (VIEWER-PROTOCOL 1.4)
 CAPTION_MAX = 60  # characters of a step's caption (VIEWER-PROTOCOL 1.4)
 BUTTON_CAPTIONS = {"home": "Home", "volumeUp": "Volume up", "volumeDown": "Volume down"}
 

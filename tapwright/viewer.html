@@ -1475,7 +1475,7 @@ function createVideoBlock(io) {
 
   /* Captions (VIEWER-PROTOCOL 1.4): the step in plain words. The server's caption when it sends one (the
      agent's steps), else one made from kind and label with the protocol's table. */
-  var NAME_MAX = 24;
+  var NAME_MAX = 32;
   var CAPTION_MAX = 60;
   function cut(text, max) { return text.length <= max ? text : text.slice(0, max - 1) + "\u2026"; }
   function q(name) { return name ? " \"" + name + "\"" : ""; }

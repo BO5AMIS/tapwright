@@ -161,7 +161,7 @@ JSON text messages. Both sides ignore types and fields they don't know.
   - the text typed into a field: the phone shows that itself, and a password must never appear;
   - a link's address: `open_url` is always "Open link", because a URL can carry codes or tokens;
   - the failure reason: the page adds it (see below), so it is never said twice.
-- **Element names** longer than 24 characters are cut with "…", by the server and by the page alike.
+- **Element names** longer than 32 characters are cut with "…", by the server and by the page alike.
 - **The server's caption** is for the agent's steps. It may say more than the table, e.g. `app_command` →
   "Switch to dark mode". When it sends none, the page uses the table. A person's steps always use the table's
   person column.

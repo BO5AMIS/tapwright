@@ -5082,7 +5082,9 @@ def test_the_live_view_gets_the_elements_name_and_a_plain_caption():
     drawn beside a touch covered the keys around it (recording the demo, 2026-11-11)."""
     name, caption = daemon_module.element_name, daemon_module.step_caption
     assert name('Tapped e25 button "Equals" @320,780 95x90.') == "Equals"
-    assert name('Tapped e4 cell "A row whose name runs on and on" @0,0 1x1.') == "A row whose name runs o…"
+    assert name('Tapped e4 cell "A row whose name runs on and on" @0,0 1x1.') == "A row whose name runs on and on"
+    assert name('Tapped e4 cell "A row whose name runs on and on and on" @0,0 1x1.') == "A row whose name runs on and on…"
+    assert caption("toggle", 'Tapped e12 switch "Remind me before the trip" @0,0 1x1.', {}) ==         'Switch "Remind me before the trip"'  # whole (it was cut at 24, in the demo's stills)
     assert name("Opened Calculator (com.apple.calculator).") == ""
     cases = [
         ("tap", 'Tapped e25 button "Equals" @320,780 95x90.', {}, 'Tap "Equals"'),
