@@ -21,6 +21,7 @@ address such as the phone's Tailscale IP (experimental).
 """
 import argparse
 import asyncio
+import os
 import logging
 import socket
 import sys
@@ -329,6 +330,8 @@ def main() -> int:
     p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
+    p.add_argument("--no-log", action="store_true",
+                   help="don't keep the action log (~/.tapwright/log: one line per action, typed text never written)")
     p.add_argument("--settle-on-video", action="store_true",
                    help="experimental, with --video: actions watch the video's frames and the JPEG stream stays "
                         "closed (faster over Wi-Fi; a stalled mirror can make an action answer 'No visible change')")
@@ -364,6 +367,8 @@ def main() -> int:
     from .device import run
     if a.cmd == "serve":
         from . import server
+        if a.no_log:
+            os.environ["TAPWRIGHT_NO_LOG"] = "1"
         port = a.port if a.port is not None else server.DEFAULT_PORT
         return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone,
                                         video=a.video, settle_on_video=a.settle_on_video))

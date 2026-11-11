@@ -6,3 +6,4 @@ tapwright-*.jpg
 HANDOFF.md
 build/
 dist/
+.claude/

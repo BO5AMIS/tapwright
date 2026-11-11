@@ -320,7 +320,9 @@ def _default_daemon(log, phone: str | None):
     from .daemon import Daemon
     from .device import Device
     from .session import Session
-    return Daemon(Session(Device(host=phone, log=log)), log=log)
+    from . import actionlog
+    actions = actionlog.ActionLog(actionlog.default_folder() if actionlog.enabled() else None, report=log)
+    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions)
 
 
 def _lock_instance():

@@ -16,7 +16,8 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import changes, ui
+from . import actionlog, changes, ui
+from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
@@ -36,6 +37,10 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
+# the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
+LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
+                    "close_app", "alert", "press_button", "rotate"})
+REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
 STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
@@ -405,8 +410,11 @@ class Daemon:
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
                  settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
-                 pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET) -> None:
+                 pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
+                 actions: ActionLog | None = None) -> None:
         self.session = session
+        self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
+        self._announced: dict | None = None  # the action message this agent call announced, for its log line
         # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
         # streams at now (None until connected)
         self.pace_tick, self.pace_quiet = pace_tick, pace_quiet
@@ -521,6 +529,11 @@ class Daemon:
         if code:
             message["code"] = code
         self.broadcast(message)
+        if by == "person":
+            self.actions.write({"source": "tapwright", "by": "person", "tool": kind, "element": label, "ok": ok,
+                                "code": code, "app": getattr(self.session, "app", None)})
+        else:
+            self._announced = message
 
     # ---- the connection ----
     def lost(self, reason: "str | Exception") -> None:
@@ -769,6 +782,30 @@ class Daemon:
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit."""
         self.last_request = time.monotonic()
+        if name in LOGGED:
+            started, self._announced = time.monotonic(), None
+            try:
+                result = await self._run_tool_inner(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e)
+                raise
+            self._log_action(name, args, started, None)
+            return result
+        return await self._run_tool_inner(client_id, name, args, scope)
+
+    def _log_action(self, name: str, args: dict, started: float, error: Refused | None) -> None:
+        """The agent's action, one line in the action log. Typed text only as its length (AGENT-TOOLS §12)."""
+        told = self._announced or {}
+        message = str(error) if error is not None else ""
+        reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
+        text = args.get("text")
+        self.actions.write({
+            "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
+            "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
+            "reason": reason, "ms": round((time.monotonic() - started) * 1000),
+            "app": getattr(self.session, "app", None), "chars": len(text) if isinstance(text, str) else None})
+
+    async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
