@@ -192,14 +192,14 @@ experimental.
 
 | | |
 |---|---|
-| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated`; landscape pictures |
-| Measured over USB | a tap, with its answer: 0.68 s; a look: 0.16 s; a toggle 0.65 s; typing 0.74 s; a scroll 1.45 s; a person's tap in the live view shows after 0.23 s; the reliability suite with no misses |
-| Measured over Wi-Fi | slower: a tap 0.9 s, a look 0.26 s, typing 0.9 to 1.3 s; the reliability suite with 2 misses in 142 |
+| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated`; landscape, on both sides |
+| Measured over USB | a tap, with its answer: 0.65 s; a look: 0.14 s; a toggle 0.66 s; typing 0.73 s; a scroll 1.46 s; a person's tap in the live view shows after 0.23 s; the reliability suite with no misses |
+| Measured over Wi-Fi | slower: a tap 1.0 s, a look 0.4 s, typing 1.3 s; the reliability suite with no misses |
 | Agents | a first-time agent with the skill tested the whole lab charter in 44 calls (40 with Tapline connected too) |
-| Not done | touches in landscape; a second phone or an iPad; a run by anyone but the authors |
+| Not done | speed over Wi-Fi within the bar; a second phone or an iPad; a run by anyone but the authors |
 
-The measurements, and the bar they are held against, are in
-[docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
+Every number, how it was measured and how to run it yourself: [docs/benchmarks.md](docs/benchmarks.md).
+The bar they are held against: [docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
 
 ## License
 
