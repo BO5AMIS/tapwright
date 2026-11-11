@@ -124,7 +124,8 @@ def _was(old: Element, new: Element) -> list[str]:
         out.append(("text", clip(old.text)))
     if (old.value != new.value and old.checked is None and new.checked is None
             and (old.value != old.text or new.value != new.text)):
-        out.append(("value", clip(old.value)))
+        # an input that showed its placeholder: `(was placeholder "…")` (AGENT-TOOLS v1.7)
+        out.append(("value", f"placeholder {clip(old.placeholder)}" if old.shows_placeholder else clip(old.value)))
     if old.checked != new.checked:
         out.append(("checked", "null" if old.checked is None else _flag(old.checked)))
     if old.selected != new.selected:

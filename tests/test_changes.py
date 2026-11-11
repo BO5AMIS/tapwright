@@ -436,3 +436,16 @@ def test_an_element_that_was_listed_and_is_off_screen_now_is_compared_with_what_
     assert changes.off_screen([], now_off, by_place=False) == []  # without the list there is nothing to compare with
     unchanged = [el("", role="text", label="taps=1", identifier="lab-state", y=-300)]
     assert changes.off_screen([], unchanged, by_place=False, listed=listed) == []
+
+
+def test_an_empty_input_shows_its_placeholder_and_typing_into_it_says_so():
+    """AGENT-TOOLS v1.7: WebDriverAgent reports an empty field's placeholder as its value; a first-time agent took
+    Wayfare's empty Name field for filled in (2026-11-11)."""
+    empty = ui.Element("e1", "input", "Name", "name", value="Alex Morgan", placeholder="Alex Morgan",
+                       rect=(20, 100, 380, 50), actions=("tap", "type"))
+    assert empty.line() == 'e1 input "Name" id=name placeholder="Alex Morgan" @20,100 380x50 [tap, type]'
+    typed = replace(empty, value="abc")
+    assert typed.line() == 'e1 input "Name" id=name value="abc" @20,100 380x50 [tap, type]'
+    assert changes._was(empty, typed) == ['placeholder "Alex Morgan"']
+    assert changes._was(typed, empty) == ['"abc"']  # cleared again: the placeholder is back on the line
+    assert "value=" not in empty.line() and "placeholder=" not in typed.line()

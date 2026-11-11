@@ -118,6 +118,12 @@ class Element:
         """What the screen shows for it: the label, else the value."""
         return self.label or self.value
 
+    @property
+    def shows_placeholder(self) -> bool:
+        """An empty input showing its placeholder: WebDriverAgent reports the placeholder as its value
+        (AGENT-TOOLS v1.7: the line says `placeholder=`, so an agent doesn't take the field for filled in)."""
+        return bool(self.placeholder) and self.value == self.placeholder
+
     def line(self, ref: bool = True, actions: bool = True) -> str:
         """`<ref> <role> "<text>" [id=…] [value="…"] [disabled] [selected] [checked=…] @x,y WxH [actions]`.
         `ref=False` leaves the ref out (a gone element has no ref any more); `actions=False` leaves
@@ -128,8 +134,10 @@ class Element:
             parts.append(clip(self.text))
         if self.identifier:
             parts.append(f"id={self.identifier}")
-        # a switch's value ("1", "0") is already `checked=`
-        if self.value and self.value != self.text and self.checked is None:
+        # a switch's value ("1", "0") is already `checked=`; an empty input's placeholder is `placeholder=` (v1.7)
+        if self.shows_placeholder:
+            parts.append(f"placeholder={clip(self.placeholder)}")
+        elif self.value and self.value != self.text and self.checked is None:
             parts.append(f"value={clip(self.value)}")
         if not self.enabled:
             parts.append("disabled")

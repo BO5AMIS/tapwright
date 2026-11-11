@@ -16,7 +16,9 @@ the phone leaves the same note as viewer input, `type_text` takes `force`, and a
 apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds what a second first-time agent ran into: `scroll` with
 `to: "target"` brings an element onto the screen, changes off screen are shown, a note says when a
 change block covers more than one action, a forced action says so, typing into the next field of
-a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Each repo keeps an
+a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
+(2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
+`value=`, which a first-time agent read as a field already filled in. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -105,7 +107,8 @@ Settled in 0.31 s.
     `- <role> id=<id>`, and without that, `- <role>`;
   - `~ <element line> (was "<old>")` when exactly one field changed. When several changed:
     `(was text="…", value="…")`, naming each one. The fields are text, label, value,
-    checked, selected, disabled and actions. **A frame never appears in `~`**;
+    checked, selected, disabled and actions. An input that showed its placeholder and now
+    holds a value reads `(was placeholder "<old>")` (v1.7). **A frame never appears in `~`**;
   - `~ <element line without a ref> (off screen; was "<old>")` for an element that lies above
     or below the screen, before and now, whose text, label, value, checked, selected or
     disabled changed (v1.6): the effect of a tap that is scrolled out of view. Off-screen
@@ -183,7 +186,7 @@ Network: 2 requests in flight
 
 ### 3.3 Element line
 
-`<ref> <role> "<text or label>" [label="…"] [id=…] [value="…"] [disabled] [selected] [checked=true|false] @x,y WxH [actions]`
+`<ref> <role> "<text or label>" [label="…"] [id=…] [value="…"] [placeholder="…"] [disabled] [selected] [checked=true|false] @x,y WxH [actions]`
 
 - **The quoted part** is the element's **own** text, or its label when there's no text.
   - It's never its descendants' text. An accessible element (a button or a text, i.e. what
@@ -206,6 +209,10 @@ Network: 2 requests in flight
 - **`id=` is always shown when present.** **Change Tapline:** `testID=` becomes `id=`.
 - **`value=` is shown when not empty.** **Change Tapwright:** today it's shown only when it
   differs from the label.
+- **`placeholder="…"`** is shown for an input that is empty and has a placeholder, instead of
+  `value=` (v1.7). An input shows `value=` or `placeholder=`, never both. On Tapwright,
+  WebDriverAgent reports an empty field's placeholder as its value; Tapwright tells them apart
+  by the placeholder attribute.
 - **Roles are lowercase, from one vocabulary.** **Change Tapwright:** today it shows
   capitalised XCUIElementType names. **Change Tapline:** `textfield` becomes `input`, and
   `scrollview` becomes `scroll`. Tapline uses the React Native `accessibilityRole` or `role`
