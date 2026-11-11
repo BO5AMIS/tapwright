@@ -73,7 +73,7 @@ def test_look_then_act_by_ref():
         assert r["text"].startswith("Screen 400x800") and r["image"]
         assert r["image_size"] == [600, 1200]  # no stream frame here: the phone's screenshot, resized
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert r == {"text": 'Tapped e1 button "OK" id=ok-button @10,10 100x40.', "image": None, "image_size": None}
+        assert r == {"text": 'Tapped e1 button "OK" id=ok-button @10,100 100x40.', "image": None, "image_size": None}
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # its own taps don't make refs stale
         assert r["text"].startswith("Tapped e1")
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})  # with what changed after it
@@ -827,7 +827,7 @@ def test_an_ambiguous_target_lists_candidates_and_nothing_is_tapped():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "7"}, "look": False})
         assert e.value.code == "ambiguous" and str(e.value) == (
-            '2 elements match label "7".\nCandidates:\n  e1 button "7" @10,10 100x40 [tap]\n'
+            '2 elements match label "7".\nCandidates:\n  e1 button "7" @10,100 100x40 [tap]\n'
             '  e2 button "7" id=seven-again @10,60 100x40 [tap]\nRetry with one of the refs, or add "index" (0-based).')
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "tap", {"target": {"label": "7", "index": 1}, "look": False})
@@ -927,12 +927,12 @@ def test_type_text_takes_the_same_target_or_none():
     async def go():
         d = make()
         stop, task = await started(d)
-        d.session.tree = [ui.Element("e1", "input", "Name", "name-field", rect=(10, 10, 100, 40), actions=("tap", "type"))]
+        d.session.tree = [ui.Element("e1", "input", "Name", "name-field", rect=(10, 100, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "type_text", {"text": "hi", "look": False})  # the only input
-        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,10 100x40.'
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,100 100x40.'
         r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "name-field"}, "look": False})
-        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,10 100x40.'
+        assert r["text"] == 'Typed into e1 input "Name" id=name-field @10,100 100x40.'
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "hi", "target": {"ref": "e9"}, "look": False})
         assert e.value.code == "not_found" and "e9" in str(e.value)
@@ -975,10 +975,10 @@ def test_a_point_for_type_text_is_a_lookup_on_a_current_list():
     async def go():
         d = make()
         stop, task = await started(d)
-        d.session.tree = [ui.Element("e1", "input", "Name", rect=(10, 10, 100, 40), actions=("tap", "type"))]
+        d.session.tree = [ui.Element("e1", "input", "Name", rect=(10, 100, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
         d.control.clock.t += 5.0
-        await d.run_tool("a", "type_text", {"text": "hi", "target": {"x": 20, "y": 20}, "look": False})
+        await d.run_tool("a", "type_text", {"text": "hi", "target": {"x": 20, "y": 110}, "look": False})
         assert d.session.calls.count("refresh") == 1
         await finish(stop, task)
     run(go)
@@ -1068,7 +1068,7 @@ def test_an_action_answers_with_what_changed_and_the_refs_stay():
         await d.run_tool("a", "look", {"screenshot": False})
         d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done-button", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert unsettled(r) == ['Tapped e1 button "OK" id=ok-button @10,10 100x40.', "Same screen. Changes:",
+        assert unsettled(r) == ['Tapped e1 button "OK" id=ok-button @10,100 100x40.', "Same screen. Changes:",
                                 '+ e2 button "Done" id=done-button @10,60 100x40 [tap]']
         assert SETTLED.fullmatch(r["text"].splitlines()[-1])
         assert r["image"] is None  # a screenshot only when asked
@@ -1088,7 +1088,7 @@ def test_a_new_app_or_a_screen_the_agent_has_not_seen_gets_the_full_list():
         stop, task = await started(d)
         r = await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}})  # no look yet
         assert unsettled(r)[1:4] == ["Screen 400x800 pt @3x · 1 elements", "App: Example (com.example.app)",
-                                               'e1 button "OK" id=ok-button @10,10 100x40 [tap]']
+                                               'e1 button "OK" id=ok-button @10,100 100x40 [tap]']
         d.session.app = ("Settings", "com.apple.Preferences")
         d.session.tree = [button("e1", "Wi-Fi"), button("e2", "Bluetooth", rect=(10, 60, 100, 40))]
         r = await d.run_tool("a", "tap", {"target": {"text": "OK"}})
@@ -2008,10 +2008,10 @@ def test_labels_draw_the_actionable_elements():
         d.hub.publish(blue_frame())
         plain_look = await d.run_tool("a", "look", {"width": 400})
         labelled = await d.run_tool("a", "look", {"width": 400, "labels": True})
-        assert pixel(plain_look, (11, 30))[2] > 200            # e1 is at 10,10 100x40
-        p = pixel(labelled, (11, 30))
+        assert pixel(plain_look, (11, 120))[2] > 200           # e1 is at 10,100 100x40
+        p = pixel(labelled, (11, 120))
         assert p[0] > 180 and p[1] < 80 and p[2] < 80          # its left edge
-        assert pixel(labelled, (60, 30))[2] > 200              # its inside is untouched
+        assert pixel(labelled, (60, 120))[2] > 200             # its inside is untouched
         await finish(stop, task)
     run(go)
 
@@ -2345,7 +2345,7 @@ def test_toggle_refuses_what_is_not_a_switch():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
         assert e.value.code == "not_actionable"
-        assert str(e.value) == 'no_action: e1 button "OK" id=ok-button @10,10 100x40 is not a switch'
+        assert str(e.value) == 'no_action: e1 button "OK" id=ok-button @10,100 100x40 is not a switch'
         assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
@@ -2928,7 +2928,7 @@ def test_type_text_into_something_that_is_not_an_input_is_no_action():
         await looked(d, [el("e1", "button", "OK")])
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "type_text", {"text": "x", "target": {"ref": "e1"}})
-        assert e.value.code == "not_actionable" and str(e.value) == 'no_action: e1 button "OK" @10,10 100x40 is not an input'
+        assert e.value.code == "not_actionable" and str(e.value) == 'no_action: e1 button "OK" @10,100 100x40 is not an input'
         assert not d.session.typed
         await finish(stop, task)
     run(go)
@@ -3494,7 +3494,7 @@ def test_a_disabled_element_is_refused_before_the_touch():
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", tool, {"target": {"ref": "e1"}})
             assert e.value.code == "not_actionable"
-            assert str(e.value) == 'disabled: e1 button "Save" disabled @10,10 100x40 is disabled.'
+            assert str(e.value) == 'disabled: e1 button "Save" disabled @10,100 100x40 is disabled.'
         assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
@@ -3846,6 +3846,38 @@ def test_an_element_with_too_little_showing_is_refused():
         assert "tap" not in d.session.calls
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (215.0, 875.0)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_row_under_the_status_bar_is_tapped_below_it_or_refused():
+    """2026-11-11: Settings' "Notifications" row lay at y 10-67, half under the status bar, and a tap at its centre
+    scrolled the list to its top instead of opening it."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        row = el("e1", "button", "Notifications", rect=(20, 10, 390, 57))
+        nav = ui.Bar("NavigationBar", (0.0, 59.0, 430.0, 54.0), "navigationbar @0,59 430x54")
+        await looked(d, [row, el("e2", "button", "Sounds", rect=(20, 0, 390, 80))])
+        await d.run_tool("a", "tap", {"target": {"ref": "e2"}, "look": False})
+        assert d.session.last_point == (215.0, 65.0)  # the middle of y 50-80: below the status bar
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 58.5)  # 50-67 shows
+        await looked(d, [el("e1", "button", "Notifications", rect=(20, 10, 390, 57), covered_by=(nav,))])
+        calls = len(d.session.calls)
+        with pytest.raises(Refused) as e:  # 50-59 is all that shows between the status bar and the bar
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert str(e.value) == ('covered: e1 button "Notifications" @20,10 390x57 is under the status bar, where a '
+                                'touch scrolls the list to its top; scroll to it first (scroll with this target and '
+                                'to: "target").')
+        assert len(d.session.calls) == calls  # nothing touched
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
+        assert d.session.last_point == (215.0, 38.5)  # forced: its own centre
+        d.session.screen = (932.0, 430.0)  # landscape: no status bar
+        await looked(d, [el("e1", "button", "Notifications", rect=(20, 10, 390, 57))])
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (215.0, 38.5)
         await finish(stop, task)
     run(go)
 

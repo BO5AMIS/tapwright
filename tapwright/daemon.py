@@ -324,6 +324,11 @@ ACTIONS = {
 SPRINGBOARD = "com.apple.springboard"
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
+# The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
+# whatever row lies under it. It is in no app's tree, so a row half under it looked reachable: a tap on Settings'
+# "Notifications" row at y 10 scrolled the list instead (seen on the phone 2026-11-11). 50 pt covers the status
+# bar of the current iPhones (47 to 54); in landscape an iPhone shows none.
+STATUS_BAR = 50.0
 MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told apart after these
 # These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
@@ -1594,14 +1599,21 @@ class Daemon:
         the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
         covers the centre. Refuses when too little shows."""
         centre = element.center
-        over = [b for b in element.covered_by if b.rect[0] <= centre[0] < b.rect[0] + b.rect[2]
+        bars = element.covered_by
+        width, height = self.session.screen or (0.0, 0.0)
+        if height > width and element.rect[1] < STATUS_BAR:
+            bars = (*bars, ui.Bar("StatusBar", (0.0, 0.0, width, STATUS_BAR), "the status bar"))
+        over = [b for b in bars if b.rect[0] <= centre[0] < b.rect[0] + b.rect[2]
                 and b.rect[1] <= centre[1] < b.rect[1] + b.rect[3]]
         if not over:
             return None
-        x, y, w, h = ui.visible_part(element.rect, element.covered_by, self.session.screen)
+        x, y, w, h = ui.visible_part(element.rect, bars, self.session.screen)
         if w >= MIN_VISIBLE and h >= MIN_VISIBLE:
             return x + w / 2, y + h / 2
         line = element.line(actions=False)
+        if over[0].kind == "StatusBar":
+            raise Refused("not_actionable", f"covered: {line} is under the status bar, where a touch scrolls the "
+                                            f"list to its top; {SCROLL_HINT}")
         if over[0].kind == "TabBar":
             raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; {SCROLL_HINT}")
         if over[0].kind in ui.COVERING_BARS:

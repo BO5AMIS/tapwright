@@ -94,12 +94,12 @@ class FakeDevice:
         return 1
 
 
-def button(ref: str, label: str, identifier: str = "", rect=(10, 10, 100, 40), **fields) -> ui.Element:
+def button(ref: str, label: str, identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
     """An element for a fake screen."""
     return ui.Element(ref, "button", label, identifier, rect=rect, actions=("tap",), type="Button", **fields)
 
 
-def el(ref: str, role: str, label: str = "", identifier: str = "", rect=(10, 10, 100, 40), **fields) -> ui.Element:
+def el(ref: str, role: str, label: str = "", identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
     """An element of any role, with the actions its role gets."""
     return ui.Element(ref, role, label, identifier, rect=rect, actions=ui.ROLE_ACTIONS.get(role, ()), **fields)
 
@@ -107,7 +107,7 @@ def el(ref: str, role: str, label: str = "", identifier: str = "", rect=(10, 10,
 class FakeSession:
     """Session's interface, no phone. `fail[name] = exc` makes the next call of that name raise.
     `tree` is the screen: what look() and refresh() read into `items`."""
-    SCREEN_TEXT = 'Screen 400x800 pt · 1 elements\ne1 button "OK" id=ok-button @10,10 100x40 [tap]'
+    SCREEN_TEXT = 'Screen 400x800 pt · 1 elements\ne1 button "OK" id=ok-button @10,100 100x40 [tap]'
 
     def __init__(self) -> None:
         self.device = FakeDevice()
