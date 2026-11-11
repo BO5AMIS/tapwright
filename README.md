@@ -13,7 +13,8 @@ Nothing is added to your app, and no Mac or Xcode is needed.
 </p>
 <p align="center"><sub>A Claude agent given one sentence ("test sign-up and a first trip the way a new user would") on a real
 iPhone, through Tapwright. It finds the planted bug (the app accepts "abc" as an email) and answers iOS's own
-permission prompt. 2× speed; <a href="docs/media/hero-landscape.mp4">full video, real time</a>.</sub></p>
+permission prompt. Real time, with the agent's thinking pauses shortened;
+<a href="docs/media/hero-landscape.mp4">with the live view around it</a>.</sub></p>
 
 > [!NOTE]
 > Version 1 is for testing and QA on a **test phone that sits next to your computer**, over
