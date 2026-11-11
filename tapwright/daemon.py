@@ -19,7 +19,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, batch, changes, ui
+from . import actionlog, audit, batch, changes, ocr, ui
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -45,6 +45,12 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate"})
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
+FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
+NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
+            "in its picture.")
+OCR_REF = re.compile(r"o[1-9][0-9]*")
+OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
+OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
@@ -291,7 +297,7 @@ def _checked(name: str, args: dict) -> dict:
         timeout = args.get("timeout", WAIT_FOR_DEFAULT)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not WAIT_FOR_MIN <= timeout <= WAIT_MAX:
             raise Refused("bad_params", f"timeout must be a number from {WAIT_FOR_MIN:g} to {WAIT_MAX:g}, not {timeout!r}")
-    for key in ("look", "screenshot", "labels", "dry_run"):
+    for key in ("look", "screenshot", "labels", "dry_run", "ocr"):
         if key in args and not isinstance(args[key], bool):
             raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
     if name == "audit" and args.get("types") is not None:
@@ -1210,6 +1216,7 @@ class Daemon:
         missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
+        args = self._ocr_target(client_id, args)
         args = _checked(name, args)
         shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
@@ -1233,7 +1240,14 @@ class Daemon:
             return await self._audit(view, args, notes)
         if name == "look":
             await self._settle_pending()
-            return await self._look(view, shot, [], notes)
+            if args.get("ocr") and not ocr.available():
+                raise Refused("unsupported", ocr.INSTALL)
+            answer = await self._look(view, shot, [], notes)
+            if args.get("ocr"):
+                return await self._with_ocr(view, answer)
+            if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
+                answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_FEW}
+            return answer
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
@@ -1652,6 +1666,35 @@ class Daemon:
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         answer = await self._after(view, result, notes, full)  # no `Settled in`: the app did nothing
         return await self._add_shot(answer, view, shot)
+
+    def _ocr_target(self, client_id: str, args: dict) -> dict:
+        """A ref from the last OCR reading (`o3`) is a point: the centre of that text."""
+        target = args.get("target")
+        ref = target.get("ref") if isinstance(target, dict) else None
+        if not isinstance(ref, str) or not OCR_REF.fullmatch(ref):
+            return args
+        point = self.control.client(client_id).ocr.get(ref)
+        if point is None:
+            raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again.")
+        return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
+
+    async def _with_ocr(self, view, answer: dict) -> dict:
+        """`look` with `ocr: true`: the text the picture shows that no element carries, as lines with refs o1, o2…
+        after the list (before its notes). Read from the stream's newest frame when it is fresh, else a screenshot."""
+        frame = self.hub.latest
+        if frame is not None and self.hub.now_ms() - frame.at <= FRESH_FRAME * 1000:
+            picture = await jpeg_of(frame)
+        else:
+            picture = await self._read(self.session.screenshot_png)
+        seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
+        known = {e.text.casefold() for e in view.items if e.text}
+        new = [s for s in seen if s.text.casefold() not in known]  # what an element says already isn't repeated
+        view.ocr = {f"o{n}": s.center for n, s in enumerate(new, 1)}
+        lines = answer["text"].split("\n")
+        cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
+        head = OCR_HEAD if new else OCR_NONE
+        lines[cut:cut] = [head, *(s.line(f"o{n}") for n, s in enumerate(new, 1))]
+        return {**answer, "text": "\n".join(lines)}
 
     async def _audit(self, view, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §10: XCTest's own accessibility audit of the screen in front, plus `duplicate_id` from the

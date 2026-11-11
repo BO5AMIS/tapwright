@@ -38,6 +38,7 @@ Issues = "https://github.com/bo5amis/tapwright/issues"
 [project.optional-dependencies]
 dev = ["pytest", "pyflakes"]
 video = ["av>=14"]  # the H.264 live view (/video): decode the AirPlay stream, encode it again
+ocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]  # look with ocr: true: text read from the picture, on the CPU
 
 [project.scripts]
 tapwright = "tapwright.cli:main"

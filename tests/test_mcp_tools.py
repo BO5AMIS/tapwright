@@ -6,7 +6,7 @@ import pytest
 from tapwright import client, mcp_server
 
 EXPECTED = {
-    "look": {"screenshot", "width", "labels"},
+    "look": {"screenshot", "width", "labels", "ocr"},
     "tap": {"target", "force", "look", "screenshot", "dry_run"},
     "long_press": {"target", "seconds", "force", "look", "screenshot", "dry_run"},
     "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot", "dry_run"},
@@ -33,7 +33,7 @@ REQUIRED = {"run": ["steps"], "replay": ["path"], "tap": ["target"], "long_press
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
             "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
 DEFAULTS = {
-    "look": {"screenshot": True, "width": 600, "labels": False},
+    "look": {"screenshot": True, "width": 600, "labels": False, "ocr": False},
     "tap": {"force": False, "look": True, "screenshot": False, "dry_run": False},
     "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False, "dry_run": False},
     "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": False,

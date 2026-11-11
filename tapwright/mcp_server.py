@@ -168,8 +168,8 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
 
 
 @server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)
-async def look(screenshot: bool = True, width: int = 600, labels: bool = False) -> CallToolResult:
-    return await _tool("look", screenshot=screenshot, width=width, labels=labels)
+async def look(screenshot: bool = True, width: int = 600, labels: bool = False, ocr: bool = False) -> CallToolResult:
+    return await _tool("look", screenshot=screenshot, width=width, labels=labels, **({"ocr": True} if ocr else {}))
 
 
 @server.tool(description=describe("tap"), structured_output=False)

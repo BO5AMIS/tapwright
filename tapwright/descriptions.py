@@ -151,7 +151,10 @@ EXTRA = {
         '(contrast, hit_region, description, dynamic_type, clipped_text, trait, element_detection, duplicate_id). '
         "Runs Apple's own XCTest audit on the phone (iOS 17+); it can take a few seconds."
     ),
-    'look': 'reads the whole phone; the header may add `Keyboard:`.',
+    'look': (
+        'reads the whole phone; the header may add `Keyboard:`. ocr: true also reads the text in the picture that no '
+        'element carries (a game, a canvas, a web view), as lines o1, o2... that a touch takes as a target ref.'
+    ),
     'tap': (
         "makes a real touch at the element's centre, or at the centre of its visible part when a bar "
         'covers the centre. `dry_run: true` says what it would tap and whether a person\'s OK is needed, touching nothing.'
