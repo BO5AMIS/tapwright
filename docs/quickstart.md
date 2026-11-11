@@ -63,8 +63,8 @@ Opened Example app (com.example.app).
 Screen 430x932 pt @3x · 3 elements
 App: Example app (com.example.app)
 e1 text "Welcome back" @24,120 200x32
-e2 input "Email" id=email @24,200 354x44 [tap, type]
-e3 button "Log in" id=login-button @24,610 354x48 [tap]
+e2 input "Email" id=email placeholder="you@example.com" @24,200 354x44
+e3 button "Log in" id=login-button @24,610 354x48
 Settled in 0.84 s.
 ```
 
@@ -74,7 +74,7 @@ aren't sure what is on screen.
 **3. `tap`** with `{id: "login-button"}` answers with what it did and what changed:
 
 ```
-Tapped e3 button "Log in" id=login-button @24,610 354x48.
+Tapped e3 button "Log in" id=login-button.
 Same screen. Changes:
 + e4 text "Check your email and password" @24,670 354x20
 Settled in 0.31 s.
