@@ -1544,10 +1544,7 @@ class Daemon:
             self._guard(view, found)
             point = shown = self._touch_point(found)
             if found.width > WIDE_SWITCH * found.height:
-                # the switch is the whole row (iOS Settings: "Allow Notifications" 350x29 at x 40); its control is
-                # at the right end, and a tap on the label toggles nothing (seen on the phone 2026-11-11)
-                y = found.center[1] if point is None else point[1]
-                point = (found.x + found.width - SWITCH_FROM_RIGHT, y)
+                point = self._switch_control(view.items, found, shown)
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
@@ -1558,6 +1555,26 @@ class Daemon:
         done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
         done.note = forced
         return done
+
+    def _switch_control(self, items: list[ui.Element], switch: ui.Element,
+                        shown: tuple[float, float] | None) -> tuple[float, float] | None:
+        """Where the control of a switch that is a whole row sits (iOS Settings: "Allow Notifications" is one
+        element 350x29 at x 40; a tap on its middle lands on the label and toggles nothing, seen on the phone
+        2026-11-11). The control is at the end away from the label: the right in a left-to-right layout, the
+        left in Arabic or Hebrew. The row's label shows as its own element inside it; without one, the right.
+        Partly covered (`shown`, the visible part's middle when the centre is covered): the control's end at that
+        height. A bar over the control itself is refused `covered`, as tap refuses: a finger couldn't reach it."""
+        x, y, w, h = switch.rect
+        label = next((e for e in items if e is not switch and e.label and e.label == switch.label
+                      and x <= e.center[0] <= x + w and y <= e.center[1] <= y + h), None)
+        leading_right = label is not None and label.center[0] > x + w / 2
+        point = (x + SWITCH_FROM_RIGHT if leading_right else x + w - SWITCH_FROM_RIGHT,
+                 y + h / 2 if shown is None else shown[1])
+        over = next((b for b in switch.covered_by if ui._holds(b.rect, point)), None)
+        if over is not None:
+            hint = SCROLL_HINT if over.kind in ui.COVERING_BARS else "move or close it first."
+            raise Refused("not_actionable", f"covered: {switch.line(actions=False)} is covered by {over.line}; {hint}")
+        return point
 
     @staticmethod
     def _switch_first(items: list[ui.Element], target: ui.Target) -> ui.Element:

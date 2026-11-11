@@ -3964,6 +3964,32 @@ def test_toggle_touches_the_control_of_a_switch_that_is_a_whole_row():
     run(go)
 
 
+def test_toggle_finds_a_row_switchs_control_on_the_left_in_right_to_left_and_stays_in_the_visible_part():
+    """Tapline's review of 932dbc4: in Arabic iOS puts the control at the left end and the label at the right; and
+    a partly covered row must not be touched where it is covered."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "switch", "السماح", rect=(40, 145, 350, 29), checked=True),
+                         el("e2", "button", "السماح", rect=(224, 146, 166, 26))])
+        await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (72.0, 159.5)  # 32 pt in from the left end, away from the label
+        bar = ui.Bar("Keyboard", (300, 0, 130, 932), "keyboard")  # covers the row's right end, where the control is
+        await looked(d, [el("e1", "switch", "Allow", rect=(40, 145, 350, 29), checked=True, covered_by=(bar,))])
+        taps = d.session.calls.count("tap")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("covered: e1 switch")
+        assert d.session.calls.count("tap") == taps  # nothing touched
+        low = ui.Bar("Keyboard", (0, 152, 430, 780), "keyboard")  # covers the row from y 152, centre (154.5) included
+        await looked(d, [el("e1", "switch", "Allow", rect=(40, 140, 350, 29), checked=True, covered_by=(low,))])
+        await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (358.0, 146.0)  # the control's end, at the middle of the 12 pt that show
+        await finish(stop, task)
+    run(go)
+
+
 def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_shows():
     """toggle touched a switch's centre with the keyboard over it, so the keyboard got the touch and the shared
     runner's toggles did nothing (2026-11-09). It now checks covers as tap does."""
