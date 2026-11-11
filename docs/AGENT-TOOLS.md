@@ -322,12 +322,13 @@ text items.
     one, `off_screen`, then `not_found`. A covering sheet comes before `off_screen`, because
     scrolling can't help until it is closed.
 - **Closing the keyboard first (v1.4).** When the keyboard is up and the target of a touch (`tap`,
-  `long_press`, `toggle`, or `type_text`'s focusing tap on another input that the keyboard covers)
+  `long_press`, `toggle`, or `type_text`'s focusing tap on another input of which less than 10 pt show above the keyboard)
   lies outside the focused input, the tool closes the keyboard first, without pressing return, and
   the answer ends with `Note: closed the keyboard first.` A person's first tap outside the field
   often only closes the keyboard, and the keyboard covers controls near the bottom; the tool does
-  both steps in one and says so. For another input that shows above the keyboard, nothing is closed
-  (v1.6): focus moves to it, as a person's tap moves it, and there is no note. If the focus doesn't
+  both steps in one and says so. For another input with at least 10 pt above the keyboard, nothing is
+  closed (v1.6): focus moves to it, as a person's tap on the part that shows moves it, and there
+  is no note. If the focus doesn't
   move, the keyboard is closed the old way. With a hardware keyboard connected no keyboard shows,
   and nothing is closed. Nothing is
   closed for a call the tool refuses, or while a system alert is in front. The note is given only
