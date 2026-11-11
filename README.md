@@ -128,7 +128,7 @@ repository too.
 | Tool | What it does |
 |---|---|
 | `apps`, `open_app`, `close_app` | the apps you installed (TestFlight and development builds included); open one by bundle id or name, or close it |
-| `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot |
+| `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot; `ocr: true` also reads the text in the picture that no element carries (games, canvases, web views), as refs `o1`, `o2` a touch can take (`pip install "tapwright[ocr]"`, about 300 MB, runs on the computer's CPU, about 1.5 s) |
 | `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}` |
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
 | `scroll`, `swipe`, `back` | lists and pages, to the start, the end, or straight to an element; drags between points; up one screen (an open sheet closes first) |
@@ -226,8 +226,8 @@ files older than two weeks are deleted. `tapwright serve --no-log` turns it off.
 ## Limits
 
 - Apple's automation sees what accessibility sees. Give important views accessibility
-  identifiers (`testID` in React Native) and labels; games and custom-drawn screens show
-  little beyond their screenshot.
+  identifiers (`testID` in React Native) and labels. Games and custom-drawn screens show
+  little beyond their screenshot; `look` with `ocr: true` reads their text from the picture.
 - Face ID, Touch ID and the passcode can't be automated; unlock the phone yourself.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
