@@ -125,6 +125,23 @@ SHARED = {
 }
 
 EXTRA = {
+    'run': (
+        'Run several steps in one call, each an ordinary tool call written as {"tool": "tap", "target": {...}}, with '
+        'an optional "expect" ({"text": "Saved"}, or id or label; with "gone": true, a "value", a "timeout" in '
+        'seconds, default 2) checked after it. It stops at the first step that fails or whose expectation does not '
+        'hold, and answers once: how many steps ran, then what changed since your last list, then the notes of each step. '
+        'Use it for a known sequence (fill a form, then submit and expect the result): one call instead of five. '
+        'trace: true adds the first line of each step.'
+    ),
+    'record': (
+        'Save what you do as a script that replays without an agent: record start: true (optional name), act as '
+        'usual, then record stop: true with a path. Each action that succeeded becomes a step, its target saved as '
+        "the element's id, else its label, else its text."
+    ),
+    'replay': (
+        'Run a saved script (from record, or written by hand in the same format) like run: it opens its app fresh '
+        'first and stops at the first step that fails. People run the same file in CI with `tapwright replay FILE`.'
+    ),
     'audit': (
         'Check the screen in front for accessibility problems and get a report: low contrast, tap targets smaller '
         'than 44x44 pt, elements with no useful label, text that is cut off or does not grow with the text size, '

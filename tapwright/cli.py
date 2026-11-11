@@ -19,6 +19,9 @@
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      connect an agent in one go: register the MCP server and install the skill
+  tapwright replay FILE... [--junit OUT] [--dedicated]
+                     run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
+                     2 one couldn't start
 
 Connection: USB when the phone is plugged in, else the local network; serve --phone dials an
 address such as the phone's Tailscale IP (experimental).
@@ -469,6 +472,58 @@ def install(a) -> int:
     return 0
 
 
+
+START_CODES = ("bad_params", "not_connected", "reconnecting", "not_allowed", "unsupported", "internal")
+
+
+def replay(a) -> int:
+    """`tapwright replay FILE…`: each script through the daemon's `replay` tool, its answer printed. Exit 0 when every
+    script held, 1 when one stopped at a step, 2 when one couldn't start (no phone, no app, a bad file)."""
+    from . import batch, client
+    from .control import Refused
+    results: list[tuple[str, str, str, float]] = []  # (file, "ok" | "failed" | "error", message, seconds)
+    for f in a.files:
+        path = str(Path(f).resolve())
+        began = time.monotonic()
+        try:
+            data = batch.load_script(path)
+        except Refused as e:
+            print(f"{f}: Error {e.code}: {e}")
+            results.append((f, "error", str(e), 0.0))
+            continue
+        client.set_scope([data["app"]] if data.get("app") else [], a.dedicated)
+        try:
+            answer = client.call("replay", {"path": path}, "cli-replay", timeout=200.0)
+        except client.DaemonError as e:
+            print(f"{f}: Error {e.code}: {e}")
+            kind = "error" if e.code in START_CODES and not str(e).startswith("Ran ") else "failed"
+            results.append((f, kind, f"{e.code}: {e}", time.monotonic() - began))
+            continue
+        print(f"{f}: {answer.get('text', '')}")
+        results.append((f, "ok", "", time.monotonic() - began))
+    if a.junit:
+        write_junit(a.junit, results)
+    kinds = {r[1] for r in results}
+    return 2 if "error" in kinds else 1 if "failed" in kinds else 0
+
+
+def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
+    """One <testcase> per script; a stop is a <failure>, a script that couldn't start an <error>."""
+    from xml.etree import ElementTree as ET
+    suite = ET.Element("testsuite", name="tapwright replay", tests=str(len(results)),
+                       failures=str(sum(r[1] == "failed" for r in results)),
+                       errors=str(sum(r[1] == "error" for r in results)),
+                       time=f"{sum(r[3] for r in results):.2f}")
+    for f, kind, message, seconds in results:
+        case = ET.SubElement(suite, "testcase", classname="tapwright.replay", name=Path(f).stem, file=f,
+                             time=f"{seconds:.2f}")
+        if kind != "ok":
+            node = ET.SubElement(case, "failure" if kind == "failed" else "error", message=message.splitlines()[0])
+            node.text = message
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
+
+
 def main() -> int:
     # pymobiledevice3's test-runner channel logs every message it drops while the runner shuts down as a warning
     # ("received connection termination: <DTXMessage …>", "No channel registered …"): expected, and only noise on a
@@ -515,6 +570,11 @@ def main() -> int:
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
     sub.add_parser("view")
+    p = sub.add_parser("replay", help="run scripts saved with record (or written by hand) on the phone, with no agent")
+    p.add_argument("files", nargs="+", metavar="FILE")
+    p.add_argument("--junit", metavar="OUT", help="also write the results as JUnit XML, one test case per script")
+    p.add_argument("--dedicated", action="store_true",
+                   help="the phone is kept for testing: let the scripts use any app (default: only each script's app)")
     p = sub.add_parser("skill", help="the agent skill: how to test with Tapwright, for Claude Code, Codex and others")
     p.add_argument("action", choices=("install", "path"),
                    help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")
@@ -545,6 +605,8 @@ def main() -> int:
         return 0
     if a.cmd == "view":
         return view()
+    if a.cmd == "replay":
+        return replay(a)
     if a.cmd == "skill":
         return skill(a)
     if a.cmd == "install":

@@ -1,0 +1,172 @@
+"""Batches and scripts (docs/AGENT-TOOLS.md §9, v1.8): checking `run`'s steps and their `expect`, naming a step in an
+answer, the script file, and the target a recording saves. The daemon runs the steps (Daemon._batch)."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from . import ui
+from .control import Refused
+
+MAX_STEPS = 50
+BATCH_LIMIT = 120.0  # seconds a whole batch may take
+EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
+STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
+              "alert", "press_button", "rotate", "open_app", "close_app")
+EXPECT_KINDS = ("text", "id", "label")
+FORMAT, VERSION = "agent-tools-script", 1
+
+
+def check_steps(steps: object, *, script: bool = False) -> list[dict]:
+    """The steps as given, checked (`bad_params` otherwise): 1 to 50 objects, each naming a tool a step may use, with
+    a well-formed `expect`. A script may not use refs: they don't outlive the session that made them."""
+    if not isinstance(steps, list) or not steps:
+        raise Refused("bad_params", "steps must be a non-empty list of tool calls, like "
+                                    '[{"tool": "tap", "target": {"id": "save"}}]')
+    if len(steps) > MAX_STEPS:
+        raise Refused("bad_params", f"a batch takes at most {MAX_STEPS} steps, not {len(steps)}; split it")
+    for n, step in enumerate(steps, 1):
+        if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
+            raise Refused("bad_params", f'step {n} must be an object with "tool", like {{"tool": "tap", ...}}')
+        if step["tool"] not in STEP_TOOLS:
+            raise Refused("bad_params", f"step {n}: {step['tool']!r} can't be a step; a step is one of "
+                                        f"{', '.join(STEP_TOOLS)}")
+        target = step.get("target")
+        if script and isinstance(target, dict) and "ref" in target:
+            raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "
+                                        "element's id, label or text")
+        if "expect" in step:
+            check_expect(step["expect"], n)
+    return steps
+
+
+def check_expect(expect: object, n: int) -> None:
+    if not isinstance(expect, dict):
+        raise Refused("bad_params", f"step {n}: expect must be an object, like {{\"text\": \"Saved\"}}")
+    given = [k for k in EXPECT_KINDS if expect.get(k) is not None]
+    if len(given) != 1 or not isinstance(expect[given[0]], str) or not expect[given[0]]:
+        raise Refused("bad_params", f"step {n}: expect needs exactly one of text, id or label, as a non-empty string")
+    if "gone" in expect and not isinstance(expect["gone"], bool):
+        raise Refused("bad_params", f"step {n}: expect's gone must be true or false")
+    if "value" in expect:
+        if given[0] == "text" or not isinstance(expect["value"], str):
+            raise Refused("bad_params", f"step {n}: expect's value goes with id or label, and is a string "
+                                        '(a switch: "on" or "off")')
+        if expect.get("gone"):
+            raise Refused("bad_params", f"step {n}: expect can't have both value and gone")
+    timeout = expect.get("timeout", EXPECT_DEFAULT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not EXPECT_MIN <= timeout <= EXPECT_MAX:
+        raise Refused("bad_params", f"step {n}: expect's timeout must be from {EXPECT_MIN:g} to {EXPECT_MAX:g} s")
+
+
+def args_of(step: dict) -> dict:
+    """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
+    (the batch answers once)."""
+    args = {k: v for k, v in step.items() if k not in ("tool", "expect", "route", "look", "screenshot")}
+    if step["tool"] != "close_app":
+        args["look"] = False
+    return args
+
+
+def summary(step: dict) -> str:
+    """How an answer names a step: its tool and its target as the agent wrote it (`tap "Save"`, `tap id=save`,
+    `type_text "Email"`, `scroll down`, `wait 1.0`)."""
+    tool, target = step["tool"], step.get("target")
+    if isinstance(target, dict):
+        if target.get("ref"):
+            aim = str(target["ref"])
+        elif target.get("id"):
+            aim = f"id={target['id']}"
+        elif target.get("label") or target.get("text"):
+            aim = json.dumps(target.get("label") or target.get("text"), ensure_ascii=False)
+        elif target.get("x") is not None and target.get("y") is not None:
+            aim = f"({target['x']:g}, {target['y']:g})"
+        else:
+            aim = ""
+        return f"{tool} {aim}".strip()
+    extra = {"scroll": step.get("to") or step.get("direction") or "down", "wait": step.get("seconds"),
+             "open_app": step.get("app"), "close_app": step.get("app"), "open_url": step.get("url"),
+             "alert": step.get("action"), "press_button": step.get("name"), "rotate": step.get("to"),
+             "wait_for": next((json.dumps(step[k], ensure_ascii=False) for k in EXPECT_KINDS if step.get(k)), None)}
+    shown = extra.get(tool)
+    return f"{tool} {shown}" if shown is not None else tool
+
+
+def expect_failed(expect: dict) -> str:
+    """The reason an expectation failed, as the answer says it."""
+    kind = next(k for k in EXPECT_KINDS if expect.get(k) is not None)
+    what = f"{kind} {json.dumps(expect[kind], ensure_ascii=False)}"
+    seconds = f"{float(expect.get('timeout', EXPECT_DEFAULT)):g}"
+    if "value" in expect:
+        return f"{what} didn't have the value {json.dumps(expect['value'], ensure_ascii=False)} within {seconds} s."
+    return f"{what} didn't {'disappear' if expect.get('gone') else 'appear'} within {seconds} s."
+
+
+def value_of(element: ui.Element) -> str:
+    """An element's value as `expect` compares it: a switch is "on" or "off"."""
+    if element.checked is not None:
+        return "on" if element.checked else "off"
+    return element.value
+
+
+def load_script(path: str) -> dict:
+    """A script file (§9.4), checked."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        raise Refused("bad_params", f"can't read the script {path}: {e.strerror or e}") from None
+    except ValueError as e:
+        raise Refused("bad_params", f"the script {path} isn't valid JSON: {e}") from None
+    if not isinstance(data, dict) or data.get("format") != FORMAT:
+        raise Refused("bad_params", f'the script {path} isn\'t an agent-tools script (its "format" must be "{FORMAT}")')
+    if data.get("version") != VERSION:
+        raise Refused("bad_params", f"the script {path} is version {data.get('version')!r}; this tool reads version "
+                                    f"{VERSION}")
+    if data.get("app") is not None and not isinstance(data["app"], str):
+        raise Refused("bad_params", f'the script {path}: "app" must be a bundle id or an app\'s name')
+    check_steps(data.get("steps"), script=True)
+    return data
+
+
+def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
+    """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
+    `index` when that target matches several elements. A ref is turned into the element it names first."""
+    if not isinstance(target, dict):
+        return None
+    if target.get("x") is not None:
+        return {"x": target["x"], "y": target["y"]}
+    if not target.get("ref"):
+        return {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
+    try:
+        found = ui.resolve(items, ui.parse_target(target))
+    except Refused:
+        return None
+    if not isinstance(found, ui.Element):
+        return None
+    for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
+        if not value:
+            continue
+        aim = {kind: value}
+        try:
+            ui.resolve(items, ui.parse_target(aim))
+        except Refused as e:
+            if e.code != "ambiguous":
+                continue
+            same = [e2 for e2 in items if _matches(e2, kind, value)]
+            if found in same:
+                aim["index"] = same.index(found)
+        return aim
+    x, y = found.center
+    return {"x": round(x, 1), "y": round(y, 1)}
+
+
+def _matches(element: ui.Element, kind: str, value: str) -> bool:
+    if kind == "id":
+        return element.identifier == value or element.name == value
+    if kind == "label":
+        return element.label.lower() == value.lower()
+    return element.text == value
+
+
+def script(name: str, app: str | None, steps: list[dict]) -> dict:
+    return {"format": FORMAT, "version": VERSION, "name": name, "app": app, "fresh": True, "steps": steps}

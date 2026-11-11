@@ -3,11 +3,14 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
+import contextvars
+import itertools
 import io
 import json
 import dataclasses
 import math
 import os
+import pathlib
 import re
 import time
 import traceback
@@ -16,7 +19,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, changes, ui
+from . import actionlog, audit, batch, changes, ui
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -40,6 +43,8 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate"})
+BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
+BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
 STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
@@ -419,6 +424,8 @@ class Daemon:
         self.session = session
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
+        self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
+        self._batch_ids = itertools.count(1)
         # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
         # streams at now (None until connected)
         self.pace_tick, self.pace_quiet = pace_tick, pace_quiet
@@ -535,7 +542,7 @@ class Daemon:
         self.broadcast(message)
         if by == "person":
             self.actions.write({"source": "tapwright", "by": "person", "tool": kind, "element": label, "ok": ok,
-                                "code": code, "app": getattr(self.session, "app", None)})
+                                "code": code, "app": self._bundle()})
         else:
             self._announced = message
 
@@ -786,14 +793,18 @@ class Daemon:
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit."""
         self.last_request = time.monotonic()
+        if name in BATCH_TOOLS:
+            return await self._batch_tool(client_id, name, args, scope)
         if name in LOGGED:
             started, self._announced = time.monotonic(), None
+            aimed = self._aim_for_recording(client_id, name, args)
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
                 self._log_action(name, args, started, e)
                 raise
             self._log_action(name, args, started, None)
+            self._record_step(client_id, name, args, aimed)
             return result
         return await self._run_tool_inner(client_id, name, args, scope)
 
@@ -807,7 +818,156 @@ class Daemon:
             "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
-            "app": getattr(self.session, "app", None), "chars": len(text) if isinstance(text, str) else None})
+            "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None,
+            "batch": BATCH.get()})
+
+    def _bundle(self) -> str | None:
+        """The bundle id of the app in front at the last read, for the log and a recording."""
+        app = getattr(self.session, "app", None)
+        return app[1] if isinstance(app, tuple) and len(app) == 2 else None
+
+    # ---- batches and scripts (AGENT-TOOLS §9) ----
+    def _aim_for_recording(self, client_id: str, name: str, args: dict) -> dict | None:
+        """While this agent records: the target its step will be saved with, worked out before the call (a ref names
+        an element of the list the agent has now)."""
+        if client_id not in self._recording or name not in batch.STEP_TOOLS:
+            return None
+        return batch.recorded_target(args.get("target"), self.control.client(client_id).items)
+
+    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
+        """An action that succeeded while this agent records becomes a step of its script."""
+        rec = self._recording.get(client_id)
+        if rec is None or name not in batch.STEP_TOOLS:
+            return
+        step = {"tool": name, **{k: v for k, v in args.items() if k not in ("target", "look", "screenshot")}}
+        if aimed is not None:
+            step["target"] = aimed
+        elif "target" in args:
+            return  # a target that can't be saved (a ref gone stale): leave the step out rather than guess
+        rec["steps"].append(step)
+        rec["app"] = rec["app"] or self._bundle()
+
+    async def _batch_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        """`run`, `record` and `replay`."""
+        for key in ("trace", "look", "screenshot", "start", "stop"):
+            if key in args and not isinstance(args[key], bool):
+                raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+        if name == "record":
+            return self._record(client_id, args)
+        if name == "run":
+            steps = batch.check_steps(args.get("steps"))
+            return await self._batch(client_id, steps, scope, args)
+        if not isinstance(args.get("path"), str) or not args["path"]:
+            raise Refused("bad_params", "replay needs the path of a script file")
+        data = batch.load_script(args["path"])
+        if data.get("fresh", True) and data.get("app"):
+            # a known start: the app closed and opened again (Tapline reloads its JS instead)
+            await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
+            await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
+        points = [n for n, step in enumerate(data["steps"], 1)
+                  if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
+        notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
+        return await self._batch(client_id, data["steps"], scope, args, notes)
+
+    def _record(self, client_id: str, args: dict) -> dict:
+        if args.get("start") and args.get("stop"):
+            raise Refused("bad_params", "record takes start: true or stop: true, not both")
+        if args.get("start"):
+            name = args.get("name") or "recording"
+            if not isinstance(name, str):
+                raise Refused("bad_params", f"name must be a string, not {name!r}")
+            self._recording[client_id] = {"name": name, "app": None, "steps": []}
+            return _answer(["Recording: every action that succeeds from now on is saved as a step. Call record with "
+                            "stop: true and a path to save the script."])
+        if args.get("stop"):
+            path = args.get("path")
+            if not isinstance(path, str) or not path:
+                raise Refused("bad_params", "record with stop: true needs a path to save the script to")
+            rec = self._recording.get(client_id)
+            if rec is None:
+                raise Refused("bad_params", "nothing is being recorded; start with record start: true")
+            try:
+                pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(path).write_text(json.dumps(batch.script(rec["name"], rec["app"], rec["steps"]),
+                                                         ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            except OSError as e:
+                raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
+            del self._recording[client_id]
+            return _answer([f"Saved {len(rec['steps'])} steps to {path}."])
+        raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true with a path")
+
+    async def _batch(self, client_id: str, steps: list[dict], scope: "Scope | None", args: dict,
+                     notes: list[str] | None = None) -> dict:
+        """Run the steps in order through the ordinary tools; stop at the first that fails or whose expectation
+        doesn't hold. One answer for the whole batch: its first line, then what changed since the list the agent
+        had before the call, then each step's notes (AGENT-TOOLS §9.3)."""
+        view, clock = self.control.client(client_id), self.control.clock
+        began, n, ident = clock(), len(steps), f"b{next(self._batch_ids)}"
+        traced: list[str] = []
+        step_notes = list(notes or [])
+        failed: tuple[str, str] | None = None
+        done = 0
+        for i, step in enumerate(steps, 1):
+            if clock() - began > batch.BATCH_LIMIT:
+                failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
+                                     f"batch took longer than {batch.BATCH_LIMIT:g} s.")
+                break
+            t0, token = clock(), BATCH.set({"id": ident, "step": i})
+            try:
+                answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
+                lines = answer["text"].splitlines()
+                step_notes += [f"Note (step {i}): {line[6:]}" for line in lines if line.startswith("Note: ")]
+                if args.get("trace"):
+                    traced.append(f"  {i}. {lines[0] if lines else step['tool']} ({clock() - t0:.1f} s)")
+                missed = await self._expect(client_id, view, scope, step["expect"]) if "expect" in step else None
+            except Refused as e:
+                failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {e}")
+                break
+            finally:
+                BATCH.reset(token)
+            if missed is not None:
+                failed = ("expect_failed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
+                                           f"{missed}")
+                break
+            done += 1
+        first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
+        if args.get("look", True):
+            view.unlooked = 0  # the block covers the batch: one call, not "N actions ago"
+            full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
+            answer = await self._after(view, "\n".join([first, *traced]), [], full, moves_content=None)
+        else:
+            view.unlooked += 1
+            answer = _answer([first, *traced])
+        answer["text"] = "\n".join([answer["text"], *step_notes])
+        if failed:
+            raise Refused(failed[0], answer["text"])
+        return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
+
+    async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
+        """Wait up to the expectation's timeout for it to hold (§9.2). None when it did, else why not."""
+        kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
+        timeout = float(expect.get("timeout", batch.EXPECT_DEFAULT))
+        if "value" not in expect:
+            try:
+                await self.run_tool(client_id, "wait_for", {kind: expect[kind], "gone": bool(expect.get("gone")),
+                                                            "timeout": timeout, "look": False}, scope)
+                return None
+            except Refused as e:
+                if e.code == "timeout":
+                    return batch.expect_failed(expect)
+                raise
+        target, deadline = ui.parse_target({kind: expect[kind]}), self.control.clock() + timeout
+        while True:
+            await self._read(lambda: self._silent_read(view))
+            try:
+                found = ui.resolve(view.items, target)
+            except Refused:
+                found = None
+            if isinstance(found, ui.Element) and batch.value_of(found) == expect["value"]:
+                return None
+            if self.control.clock() >= deadline:
+                return batch.expect_failed(expect)
+            await self.control.sleep(0.25)
 
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         try:
@@ -1409,8 +1569,8 @@ class Daemon:
         await self._settle_pending()
         await self._read(lambda: self._silent_read(view))
         issues = await self._read(lambda: self.session.audit(asked)) if asked else []
-        app = getattr(self.session, "app", None) or ""
-        name = self.session.app_names.get(app) or app or "the screen"
+        app = getattr(self.session, "app", None)
+        name = app[0] if app else "the screen"
         text = audit.report(f'"{name}"', issues, view.items, types)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
 

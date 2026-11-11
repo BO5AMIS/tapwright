@@ -148,7 +148,8 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
     try:
-        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID)
+        long = tool in ("run", "replay")  # a batch may take up to 120 s on the phone
+        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, 200.0 if long else 120.0)
     except client.DaemonError as e:
         return _error(e.code, str(e))
     except Exception:  # the daemon unreachable: never crash the server
@@ -223,6 +224,25 @@ async def wait_for(text: str | None = None, id: str | None = None, label: str | 
                    timeout: float = 10.0, look: bool = True, screenshot: bool = False) -> CallToolResult:
     return await _tool("wait_for", text=text, id=id, label=label, gone=gone, timeout=timeout, look=look,
                        screenshot=screenshot)
+
+
+@server.tool(name="run", description=describe("run"), structured_output=False)
+async def run_steps(steps: list[dict[str, object]], trace: bool = False, look: bool = True,
+              screenshot: bool = False) -> CallToolResult:
+    return await _tool("run", steps=steps, trace=trace, look=look, screenshot=screenshot)
+
+
+@server.tool(description=describe("record"), structured_output=False)
+async def record(start: bool = False, stop: bool = False, name: str | None = None,
+                 path: str | None = None) -> CallToolResult:
+    # a relative path is the agent's: where this server was started, not where the daemon runs
+    return await _tool("record", start=start, stop=stop, **({"name": name} if name else {}),
+                       **({"path": str(Path(path).resolve())} if path else {}))
+
+
+@server.tool(description=describe("replay"), structured_output=False)
+async def replay(path: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
+    return await _tool("replay", path=str(Path(path).resolve()), look=look, screenshot=screenshot)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("audit"), structured_output=False)
