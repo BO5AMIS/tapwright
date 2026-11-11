@@ -4342,6 +4342,22 @@ def test_scroll_to_the_end_stops_as_soon_as_the_tree_shows_nothing_past_the_edge
     run(go)
 
 
+def test_rotate_turns_the_phone_and_checks_its_argument():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        turned = []
+        d.session.rotate = lambda to: turned.append(to) or asyncio.sleep(0, f"rotated to {to.replace('_', ' ')}")
+        r = await d.run_tool("a", "rotate", {"to": "landscape_left", "look": False})
+        assert r["text"] == "rotated to landscape left" and turned == ["landscape_left"]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "rotate", {"to": "sideways"})
+        assert e.value.code == "bad_params"
+        await finish(stop, task)
+    run(go)
+
+
 def test_scroll_to_the_start_of_a_list_already_there_answers_at_once():
     """Over Wi-Fi a scroll to the start of a list already at its start took 13 s (one drag, then waiting for the
     pictures to repeat). The tree shows rows past the bottom edge and none past the top: no drag at all."""

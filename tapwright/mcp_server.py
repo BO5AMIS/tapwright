@@ -251,6 +251,12 @@ async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.3
     return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot)
 
 
+@server.tool(description=describe("rotate"), structured_output=False)
+async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], look: bool = True,
+                 screenshot: bool = False) -> CallToolResult:
+    return await _tool("rotate", to=to, look=look, screenshot=screenshot)
+
+
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False) -> None:
     client.set_scope(apps, dedicated)
     global SHOTS_DIR

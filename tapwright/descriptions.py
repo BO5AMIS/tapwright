@@ -57,7 +57,7 @@ _CORE = (
 _TAPWRIGHT = (
     'Tapwright drives the whole iPhone through real touches and reads the accessibility tree.\n'
     '- System alerts (permissions, notifications) show in the header as `Alert:`. Answer them with `alert`.\n'
-    '- `press_button` presses Home or volume. `swipe` drags between two points. `close_app` quits an app, and `open_app` launches it.\n'
+    '- `press_button` presses Home or volume. `rotate` turns the phone. `swipe` drags between two points. `close_app` quits an app, and `open_app` launches it.\n'
     "- The header shows `Keyboard: shown` or `hidden`. Its keys aren't listed: type with `type_text`.\n"
     '- Stay in the app under test: if a link takes you elsewhere, go back with `open_app`.\n'
     "- On the owner's own phone you can read and touch only the apps you were given. Anything else answers `not_allowed`, and nothing of another app is shown.\n"
@@ -169,6 +169,11 @@ EXTRA = {
     'swipe': (
         'Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sliders, '
         'carousels, swipe actions and edge gestures; for lists, use `scroll`.'
+    ),
+    'rotate': (
+        'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app '
+        'looks and works in landscape. Answers with the whole screen in its new size; a screen that only '
+        'supports portrait stays as it is, and the answer says so.'
     ),
 }
 

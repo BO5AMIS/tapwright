@@ -23,6 +23,8 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
+ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
+                "landscape_right": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"}  # WebDriverAgent's names
 ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
 # How far to turn a captured frame clockwise for each WebDriverAgent rotation z (checked on the phone 2026-11-11 with
 # Calculator in each landscape side: the frame turned this way reads upright)
@@ -568,6 +570,11 @@ class Session:
         else:
             await self._call("POST", "/session/{sid}/wda/pressButton", {"name": name})
         return f"pressed {name}"
+
+    async def rotate(self, to: str) -> str:
+        """Turn the phone (XCUIDevice's orientation, no touch). The screen's new size comes with the next read."""
+        await self._call("POST", "/session/{sid}/orientation", {"orientation": ORIENTATIONS[to]})
+        return f"rotated to {to.replace('_', ' ')}"
 
     async def key(self, name: str) -> str:
         """backspace or enter, into whatever field has focus."""

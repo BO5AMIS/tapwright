@@ -114,6 +114,7 @@ repository too.
 | `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
 | `alert` | accept, dismiss or read system alerts (permission prompts) |
 | `press_button` | home, volume |
+| `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `open_url` | deep links |
 | `viewer` | the link to the live view |
 

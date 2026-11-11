@@ -181,6 +181,8 @@ def _checked(name: str, args: dict) -> dict:
         for key in ("replace", "submit", "force"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if name == "rotate" and args.get("to") not in ("portrait", "landscape_left", "landscape_right"):
+        raise Refused("bad_params", f"to must be portrait, landscape_left or landscape_right, not {args.get('to')!r}")
     if name == "wait_for":
         given = [k for k in WAIT_FOR_KINDS if args.get(k) is not None]
         if len(given) != 1:
@@ -287,6 +289,7 @@ ACTIONS = {
     "press_button": (lambda s, a: s.press_button(a["name"]), CAP),
     "alert": (lambda s, a: s.alert(a["action"]), CAP),
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
+    "rotate": (lambda s, a: s.rotate(a["to"]), CAP),
 }
 SPRINGBOARD = "com.apple.springboard"
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
@@ -295,11 +298,11 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
-MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button")
+MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
 READS = ("look", "apps")
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
-REQUIRED = {"open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
+REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",)}
