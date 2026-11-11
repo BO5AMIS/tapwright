@@ -4342,6 +4342,19 @@ def test_scroll_to_the_end_stops_as_soon_as_the_tree_shows_nothing_past_the_edge
     run(go)
 
 
+def test_scroll_to_the_end_doesnt_stop_while_the_last_row_straddles_the_edge():
+    """Seen over Wi-Fi 2026-11-11: Bottom lay at y 915 to 963 on a 932 pt screen, its middle past the edge; the
+    scroll to the end stopped there and the next tap on Bottom answered off_screen."""
+    d = make()
+    d.session.screen = (430.0, 932.0)
+    straddling = button("", "Bottom", "lab-bottom", rect=(16, 915, 398, 48))  # its middle at 939, past 932
+    d.session.offscreen = [straddling]
+    assert d._more_beyond("down", (0.0, 0.0, 430.0, 932.0))
+    d.session.offscreen = [button("", "Above", "a", rect=(16, -30, 398, 48))]  # its middle at -6, past the top
+    assert d._more_beyond("up", (0.0, 0.0, 430.0, 932.0))
+    assert not d._more_beyond("down", (0.0, 0.0, 430.0, 932.0))
+
+
 def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
     """A first-time agent needed five calls to reach one button: off_screen, two scrolls by guess, covered under
     a bar, a third scroll. One call now, and the off_screen message says which."""

@@ -1249,9 +1249,11 @@ class Daemon:
         for e in getattr(self.session, "offscreen", []):
             if e.x + e.width <= x or e.x >= x + w:
                 continue  # beside the area (a carousel's cards), not past its edge
-            if direction == "up" and e.y + e.height <= y + 1:
+            # by its middle: a row that straddles the edge with its middle past it is still past it (seen over
+            # Wi-Fi 2026-11-11: Bottom at y 915 to 963 on a 932 pt screen, and the scroll stopped one drag short)
+            if direction == "up" and e.center[1] < y:
                 return True
-            if direction == "down" and e.y >= y + h - 1:
+            if direction == "down" and e.center[1] >= y + h:
                 return True
         return False
 
