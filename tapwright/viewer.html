@@ -1202,6 +1202,7 @@ function createVideoBlock(io) {
     var dot = $("dot");
     var core = [];
     var cls = "";
+    var viaText = null;
     if (!wsOpen) {
       core.push(status ? "Connection lost, retrying" : "Connecting");
       cls = "wait";
@@ -1209,7 +1210,7 @@ function createVideoBlock(io) {
       var st = String(status.state || "");
       core.push(STATE_TEXT[st] || st || "Unknown");
       if (status.detail) core.push(String(status.detail));
-      if (status.via) core.push("via " + (VIA_TEXT[String(status.via)] || String(status.via)));
+      if (status.via) core.push(viaText = "via " + (VIA_TEXT[String(status.via)] || String(status.via)));
       if (st === "live") cls = "live";
       else if (st === "locked" || st === "no-device" || st === "not-answering") cls = "bad";
       else cls = "wait";
@@ -1227,7 +1228,10 @@ function createVideoBlock(io) {
     var text = plain;
     var fps = videoOn ? videoFps : status && isNum(status.fps) ? status.fps : null;
     if (wsOpen && status && isNum(fps)) text += " \u00b7 " + fps.toFixed(1) + " fps";
-    $("status").textContent = text;
+    /* The presentation view (Details off) says only the state and who drives ("Live \u00b7 agent driving");
+       how the phone is reached and the frame rate are the Details view's, and always in the tooltip. */
+    var brief = core.filter(function (part) { return part !== viaText; }).join(" \u00b7 ");
+    $("status").textContent = document.body.classList.contains("details") ? text : brief;
     $("status").title = text; /* the whole line, when the bar cuts it short */
     dot.className = cls;
     if (plain !== lastAnnounce) {
@@ -1806,6 +1810,7 @@ function createVideoBlock(io) {
     document.body.classList.toggle("details", on);
     $("details").setAttribute("aria-pressed", on ? "true" : "false");
     try { localStorage.setItem("viewer.details", on ? "1" : "0"); } catch (e) { /* not kept */ }
+    renderStatus();
   }
   $("details").addEventListener("click", function () {
     setDetails(!document.body.classList.contains("details"));
