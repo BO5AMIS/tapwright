@@ -63,6 +63,7 @@ class Session:
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
+        self.retyped = False  # the last type_text cleared the field and typed once more (see type_text)
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end (y)
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
         self.app_names: dict[str, str] = {}  # bundle id -> display name, from the installed apps
@@ -435,6 +436,10 @@ class Session:
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
         element, hit, again, at_end = None, None, False, False
+        # with the keyboard already up, the focusing tap moves focus from another field, and iOS may swap in that
+        # field's keyboard as the keys go out: some went missing on the phone ("abc" landed as "a", 2026-11-11)
+        switched = self.last_keyboard
+        self.retyped = False
         if target is not None:
             what = self._target(target)[2]
             hit = ui.resolve(self.items, target)
@@ -478,6 +483,15 @@ class Session:
             await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             await self._touching(KEY_MS * len(text))
             await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
+        elif (replace and not submit and switched and not again and element and field is not None
+              and not field.secure and await self._attribute(element, "value") != text):
+            # keys went missing as focus moved between fields: the field holds something else. Cleared and typed
+            # once more; the answer says so (Daemon, NOTE_RETYPED). Typing again into the same field isn't checked:
+            # its keyboard is already the field's own (and that path is the fast one)
+            await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
+            await self._touching(KEY_MS * len(text))
+            await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
+            self.retyped = True
         if field is not None and element and not submit:  # return may move focus on; keys never do
             self.typed_into = (_field_key(field), element)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note

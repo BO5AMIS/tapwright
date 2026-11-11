@@ -986,3 +986,34 @@ def test_a_read_that_hangs_behind_the_passcode_screen_is_the_passcode_screen(pho
     phone.fail["/window/size"] = ConnectionLost("didn't answer")
     with pytest.raises(PasscodeNeeded):
         asyncio.run(Session(phone).ensure())
+
+
+def test_typing_into_a_field_that_took_focus_from_another_checks_the_keys_landed(phone, monkeypatch):
+    """2026-11-11 on the phone: with the keyboard up for one field, a tap on the next moved focus there and iOS
+    swapped in that field's keyboard as the keys went out: "abc" landed as "a". Only then is the value read back;
+    when it's wrong, the field is cleared and typed once more."""
+    monkeypatch.setattr(session_module, "FOCUS_POLL", 0.01)
+    _keyboard_after(phone, 1)
+    _focus(phone, [FIELD_RECT])
+    held = ["a"]
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path.endswith("/attribute/value"):
+            return {"value": held.pop(0) if held else "abc"}
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    s = Session(phone)
+    s.items = _field(placeholder="you@example.com", value="you@example.com")
+    s.last_keyboard = True  # the keyboard is up for another field
+    before = len(phone.requests)
+    asyncio.run(s.type_text("abc", replace=True, target=ui_module.Target(ref="e1")))
+    sent = [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]]
+    assert sent[-3:] == ["keys", "clear", "keys"] and s.retyped  # (the value read is answered above, unlogged)
+    # with the keyboard down (the first field of a form) nothing is read back
+    s2 = Session(phone)
+    s2.items = _field(placeholder="you@example.com", value="you@example.com")
+    before = len(phone.requests)
+    asyncio.run(s2.type_text("abc", replace=True, target=ui_module.Target(ref="e1")))
+    assert [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]][-1] == "keys" and not s2.retyped
+    assert "clear" not in [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]]

@@ -1451,7 +1451,8 @@ class Daemon:
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
             await typed()
         done = Typed(f"Typed into {field.line(actions=False)}.")
-        done.field, done.note = field, forced
+        retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
+        done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         return done
 
     async def _scroll(self, view, a: dict) -> Scrolled:
