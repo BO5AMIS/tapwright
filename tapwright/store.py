@@ -20,8 +20,16 @@ SECRETS = HOME / "signing"  # private key, certificate, profile: never leave thi
 STATE = HOME / "state.json"
 SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, token (kept after it stops)
 
-WDA_VERSION = "16.15.3"
-WDA_SHA256 = "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5"
+# Where the WebDriverAgent runner comes from: (repo, release tag, SHA-256, cache folder).
+# Appium's prebuilt runner is the default; TAPWRIGHT_WDA=fork selects Tapwright's own build.
+WDA_SOURCES = {
+    "appium": ("appium/WebDriverAgent", "v16.15.3",
+               "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.0", "839a33f80bd159438b9f71cf49451949b27f03088045c1e9fdefab781fc78154", "fork-tw-16.15.3.0"),
+}
+WDA_DEFAULT = "appium"
+WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]
+WDA_SHA256 = WDA_SOURCES[WDA_DEFAULT][2]
 
 RCODESIGN_VERSION = "0.29.0"
 
@@ -79,14 +87,23 @@ def _release_file(repo: str, tag: str, name: str) -> bytes:
             raise RuntimeError(f"couldn't download {link}: {e}") from None
 
 
+def wda_source() -> tuple[str, str, str, str]:
+    """(repo, tag, SHA-256, cache folder) of the runner in use: $TAPWRIGHT_WDA picks the table row."""
+    name = (os.environ.get("TAPWRIGHT_WDA") or WDA_DEFAULT).strip().lower()
+    if name not in WDA_SOURCES:
+        raise RuntimeError(f"TAPWRIGHT_WDA={name!r} isn't one of {', '.join(WDA_SOURCES)}")
+    return WDA_SOURCES[name]
+
+
 def wda_app() -> Path:
     """The unsigned WebDriverAgent runner app, downloaded once and verified."""
-    target = HOME / "wda" / WDA_VERSION / "WebDriverAgentRunner-Runner.app"
+    repo, tag, sha256, folder = wda_source()
+    target = HOME / "wda" / folder / "WebDriverAgentRunner-Runner.app"
     if target.exists():
         return target
-    data = _release_file("appium/WebDriverAgent", f"v{WDA_VERSION}", "WebDriverAgentRunner-Runner.zip")
-    if hashlib.sha256(data).hexdigest() != WDA_SHA256:
-        raise RuntimeError(f"the WebDriverAgent {WDA_VERSION} download doesn't match its pinned SHA-256")
+    data = _release_file(repo, tag, "WebDriverAgentRunner-Runner.zip")
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise RuntimeError(f"the WebDriverAgent {tag} download doesn't match its pinned SHA-256")
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(target.parent)
     return target
