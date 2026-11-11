@@ -400,29 +400,29 @@ async def until_stuck(d: Daemon) -> None:
 
 
 def test_a_frozen_app_is_named_at_once_and_close_app_ends_it():
-    """2026-11-10: JLD froze in front. Agents were told 'reconnecting… wait a few seconds' for hours."""
+    """2026-11-10: Lab froze in front. Agents were told 'reconnecting… wait a few seconds' for hours."""
     async def go():
         s = FakeSession()
-        s.stuck = AppNotAnswering("app.jld.mobile", "JLD")
+        s.stuck = AppNotAnswering("com.example.lab", "Lab")
         d = make(s, ready_wait=2.0)
         stop, task = await started(d, until=())
         await until_stuck(d)
-        assert d.state == "not-answering" and d.detail.startswith("JLD (app.jld.mobile) is in front")  # the viewer says so too
+        assert d.state == "not-answering" and d.detail.startswith("Lab (com.example.lab) is in front")  # the viewer says so too
         began = asyncio.get_running_loop().time()
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "look", {"screenshot": False})
         assert asyncio.get_running_loop().time() - began < 1.0  # not after the 2 s wait for a connection
         assert e.value.code == "not_answering"  # AGENT-TOOLS v1.4
-        assert str(e.value) == ("JLD (app.jld.mobile) is in front and isn't answering, so nothing on the phone can be read. "
+        assert str(e.value) == ("Lab (com.example.lab) is in front and isn't answering, so nothing on the phone can be read. "
                                 "close_app can still close it; then open_app it again.")
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "not_answering"
         assert "wait a few seconds" not in str(e.value)
         with pytest.raises(Refused) as e:  # only the stuck app can be closed while it blocks the phone
             await d.run_tool("a", "close_app", {"app": "Settings"})
         assert e.value.code == "not_answering" and s.device.killed == []
-        r = await d.run_tool("a", "close_app", {"app": "jld"})
-        assert r["text"] == "Closed JLD (app.jld.mobile), which wasn't answering."
-        assert s.device.killed == ["app.jld.mobile"]
+        r = await d.run_tool("a", "close_app", {"app": "lab"})
+        assert r["text"] == "Closed Lab (com.example.lab), which wasn't answering."
+        assert s.device.killed == ["com.example.lab"]
         r = await d.run_tool("a", "look", {"screenshot": False})  # waits for the reconnect the close starts
         assert r["text"].startswith("Screen") and d.state == "live" and d.stuck is None
         assert "reset" not in s.calls  # a stuck app is no reason to rebuild the tunnel
@@ -437,12 +437,12 @@ def test_an_app_that_freezes_mid_session_answers_not_answering_and_then_recovers
         d = make(s)
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        frozen = AppNotAnswering("app.jld.mobile", "JLD")
+        frozen = AppNotAnswering("com.example.lab", "Lab")
         s.stuck = frozen  # the reconnect finds it still frozen
         s.fail["look"] = s.fail["snapshot"] = frozen  # the read is cut and the app named
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "look", {"screenshot": False})
-        assert e.value.code == "not_answering" and str(e.value).startswith("JLD (app.jld.mobile) is in front")
+        assert e.value.code == "not_answering" and str(e.value).startswith("Lab (com.example.lab) is in front")
         assert d.state == "not-answering" and d.stuck is not None
         s.stuck = None  # the app answers again: nobody has to do anything
         for _ in range(300):

@@ -25,7 +25,7 @@ class Recorder:
         return list(self.in_front)
 
     async def user_apps(self):
-        return [{"bundle_id": "app.jld.mobile", "name": "JLD", "version": "1.0", "build": "1"}]
+        return [{"bundle_id": "com.example.lab", "name": "Lab", "version": "1.0", "build": "1"}]
 
     async def connect(self):
         self.rsd = "tunnel"
@@ -71,14 +71,14 @@ def test_session_starts_once_then_costs_nothing(phone):
 
 
 def test_a_frozen_app_in_front_is_named_instead_of_a_dropped_line(phone):
-    """2026-11-10: JLD froze in front; every read hung behind it and the daemon said 'reconnecting' for hours."""
-    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    """2026-11-10: Lab froze in front; every read hung behind it and the daemon said 'reconnecting' for hours."""
+    phone.locked, phone.in_front = False, ["com.example.lab"]
     phone.fail["/window/size"] = ConnectionLost("WebDriverAgent didn't answer GET /session/S/window/size within 10 s")
     s = Session(phone)
     with pytest.raises(AppNotAnswering) as e:
         asyncio.run(s.ensure())
-    assert (e.value.bundle_id, e.value.name) == ("app.jld.mobile", "JLD") and s.sid is None
-    assert str(e.value) == "JLD (app.jld.mobile) is in front and isn't answering, so nothing on the phone can be read"
+    assert (e.value.bundle_id, e.value.name) == ("com.example.lab", "Lab") and s.sid is None
+    assert str(e.value) == "Lab (com.example.lab) is in front and isn't answering, so nothing on the phone can be read"
     paths = [path for _, path, _ in phone.requests]
     # asked before the first read of the app: once that read hangs, nothing else gets an answer
     assert paths.index("/session/S/wda/locked") < paths.index("/session/S/window/size")
@@ -91,14 +91,14 @@ def test_a_read_waits_out_a_notification_banner_over_the_app(phone, monkeypatch)
               'bundleId="com.apple.springboard" enabled="true" x="0" y="0" width="430" height="932">'
               '<XCUIElementTypeOther type="XCUIElementTypeOther" name="NotificationShortLookView" label="A message" '
               'enabled="true" x="8" y="56" width="414" height="70"/></XCUIElementTypeApplication></AppiumAUT>')
-    app = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="JLD" label="JLD" '
-           'bundleId="app.jld.mobile" enabled="true" x="0" y="0" width="430" height="932">'
+    app = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" label="Lab" '
+           'bundleId="com.example.lab" enabled="true" x="0" y="0" width="430" height="932">'
            '<XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-taps" label="Tap me" enabled="true" '
            'x="16" y="197" width="398" height="120"/></XCUIElementTypeApplication></AppiumAUT>')
     monkeypatch.setattr(session_module, "BANNER_POLL", 0.001)
     s = Session(phone)
     asyncio.run(s.ensure())
-    phone.in_front = ["app.jld.mobile"]
+    phone.in_front = ["com.example.lab"]
     reads, real = [banner, banner, app], phone.http
 
     async def http(method, path, payload=None, timeout=30.0):
@@ -121,8 +121,8 @@ def test_a_touch_near_the_top_waits_out_a_notification_banner(phone, monkeypatch
     monkeypatch.setattr(session_module, "BANNER_WAIT", 0.005)
     s = Session(phone)
     asyncio.run(s.ensure())
-    phone.in_front = ["app.jld.mobile"]
-    fronts, touched, real = ["com.apple.springboard", "com.apple.springboard", "app.jld.mobile"], [], phone.http
+    phone.in_front = ["com.example.lab"]
+    fronts, touched, real = ["com.apple.springboard", "com.apple.springboard", "com.example.lab"], [], phone.http
 
     async def http(method, path, payload=None, timeout=30.0):
         if path.endswith("/wda/activeAppInfo"):
@@ -134,7 +134,7 @@ def test_a_touch_near_the_top_waits_out_a_notification_banner(phone, monkeypatch
     phone.http = http
     s.banner_guard = True
     asyncio.run(s.swipe(200, 150, 200, 500))  # starts under where a banner lies
-    assert len(touched) == 1 and fronts == ["app.jld.mobile"]
+    assert len(touched) == 1 and fronts == ["com.example.lab"]
     fronts[:] = ["com.apple.springboard"]  # a banner that stays
     with pytest.raises(Refused, match="covered: a notification is over the top"):
         asyncio.run(s.swipe(200, 150, 200, 500))
@@ -143,7 +143,7 @@ def test_a_touch_near_the_top_waits_out_a_notification_banner(phone, monkeypatch
     phone.in_front = []  # the home screen itself: no app under a banner
     asyncio.run(s.swipe(200, 150, 200, 500))
     s.banner_guard = False  # a person's input from the live view is theirs
-    phone.in_front = ["app.jld.mobile"]
+    phone.in_front = ["com.example.lab"]
     asyncio.run(s.swipe(200, 150, 200, 500))
     assert len(touched) == 4
 
@@ -233,10 +233,10 @@ def test_one_stalled_touch_keeps_the_session_and_says_it_is_not_known(phone):
 
 def test_one_stalled_read_is_asked_again_and_is_not_a_frozen_app(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a single connection stalled, the app was fine, and the answer
-    was "JLD isn't answering" with a reconnect. The read is asked once more on a new connection first."""
+    was "Lab isn't answering" with a reconnect. The read is asked once more on a new connection first."""
     s = Session(phone)
     asyncio.run(s.ensure())
-    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    phone.locked, phone.in_front = False, ["com.example.lab"]
     stalls, real = [1], phone.http
 
     async def http(method, path, payload=None, timeout=30.0):
@@ -244,8 +244,8 @@ def test_one_stalled_read_is_asked_again_and_is_not_a_frozen_app(phone):
             stalls.pop()
             raise ConnectionLost(f"WebDriverAgent didn't answer {method} {path} within {timeout:.0f} s")
         if "/source" in path:
-            return {"value": '<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="JLD" '
-                             'label="JLD" enabled="true" x="0" y="0" width="430" height="932"/></AppiumAUT>'}
+            return {"value": '<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" '
+                             'label="Lab" enabled="true" x="0" y="0" width="430" height="932"/></AppiumAUT>'}
         return await real(method, path, payload, timeout)
     phone.http = http
     asyncio.run(s.refresh())  # no AppNotAnswering, no ConnectionLost
@@ -257,7 +257,7 @@ def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phon
     the app iOS has in front is named (R6: a drop ends clearly)."""
     s = Session(phone)
     asyncio.run(s.ensure())
-    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    phone.locked, phone.in_front = False, ["com.example.lab"]
     waits = []
     real = phone.http
 
@@ -269,7 +269,7 @@ def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phon
     phone.http = http
     with pytest.raises(AppNotAnswering) as e:
         asyncio.run(s.refresh())
-    assert e.value.bundle_id == "app.jld.mobile" and waits == [session_module.READ_CUT, session_module.READ_AGAIN]
+    assert e.value.bundle_id == "com.example.lab" and waits == [session_module.READ_CUT, session_module.READ_AGAIN]
     phone.in_front = []  # nothing in front can be blamed: it stays a dropped line
     asyncio.run(s.ensure())
     with pytest.raises(ConnectionLost) as e:
@@ -278,7 +278,7 @@ def test_a_tree_read_that_hangs_mid_session_is_cut_and_the_frozen_app_named(phon
 
 
 def test_a_locked_phone_at_connect_is_named(phone):
-    phone.locked, phone.in_front = True, ["app.jld.mobile"]
+    phone.locked, phone.in_front = True, ["com.example.lab"]
     phone.fail["/window/size"] = ConnectionLost("didn't answer")
     with pytest.raises(PhoneLocked):
         asyncio.run(Session(phone).ensure())
@@ -978,7 +978,7 @@ def test_a_read_that_hangs_behind_the_passcode_screen_is_the_passcode_screen(pho
     """iOS asks for the passcode again now and then, also with WebDriverAgent already up. A review found that
     the hang was then blamed on "the app in front", and `close_app` would have closed the passcode screen."""
     from tapwright.device import PasscodeNeeded
-    phone.locked, phone.in_front = False, ["app.jld.mobile"]
+    phone.locked, phone.in_front = False, ["com.example.lab"]
 
     async def prompt_up():
         return True
