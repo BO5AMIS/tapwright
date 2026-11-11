@@ -4209,6 +4209,41 @@ def test_a_view_over_the_app_from_another_process_is_not_taken_for_a_theft():
     run(go)
 
 
+def test_in_personal_mode_a_given_apps_permission_prompt_can_be_seen_and_answered():
+    """2026-11-11, a first-time agent on Wayfare (in Expo Go): the reminder switch raised iOS's notification prompt,
+    drawn in SpringBoard, and personal mode refused both `look` and `alert` as the home screen."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        mine = Scope(("com.example.app",))
+        s.app_names["com.example.app"] = "Example"
+        s.foreground, s.tree = "com.example.app", [button("e1", "Remind me", "remind")]
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+
+        async def still_running():
+            return ["com.example.app"]
+        s.device.foreground_apps = still_running
+        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
+        s.tree = [button("e1", "Allow"), button("e2", "Don’t Allow")]
+        s.last_alert = ui.Alert("“Example” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
+                                (60.0, 300.0, 300.0, 200.0))
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        assert "outside_apps" not in r["text"]  # the prompt is shown, not withheld
+        r = await d.run_tool("a", "alert", {"action": "accept"}, scope=mine)
+        assert "alert" in d.session.calls and "outside_apps" not in r["text"]
+        assert asyncio.get_running_loop().time() - began < 2.0  # no banner wait: a prompt doesn't leave by itself
+        # a prompt naming another app is not the given app's
+        s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
+                                (60.0, 300.0, 300.0, 200.0))
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "alert", {"action": "accept"}, scope=mine)
+        assert e.value.code == "not_allowed"
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_shade_pulled_down_over_the_app_is_a_theft():
     """Tapline's review: a drag from the top edge pulls Notification Center over the app: SpringBoard in front, the app
     still running under it, and it stays (a banner would leave). The app is opened again."""

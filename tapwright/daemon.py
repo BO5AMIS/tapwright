@@ -364,6 +364,7 @@ ACTIONS = {
     "rotate": (lambda s, a: s.rotate(a["to"]), CAP),
 }
 SPRINGBOARD = "com.apple.springboard"
+PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own system prompt is in front
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
@@ -803,13 +804,15 @@ class Daemon:
             self._scopes[scope.apps] = given
         return self._scopes[scope.apps]
 
-    async def _front(self, given: dict[str, str]) -> str | None:
+    async def _front(self, given: dict[str, str], prompt=None) -> str | None:
         """The app in front, for personal mode's question before a touch. WebDriverAgent answers SpringBoard
         while a notification banner slides over the app in front (seen on the phone 2026-11-10: twice in forty
         calls, each a false `outside_apps`; a banner stays for some seconds). When it says SpringBoard and the phone's
         own process list has one of the given apps in the foreground, it is asked again, FRONT_RETRIES times
         FRONT_RETRY s apart at most. Only WebDriverAgent's answer lets a call through; the process list never
-        does, and on the real home screen it has no given app, so that refusal isn't delayed."""
+        does, and on the real home screen it has no given app, so that refusal isn't delayed. `prompt`: asked first
+        whether the screen is a given app's own permission prompt (see _prompt_of_given): then PROMPT_FRONT at once,
+        with no wait, since a prompt doesn't leave by itself as a banner does."""
         front = await self._read(self.session.foreground_bundle_id)
         if front != SPRINGBOARD:
             return front
@@ -817,12 +820,34 @@ class Daemon:
             running = set(await asyncio.wait_for(self.session.device.foreground_apps(), 5))
         except Exception:  # no process list in time: WebDriverAgent's word stands
             return front
+        if running & set(given) and prompt is not None and await prompt():
+            return PROMPT_FRONT
         for _ in range(FRONT_RETRIES if running & set(given) else 0):
             await asyncio.sleep(FRONT_RETRY)
             front = await self._read(self.session.foreground_bundle_id)
             if front != SPRINGBOARD:
                 break
         return front
+
+    async def _prompt_of_given(self, given: dict[str, str], view, read: bool) -> bool:
+        """Is the system alert on screen a given app's own: a permission prompt the app raised ("“Expo Go” Would
+        Like to Send You Notifications")? iOS draws it in SpringBoard, so personal mode saw the home screen in front
+        and refused the very `alert` the skill says to answer (a first-time agent stuck on it, 2026-11-11). Only
+        when the alert's title names a given app and the phone's process list still has that app in the
+        foreground under it. `read`: read the screen first (a touch's check); else the answer's own read counts."""
+        if read:
+            await self._read(lambda: self._silent_read(view))
+        if view.alert_now is None:
+            return False
+        title = view.alert_now[0]
+        named = [b for b in given if (self.session.app_names.get(b) or given[b].split(" (")[0]) in title]
+        if not named:
+            return False
+        try:
+            running = set(await asyncio.wait_for(self.session.device.foreground_apps(), 5))
+        except Exception:
+            return False  # the phone can't say: refuse, the safe side
+        return bool(running & set(named))
 
     async def _within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """One tool call in personal mode, failing closed. Nothing runs without an app list. Opening or closing an
@@ -844,8 +869,9 @@ class Daemon:
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
-            front = await self._front(given)
-            if front not in given:
+            view = self.control.client(client_id)
+            front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=True))
+            if front not in given and front != PROMPT_FRONT:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
         answer = await self._run_tool(client_id, name, args)
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
@@ -855,7 +881,9 @@ class Daemon:
         # The answer's own App: line says whose screen it lists; without one, the app at the last read does.
         shown = APP_LINE.search(answer["text"])
         app = (shown.group(1), shown.group(2)) if shown else self.session.app
-        if app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image")):
+        if (app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image"))
+                and not (app[1] == SPRINGBOARD
+                         and await self._prompt_of_given(given, self.control.client(client_id), read=True))):
             if name == "look":  # nothing was done, so there is nothing to report but the refusal
                 raise Refused("not_allowed", _outside(app[1], app[0], names))
             first = answer["text"].splitlines()[0]
