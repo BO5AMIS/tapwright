@@ -9,12 +9,12 @@ on the phone: your TestFlight builds, development builds, the App Store version.
 Nothing is added to your app, and no Mac or Xcode is needed.
 
 <p align="center">
-  <img src="docs/media/hero.gif" width="320" alt="A Claude agent tests a demo app's sign-up on a real iPhone: it types an invalid email, the app accepts it, then it plans a trip and answers iOS's notification prompt. Each step is captioned under the phone.">
+  <img src="https://raw.githubusercontent.com/bo5amis/tapwright/main/docs/media/hero.gif" width="320" alt="A Claude agent tests a demo app's sign-up on a real iPhone: it types an invalid email, the app accepts it, then it plans a trip and answers iOS's notification prompt. Each step is captioned under the phone.">
 </p>
 <p align="center"><sub>A Claude agent given one sentence ("test sign-up and a first trip the way a new user would") on a real
 iPhone, through Tapwright. It finds the planted bug (the app accepts "abc" as an email) and answers iOS's own
 permission prompt. Real time, with the agent's thinking pauses shortened;
-<a href="docs/media/hero-landscape.mp4">with the live view around it</a>.</sub></p>
+<a href="https://github.com/bo5amis/tapwright/blob/main/docs/media/hero-landscape.mp4">with the live view around it</a>.</sub></p>
 
 > [!NOTE]
 > Version 1 is for testing and QA on a **test phone that sits next to your computer**, over
@@ -41,7 +41,7 @@ Appium) on your phone, signed with your developer identity, and talks to it thro
 no admin rights and works on any OS.
 
 Tapwright drives **the whole phone from the outside** (any app, system alerts, the home
-screen). Its sibling project [Tapline](https://github.com/<owner>/tapline) drives **your own
+screen). Its sibling project [Tapline](https://github.com/bo5amis/tapline) drives **your own
 React Native app from the inside**, through a small SDK in the app.
 
 ## You need
@@ -57,7 +57,7 @@ React Native app from the inside**, through a small SDK in the app.
 ## Quick start
 
 ```sh
-pip install git+https://github.com/<owner>/tapwright
+pip install tapwright
 ```
 
 **One-time setup**, phone plugged in and unlocked:
@@ -70,7 +70,7 @@ tapwright setup --asc-key-id KEY_ID --asc-issuer-id ISSUER_ID --asc-key-file Aut
 It pairs with the phone (tap **Trust**), checks Developer Mode, creates a development
 certificate and profile through the API (the private key stays on your computer), signs
 and installs WebDriverAgent, and pairs for network use. Details and the manual option:
-[docs/setup.md](docs/setup.md).
+[docs/setup.md](https://github.com/bo5amis/tapwright/blob/main/docs/setup.md).
 
 **Try it** on one of your apps:
 
@@ -95,8 +95,8 @@ claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
 
 Other MCP clients: run `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
 on my phone, sign up with a test email, and tell me if anything looks broken."*
-[AGENTS.md](AGENTS.md) is the agent's guide; point your agent at it.
-[docs/quickstart.md](docs/quickstart.md) walks through a first test.
+[AGENTS.md](https://github.com/bo5amis/tapwright/blob/main/AGENTS.md) is the agent's guide; point your agent at it.
+[docs/quickstart.md](https://github.com/bo5amis/tapwright/blob/main/docs/quickstart.md) walks through a first test.
 
 **Give your agent the skill.** It teaches an agent how to test with Tapwright: the loop, how
 to read an answer, what to do on each error, how to report, and the mistakes agents make.
@@ -107,7 +107,7 @@ tapwright skill install --project .   # for one project
 ```
 
 Claude Code reads `.claude/skills`; Codex and other agents read `.agents/skills`. The skill
-is [skills/tapwright](skills/tapwright/SKILL.md), in the open
+is [skills/tapwright](https://github.com/bo5amis/tapwright/blob/main/skills/tapwright/SKILL.md), in the open
 [Agent Skills](https://agentskills.io) format, so skill installers can take it from this
 repository too.
 
@@ -132,7 +132,7 @@ screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --sc
 saves the pictures as files instead of sending them. Errors are `Error <code>: <message>`; for
 `not_actionable` the first word says why (`disabled`, `off_screen`, `covered`, `under_tab_bar`,
 `behind_alert`, `no_action`). The tools and their errors are the same as Tapline's:
-[docs/AGENT-TOOLS.md](docs/AGENT-TOOLS.md).
+[docs/AGENT-TOOLS.md](https://github.com/bo5amis/tapwright/blob/main/docs/AGENT-TOOLS.md).
 
 ## Live view
 
@@ -144,7 +144,7 @@ an agent can share one phone. Agent tools start it by themselves. To watch:
 tapwright view      # opens the live view in your browser
 ```
 
-<p align="center"><img src="docs/media/still-prompt.png" width="720" alt="The live view: the phone's screen in a drawn phone, iOS asking whether Wayfare may send notifications, and the agent's step captioned under the phone."></p>
+<p align="center"><img src="https://raw.githubusercontent.com/bo5amis/tapwright/main/docs/media/still-prompt.png" width="720" alt="The live view: the phone's screen in a drawn phone, iOS asking whether Wayfare may send notifications, and the agent's step captioned under the phone."></p>
 
 You see the phone's screen live and can drive it: click to tap, hold to long-press, drag to
 swipe, use the mouse wheel to scroll, and type into the focused field. Each step, the
@@ -159,11 +159,11 @@ access token in the link.
   while it is still.
 - `tapwright serve --video` plays the phone's own video instead, 60 frames a second, with
   nothing installed on the phone. The phone and the computer must be on the same Wi-Fi, and
-  the computer needs an AirPlay receiver: see [docs/setup.md](docs/setup.md).
+  the computer needs an AirPlay receiver: see [docs/setup.md](https://github.com/bo5amis/tapwright/blob/main/docs/setup.md).
 - The volume buttons press the phone's real buttons.
 
 Other tools can use the same daemon: the agent tools over HTTP (`POST /api/<tool>`), and the
-live view protocol in [docs/VIEWER-PROTOCOL.md](docs/VIEWER-PROTOCOL.md).
+live view protocol in [docs/VIEWER-PROTOCOL.md](https://github.com/bo5amis/tapwright/blob/main/docs/VIEWER-PROTOCOL.md).
 
 ## Without the cable
 
@@ -211,8 +211,8 @@ experimental.
 | Agents | a first-time agent with the skill tested the whole lab charter in 44 calls (40 with Tapline connected too) |
 | Not done | over Wi-Fi, a tap (1.03 s) and typing (1.33 s) within Wi-Fi's own bar of 1.0 s (the toggle meets it), and a scroll within 1.5 s; a second phone or an iPad; a run by anyone but the authors |
 
-Every number, how it was measured and how to run it yourself: [docs/benchmarks.md](docs/benchmarks.md).
-The bar they are held against: [docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
+Every number, how it was measured and how to run it yourself: [docs/benchmarks.md](https://github.com/bo5amis/tapwright/blob/main/docs/benchmarks.md).
+The bar they are held against: [docs/QUALITY-BAR.md](https://github.com/bo5amis/tapwright/blob/main/docs/QUALITY-BAR.md).
 
 ## License
 

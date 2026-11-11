@@ -9,7 +9,7 @@ setting Tapwright up for a user, then testing well and safely.
 Do the computer side yourself; ask the user only for what needs their hands or their
 Apple account. Follow [docs/setup.md](docs/setup.md).
 
-1. `pip install git+https://github.com/<owner>/tapwright`, then `tapwright doctor`. Fix
+1. `pip install tapwright`, then `tapwright doctor`. Fix
    what it reports on the computer (Windows: Apple Devices from the Microsoft Store).
 2. Ask the user to plug in and unlock the iPhone.
 3. Signing: ask for an App Store Connect API key (Key ID, Issuer ID, the `.p8` file's path,

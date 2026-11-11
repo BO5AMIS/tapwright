@@ -4,7 +4,7 @@ Once per phone, with the phone on USB. About ten minutes.
 
 ## 1. The computer
 
-- Python 3.10 or newer, then `pip install git+https://github.com/<owner>/tapwright`.
+- Python 3.10 or newer, then `pip install tapwright`.
 - Windows: **Apple Devices** from the Microsoft Store (or iTunes). It provides the USB
   connection to the phone.
 - Linux: `usbmuxd` (`sudo apt install usbmuxd`).

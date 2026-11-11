@@ -16,7 +16,7 @@ option: [setup.md](setup.md).
 ## On the computer
 
 ```sh
-pip install git+https://github.com/<owner>/tapwright
+pip install tapwright
 tapwright doctor
 ```
 

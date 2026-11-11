@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 tapwright-*.jpg
 HANDOFF.md
+build/
+dist/

@@ -18,7 +18,7 @@ Never print the key's contents, and never copy the key file anywhere else.
 
 1. Install and check the computer:
    ```sh
-   pip install git+https://github.com/<owner>/tapwright
+   pip install tapwright
    tapwright doctor
    ```
    Fix what `doctor` reports on the computer.
