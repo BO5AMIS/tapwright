@@ -1755,6 +1755,9 @@ class Daemon:
                 source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
                 source = None
+            turn = getattr(self.session, "turn", 0)
+            if source is not None and turn and getattr(frame, "picture", None) is None:
+                source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is None:
                 source = await self._read(self.session.screenshot_png)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
