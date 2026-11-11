@@ -412,7 +412,7 @@ text items.
 | `close_app` (today's `terminate_app`) | Tapwright | Tapline lives inside the app |
 | `alert` (`accept`, `dismiss`, `text`) | Tapwright | Tapline can't reach OS alerts |
 | `press_button` (`home`, `volumeUp`, `volumeDown`) | Tapwright | hardware buttons are outside the app |
-| `swipe` (`x0, y0, x1, y1, seconds`) | Tapwright | Tapline calls handlers and can't make raw gestures |
+| `swipe` (`x0, y0, x1, y1, seconds`) | both (Tapline since v1.6) | Tapwright makes a real drag. Tapline drags through React Native's own touch system (a pan view, a sheet's swipe to close); a gesture that react-native-gesture-handler or a native view handles (sliders, maps), or a drag along a native scroll view, answers `no_action` there and its message names what can make it |
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
 | `compare_screen`, `filmstrip` | Tapline now; Tapwright in part 2 | both are image work. Tapwright's 22 fps stream suits `filmstrip`; part 2's planned `watch` becomes `filmstrip` |
 | `record`, `replay` | Tapline now; Tapwright later | scripts by id, label or text work for both |
