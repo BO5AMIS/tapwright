@@ -8,6 +8,13 @@ scrolls, swipes, answers permission prompts and opens deep links. It works with 
 on the phone: your TestFlight builds, development builds, the App Store version.
 Nothing is added to your app, and no Mac or Xcode is needed.
 
+<p align="center">
+  <img src="docs/media/hero.gif" width="320" alt="A Claude agent tests a demo app's sign-up on a real iPhone: it types an invalid email, the app accepts it, then it plans a trip and answers iOS's notification prompt. Each step is captioned under the phone.">
+</p>
+<p align="center"><sub>A Claude agent given one sentence ("test sign-up and a first trip the way a new user would") on a real
+iPhone, through Tapwright. It finds the planted bug (the app accepts "abc" as an email) and answers iOS's own
+permission prompt. 2× speed; <a href="docs/media/hero-landscape.mp4">full video, real time</a>.</sub></p>
+
 > [!NOTE]
 > Version 1 is for testing and QA on a **test phone that sits next to your computer**, over
 > USB or the same Wi-Fi. It is measured on one phone (an iPhone 14 Pro Max on iOS 26) from
@@ -135,11 +142,15 @@ an agent can share one phone. Agent tools start it by themselves. To watch:
 tapwright view      # opens the live view in your browser
 ```
 
+<p align="center"><img src="docs/media/still-prompt.png" width="720" alt="The live view: the phone's screen in a drawn phone, iOS asking whether Wayfare may send notifications, and the agent's step captioned under the phone."></p>
+
 You see the phone's screen live and can drive it: click to tap, hold to long-press, drag to
-swipe, use the mouse wheel to scroll, and type into the focused field. The toolbar has Home,
-volume, the stream quality and **Pause agent**. Your input goes first: the agent waits while
-you drive. The live view is reachable from this computer only, with an access token in the
-link.
+swipe, use the mouse wheel to scroll, and type into the focused field. Each step, the
+agent's or yours, shows in plain words under the phone (`Tap "Save trip"`), and **Steps**
+lists them. The bar has **Pause agent**; **More** holds Home, volume, the picture quality and
+**Details** (the element names and boxes, for when you're debugging). Your input goes first:
+the agent waits while you drive. The live view is reachable from this computer only, with an
+access token in the link.
 
 - Drags play on the phone after you let go: WebDriverAgent can't follow a finger live.
 - The picture is a stream of JPEG frames, about 26 a second while the screen changes and 5
