@@ -102,6 +102,7 @@ NOTE_TAKEN_SYSTEM = ("{other} came to the front after the touch: a notification 
 SYSTEM_IN_FRONT = "the home screen, Notification Center or Control Center"
 RECHECK_WITHIN = 5.0  # seconds: a banner's theft shows within about one; later, the agent or a person moved on
 NOTE_KEYBOARD = "closed the keyboard first."
+NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
@@ -1064,6 +1065,13 @@ class Daemon:
             landed = await self._toggle_landed(view, result)
         elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
             landed = await self._typed_landed(view, result, args["text"])
+            if landed is None and not result.field.secure and await self._typed_wrong(result, args["text"]) and \
+                    await self.control.agent(lambda: self.session.retype(args["text"])):
+                # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
+                # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
+                # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
+                notes = [*notes, NOTE_RETYPED]
+                landed = await self._typed_landed(view, result, args["text"])
         else:
             landed = None
         if landed is not None:
@@ -1236,6 +1244,15 @@ class Daemon:
                 return snap, loop.time() - began
             await asyncio.sleep(TOGGLE_POLL)
         return None
+
+    async def _typed_wrong(self, result: "Typed", text: str) -> bool:
+        """Does the field typed into hold something other than `text` on a fresh read? False when it can't be found
+        again (claim nothing) or holds exactly `text`."""
+        snap = await self._read(lambda: self.session.snapshot())
+        old = result.field
+        same = [e for e in snap.tree.items if e.role == old.role and (
+            e.identifier == old.identifier if old.identifier else e.label == old.label)]
+        return len(same) == 1 and not same[0].secure and same[0].value != text
 
     async def _typed_landed(self, view, result: "Typed", text: str) -> tuple[Snapshot, float] | None:
         """As _toggle_landed, for typing: the field holds the typed text as soon as the keys call returns, and the

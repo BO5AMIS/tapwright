@@ -1,4 +1,5 @@
 """Stand-ins for tests: a clock that runs only when told, and (Task 5) a fake Session."""
+import dataclasses
 import asyncio
 import io
 import time
@@ -261,6 +262,16 @@ class FakeSession:
         self._record("type_text")
         self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"
+
+    async def retype(self, text):
+        """Session.retype: clear the focused field and type again. With `retype_into` set (an element in `tree`),
+        the field then holds the text; without it there is no focused field to retype into."""
+        self._record("retype")
+        field = getattr(self, "retype_into", None)
+        if field is None:
+            return False
+        self.tree = [dataclasses.replace(e, value=text) if e is field else e for e in self.tree]
+        return True
 
     async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
         self._record("swipe")

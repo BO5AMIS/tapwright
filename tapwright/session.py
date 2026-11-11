@@ -482,6 +482,17 @@ class Session:
             self.typed_into = (_field_key(field), element)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
 
+    async def retype(self, text: str) -> bool:
+        """Clear the focused field and type `text` again, once: the first keys went missing (the daemon saw the
+        field holding something else). False when no field has focus."""
+        element = await self._active_element()
+        if not element:
+            return False
+        await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
+        await self._touching(KEY_MS * len(text))
+        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
+        return True
+
     async def is_focused(self, field: ui.Element) -> bool:
         """Is this listed input the one WebDriverAgent says has focus (the keyboard's target)?"""
         if field.role != "input":

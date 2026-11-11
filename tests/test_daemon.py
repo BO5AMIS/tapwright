@@ -3932,6 +3932,28 @@ def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
     run(go)
 
 
+def test_keys_that_went_missing_are_typed_once_more_and_the_answer_says_so():
+    """2026-11-11, a first-time agent on Wayfare: "abc" into the email field landed as "a" (iOS swapped in another
+    keyboard as the field took focus), and the agent's retry made "abca"."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        email = el("e1", "input", "Email", "signup-email", value="a", rect=(25, 450, 380, 50))
+        await looked(d, [email])
+        s.retype_into = s.tree[0]
+        r = await d.run_tool("a", "type_text", {"target": {"id": "signup-email"}, "text": "abc"})
+        assert "retype" in s.calls
+        assert 'Value is now "abc"' in r["text"] and "cleared and typed once more" in r["text"]
+        # a field that holds what was typed is left alone
+        s.calls.clear()
+        await looked(d, [el("e1", "input", "Email", "signup-email", value="abc", rect=(25, 450, 380, 50))])
+        r = await d.run_tool("a", "type_text", {"target": {"id": "signup-email"}, "text": "abc"})
+        assert "retype" not in s.calls and "typed once more" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_button_the_keyboard_hides_is_reached_by_closing_the_keyboard_first():
     """2026-11-11, a first-time agent on Wayfare: with the keyboard up, "Create account" lay past the form's scroll
     edge (the scroll view ends at the keyboard), a short form can't scroll it up, and the tap was refused off_screen.
