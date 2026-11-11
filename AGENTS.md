@@ -53,7 +53,15 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    for a permission prompt of an app you were given; after the answer the call waits for the app
    to come back.
 9. Start a fresh run with `close_app` then `open_app`.
-10. A person may be watching the live view (`viewer` gives the link), or driving. Their input
+10. A known sequence is one `run`: its `steps` are ordinary calls, each with an optional `expect`
+    (`{"text": "Saved"}`) that must hold after it. It stops at the first that fails and says which.
+    `record` saves what you do as a script that `replay` (or `tapwright replay FILE` in CI) runs
+    again. `audit` checks the screen's accessibility; report what it finds.
+11. A tap on Buy, Delete, Send, Post, Sign out and the like answers
+    `not_allowed: needs_confirmation`: the live view asks the person; repeat the same call once
+    they allow it, or ask your user. Never look for another way. `dry_run: true` shows what a touch
+    would do without touching.
+12. A person may be watching the live view (`viewer` gives the link), or driving. Their input
     goes first. Errors say what to do: `not_found` (look, then pick another target), `ambiguous`
     (use a candidate's ref, or `index`), `not_actionable` (the first word says why: `disabled`,
     `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass
@@ -62,7 +70,8 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     phone, or to enter its passcode when the message says the phone is asking for it),
     `not_allowed` (the app isn't one you were given: go back with `open_app`), `not_answering` (the app in front stopped answering: `close_app` it, then `open_app` it),
     `reconnecting` (wait, then look), `timeout` (look at the screen before retrying,
-    because the action may have happened).
+    because the action may have happened), `expect_failed` (a `run` step's check didn't hold: look,
+    then report the bug or fix the step).
 
 ## Reporting
 
