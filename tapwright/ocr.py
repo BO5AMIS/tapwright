@@ -33,9 +33,13 @@ _engine = None  # RapidOCR, made once (it loads its models)
 reader: Callable[[bytes, tuple[float, float]], list[Seen]] | None = None  # tests put a fake here
 
 
+def installed() -> bool:
+    """Is the optional extra here (`pip install "tapwright[ocr]"`)?"""
+    return importlib.util.find_spec("rapidocr") is not None and importlib.util.find_spec("onnxruntime") is not None
+
+
 def available() -> bool:
-    return reader is not None or (importlib.util.find_spec("rapidocr") is not None
-                                  and importlib.util.find_spec("onnxruntime") is not None)
+    return reader is not None or installed()
 
 
 def read(image: bytes, screen: tuple[float, float]) -> list[Seen]:

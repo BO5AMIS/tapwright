@@ -66,3 +66,21 @@ def test_without_the_extra_ocr_says_how_to_install_it(monkeypatch):
         assert e.value.code == "unsupported" and 'pip install "tapwright[ocr]"' in str(e.value)
         await finish(stop, task)
     run(go)
+
+
+def test_the_status_bar_and_what_elements_say_already_are_left_out(monkeypatch):
+    seen = [ocr.Seen("12:31", (42.0, 19.0, 75.0, 19.0), 0.9),
+            ocr.Seen("Q Search destinations", (33.0, 157.0, 200.0, 21.0), 0.9),
+            ocr.Seen("Kyoto, Japan", (49.0, 406.0, 105.0, 20.0), 0.9)]
+    monkeypatch.setattr(ocr, "reader", lambda image, screen: list(seen))
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = [el("e1", "input", "Search destinations", "search", rect=(65, 143, 330, 51)),
+                          el("e2", "button", "Kyoto", "kyoto", rect=(20, 205, 390, 236))]
+        r = await d.run_tool("a", "look", {"screenshot": False, "ocr": True})
+        ocr_lines = [line for line in r["text"].splitlines() if line.startswith("o")]
+        assert ocr_lines == ['o1 "Kyoto, Japan" @49,406 105x20']
+        await finish(stop, task)
+    run(go)

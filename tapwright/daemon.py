@@ -218,6 +218,13 @@ def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | Non
     return {"text": text, "image": base64.b64encode(image).decode() if image else None, "image_size": _size(image)}
 
 
+def _said(text: str, known: list[str]) -> bool:
+    """Does an element already say this OCR reading (the same words, or one inside the other: OCR adds an icon
+    as a letter: "Q Search destinations")?"""
+    t = text.casefold().strip()
+    return any(t == k or (len(t) >= 3 and t in k) or (len(k) >= 3 and k in t and len(k) >= 0.6 * len(t)) for k in known)
+
+
 def settled_line(seconds: float) -> str:
     return f"Settled in {seconds:.2f} s."
 
@@ -1687,8 +1694,10 @@ class Daemon:
         else:
             picture = await self._read(self.session.screenshot_png)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
-        known = {e.text.casefold() for e in view.items if e.text}
-        new = [s for s in seen if s.text.casefold() not in known]  # what an element says already isn't repeated
+        known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
+        width, height = self.session.screen
+        top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
+        new = [s for s in seen if s.rect[1] >= top and not _said(s.text, known)]
         view.ocr = {f"o{n}": s.center for n, s in enumerate(new, 1)}
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
