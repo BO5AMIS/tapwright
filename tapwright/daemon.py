@@ -93,8 +93,14 @@ TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 WIDE_SWITCH, SWITCH_FROM_RIGHT = 3.0, 32.0
 NOTE_PERSON = "a person used the phone since your last look."
 # a notification banner took a touch near the top (Daemon._taken_away)
-NOTE_TAKEN = ("{other} came to the front after the touch: a notification banner over the top of the screen can take "
-              "a touch there. Went back to {app}; the touch may not have reached it. Look, then try again.")
+NOTE_TAKEN = ("{other} came to the front after the touch: the app opened it, or a notification banner over the top of "
+              "the screen took the touch. Went back to {app}. If the app was meant to open it, that worked; if not, "
+              "look, then try again.")
+NOTE_TAKEN_SYSTEM = ("{other} came to the front after the touch: a notification banner over the top of the screen, or "
+                     "a drag from its top edge, can take a touch there. Went back to {app}; the touch may not have "
+                     "reached it. Look, then try again.")
+SYSTEM_IN_FRONT = "the home screen, Notification Center or Control Center"
+RECHECK_WITHIN = 5.0  # seconds: a banner's theft shows within about one; later, the agent or a person moved on
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
@@ -383,7 +389,9 @@ class Daemon:
         self._attempts = 0  # connects that ended, either way
         self._scopes: dict[tuple[str, ...], dict[str, str]] = {}  # each app list seen, as {bundle id: shown}
         # {agent: the app its last touch near the top was meant for}, for a look: false answer that asked once
-        self._recheck: dict[str, tuple[str, str]] = {}
+        # {agent: (the app, when, the person generation then)}: see _recheck_later and _check_again
+        self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
+        self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
@@ -694,6 +702,7 @@ class Daemon:
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
+                await self._check_again(client_id, name)  # before personal mode's front check: see there
                 if scope is None:
                     return await self._run_tool(client_id, name, args)
                 return await self._within(scope, client_id, name, args)
@@ -804,13 +813,8 @@ class Daemon:
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
         await self.wait_connected()
-        if (meant := self._recheck.pop(client_id, None)) is not None and name not in ("apps", "open_app"):
-            taken = await self._taken_away(view, meant, top=True)
-            if taken and name in ACTIONS:  # its refs are for the app the touch was meant for, which is back now
-                view.moved = True
-                raise Refused("stale", f"after your last action: {taken} This call did nothing.")
-            if taken:
-                notes = [*notes, taken]
+        if (taken := self._taken_notes.pop(client_id, None)) is not None:
+            notes = [*notes, taken]
         if name == "apps":
             return await self._apps(notes)
         if name == "wait":
@@ -917,10 +921,7 @@ class Daemon:
         if not looks:
             view.unlooked += 0 if reads_only else 1
             taken = await self._taken_away(view, box.get("app"))
-            if not taken and self.session.top_touch and box.get("app"):
-                # asked once, at once: the other app may come to the front a moment later (seen on the phone
-                # 2026-11-11 with look: false), so the agent's next call asks again before it does anything
-                self._recheck[client_id] = box["app"]
+            self._recheck_later(client_id, box.get("app"), taken)
             return _answer([str(result)], [*notes, taken] if taken else notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
@@ -980,9 +981,39 @@ class Daemon:
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         taken = await self._taken_away(view, box.get("app"), read=self.session.app)
+        self._recheck_later(client_id, box.get("app"), taken)
         if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
             return await self._look(view, shot, [str(result)], [*notes, taken])
         return await self._add_shot(answer, view, shot)
+
+    def _recheck_later(self, client_id: str, before: tuple[str, str] | None, taken: str | None) -> None:
+        """After a touch near the top that nothing was seen taking: the other app may come to the front a moment
+        after the answer's check (seen on the phone 2026-11-11 with look: false), so the agent's next call asks
+        again, if it comes within RECHECK_WITHIN and no person acted in between (Tapline's review)."""
+        if taken is None and before is not None and self.session.top_touch:
+            self._recheck[client_id] = (before, time.monotonic(), self.control.person_generation)
+        else:
+            self._recheck.pop(client_id, None)
+
+    async def _check_again(self, client_id: str, name: str) -> None:
+        """At an agent's call: the check _recheck_later left for it. Done before personal mode's own check of the
+        app in front, so the agent hears that a banner took its touch rather than `not_allowed`. An action is
+        refused `stale` (its refs are for the app, back in front now); a look carries the note. `apps` reads
+        nothing of the screen and leaves the check for the next call; open_app makes it moot."""
+        if name == "apps" or (pending := self._recheck.pop(client_id, None)) is None or name == "open_app":
+            return
+        before, when, persons = pending
+        if time.monotonic() - when > RECHECK_WITHIN or self.control.person_generation != persons:
+            return
+        await self.wait_connected()
+        view = self.control.client(client_id)
+        taken = await self._taken_away(view, before, top=True)
+        if taken is None:
+            return
+        if name in ACTIONS:
+            view.moved = True
+            raise Refused("stale", f"after your last action: {taken} This call did nothing.")
+        self._taken_notes[client_id] = taken
 
     async def _taken_away(self, view, before: tuple[str, str] | None,
                           read: tuple[str, str] | None = None, top: bool | None = None) -> str | None:
@@ -1009,21 +1040,35 @@ class Daemon:
         front = await self._read(s.foreground_bundle_id)
         if not front or front == bundle:
             return None
-        if front == SPRINGBOARD:
-            try:
-                if bundle in await asyncio.wait_for(s.device.foreground_apps(), 5):
-                    return None  # a banner over the app, not the app gone
-            except Exception:
-                pass
-            if read is None:  # no read of its own: see whether an alert is up
+        if await self._still_under(bundle):
+            # the app still runs in front: something lies over it, not instead of it. Sign in with Apple, Apple Pay,
+            # a Safari view, the share sheet are other processes over the app (Tapline's review), and a banner
+            # slides over it. Only SpringBoard staying in front once a banner would have gone is a theft: a shade
+            # (Notification Center, Control Center) pulled down from the top edge
+            if front != SPRINGBOARD:
+                return None
+            if read is None:  # the answer had no read of its own: one now, which waits out a banner
+                await self._read(lambda: self._silent_read(view))
+            if view.alert_now is not None or await self._read(s.foreground_bundle_id) != SPRINGBOARD:
+                return None  # a permission prompt the touch raised is the app's own; or the banner has gone
+        elif front == SPRINGBOARD:
+            if read is None:
                 await self._read(lambda: self._silent_read(view))
             if view.alert_now is not None:
                 return None
         await self.control.agent(lambda: s.launch(bundle))
         self.log(f"the agent's touch near the top left {bundle} for {front}: opened {bundle} again")
+        if front == SPRINGBOARD:
+            return NOTE_TAKEN_SYSTEM.format(other=SYSTEM_IN_FRONT, app=f"{name} ({bundle})")
         known = read[0] if read is not None and read[1] == front else s.app_names.get(front)
-        other = "the home screen or a notification" if front == SPRINGBOARD else f"{known or front} ({front})"
-        return NOTE_TAKEN.format(other=other, app=f"{name} ({bundle})")
+        return NOTE_TAKEN.format(other=f"{known or front} ({front})", app=f"{name} ({bundle})")
+
+    async def _still_under(self, bundle: str) -> bool:
+        """Whether iOS's process list still has the app running in front (under whatever WebDriverAgent names)."""
+        try:
+            return bundle in await asyncio.wait_for(self.session.device.foreground_apps(), 5)
+        except Exception:
+            return False  # the phone can't say: count the app as gone, the safer side for an agent's next touch
 
     async def turned(self, seq: int, jpeg: bytes, degrees: int) -> bytes:
         """A stream frame turned upright for landscape, made once per frame for every viewer."""

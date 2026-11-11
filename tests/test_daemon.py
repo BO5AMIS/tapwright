@@ -202,6 +202,7 @@ def test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused(
     async def go():
         s = FakeSession()
         s.app_names = {"com.example.app": "Example"}
+        s.tree = [button("e1", "OK", "ok-button", rect=(10, 400, 100, 40))]  # below the banners (not what is tested)
         d = make(s)
         stop, task = await started(d)
         mine = Scope(("com.example.app",))
@@ -291,6 +292,7 @@ def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
 def test_an_answer_in_personal_mode_never_shows_another_apps_screen():
     async def go():
         s = FakeSession()
+        s.tree = [button("e1", "OK", "ok-button", rect=(10, 400, 100, 40))]  # below the banners (not what is tested)
         d = make(s)
         stop, task = await started(d)
         mine = Scope(("com.example.app",))
@@ -4142,6 +4144,136 @@ def test_an_app_that_comes_to_the_front_a_moment_after_a_look_false_touch_is_cau
         s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert f"Note: {TAKEN}" in r["text"] and s.launched == ["com.example.app", "com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def _top_screen(s, app_names=True):
+    if app_names:
+        s.app_names["com.apple.mobilemail"] = "Mail"
+    s.foreground, s.tree = "com.example.app", [button("e1", "Top", "top", rect=(10, 120, 100, 40))]
+
+
+def test_a_view_over_the_app_from_another_process_is_not_taken_for_a_theft():
+    """Tapline's review: Sign in with Apple, Apple Pay, a Safari view are other processes over the app; WebDriverAgent
+    names them in front while the app still runs in the foreground. Reopening the app would close them."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def still_running():
+            return ["com.example.app"]
+        s.device.foreground_apps = still_running
+        s.taken_by = ("Sign in with Apple", "com.apple.AuthKitUIService")
+        for look in (True, False):
+            r = await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": look})
+            assert s.launched == [] and "came to the front" not in r["text"]
+            s.foreground, s.taken_by = "com.example.app", ("Sign in with Apple", "com.apple.AuthKitUIService")
+            await d.run_tool("a", "look", {"screenshot": False})
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_shade_pulled_down_over_the_app_is_a_theft():
+    """Tapline's review: a drag from the top edge pulls Notification Center over the app: SpringBoard in front, the app
+    still running under it, and it stays (a banner would leave). The app is opened again."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def still_running():
+            return ["com.example.app"]
+        s.device.foreground_apps = still_running
+        s.taken_by = ("Home screen", "com.apple.springboard")
+        r = await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": True})
+        assert s.launched == ["com.example.app"]
+        assert "Note: the home screen, Notification Center or Control Center came to the front" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_next_call_check_is_skipped_after_a_person_acted_or_after_a_while(monkeypatch):
+    """Tapline's review: a person may open another app on purpose between the agent's calls, and a theft shows within
+    about a second; neither is reopened over."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        d.control.person_generation = d.control.generation + 1  # a person acted since
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert s.launched == [] and "came to the front" not in r["text"]
+        s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
+        await d.run_tool("a", "look", {"screenshot": False})
+        monkeypatch.setattr(daemon_module, "RECHECK_WITHIN", 0.0)
+        await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
+        await asyncio.sleep(0.01)
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert s.launched == [] and "came to the front" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_answer_with_a_read_also_leaves_the_check_for_the_next_call():
+    """Tapline's review: the answer's own read can come before the other app reaches the front, look true too."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": True})
+        assert "came to the front" not in r["text"]
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")  # a moment later
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        assert e.value.code == "stale" and TAKEN in str(e.value) and s.launched == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_in_personal_mode_the_agent_hears_of_the_banner_not_not_allowed():
+    """Tapline's review: personal mode's own check of the app in front came first and answered not_allowed; the check
+    for a theft now runs before it, and reopening the given app is inside the scope."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        mine = Scope(("com.example.app",))
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False}, scope=mine)
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False}, scope=mine)
+        assert e.value.code == "stale" and TAKEN in str(e.value) and s.launched == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_apps_leaves_the_next_call_check_for_the_call_after():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        _top_screen(s)
+        s.installed.append({"bundle_id": "com.apple.mobilemail", "name": "Mail", "version": "1", "build": "1"})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
+        await d.run_tool("a", "apps", {})
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert f"Note: {TAKEN}" in r["text"] and s.launched == ["com.example.app"]
         await finish(stop, task)
     run(go)
 
