@@ -1,5 +1,6 @@
 """The daemon's phone side with a fake session: connecting, tools, control rules, viewer input."""
 import asyncio
+import dataclasses
 import base64
 import io
 import re
@@ -3927,6 +3928,41 @@ def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
         await looked(d, [covered_card((390.0, 100.0, 20.0, 20.0))])
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert d.session.last_point == (215.0, 130.0) and "visible part" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_button_the_keyboard_hides_is_reached_by_closing_the_keyboard_first():
+    """2026-11-11, a first-time agent on Wayfare: with the keyboard up, "Create account" lay past the form's scroll
+    edge (the scroll view ends at the keyboard), a short form can't scroll it up, and the tap was refused off_screen.
+    A person closes the keyboard first."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.screen = (430.0, 932.0)
+        field = el("e1", "input", "Email", "signup-email", rect=(25, 450, 380, 50))
+        s.last_keyboard = True
+        await looked(d, [field])
+        submit = button("", "Create account", "signup-submit", rect=(20, 700, 390, 56))
+        s.offscreen = [submit]
+        read = s.refresh
+
+        async def reread(timeout=None):
+            if not s.last_keyboard:  # the keyboard closed: the button shows again
+                s.tree, s.offscreen = [field, dataclasses.replace(submit, ref="e2")], []
+            return await read(timeout)
+        s.refresh = reread
+        r = await d.run_tool("a", "tap", {"target": {"id": "signup-submit"}})
+        assert s.tap_points[-1] == (215.0, 728.0)
+        assert r["text"].startswith('Tapped e') and "closed the keyboard first." in r["text"]
+        # a target truly past the screen's edge is still off_screen
+        s.last_keyboard = True
+        await looked(d, [field])
+        s.offscreen = [button("", "Far", "far", rect=(20, 1600, 390, 56))]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "far"}})
+        assert str(e.value).startswith("off_screen:")
         await finish(stop, task)
     run(go)
 

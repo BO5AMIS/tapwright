@@ -986,8 +986,16 @@ class Daemon:
                     self._refuse_behind_alert(view, force=False)
                 self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 if not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
-                    self._refuse_off_screen(target)
-            box["note"] = await self._close_keyboard(view, name, target)  # a person would close it before the touch
+                    if name in KEYBOARD_TOOLS and view.read_keyboard and self._under_keyboard(target):
+                        # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
+                        # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
+                        closed = await self._dismiss_keyboard_now(view)
+                        if not self._missing(s.items, target):
+                            box["closed"] = closed
+                    if "closed" not in box:
+                        self._refuse_off_screen(target)
+            # a person would close the keyboard before the touch
+            box["note"] = box.pop("closed", "") or await self._close_keyboard(view, name, target)
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
@@ -1629,12 +1637,30 @@ class Daemon:
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
+        return await self._dismiss_keyboard_now(view)
+
+    async def _dismiss_keyboard_now(self, view) -> str:
+        """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
+        dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else ""."""
+        s = self.session
+        top, bottom = s.last_insets
+        top = SCROLL_TOP_INSET if top is None else top
+        bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
         if (blank := ui.blank_point(view.items, s.screen, top, bottom)) is not None:
             await s.tap(ui.Target(x=blank[0], y=blank[1]))
             await self._silent_read(view)
         if view.read_keyboard and await s.dismiss_keyboard():
             await self._silent_read(view)
         return "" if view.read_keyboard else NOTE_KEYBOARD
+
+    def _under_keyboard(self, target: ui.Target) -> bool:
+        """Is the target an element the last read found past its scroll view's edge but still on the phone's
+        screen: hidden by the keyboard rather than scrolled away?"""
+        try:
+            hit = ui.resolve(getattr(self.session, "offscreen", []), dataclasses.replace(target, index=0))
+        except Refused:
+            return False
+        return isinstance(hit, ui.Element) and 0 <= hit.y < self.session.screen[1] and hit.y + hit.height > 0
 
     @staticmethod
     def _refuse_behind_alert(view, force: bool = True) -> None:
