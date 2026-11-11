@@ -157,3 +157,17 @@ def test_a_bad_script_is_refused(tmp_path):
     with pytest.raises(Refused) as e:
         batch.load_script(str(path))
     assert e.value.code == "bad_params" and "isn't an agent-tools script" in str(e.value)
+
+
+def test_a_dry_run_batch_resolves_step_one_and_touches_nothing():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = list(FORM)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "run", {"dry_run": True, "steps": [{"tool": "tap", "target": {"id": "save"}},
+                                                                     {"tool": "tap", "target": {"id": "nope"}}]})
+        assert r["text"].startswith('Would run 2 steps; step 1 would tap e2 button "Save"'), r["text"]
+        assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)

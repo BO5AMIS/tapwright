@@ -901,13 +901,15 @@ class Daemon:
 
     async def _batch_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         """`run`, `record` and `replay`."""
-        for key in ("trace", "look", "screenshot", "start", "stop"):
+        for key in ("trace", "look", "screenshot", "start", "stop", "dry_run"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
         if name == "record":
             return self._record(client_id, args)
         if name == "run":
             steps = batch.check_steps(args.get("steps"))
+            if args.get("dry_run"):
+                return await self._dry_batch(client_id, steps, scope)
             return await self._batch(client_id, steps, scope, args)
         if not isinstance(args.get("path"), str) or not args["path"]:
             raise Refused("bad_params", "replay needs the path of a script file")
@@ -920,6 +922,18 @@ class Daemon:
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
         return await self._batch(client_id, data["steps"], scope, args, notes)
+
+    async def _dry_batch(self, client_id: str, steps: list[dict], scope: "Scope | None") -> dict:
+        """`run` with dry_run (§11.4): every step's parameters are checked already; step 1 is resolved and checked like a
+        dry run of its own, and nothing touches the phone. Later steps depend on what step 1 does, so they aren't."""
+        first, n = steps[0], len(steps)
+        if first["tool"] in DRY_TOOLS:
+            answer = await self.run_tool(client_id, first["tool"], {**batch.args_of(first), "dry_run": True}, scope)
+            would = answer["text"].splitlines()[0]
+            what = "w" + would[1:] if would.startswith("Would ") else would
+        else:
+            what = f"would {batch.summary(first)}."
+        return _answer([f"Would run {n} step{'s' if n != 1 else ''}; step 1 {what}"])
 
     def _record(self, client_id: str, args: dict) -> dict:
         if args.get("start") and args.get("stop"):

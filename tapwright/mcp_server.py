@@ -231,9 +231,9 @@ async def wait_for(text: str | None = None, id: str | None = None, label: str | 
 
 
 @server.tool(name="run", description=describe("run"), structured_output=False)
-async def run_steps(steps: list[dict[str, object]], trace: bool = False, look: bool = True,
-              screenshot: bool = False) -> CallToolResult:
-    return await _tool("run", steps=steps, trace=trace, look=look, screenshot=screenshot)
+async def run_steps(steps: list[dict[str, object]], trace: bool = False, dry_run: bool = False, look: bool = True,
+                    screenshot: bool = False) -> CallToolResult:
+    return await _tool("run", steps=steps, trace=trace, dry_run=dry_run, look=look, screenshot=screenshot)
 
 
 @server.tool(description=describe("record"), structured_output=False)
