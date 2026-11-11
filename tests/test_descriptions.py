@@ -13,7 +13,7 @@ CODES = ["not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", 
 REASONS = ["disabled", "off_screen", "covered", "under_tab_bar", "behind_alert", "no_action"]
 TOOLS = ["audit", "run", "record", "replay", "look", "tap", "long_press", "type_text", "scroll", "toggle", "back", "open_url", "wait", "wait_for",
          "apps", "open_app", "viewer", "close_app", "alert", "press_button", "swipe", "rotate"]
-ONLY_HERE = {"audit", "run", "record", "replay", "close_app", "alert", "press_button", "swipe", "rotate"}
+ONLY_HERE = {"close_app", "alert", "press_button", "rotate"}
 OLD = ["list_apps", "launch_app", "terminate_app"]
 
 
@@ -48,9 +48,9 @@ def test_shared_texts_are_pinned_word_for_word():
     assert SHARED["viewer"].endswith("Their touches go first, and they can pause you. Give the link to the user only.")
     assert SHARED["back"].endswith("`not_actionable: no_action` when there is nothing to go back to.")
     assert EXTRA["tap"] == ("makes a real touch at the element's centre, or at the centre of its visible part "
-                            "when a bar covers the centre. `dry_run: true` says what it would tap and whether a "
-                            "person's OK is needed, touching nothing.")
-    assert EXTRA["swipe"].startswith("Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35).")
+                            "when a bar covers the centre.")
+    assert "`dry_run: true` on a touch or on `run` says what would happen without doing it." in INSTRUCTIONS
+    assert SHARED["swipe"].startswith("Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35).")
 
 
 def test_every_tool_carries_its_description():
