@@ -149,6 +149,21 @@ saves the pictures as files instead of sending them. Errors are `Error <code>: <
 `behind_alert`, `no_action`). The tools and their errors are the same as Tapline's:
 [docs/AGENT-TOOLS.md](https://github.com/bo5amis/tapwright/blob/main/docs/AGENT-TOOLS.md).
 
+**From an agent's session to a test you keep.** An agent that knows a flow runs it as one `run`, each
+step with the check that proves it worked:
+
+```json
+{"steps": [
+  {"tool": "type_text", "target": {"id": "email"}, "text": "test@example.com"},
+  {"tool": "tap", "target": {"id": "signup"}, "expect": {"id": "explore-greeting"}}
+]}
+```
+
+With `record`, what it does is saved in that same format. `tapwright replay sign-up.json --junit
+out.xml` runs the file again on the phone with no agent: it reopens the app, stops at the first step
+that fails and says which, and exits 0, 1 (a step failed) or 2 (it couldn't start). Tapline runs the
+same files inside your app.
+
 ## Live view
 
 `tapwright serve` is a small background process that owns the connection to the phone.
@@ -200,6 +215,13 @@ doesn't skip it, and `alert` answers are never checked. `tapwright mcp --policy 
 words as JSON: `confirm` and `block` lists, and per app lists that replace them for that app (a block
 is final: `not_allowed: blocked`); `--no-policy` turns the check off, for a test phone with test data.
 `dry_run: true` on a touch tool says what it would do, policy included, and touches nothing.
+
+A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
+the agent's last look: a sheet or a banner that came in meanwhile would take the touch.
+
+Every action, the agent's and yours, is one line in `~/.tapwright/log/actions-<date>.jsonl` (the tool,
+its target, the element, the result, how long it took). Typed text is never written, only its length;
+files older than two weeks are deleted. `tapwright serve --no-log` turns it off.
 
 ## Limits
 
