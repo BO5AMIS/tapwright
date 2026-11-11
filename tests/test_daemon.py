@@ -3946,6 +3946,24 @@ def test_a_target_behind_an_open_sheet_is_covered_naming_the_sheet():
 KEYBOARD = ui.Bar("Keyboard", (0.0, 614.0, 430.0, 318.0), "keyboard @0,614 430x318")
 
 
+def test_toggle_touches_the_control_of_a_switch_that_is_a_whole_row():
+    """iOS Settings' "Allow Notifications" is one switch element 350x29 from x 40, label and control together;
+    toggle touched its middle, the label, and nothing changed (2026-11-11). It touches the control at the right."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "switch", "Allow Notifications", rect=(40, 145, 350, 29), checked=True),
+                         el("e2", "switch", "Notify", rect=(351, 612, 63, 28), checked=False)])
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}, "look": False})
+        assert d.session.last_point == (358.0, 159.5)
+        assert r["text"].startswith('Tapped e1 switch "Allow Notifications" @40,145 350x29.')
+        await d.run_tool("a", "toggle", {"target": {"ref": "e2"}, "look": False})
+        assert d.session.calls[-1] == "tap" and d.session.last_point in (None, (382.5, 626.0))  # a switch-sized one: as before
+        await finish(stop, task)
+    run(go)
+
+
 def test_toggle_refuses_a_switch_under_the_keyboard_and_touches_one_where_it_shows():
     """toggle touched a switch's centre with the keyboard over it, so the keyboard got the touch and the shared
     runner's toggles did nothing (2026-11-09). It now checks covers as tap does."""

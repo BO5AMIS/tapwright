@@ -87,6 +87,9 @@ PACE_TICK = 0.25  # how often the pace is checked
 LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
 BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
 TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
+# A switch element this many times wider than tall is a whole row (label and control): toggle touches the control,
+# SWITCH_FROM_RIGHT points in from its right end (half an iOS switch, 63 pt wide), not the label in the middle
+WIDE_SWITCH, SWITCH_FROM_RIGHT = 3.0, 32.0
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -1534,18 +1537,23 @@ class Daemon:
         if found.role != "switch" or found.checked is None:
             raise Refused("not_actionable", f"no_action: {line} is not a switch")
         self._refuse_disabled(found)
-        forced, point = "", None
+        forced, point, shown = "", None, None
         if a.get("force"):
             forced = self._forced(view, found)
         else:
             self._guard(view, found)
-            point = self._touch_point(found)
+            point = shown = self._touch_point(found)
+            if found.width > WIDE_SWITCH * found.height:
+                # the switch is the whole row (iOS Settings: "Allow Notifications" 350x29 at x 40); its control is
+                # at the right end, and a tap on the label toggles nothing (seen on the phone 2026-11-11)
+                y = found.center[1] if point is None else point[1]
+                point = (found.x + found.width - SWITCH_FROM_RIGHT, y)
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
-        where = "" if point is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
+        where = "" if shown is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
         done = Toggled(f"Tapped {dataclasses.replace(found, checked=None, value='').line(actions=False)}{where}.")
         done.ref, done.before, done.want, done.flipped = found.ref, found, want, not found.checked
         done.note = forced
