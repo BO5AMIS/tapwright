@@ -21,6 +21,7 @@ address such as the phone's Tailscale IP (experimental).
 """
 import argparse
 import asyncio
+import logging
 import socket
 import sys
 import time
@@ -297,6 +298,10 @@ def skill(a) -> int:
 
 
 def main() -> int:
+    # pymobiledevice3's test-runner channel logs every message it drops while the runner shuts down as a warning
+    # ("received connection termination: <DTXMessage …>", "No channel registered …"): expected, and only noise on a
+    # new user's console (seen in a clean install's `tapwright smoke`). Its errors still show.
+    logging.getLogger("pymobiledevice3.dtx").setLevel(logging.ERROR)
     ap = argparse.ArgumentParser(prog="tapwright", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
