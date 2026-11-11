@@ -5,7 +5,9 @@ Shared by Tapline and Tapwright. Version 1 was agreed by both projects and appro
 gives V6 (a) two readings, adds a target for a scroll made by a real touch, measures the video transport,
 and replaces the gap list with what the shared benchmark measured. The user handed these decisions to the
 two projects on 2026-11-10, and both agree on it. Version 2.1 (2026-11-10) adds group A: how an agent
-that has never seen the tool gets on with it. Each repo keeps an identical copy.
+that has never seen the tool gets on with it. Version 2.2 (2026-11-11, the owner's decision) narrows the
+launch links to USB and Wi-Fi on the same network, for a test phone that stays next to the computer;
+5G and Tailscale move to "Later". Each repo keeps an identical copy.
 
 The two tools should feel like one product made by one team. They differ only in setup: how an
 agent is wired to them, how the user gives access (an app pairs with Tapline; a whole phone
@@ -18,10 +20,11 @@ the end with a plan. There are no per-tool targets.
 
 ## Links
 
-- **Launch links:** USB, Wi-Fi on the same network, and 5G or another fast connection through Tailscale.
-  Every target below holds on each link a tool offers. Tapline uses the network (Wi-Fi, or Tailscale over
-  Wi-Fi or 5G); Tapwright uses USB, Wi-Fi, or Tailscale.
-- **Weak links (3G and the like)** are not a launch target. Their former targets are kept under "Later".
+- **Launch links (v1):** USB, and Wi-Fi on the same network as the computer. v1 is for testing on a test
+  phone that stays next to the computer while the agent runs it. Every target below holds on each link a
+  tool offers: Tapline uses the network (Wi-Fi); Tapwright uses USB or Wi-Fi.
+- **Later:** 5G or another network reached through Tailscale (a phone away from the computer), and weak
+  links (3G and the like). Not launch targets; 3G's former targets are kept under "Later".
 
 ## How it's measured
 
@@ -155,12 +158,12 @@ version 1 is no longer listed.
 | Tapline | S4 reconnect | met, measured by hand on the phone (2026-11-11): the Tapwright side sent the app to the background and opened it again five times while a look ran every 100 ms. The first working look came 0.49 to 0.63 s after the app was back in front (open_app answered), 1.93 to 2.14 s after it was asked to open; every look in between answered that the app was in the background. The runner still doesn't measure it on its own | measure S4 in the runner when both tools are connected (the Tapwright side backgrounds the app) |
 | Both | C2 one page | done in code: `viewer.html` is one file, byte-identical in both repos (VIEWER-PROTOCOL v1.3). Checked in headless Chrome and Edge against both real servers, video included. Not judged: how typing, the wheel and dragging feel to a person | a person tries it |
 | Both | V8 browsers | Tapline's server measured in headless Chrome: first frame 35 ms, status under 1 ms, click mark 0.2 ms after release, no console errors (the browser ran on the host's own computer, so the first frame has no network in it). Tapwright's checked in headless Edge with video. Firefox and Safari not tried | try both; measure the first frame from another computer |
-| Both | Wi-Fi and 5G | Tapline's suites ran over the local network; Tapwright's over USB, and its speed and viewer suites over Wi-Fi (the row above). No run over 5G yet: it needs Wi-Fi switched off on the phone | run all three suites on each launch link before launch |
 
-## Later: weak links
+## Later: other networks and weak links
 
-Not a launch target. When weak links come back, these were version 1's 3G targets (the iPhone's Network
-Link Conditioner "3G" profile: about 780 kbit/s to the phone, 330 kbit/s from it, 100 ms delay): every
+Not launch targets. A phone away from the computer, reached through Tailscale over 5G or another network:
+measured when it comes back, against the same targets as Wi-Fi. Weak links: these were version 1's 3G
+targets (the iPhone's Network Link Conditioner "3G" profile: about 780 kbit/s to the phone, 330 kbit/s from it, 100 ms delay): every
 action completes and nothing times out; S1 median ≤ 1.5 s, S2 ≤ 1.5 s, S3 ≤ 2.5 s, S4 ≤ 6 s, S5 ≤ 8 s;
 V1 median ≤ 1.0 s, V2 ≥ 2 fps, V3 ≤ 2 s, V7 ≤ 33 KB/s of frames. A JPEG stream can't meet V2 there
 (the smallest frame measured was 58 KB); it needs a video encoder on the phone.
