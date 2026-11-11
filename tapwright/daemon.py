@@ -17,6 +17,7 @@ from typing import NamedTuple
 from PIL import Image, UnidentifiedImageError
 
 from . import changes, ui
+from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
 from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
@@ -822,6 +823,8 @@ class Daemon:
         if self.state == "locked":
             raise Refused("locked", "the phone is locked; ask the user to unlock it")
         call, settle = ACTIONS[name]
+        if session_module.TRACE:
+            self.log(f"trace {name} begins")
         by_ref = target is not None and target.kind == "ref"
         # these tools at a point act on the element under it, so they need a current list too
         by_lookup = target is not None and (target.kind in ("id", "label", "text")
@@ -932,6 +935,8 @@ class Daemon:
         else:
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
                                       early=mark[0] if settle == CAP else None)
+        if session_module.TRACE:
+            self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:

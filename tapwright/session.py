@@ -3,6 +3,7 @@ holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
 import io
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ SCROLL_MS = 1200  # ms a scroll drag counts for there (an eased drag that ends s
 ACTION_WAIT = 10.0  # seconds a touch may take to be answered beyond its own length (a tap answers in about 0.5 s)
 BANNER_ID = "NotificationShortLookView"  # the identifier of a notification banner in SpringBoard's tree
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
+# TAPWRIGHT_TRACE=1: every request to WebDriverAgent is logged with how long it took (for profiling, e.g. over Wi-Fi)
+TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
@@ -149,7 +152,14 @@ class Session:
         full = path.replace("{sid}", self.sid)
         try:
             try:
-                return await self.device.http(method, full, payload, timeout)
+                if not TRACE:
+                    return await self.device.http(method, full, payload, timeout)
+                began = time.monotonic()
+                try:
+                    return await self.device.http(method, full, payload, timeout)
+                finally:
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"trace {method} {path.split('?')[0]} {(time.monotonic() - began) * 1000:.0f} ms")
             except ConnectionLost as e:
                 # A question that got no answer is asked once more before the line counts as dead. Every request
                 # has its own connection, and over Wi-Fi one of them can stall while the phone, WebDriverAgent
