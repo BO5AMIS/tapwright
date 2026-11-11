@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, and the rule for secure fields. Both projects agree on it under the plan the owner approved on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -86,9 +86,9 @@ Every answer is one text item, plus an image only when asked. A call that fails 
 ### 3.1 After an action
 
 ```
-Tapped e3 button "Log in" id=login-button @24,610 354x48.
+Tapped e3 button "Log in" id=login-button.
 Same screen. Changes:
-+ e13 button "Done" @24,700 354x48 [tap]
++ e13 button "Done" @24,700 354x48
 - text "Loading"
 ~ e5 text "3 items" (was "2 items")
 ↕ 7 elements moved
@@ -96,7 +96,7 @@ Settled in 0.31 s.
 ```
 
 - **The first line** is the verb in the past tense, then the element's line **without its
-  `[actions]`**, then a full stop: `Tapped e3 button "Log in" id=login-button @24,610 354x48.`
+  position, size or `[actions]`** (§13), then a full stop: `Tapped e3 button "Log in" id=login-button.`
 - **Then the changes.** The block always starts with `Same screen. Changes:`.
 - **Header lines that changed come first:** `Alert: "<title>" [Button] …` when an OS or app
   alert appears or changes, `Alert: gone` when it closes, `Keyboard: shown` or
@@ -307,7 +307,7 @@ text items.
   Error ambiguous: 2 elements match text "Nutrition".
   Candidates:
     e32 text "Nutrition" @76,730 263x23
-    e46 tab "Nutrition" [tap]
+    e46 tab "Nutrition"
   Retry with one of the refs, or add "index" (0-based).
   ```
   Up to 5 candidates are listed, each indented two spaces. If there are more, one further
@@ -439,7 +439,7 @@ text items.
 | `open_app` | `app` (id or name) | Shared description: "Drive this app from now on." Tapline selects that connected app (today's `select_app`). Tapline can't launch apps, so when the app isn't connected it answers `not_connected` with how to connect it, and the description says so. Tapwright launches the app or brings it to the front (today's `launch_app`). An exact id wins (Tapline: a session id; Tapwright: a bundle id). Otherwise names match ignoring case. Several matches give `Error ambiguous: N connected apps match "X". Pick one by its session id:` (Tapwright: `installed apps` and `bundle id`), followed by their `apps` lines |
 | `viewer` | none | the live view's link. **Change Tapwright:** new; today only `tapwright view` gives it |
 | `run` | `steps` (1–50, required), `trace`, `dry_run`, `look`, `screenshot` | §9 |
-| `audit` | `types`, `look` | §10 |
+| `audit` | `types` | §10 |
 
 ### 5.2 Extras: only where a tool can do them, same conventions
 
@@ -521,7 +521,8 @@ A step is one tool call written as an object: `{"tool": "<name>", ...its paramet
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
 `wait_for`, and where the tool has them `alert`, `press_button`, `rotate`, `open_app`, `close_app`,
 `app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`. A step's own `look` and
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, and where the tool has them
+`inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
 Targets are resolved when the step runs, against the screen as it is then. Refs (`{ref}`) are allowed in
@@ -546,7 +547,7 @@ executor is the tool's choice (a host loop, a runner on the phone, inside the ap
 ```
 Ran 5 of 5 steps in 3.4 s.
 Same screen. Changes:
-~ text "Trips: 0" id=trip-count @16,120 398x22 (was "Trips: 1")
+~ text "Trips: 0" id=trip-count (was "Trips: 1")
 ```
 - Line 1: `Ran <n> of <n> steps in <s> s.`
 - Then the change block for the whole batch: everything since the list the agent had before the call, with
@@ -569,7 +570,7 @@ Error not_actionable: Ran 1 of 4 steps; stopped at step 2 (tap "Delete"): covere
 - After the first line: the change block since the batch began, then notes. Steps after it don't run.
 
 **`trace: true`** adds one line per step that ran, after line 1: two spaces, the step's number, its own first
-answer line and its time: `  1. Tapped e3 button "Save" id=save @24,610 354x48. (0.2 s)`.
+answer line and its time: `  1. Tapped e3 button "Save" id=save. (0.2 s)`.
 
 **Limits:** at most 50 steps (`bad_params` above that); the batch as a whole times out at 120 s (`timeout`,
 with `Ran <k> of <n>` in the message). A person taking over between steps stops the batch the usual way
