@@ -121,6 +121,23 @@ def _size(jpeg: bytes | None) -> list[int] | None:
         return None
 
 
+MARK_NAME_MAX = 24  # characters of an element's name in the live view's mark
+
+
+def mark_label(tool: str, result: str) -> str:
+    """The short label the live view draws beside an agent's action: the tool and the element's name
+    (`tap "Equals"`). The whole answer line ("Tapped e25 button "Equals" @320,780 95x90.") covered the keys
+    around the touch and ran off the picture's edge (seen while recording the demo, 2026-11-11)."""
+    verb = tool.replace("_", " ")
+    name = re.search(r'"([^"]+)"', result)
+    if name is None:
+        return verb
+    text = name.group(1)
+    if len(text) > MARK_NAME_MAX:
+        text = text[:MARK_NAME_MAX - 1] + "…"
+    return f'{verb} "{text}"'
+
+
 def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | None = None) -> dict:
     """One tool answer (docs/AGENT-TOOLS.md §3): the lines as one text, a `Note: ` line per note,
     and the picture, if any, with its size."""
@@ -917,7 +934,7 @@ class Daemon:
         view.moved = view.moved or not looks
         if not reads_only:
             self.unsettled = not looks
-        self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
+        self._announce("agent", name, label=mark_label(name, str(result)), point=self._point(self.session.last_point))
         if not looks:
             view.unlooked += 0 if reads_only else 1
             taken = await self._taken_away(view, box.get("app"))

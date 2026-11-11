@@ -4897,3 +4897,13 @@ def test_scroll_to_a_target_nearly_as_tall_as_the_view_does_not_go_back_and_fort
         assert "Note:" not in r["text"] and r["text"].startswith("Scrolled ") and " to e" in r["text"].splitlines()[0]
         await finish(stop, task)
     run(go)
+
+
+def test_the_live_views_mark_names_the_tool_and_the_element_briefly():
+    """The whole answer line drawn beside a touch covered the keys around it (recording the demo, 2026-11-11)."""
+    label = daemon_module.mark_label
+    assert label("tap", 'Tapped e25 button "Equals" @320,780 95x90.') == 'tap "Equals"'
+    assert label("type_text", 'Typed into e3 input "Email" id=email.') == 'type text "Email"'
+    assert label("open_app", "Opened Calculator (com.apple.calculator).") == "open app"
+    long = label("tap", 'Tapped e4 cell "A row whose name runs on and on" @0,0 1x1.')
+    assert long == 'tap "A row whose name runs o…"' and len(long) <= len('tap ""') + daemon_module.MARK_NAME_MAX
