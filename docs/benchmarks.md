@@ -42,8 +42,22 @@ request goes out, and the whole answer (with the change block) comes back.
   moving under the next tap, plus WebDriverAgent's fixed cost per gesture and the read. iOS flings
   a drag whose last stretch is faster than about 330 pt/s. A drag slow enough not to fling can't
   finish in 0.7 s through WebDriverAgent.
-- **Over Wi-Fi** each request to the phone costs more, and an action is a touch plus a read, so a
-  tap takes about 1 s. That is the main gap left.
+- **Over Wi-Fi** a tap takes 0.8 to 1.0 s, depending on the network that minute (runs minutes apart
+  gave 0.81 and 1.24 s). That is the main gap left, and most of it is not the link. Where it goes
+  (traced 2026-11-11, `TAPWRIGHT_TRACE=1`, each comparison interleaved in one run):
+  - **The touch, 0.47 to 0.52 s.** XCTest playing the touch on the phone takes the same time over
+    USB and over Wi-Fi. It is 70 to 100 ms faster right after a tree read (Tapwright reads first, to
+    find the target). WebDriverAgent's own `/wda/tap` is slower (0.83 s). The gap since the last
+    request, the hold length and the live stream's quality change nothing measurable.
+  - **The read for the answer, about 0.2 s.** It is mostly the phone building the tree (0.18 s over
+    USB); Wi-Fi adds one round trip.
+  - **Round trips, 20 to 60 ms each.** The phone's Wi-Fi radio dozes between packets. While the
+    live stream runs (it does through a burst of agent calls) a round trip is 42 ms against 58, and a
+    read 218 ms against 281. Keeping one connection open saves 10 to 15 ms a request over Wi-Fi, so
+    it stays on over USB only.
+
+  So a tap over Wi-Fi can't go much under 0.75 s through WebDriverAgent: the touch and the read alone
+  are 0.7 s.
 - **Personal mode** (only the apps you name) asks the phone which app is in front before every
   touch: a tap measured 0.78 s against 0.69 s on a dedicated device (2026-11-10). A look pays nothing.
 
