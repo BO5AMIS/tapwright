@@ -13,15 +13,17 @@
 <style>
 :root {
   color-scheme: light dark;
-  --bg: #f4f5f7;
-  --panel: #ffffff;
-  --line: #d0d5dd;
-  --text: #16191f;
+  --bg: #e9ecf1;
+  --stage-hi: #ffffff;
+  --stage-lo: #d9dee6;
+  --panel: rgba(255, 255, 255, 0.72);
+  --line: rgba(17, 24, 39, 0.12);
+  --text: #111827;
   --muted: #4b5563;
-  --accent: #0b63c5;
-  --btn: #f1f3f6;
-  --btn-line-hover: #98a2b3;
-  --pressed: #dbeafe;
+  --accent: #0a66d1;
+  --btn: rgba(255, 255, 255, 0.9);
+  --btn-line-hover: rgba(17, 24, 39, 0.32);
+  --pressed: #dcebff;
   --dot-idle: #6b7480;
   --dot-live: #1f883d;
   --dot-wait: #9a6700;
@@ -29,7 +31,12 @@
   --notice-bg: #fdecec;
   --notice-line: #c62828;
   --notice-text: #7a1212;
-  --frame-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  /* The phone's body: a brushed-metal edge around a black bezel. It is drawn, never a photo. */
+  --metal-1: #c9ccd1;
+  --metal-2: #8d9197;
+  --metal-3: #eceef1;
+  --bezel: #050506;
+  --frame-shadow: 0 30px 60px -20px rgba(15, 23, 42, 0.45), 0 18px 36px -18px rgba(15, 23, 42, 0.35);
   /* Marks and overlay labels sit on the phone's picture, which doesn't follow the theme, so
      they keep one set of colours: dark text on a light fill, readable on any picture. */
   --agent: #4cc2ff;
@@ -41,22 +48,27 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1116;
-    --panel: #161b22;
-    --line: #2a313c;
-    --text: #e6e9ef;
+    --bg: #0b0d11;
+    --stage-hi: #2d3440;
+    --stage-lo: #0b0d11;
+    --panel: rgba(22, 26, 33, 0.78);
+    --line: rgba(255, 255, 255, 0.1);
+    --text: #e8ebf0;
     --muted: #9aa4b2;
     --accent: #7cc4ff;
-    --btn: #1f2630;
-    --btn-line-hover: #3b4554;
-    --pressed: #1d3550;
+    --btn: rgba(255, 255, 255, 0.06);
+    --btn-line-hover: rgba(255, 255, 255, 0.32);
+    --pressed: rgba(124, 196, 255, 0.18);
     --dot-live: #3fb950;
     --dot-wait: #d29922;
     --dot-bad: #ff6b6b;
     --notice-bg: #3a1c1c;
     --notice-line: #ff6b6b;
     --notice-text: #ffd7d7;
-    --frame-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    --metal-1: #80858d;
+    --metal-2: #3d4148;
+    --metal-3: #c2c7ce;
+    --frame-shadow: 0 40px 80px -24px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 60px 0 rgba(124, 196, 255, 0.06);
   }
 }
 * { box-sizing: border-box; }
@@ -67,9 +79,10 @@ body {
   height: 100dvh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  background: var(--bg);
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--bg) radial-gradient(120% 90% at 50% 38%, var(--stage-hi) 0%, var(--stage-lo) 70%) no-repeat;
   color: var(--text);
-  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 14px/1.4 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", sans-serif;
   overflow: hidden;
 }
 #bar {
@@ -77,19 +90,23 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 12px;
-  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  margin: max(10px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+  padding: 6px 6px 6px 16px;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 #heading {
   flex: none;
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   line-height: 1.4;
 }
 #statusline {
-  flex: 1 1 220px;
+  flex: 1 1 200px;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -98,20 +115,22 @@ body {
 }
 #dot {
   flex: none;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--dot-idle);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot-idle) 22%, transparent);
 }
-#dot.live { background: var(--dot-live); }
-#dot.wait { background: var(--dot-wait); }
-#dot.bad { background: var(--dot-bad); }
+#dot.live { background: var(--dot-live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot-live) 22%, transparent); }
+#dot.wait { background: var(--dot-wait); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot-wait) 22%, transparent); }
+#dot.bad { background: var(--dot-bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot-bad) 22%, transparent); }
 #status {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 #announce {
   position: absolute;
@@ -121,24 +140,43 @@ body {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
-#tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 button, select {
   min-height: 36px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 999px;
   background: var(--btn);
   color: var(--text);
   font: inherit;
+  font-weight: 550;
   cursor: pointer;
 }
+select { padding-right: 8px; }
 button:hover, select:hover { border-color: var(--btn-line-hover); }
-button[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); }
+button[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); padding-left: 6px; }
 @media (pointer: coarse) {
   button, select { min-height: 44px; }
   #statusline { height: 44px; }
+}
+@media (max-width: 560px) {
+  #bar { border-radius: 18px; padding: 8px 8px 8px 14px; gap: 4px 10px; }
+  #heading { font-size: 14px; }
+  #statusline { flex: 1 1 0; height: 28px; }
+  #tools { flex: 1 0 100%; gap: 6px; }
+  #tools > * { flex: none; }
+  button, select { min-height: 34px; padding: 0 12px; }
+  label.q { padding-left: 0; font-size: 0; gap: 0; }   /* the select keeps its own label for screen readers */
+  label.q select { font-size: 14px; }
+  /* short visible names on a narrow screen; the buttons' aria-labels keep the full ones */
+  #vol-down, #vol-up { font-size: 0; padding: 0 12px; }
+  #vol-down::after { content: "Vol \2212"; font-size: 14px; }
+  #vol-up::after { content: "Vol +"; font-size: 14px; }
+}
+@media (max-width: 560px) and (pointer: coarse) {
+  button, select { min-height: 40px; }
 }
 #stage {
   position: relative;
@@ -147,19 +185,96 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   place-items: center;
   overflow: hidden;
 }
+/* The drawn phone. #frame inside it is the picture's own rectangle: every click is mapped from it,
+   so nothing here may move it or catch an event over it. The bezel and the rounded screen corners
+   are painted on top by #glass, which lets events through to the picture, corners included. */
+#device {
+  --b: 14px;     /* from the screen's edge to the body's outer edge */
+  --edge: 3px;   /* the metal rim, part of --b */
+  --r: 44px;     /* the screen's corner radius */
+  --s: 200px;    /* the screen's short side */
+  position: relative;
+  padding: var(--b);
+  border-radius: calc(var(--r) + var(--b));
+  background: linear-gradient(135deg, var(--metal-3) 0%, var(--metal-1) 22%, var(--metal-2) 50%, var(--metal-1) 78%, var(--metal-3) 100%);
+  box-shadow: var(--frame-shadow), inset 0 0 0 1px rgba(255, 255, 255, 0.35), inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
 #frame {
   position: relative;
+  z-index: 1;
   width: 200px;
   height: 433px;
-  background: #000;
-  border-radius: 10px;
-  box-shadow: 0 0 0 1px var(--line), var(--frame-shadow);
   overflow: hidden;
+  outline: none;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  transform: translateZ(0); /* its own layer: a new picture repaints only the screen */
 }
 #frame.can-point { cursor: crosshair; }
+/* The picture's layers are clipped to the rounded screen. They take no events, so a click in a clipped
+   corner still lands on #frame's plain rectangle and maps as before. */
+.pic, #empty, #overlay, #marks, #trail { clip-path: inset(0 round var(--r)); }
+#empty { background: #000; }
+#glass {
+  position: absolute;
+  z-index: 2;
+  left: calc(var(--b) + 1px);
+  top: calc(var(--b) + 1px);
+  right: calc(var(--b) + 1px);
+  bottom: calc(var(--b) + 1px);
+  border-radius: calc(var(--r) - 1px);
+  /* the black bezel, spread from the screen's rounded edge: it also covers the picture's square corners,
+     and its inner 1 px overlaps the picture so no colour shows along the curve */
+  box-shadow: 0 0 0 calc(var(--b) - var(--edge) + 1px) var(--bezel), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+}
+#frame:focus-visible + #glass { box-shadow: 0 0 0 calc(var(--b) - var(--edge) + 1px) var(--bezel), inset 0 0 0 2px var(--accent); }
+#island {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--s) * 0.026);
+  width: calc(var(--s) * 0.293);
+  height: calc(var(--s) * 0.086);
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #000;
+  pointer-events: none;
+}
+#device.wide #island {
+  left: calc(var(--s) * 0.026);
+  top: 50%;
+  width: calc(var(--s) * 0.086);
+  height: calc(var(--s) * 0.293);
+  transform: translateY(-50%);
+}
+#device.no-island #island { display: none; }
+/* Side keys: drawn on the body's edge. They take a click only where the server accepts the key
+   (status.accepts), and then only as a shortcut for the labelled buttons in the toolbar. */
+.key {
+  position: absolute;
+  z-index: 0;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 2px;
+  background: var(--metal-1);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 0 0.5px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  cursor: default;
+}
+.key.live { pointer-events: auto; cursor: pointer; }
+.key.live:hover { filter: brightness(1.12); }
+.key.live:active { transform: scale(0.96); }
+#key-action { left: -4px; width: 5px; top: 17%; height: 4%; }
+#key-vol-up { left: -4px; width: 5px; top: 25%; height: 7.5%; }
+#key-vol-down { left: -4px; width: 5px; top: 34%; height: 7.5%; }
+#key-side { right: -4px; width: 5px; top: 27%; height: 11%; }
+/* Landscape: the phone turned with its top to the left, so the left keys are at the bottom. */
+#device.wide #key-action { left: 17%; top: auto; bottom: -4px; width: 4%; height: 5px; }
+#device.wide #key-vol-up { left: 25%; top: auto; bottom: -4px; width: 7.5%; height: 5px; }
+#device.wide #key-vol-down { left: 34%; top: auto; bottom: -4px; width: 7.5%; height: 5px; }
+#device.wide #key-side { left: 27%; right: auto; top: -4px; width: 11%; height: 5px; }
 .pic {
   position: absolute;
   inset: 0;
@@ -176,7 +291,7 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   place-items: center;
   padding: 16px;
   text-align: center;
-  color: #aab2bf;
+  color: #8b93a1;
 }
 #frame.has-frame #empty { display: none; }
 #overlay, #marks, #trail { position: absolute; inset: 0; pointer-events: none; }
@@ -208,9 +323,10 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 .mark.fail { --c: var(--fail); animation-duration: 2.6s; }
 .mark .tag {
   position: absolute;
-  padding: 1px 6px;
-  border-radius: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
   font-size: 11px;
+  font-weight: 600;
   line-height: 16px;
   white-space: nowrap;
   color: var(--on-mark);
@@ -231,6 +347,8 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(0, 0, 0, 0.6);
 }
 .mark.ring .tag { left: 20px; top: -8px; }
+/* near the right edge the tag goes on the ring's left, so it stays on the picture */
+.mark.ring.flip .tag { left: auto; right: 20px; }
 .mark.rect {
   border: 2px solid var(--c);
   border-radius: 4px;
@@ -248,15 +366,17 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
 }
 @media (prefers-reduced-motion: reduce) {
   .mark { animation: none; }
+  .key.live:active { transform: none; }
 }
 #notice {
   position: absolute;
+  z-index: 3;
   left: 50%;
-  bottom: 12px;
+  bottom: 14px;
   max-width: calc(100% - 32px);
   transform: translateX(-50%);
-  padding: 6px 12px;
-  border-radius: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
   background: var(--notice-bg);
   border: 1px solid var(--notice-line);
   color: var(--notice-text);
@@ -285,17 +405,24 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
       </select>
     </label>
     <button type="button" id="home" hidden>Home</button>
-    <button type="button" id="vol-down" hidden>Volume down</button>
-    <button type="button" id="vol-up" hidden>Volume up</button>
+    <button type="button" id="vol-down" aria-label="Volume down" hidden>Volume down</button>
+    <button type="button" id="vol-up" aria-label="Volume up" hidden>Volume up</button>
   </div>
 </header>
 <main id="stage">
-  <div id="frame" tabindex="0" role="img" aria-label="Live phone screen">
-    <img id="screen" class="pic" alt="">
-    <div id="empty">Waiting for the first frame</div>
-    <div id="overlay" aria-hidden="true"></div>
-    <canvas id="trail" aria-hidden="true"></canvas>
-    <div id="marks" aria-hidden="true"></div>
+  <div id="device">
+    <span class="key" id="key-action" aria-hidden="true"></span>
+    <span class="key" id="key-vol-up" aria-hidden="true" title="Volume up"></span>
+    <span class="key" id="key-vol-down" aria-hidden="true" title="Volume down"></span>
+    <span class="key" id="key-side" aria-hidden="true"></span>
+    <div id="frame" tabindex="0" role="img" aria-label="Live phone screen">
+      <img id="screen" class="pic" alt="">
+      <div id="empty">Waiting for the first frame</div>
+      <div id="overlay" aria-hidden="true"></div>
+      <canvas id="trail" aria-hidden="true"></canvas>
+      <div id="marks" aria-hidden="true"></div>
+    </div>
+    <div id="glass" aria-hidden="true"><div id="island"></div></div>
   </div>
   <div id="notice" role="alert"></div>
 </main>
@@ -832,7 +959,12 @@ function createVideoBlock(io) {
     heading.textContent = name;
   }
 
-  /* Layout: the frame is scaled to fit the stage and keeps the phone's proportions. */
+  /* Layout: the frame (the picture's rectangle) is scaled to fit the stage with the drawn phone around it,
+     and keeps the phone's proportions. The body's measures follow the screen's short side. */
+  var device = $("device");
+  var BEZEL = 0.045;   /* screen edge to body edge, of the short side */
+  var RIM = 0.009;     /* the metal rim, of the short side */
+  var CORNER = 0.128;  /* the screen's corner radius, of the short side */
   function aspect() {
     var s = shown.size || (status && status.size) || shown.natural;
     if (s && isNum(s.w) && isNum(s.h) && s.w > 0 && s.h > 0) return s.w / s.h;
@@ -857,13 +989,23 @@ function createVideoBlock(io) {
     if (trailCtx) trailCtx.setTransform(d, 0, 0, d, 0, 0);
   }
   function layout() {
-    var pad = 16;
+    var pad = 24;
     var aw = Math.max(40, stage.clientWidth - pad * 2);
     var ah = Math.max(40, stage.clientHeight - pad * 2);
     var a = aspect();
-    var w = Math.min(aw, ah * a);
+    var sr = Math.min(1, 1 / a); /* the short side, per unit of width */
+    var w = Math.min(aw / (1 + 2 * BEZEL * sr), ah / (1 / a + 2 * BEZEL * sr));
     var fw = Math.floor(w);
     var fh = Math.floor(w / a);
+    var s = Math.min(fw, fh);
+    var b = Math.max(6, Math.round(s * BEZEL));
+    device.style.setProperty("--s", s + "px");
+    device.style.setProperty("--b", b + "px");
+    device.style.setProperty("--edge", Math.max(2, Math.round(s * RIM)) + "px");
+    device.style.setProperty("--r", Math.round(s * CORNER) + "px");
+    device.classList.toggle("wide", a > 1);
+    /* a phone's tall proportions (about 9 by 19.5) get the island; a tablet's don't */
+    device.classList.toggle("no-island", Math.max(a, 1 / a) < 1.9);
     frame.style.width = fw + "px";
     frame.style.height = fh + "px";
     sizeTrail(fw, fh);
@@ -940,6 +1082,9 @@ function createVideoBlock(io) {
     $("home").hidden = !accepts.home;
     $("vol-down").hidden = !accepts.volume;
     $("vol-up").hidden = !accepts.volume;
+    /* the drawn volume keys work only where the server takes the key; elsewhere they are drawing */
+    $("key-vol-up").classList.toggle("live", !!accepts.volume);
+    $("key-vol-down").classList.toggle("live", !!accepts.volume);
     $("boxes").hidden = !accepts.overlay;
     if (!accepts.overlay && overlayOn) {
       /* The server stopped offering overlays: the button is gone, so put it back to off. */
@@ -1183,6 +1328,7 @@ function createVideoBlock(io) {
       el.style.height = pct(r.h);
     } else if (p) {
       el.classList.add("ring");
+      if (p.x > 0.6) el.classList.add("flip"); /* the tag on the ring's left, inside the picture */
       el.style.left = pct(p.x);
       el.style.top = pct(p.y);
     } else {
@@ -1314,6 +1460,9 @@ function createVideoBlock(io) {
     send({ type: "button", name: "volumeDown" });
     release(this);
   });
+  /* The drawn keys are a mouse shortcut for the toolbar's buttons (which stay the keyboard's way). */
+  $("key-vol-up").addEventListener("click", function () { if (accepts.volume) $("vol-up").click(); });
+  $("key-vol-down").addEventListener("click", function () { if (accepts.volume) $("vol-down").click(); });
 
   /* Drag trail: the path under the pointer while a person drags, on its own canvas so it
      never mixes with the action marks. It is drawn in the person's colour with a dark edge,
