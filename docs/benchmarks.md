@@ -11,7 +11,7 @@ Tapline's repository (`bench/`): it drives a tool through MCP exactly as an agen
 | Phone | iPhone 14 Pro Max, iOS 26.5, a test phone next to the computer |
 | App | a production Expo app (React Native, new architecture) in a development build that includes the lab screen |
 | Computer | Windows 11; the phone on USB, or on the same Wi-Fi |
-| Tapwright | branch `live-view` at `cd0ac14`, 2026-11-11; WebDriverAgent on the phone, reached through a developer tunnel. Later commits (typing checks, the keyboard and status-bar rules, permission prompts in personal mode) were not re-measured |
+| Tapwright | commit `871cf86`, 2026-11-11; WebDriverAgent on the phone, reached through a developer tunnel. Later commits (typing checks, the keyboard and status-bar rules, permission prompts in personal mode) were not re-measured |
 | Mode | a dedicated device (`--dedicated`); in personal mode a tap costs about 0.1 s more (below) |
 | Lab | one screen built for measuring: a state line the runner reads, buttons, inputs, a switch, a list of 40 rows, two sheets, an alert, a covered button, an animation |
 
