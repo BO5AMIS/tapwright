@@ -137,10 +137,12 @@ SHARED = {
         'Runs several steps in one call, in order, and answers once: `Ran 5 of 5 steps in 3.4 s.` then the '
         'changes since your last list. Each step is a tool call written as an object (`{"tool": "tap", "target": '
         '{"id": "save"}}`) with an optional `expect` checked after it: one of text, id or label, with gone, value '
-        '(a switch: "on"/"off") and timeout (default 2 s). It stops at the first step that fails or whose '
-        "expectation doesn't hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "
-        '"Save"): text "Saved" didn\'t appear within 2 s.` `dry_run: true` checks the steps and says what step 1 '
-        "would do. Use it to fill a form or walk a flow you're sure of; read the answer before the next batch."
+        '(a switch: "on"/"off", or "true"/"false") and timeout (default 2 s). It stops at the first step that '
+        "fails or whose expectation doesn't hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped "
+        'at step 4 (tap "Save"): its action ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as '
+        '`wait_for` does: exact text first, then part of a text. `dry_run: true` checks the steps and says what '
+        "step 1 would do. Use it to fill a form or walk a flow you're sure of; read the answer before the next "
+        'batch.'
     ),
     'audit': (
         'Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, '
@@ -196,6 +198,7 @@ EXTRA = {
     'open_app': 'launches the app or brings it to the front, and answers the first screen.',
     'viewer': 'opens in a browser; shows the whole phone.',
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
+    'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '
