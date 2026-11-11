@@ -4342,6 +4342,21 @@ def test_scroll_to_the_end_stops_as_soon_as_the_tree_shows_nothing_past_the_edge
     run(go)
 
 
+def test_scroll_to_the_start_of_a_list_already_there_answers_at_once():
+    """Over Wi-Fi a scroll to the start of a list already at its start took 13 s (one drag, then waiting for the
+    pictures to repeat). The tree shows rows past the bottom edge and none past the top: no drag at all."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        LongList(d, rows=20)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
+        assert r["text"].splitlines()[0] == "e1 scroll id=list @0,0 400x800 is already at its start."
+        assert d.session.scrolls == []
+        await finish(stop, task)
+    run(go)
+
+
 def test_scroll_to_the_end_doesnt_stop_while_the_last_row_straddles_the_edge():
     """Seen over Wi-Fi 2026-11-11: Bottom lay at y 915 to 963 on a 932 pt screen, its middle past the edge; the
     scroll to the end stopped there and the next tap on Bottom answered off_screen."""

@@ -1217,6 +1217,13 @@ class Daemon:
         # to repeat, which over Wi-Fi took 4 to 14 s. A list that keeps only its visible rows shows nothing past
         # its edge either way: it is scrolled as before, until the pictures stop changing.
         beyond = bool(to) and direction in ("up", "down") and self._more_beyond(direction, bounds)
+        other = {"up": "down", "down": "up"}.get(direction)
+        if to and other and not beyond and self._more_beyond(other, bounds):
+            # The tree shows this list's rows past its other edge, so it would show them past this one too: there
+            # are none, so the list is already at its start (or end). No drag, and no wait for pictures to repeat
+            # (13 s over Wi-Fi, 2026-11-11). (A list that keeps only its visible rows shows none either way and
+            # is scrolled as before.)
+            return Scrolled(f"{area.line(actions=False) if area else 'The screen'} is already at its {to}.")
         loop = asyncio.get_running_loop()
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
