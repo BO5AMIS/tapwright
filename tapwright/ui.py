@@ -1031,17 +1031,25 @@ def blank_point(items: list[Element], screen: tuple[float, float], top: float,
         """How far the point is from the nearest of `rects`."""
         return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
                     for r in rects), default=math.inf)
-    for e in items:
-        if (e.role in ("text", "header") and not e.in_alert and free(*e.center)
-                and clearance(*e.center, icons) >= BLANK_CLEAR):
-            return e.center
-    best, room = None, -1.0
+    # a touch inside a scroll view closes the keyboard in React Native (keyboardShouldPersistTaps defaults to
+    # "never"); one on a header outside it often does nothing (seen on the phone 2026-11-12: 4 s lost each time)
+    scrolls = [e.rect for e in items if e.role == "scroll" and not e.in_alert]
+
+    def in_scroll(point: tuple[float, float]) -> bool:
+        return any(_holds(r, point) for r in scrolls)
+    passive = [e.center for e in items if e.role in ("text", "header") and not e.in_alert and free(*e.center)
+               and clearance(*e.center, icons) >= BLANK_CLEAR]
+    for point in [*(c for c in passive if in_scroll(c)), *passive]:
+        return point
+    best, room = None, (False, -1.0)
     y = top + BLANK_GRID / 2
     while y < bottom:
         x = BLANK_GRID / 2
         while x < screen[0]:
-            if free(x, y) and (r := min(clearance(x, y, blocks + icons), x, screen[0] - x, y - top, bottom - y)) > room:
-                best, room = (x, y), r
+            if free(x, y):
+                r = (in_scroll((x, y)), min(clearance(x, y, blocks + icons), x, screen[0] - x, y - top, bottom - y))
+                if r > room:
+                    best, room = (x, y), r
             x += BLANK_GRID
         y += BLANK_GRID
     return best

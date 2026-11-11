@@ -478,6 +478,7 @@ class Daemon:
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
+        self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
         self._batch_ids = itertools.count(1)
         # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
@@ -2055,11 +2056,20 @@ class Daemon:
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
-        if (blank := ui.blank_point(view.items, s.screen, top, bottom)) is not None:
+        # what an open layer hides takes touches too, once it closes (an AutoFill menu hid a card that a "blank" touch
+        # then opened, 2026-11-12): keep away from those as well
+        hidden = [e for e in getattr(s, "behind", []) if e.actions]
+        if (blank := ui.blank_point([*view.items, *hidden], s.screen, top, bottom)) is not None:
             await s.tap(ui.Target(x=blank[0], y=blank[1]))
             await self._silent_read(view)
-        if view.read_keyboard and await s.dismiss_keyboard():
-            await self._silent_read(view)
+        app = self._bundle()
+        # WebDriverAgent's dismissal looks for a key that hides the keyboard; an iPhone keyboard often has none, and the
+        # search takes about 4 s: once it failed in an app, it isn't tried there again this session
+        if view.read_keyboard and app not in self._no_dismiss:
+            if await s.dismiss_keyboard():
+                await self._silent_read(view)
+            elif app is not None:
+                self._no_dismiss.add(app)
         return "" if view.read_keyboard else NOTE_KEYBOARD
 
     def _under_keyboard(self, target: ui.Target) -> bool:

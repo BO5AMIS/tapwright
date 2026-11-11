@@ -384,3 +384,12 @@ def test_a_calculator_key_is_a_button_but_the_keyboards_keys_stay_hidden():
     assert (e.role, e.actions, e.line()) == ("button", ("tap",), 'e1 button "7" id=Seven @14,520 90x90')
     board = node("Keyboard", rect=(0, 600, 430, 300), children=[node("Key", "q", rect=(10, 620, 40, 50))])
     assert [e.type for e in ui.elements(xml(board), SCREEN)] == []
+
+
+def test_a_blank_touch_prefers_a_point_inside_a_scroll_view():
+    from fakes import el
+    """A tap in a scroll view closes React Native's keyboard; one on a header above it often doesn't (2026-11-12)."""
+    items = [el("e1", "header", "Where to next?", rect=(20, 90, 390, 40)),
+             el("e2", "scroll", "", rect=(0, 200, 430, 600)),
+             el("e3", "text", "Kyoto", rect=(35, 370, 66, 28))]
+    assert ui.blank_point(items, (430.0, 932.0), 50.0, 849.0) == (68.0, 384.0)
