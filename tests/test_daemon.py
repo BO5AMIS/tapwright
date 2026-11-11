@@ -4119,6 +4119,33 @@ def test_a_banner_that_takes_a_touch_near_the_top_is_reported_and_the_app_opened
     run(go)
 
 
+def test_an_app_that_comes_to_the_front_a_moment_after_a_look_false_touch_is_caught_at_the_next_call():
+    """With look: false the answer asks the phone once, at once; Mail came to the front a moment later on the phone
+    (2026-11-11). The agent's next call asks again: an action is refused stale with the note, a look carries it."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.app_names["com.apple.mobilemail"] = "Mail"
+        s.foreground, s.tree = "com.example.app", [button("e1", "Top", "top", rect=(10, 120, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        assert "came to the front" not in r["text"]  # nothing yet
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")  # a moment later
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        assert e.value.code == "stale" and TAKEN in str(e.value) and "This call did nothing." in str(e.value)
+        assert s.launched == ["com.example.app"]
+        r = await d.run_tool("a", "look", {"screenshot": False})  # asked once only: nothing more to say
+        assert "came to the front" not in r["text"]
+        await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
+        s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert f"Note: {TAKEN}" in r["text"] and s.launched == ["com.example.app", "com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_touch_lower_down_that_opens_another_app_is_left_alone():
     """Banners come down over the top only: a link lower down that opens another app is the app's own doing."""
     async def go():

@@ -381,6 +381,8 @@ class Daemon:
         self._connecting = False  # a connect is under way
         self._attempts = 0  # connects that ended, either way
         self._scopes: dict[tuple[str, ...], dict[str, str]] = {}  # each app list seen, as {bundle id: shown}
+        # {agent: the app its last touch near the top was meant for}, for a look: false answer that asked once
+        self._recheck: dict[str, tuple[str, str]] = {}
         self._queues: set = set()
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
@@ -801,6 +803,13 @@ class Daemon:
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
         await self.wait_connected()
+        if (meant := self._recheck.pop(client_id, None)) is not None and name not in ("apps", "open_app"):
+            taken = await self._taken_away(view, meant, top=True)
+            if taken and name in ACTIONS:  # its refs are for the app the touch was meant for, which is back now
+                view.moved = True
+                raise Refused("stale", f"after your last action: {taken} This call did nothing.")
+            if taken:
+                notes = [*notes, taken]
         if name == "apps":
             return await self._apps(notes)
         if name == "wait":
@@ -905,6 +914,10 @@ class Daemon:
         if not looks:
             view.unlooked += 0 if reads_only else 1
             taken = await self._taken_away(view, box.get("app"))
+            if not taken and self.session.top_touch and box.get("app"):
+                # asked once, at once: the other app may come to the front a moment later (seen on the phone
+                # 2026-11-11 with look: false), so the agent's next call asks again before it does anything
+                self._recheck[client_id] = box["app"]
             return _answer([str(result)], [*notes, taken] if taken else notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
@@ -967,7 +980,7 @@ class Daemon:
         return await self._add_shot(answer, view, shot)
 
     async def _taken_away(self, view, before: tuple[str, str] | None,
-                          read: tuple[str, str] | None = None) -> str | None:
+                          read: tuple[str, str] | None = None, top: bool | None = None) -> str | None:
         """After an agent's touch that began where a notification banner comes down: did another app come to the
         front? A banner landing between the check before the touch and the touch itself takes it (seen on the phone
         2026-11-11: twice Mail opened, once on a toggle at y 159). Then the app the touch was meant for is opened
@@ -975,9 +988,10 @@ class Daemon:
         front, when it made one (then the phone is asked only if that differs); without one the phone is asked
         once (about 70 ms, and only after a touch near the top). The home screen or a notification pulled open
         count too, unless an alert is up (a permission prompt the touch raised is the app's own) or the phone's
-        process list still has the app in front (a banner still sliding over it)."""
+        process list still has the app in front (a banner still sliding over it). `top`: whether the touch began
+        near the top, when it isn't the latest action's (the check at the next call, see _run_tool)."""
         s = self.session
-        if before is None or not s.top_touch:
+        if before is None or not (s.top_touch if top is None else top):
             return None
         name, bundle = before
         if read is not None and read[1] == bundle:
