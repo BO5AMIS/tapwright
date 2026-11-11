@@ -4093,6 +4093,68 @@ def test_a_tab_inside_the_tab_bar_is_touched_at_its_own_centre():
     run(go)
 
 
+# ---- a notification banner that takes a touch near the top (owner's choice 2026-11-11: detect, go back, report) ----
+TAKEN = "Mail (com.apple.mobilemail) came to the front after the touch"
+
+
+@pytest.mark.parametrize("look", [True, False])
+def test_a_banner_that_takes_a_touch_near_the_top_is_reported_and_the_app_opened_again(look):
+    """On the phone, twice on 2026-11-11, a Mail banner landed between the banner check and a touch near the top,
+    and the touch opened Mail. The app the touch was meant for is opened again, and the answer says so."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.app_names["com.apple.mobilemail"] = "Mail"  # as Session reads them at connect
+        s.foreground, s.tree = "com.example.app", [button("e1", "Top", "top", rect=(10, 120, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.taken_by = ("Mail", "com.apple.mobilemail")
+        r = await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": look})
+        assert s.launched == ["com.example.app"] and s.foreground == "com.example.app"
+        assert f"Note: {TAKEN}" in r["text"] and "Went back to Example (com.example.app)" in r["text"]
+        assert r["text"].startswith('Tapped e1 button "Top"')
+        if look:
+            assert "\nScreen " in r["text"]  # a whole list, read after the app came back to the front
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_touch_lower_down_that_opens_another_app_is_left_alone():
+    """Banners come down over the top only: a link lower down that opens another app is the app's own doing."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.foreground, s.tree = "com.example.app", [button("e1", "Link", "link", rect=(10, 500, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+
+        async def opens_safari(target, hold_ms=60, _tap=s.tap):
+            out = await _tap(target, hold_ms)
+            s.foreground, s.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")
+            return out
+        s.tap = opens_safari
+        r = await d.run_tool("a", "tap", {"target": {"id": "link"}, "look": False})
+        assert s.launched == [] and "came to the front" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_alert_the_touch_raised_is_not_taken_for_a_banner():
+    """A permission prompt puts SpringBoard in front; it is the app's own business, answered with `alert`."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.foreground, s.tree = "com.example.app", [button("e1", "Allow photos", "ask", rect=(10, 120, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.taken_by = ("SpringBoard", "com.apple.springboard")
+        s.last_alert = ui.Alert("Allow access to your photos?", ("Allow", "Don't Allow"), (40, 300, 350, 200))
+        r = await d.run_tool("a", "tap", {"target": {"id": "ask"}, "look": True})
+        assert s.launched == [] and "came to the front" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_row_under_a_translucent_navigation_bar_is_touched_below_it():
     async def go():
         d = make()

@@ -79,6 +79,9 @@ class Session:
         # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
         self.touch_hook = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
+        # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
+        # banner landing between the check and the touch takes it (Daemon._taken_away)
+        self.top_touch = False
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -375,6 +378,7 @@ class Session:
         the agent's touches), then tell Tapline the touch is the agent's."""
         if self.banner_guard and at is not None:
             await self._clear_of_banner(at)
+            self.top_touch = self.top_touch or at[1] < BANNER_ZONE
         if self.touch_hook is not None:
             await self.touch_hook(ms)
 

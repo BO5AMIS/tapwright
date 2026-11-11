@@ -7,7 +7,7 @@ from PIL import Image
 
 from tapwright import ui
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
-from tapwright.session import Snapshot
+from tapwright.session import BANNER_ZONE, Snapshot
 
 
 def image_bytes(size, color, fmt="PNG") -> bytes:
@@ -147,6 +147,9 @@ class FakeSession:
         self.dismiss_closes = False  # whether an accepted dismissal closes the keyboard
         # what every connect raises: a PhoneLocked, or an AppNotAnswering until kill_app ends that app
         self.stuck: Exception | None = None
+        # (name, bundle id) of an app a notification banner brings to the front when a tap lands near the top
+        self.taken_by: tuple[str, str] | None = None
+        self.top_touch = False
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -248,6 +251,7 @@ class FakeSession:
             self.last_point = hit
             return f"Tapped ({round(hit[0])}, {round(hit[1])})."
         self.last_point = hit.center
+        self._maybe_taken(hit.center)
         return f"Tapped {hit.line(actions=False)}."
 
     async def type_text(self, text, replace=False, submit=False, target=None, at=None):
@@ -281,9 +285,18 @@ class FakeSession:
         self._record(f"button:{name}")
         return f"pressed {name}"
 
+    def _maybe_taken(self, at) -> None:
+        """A touch near the top: the daemon's banner window; with `taken_by` set, a banner takes it."""
+        if at[1] < BANNER_ZONE:
+            self.top_touch = True
+            if self.taken_by is not None:
+                self.app, self.foreground, self.taken_by = self.taken_by, self.taken_by[1], None
+
     async def launch(self, bundle_id):
         self._record("launch")
         self.launched.append(bundle_id)
+        self.foreground = bundle_id
+        self.app = (self.app_names.get(bundle_id, bundle_id), bundle_id)
         return f"launched {bundle_id}"
 
     async def terminate(self, bundle_id):

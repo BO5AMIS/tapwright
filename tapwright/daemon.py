@@ -91,6 +91,9 @@ TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 # SWITCH_FROM_RIGHT points in from its right end (half an iOS switch, 63 pt wide), not the label in the middle
 WIDE_SWITCH, SWITCH_FROM_RIGHT = 3.0, 32.0
 NOTE_PERSON = "a person used the phone since your last look."
+# a notification banner took a touch near the top (Daemon._taken_away)
+NOTE_TAKEN = ("{other} came to the front after the touch: a notification banner over the top of the screen can take "
+              "a touch there. Went back to {app}; the touch may not have reached it. Look, then try again.")
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
@@ -852,6 +855,7 @@ class Daemon:
                     self._refuse_off_screen(target)
             box["note"] = await self._close_keyboard(view, name, target)  # a person would close it before the touch
             s.last_point = None
+            box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
             return await (handler(view, args) if handler else call(s, args))
@@ -900,7 +904,8 @@ class Daemon:
         self._announce("agent", name, label=str(result), point=self._point(self.session.last_point))
         if not looks:
             view.unlooked += 0 if reads_only else 1
-            return _answer([str(result)], notes)
+            taken = await self._taken_away(view, box.get("app"))
+            return _answer([str(result)], [*notes, taken] if taken else notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
         if isinstance(result, Toggled):
@@ -956,7 +961,45 @@ class Daemon:
                        alike_fields[0] if len(alike_fields) == 1 else None)  # renumbered in a first full list
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
+        taken = await self._taken_away(view, box.get("app"), read=self.session.app)
+        if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
+            return await self._look(view, shot, [str(result)], [*notes, taken])
         return await self._add_shot(answer, view, shot)
+
+    async def _taken_away(self, view, before: tuple[str, str] | None,
+                          read: tuple[str, str] | None = None) -> str | None:
+        """After an agent's touch that began where a notification banner comes down: did another app come to the
+        front? A banner landing between the check before the touch and the touch itself takes it (seen on the phone
+        2026-11-11: twice Mail opened, once on a toggle at y 159). Then the app the touch was meant for is opened
+        again and the note says so; None when nothing took it. `read`: the app the answer's own read found in
+        front, when it made one (then the phone is asked only if that differs); without one the phone is asked
+        once (about 70 ms, and only after a touch near the top). The home screen or a notification pulled open
+        count too, unless an alert is up (a permission prompt the touch raised is the app's own) or the phone's
+        process list still has the app in front (a banner still sliding over it)."""
+        s = self.session
+        if before is None or not s.top_touch:
+            return None
+        name, bundle = before
+        if read is not None and read[1] == bundle:
+            return None
+        front = await self._read(s.foreground_bundle_id)
+        if not front or front == bundle:
+            return None
+        if front == SPRINGBOARD:
+            try:
+                if bundle in await asyncio.wait_for(s.device.foreground_apps(), 5):
+                    return None  # a banner over the app, not the app gone
+            except Exception:
+                pass
+            if read is None:  # no read of its own: see whether an alert is up
+                await self._read(lambda: self._silent_read(view))
+            if view.alert_now is not None:
+                return None
+        await self.control.agent(lambda: s.launch(bundle))
+        self.log(f"the agent's touch near the top left {bundle} for {front}: opened {bundle} again")
+        known = read[0] if read is not None and read[1] == front else s.app_names.get(front)
+        other = "the home screen or a notification" if front == SPRINGBOARD else f"{known or front} ({front})"
+        return NOTE_TAKEN.format(other=other, app=f"{name} ({bundle})")
 
     async def turned(self, seq: int, jpeg: bytes, degrees: int) -> bytes:
         """A stream frame turned upright for landscape, made once per frame for every viewer."""
