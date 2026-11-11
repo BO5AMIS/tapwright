@@ -11,7 +11,7 @@ Tapline's repository (`bench/`): it drives a tool through MCP exactly as an agen
 | Phone | iPhone 14 Pro Max, iOS 26.5, a test phone next to the computer |
 | App | a production Expo app (React Native, new architecture) in a development build that includes the lab screen |
 | Computer | Windows 11; the phone on USB, or on the same Wi-Fi |
-| Tapwright | branch `live-view` at `cd0ac14`, 2026-11-11; WebDriverAgent on the phone, reached through a developer tunnel |
+| Tapwright | branch `live-view` at `cd0ac14`, 2026-11-11; WebDriverAgent on the phone, reached through a developer tunnel. Later commits (typing checks, the keyboard and status-bar rules, permission prompts in personal mode) were not re-measured |
 | Mode | a dedicated device (`--dedicated`); in personal mode a tap costs about 0.1 s more (below) |
 | Lab | one screen built for measuring: a state line the runner reads, buttons, inputs, a switch, a list of 40 rows, two sheets, an alert, a covered button, an animation |
 
@@ -29,20 +29,23 @@ request goes out, and the whole answer (with the change block) comes back.
 
 | | USB median | USB p95 | Wi-Fi median | Wi-Fi p95 | Target (median / p95) |
 |---|---|---|---|---|---|
-| Tap (S1) | 0.65 | 0.68 | 1.03 | 1.55 | 0.7 / 1.2 |
-| Type | 0.73 | 0.80 | 1.33 | 1.68 | 0.7 / 1.2 |
-| Scroll, by a real touch | 1.46 | 1.85 | 1.77 | 2.39 | 0.7 / 1.2 |
-| Toggle | 0.66 | 0.71 | 0.96 | 1.46 | 0.7 / 1.2 |
+| Tap (S1) | 0.65 | 0.68 | 1.03 | 1.55 | USB 0.7 / 1.2; Wi-Fi 1.0 / 1.5 |
+| Type | 0.73 | 0.80 | 1.33 | 1.68 | USB 0.7 / 1.2; Wi-Fi 1.0 / 1.5 |
+| Scroll, by a real touch | 1.46 | 1.85 | 1.77 | 2.39 | 1.5 / 2.0 |
+| Toggle | 0.66 | 0.71 | 0.96 | 1.46 | USB 0.7 / 1.2; Wi-Fi 1.0 / 1.5 |
 | Look, text only (S2) | 0.14 | 0.17 | 0.41 | 0.57 | 0.5 / 1 |
 | Look with a screenshot (S3) | 0.18 | 0.21 | 0.38 | 0.74 | 0.8 / 1.5 |
 | Start to ready (S5) | 1.98 | | 3.75 | | 5 |
 
-- **Over USB** a tap, a toggle and both looks meet the bar; typing is 26 ms over it.
+- **Over USB** a tap, a toggle, a scroll and both looks meet the bar; typing is 26 ms over it.
+- **Over Wi-Fi**, against Wi-Fi's own bar (1.0 / 1.5 s): the toggle meets it; a tap (1.03 / 1.55) and
+  typing (1.33 / 1.68) are over it, and so is a scroll (1.77 / 2.39 against 1.5 / 2.0). Both looks meet
+  the bar.
 - **A scroll** is a real drag that stops where the finger stops (0.58 s), so the list doesn't keep
   moving under the next tap, plus WebDriverAgent's fixed cost per gesture and the read. iOS flings
   a drag whose last stretch is faster than about 330 pt/s. A drag slow enough not to fling can't
   finish in 0.7 s through WebDriverAgent.
-- **Over Wi-Fi** a tap takes 0.8 to 1.0 s, depending on the network that minute (runs minutes apart
+- **A Wi-Fi tap** takes 0.8 to 1.0 s, depending on the network that minute (runs minutes apart
   gave 0.81 and 1.24 s). That is the main gap left, and most of it is not the link. Where it goes
   (traced 2026-11-11, `TAPWRIGHT_TRACE=1`, each comparison interleaved in one run):
   - **The touch, 0.47 to 0.52 s.** XCTest playing the touch on the phone takes the same time over
@@ -72,7 +75,7 @@ The viewer protocol's JPEG stream, read by the runner over the same link. Three 
 | Longest gap between frames (V3) | 0.05 to 0.19 s | 0.28 s | 0.25 s |
 | The same while an agent looks in a loop | 0.10 to 0.19 s | 0.31 s | 0.25 s |
 | Sharpness, three presets (V5) | 3 px per point | 3 px per point | 2.0 / 1.5 / 0.75 |
-| An agent's tap while someone watches (V7) | 0.69 to 0.71 s | 1.02 s | 0.7 s |
+| An agent's tap while someone watches (V7) | 0.69 to 0.71 s | 1.02 s | 0.7 s (USB), 1.0 s (Wi-Fi) |
 | The phone's CPU for the stream (V6 a) | about 27% of one core on a still screen with a viewer; about 88% under continuous animation | | 30% |
 
 - **The phone's CPU** was measured with Apple's own sampler over the developer tunnel (DVT,
@@ -118,7 +121,8 @@ skill) tests the lab against an 11-point charter in personal mode. Every call is
 
 Target: the whole charter, at most 60 calls, at most 3 state-only reads, no misread answer,
 nothing outside the charter. With both tools, Tapline never took one of Tapwright's 22 real touches for
-a person's: Tapwright tells it before each one.
+a person's: Tapwright tells it before each one. These runs predate AGENT-TOOLS v1.7 (`placeholder=`) and
+the typing check; they were not repeated since.
 
 ## Not measured
 
@@ -130,7 +134,8 @@ a person's: Tapwright tells it before each one.
 
 ## Run it yourself
 
-With the phone set up (`tapwright setup`, see [setup.md](setup.md)) and the lab app open:
+With the phone set up (`tapwright setup`, see [setup.md](setup.md)), the lab app open, and a checkout of
+Tapline's repository (the runner lives there, under `bench/`):
 
 ```
 tapwright serve --keep-alive                      # USB; add --phone <address> for Wi-Fi

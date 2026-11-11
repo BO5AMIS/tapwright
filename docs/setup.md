@@ -4,7 +4,7 @@ Once per phone, with the phone on USB. About ten minutes.
 
 ## 1. The computer
 
-- Python 3.10 or newer, then `pip install git+https://github.com/<you>/tapwright`.
+- Python 3.10 or newer, then `pip install git+https://github.com/<owner>/tapwright`.
 - Windows: **Apple Devices** from the Microsoft Store (or iTunes). It provides the USB
   connection to the phone.
 - Linux: `usbmuxd` (`sudo apt install usbmuxd`).
@@ -81,7 +81,9 @@ device, or an unattended run stops at that screen.
 tapwright view
 ```
 
-opens the phone's screen in your browser, live, and lets you drive it. It starts
+opens the phone's screen in your browser, live, in a drawn iPhone, and lets you drive it. Each
+step is captioned under the phone; the bar has Pause agent, Steps and More (Home, volume, the
+picture quality, Details). It starts
 `tapwright serve` (the background process that owns the phone) if it isn't running; agent
 tools start it too. It stops by itself after 30 minutes without viewers or requests
 (`tapwright serve --keep-alive` keeps it running), or with `tapwright serve --stop`. Its log

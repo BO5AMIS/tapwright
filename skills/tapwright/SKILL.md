@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs the Tapwright MCP server (`tapwright mcp --apps <bundle id>`) and an iPhone that went through `tapwright setup`. Works from Windows, Linux or macOS.
 metadata:
   tool: tapwright
-  interface: AGENT-TOOLS v1.6
+  interface: AGENT-TOOLS v1.7
 ---
 
 # Tapwright: test an app on a real iPhone
@@ -19,8 +19,8 @@ themselves; what follows is what they can't tell you.
 - **No Tapwright tools in your tool list?** Set it up first:
   [references/setup.md](references/setup.md).
 - **Call `apps` once.** It lists the apps you may drive. On the owner's own phone you were
-  given a list of apps and are refused everything else (`not_allowed`). That is by design:
-  don't look for a way around it.
+  given a list of apps and are refused everything else (`not_allowed`), except a permission
+  prompt one of those apps raises. That is by design: don't look for a way around it.
 - **`locked`** means a person must act: the phone is locked, or it is asking for its passcode.
   You can't pass Face ID, Touch ID or the passcode. Tell the user and wait.
 - **A person may be watching** in the live view (`viewer` gives the link) and can take over.
@@ -80,13 +80,18 @@ with no element.
   true of the two together; it doesn't mean the second did nothing.
 - **Refs** stay with their elements from answer to answer. Only `look` starts again at `e1`,
   so after a `look` use the new list's refs.
+- **An empty input** shows `placeholder="…"` (its hint text), never `value=`: `value=` is only what
+  the field holds. After typing, its `~` line reads `(was placeholder "Email")`.
 - **Long text is cut** and says by how much: `"…(+57)"`. `wait_for` with the text checks all
   of it.
 - **The keyboard:** `Keyboard: shown` or `Keyboard: hidden` in an answer says it came or went.
-  While it is up, a touch on anything but the field you are typing in closes it first, as a
-  person would, and the answer ends with `Note: closed the keyboard first.` Typing into the
-  next field of a form leaves it up.
+  While it is up, a touch on a control the keyboard hides, or on anything but an input you can
+  see, closes it first, as a person would, and the answer ends with `Note: closed the keyboard
+  first.` A button the keyboard hides is reached this way, not refused `off_screen`. Typing into
+  the next field of a form leaves it up.
 - **`Note:` lines come last.** Read them: they say when something didn't go the plain way.
+  `type_text` checks that the field holds what you typed; when keys went missing it clears the
+  field, types once more and says so in a note.
 
 ## 4. To do this, call that
 
@@ -102,7 +107,7 @@ with no element.
 | see pixels (layout, colours, images) | `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
 | work with Tapwright and Tapline both connected | inside the app under test, Tapline's tools: its reads and actions are the fast ones. For what iOS draws (permission prompts, system alerts, the share sheet), other apps, real gestures, and the live view: Tapwright's. A ref belongs to the tool that gave it: never pass one tool's ref to the other; use the element's `id` with either |
-| answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise. `Alert:` in the header is a system alert; an app's own alert is ordinary elements: tap its button |
+| answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise. `Alert:` in the header is a system alert; an app's own alert is ordinary elements: tap its button. On the owner's phone this works for a permission prompt raised by an app you were given; after your answer the call waits for the app to come back |
 | start a run from a clean app | `close_app`, then `open_app` |
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
 | open a link a person would scan as a QR code (pairing Tapline, an Expo project, a deep link) | `open_url` with the link itself, then answer the app's prompt (Tapline's "Connect for testing?": tap Connect). Ask for the link as text; don't ask the user to scan. A pairing link works once: never log it or put it in a file. On a project's first load, Expo Go (and a development build) opens its developer menu by itself: tap Continue, then Close |
@@ -118,7 +123,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 |---|---|
 | `not_found` | `look`, then pick another target |
 | `ambiguous` | use one of the listed refs, or add `index` |
-| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: `scroll` with `to: "target"`, close what is in front, answer the alert |
+| `not_actionable` | the first word is why: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause: `scroll` with `to: "target"`, close what is in front, answer the alert. `covered` also means a row under the status bar with too little showing below it: `scroll` it down |
 | `stale` | a person changed the screen since your list: `look` again |
 | `busy` | a person is using the phone: wait a few seconds, retry |
 | `paused`, `locked` | ask the user (to resume; to unlock or enter the passcode) |

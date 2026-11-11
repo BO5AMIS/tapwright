@@ -49,7 +49,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 7. Text: `type_text` into a target; without one it types into the only field. `replace` clears
    first (the default); `submit` presses return. Switches: `toggle`. `back` goes up one screen.
 8. System alerts (notifications, location, tracking) show as `Alert:` in the list. Answer them
-   with `alert` the way the test needs, usually as a new user would.
+   with `alert` the way the test needs, usually as a new user would. In personal mode this works
+   for a permission prompt of an app you were given; after the answer the call waits for the app
+   to come back.
 9. Start a fresh run with `close_app` then `open_app`.
 10. A person may be watching the live view (`viewer` gives the link), or driving. Their input
     goes first. Errors say what to do: `not_found` (look, then pick another target), `ambiguous`
@@ -85,6 +87,6 @@ ID). Note slow screens if they took more than a few seconds.
 - **Personal mode is the default.** Add the server with the apps you may use:
   `tapwright mcp --apps com.example.app` (bundle ids or exact names, comma-separated). Tapwright
   then refuses to read or touch any other app (`not_allowed: outside_apps`), and never shows
-  another app's screen. Without `--apps` nothing runs (`not_allowed: no_apps`). Only on a phone
+  another app's screen, except a permission prompt raised by one of the given apps. Without `--apps` nothing runs (`not_allowed: no_apps`). Only on a phone
   kept for testing, start it with `tapwright mcp --dedicated`: then every app can be used.
 - The owner stops you by pausing in the live view, or by locking the phone.

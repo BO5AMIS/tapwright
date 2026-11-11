@@ -81,15 +81,17 @@ Settled in 0.31 s.
 ```
 
 A good answer names the element it tapped and says what changed. When a touch couldn't work,
-the answer says why: `covered`, `off_screen`, `disabled`, `behind_alert`. Give the controls
+the answer says why: `covered`, `off_screen`, `disabled`, `under_tab_bar`, `behind_alert`,
+`no_action`. Give the controls
 you test an accessibility identifier (React Native: `testID`): the agent targets it as `id`,
 which keeps tests stable.
 
 ## Watching and stopping
 
 - `tapwright view`, or the agent's `viewer` tool, gives a link to open in a browser on your
-  computer: the phone's screen, live, with the agent's touches marked. The viewer shows who is
-  driving, you or the agent. You can tap, drag and type there too, and your input goes first.
+  computer: the phone's screen, live, in a drawn iPhone. Under the phone each step, the agent's
+  or yours, is captioned in plain words (`Tap "Save trip"`); **Steps** lists them, and **More**
+  holds Home, volume, the picture quality and **Details** (element names and boxes). You can tap, drag and type there too, and your input goes first.
 - For a smooth picture, start the service with `tapwright serve --video` (same Wi-Fi; see
   [setup.md](setup.md#the-live-view-as-video)): the phone then mirrors its screen as video, 60
   frames a second.
@@ -103,9 +105,10 @@ which keeps tests stable.
 `tapwright mcp --apps com.example.app` (bundle ids or exact names, comma-separated). Tapwright
 then refuses to read or touch any other app, and never shows another app's screen to the
 agent. If something takes the phone elsewhere, the agent is told which app is in front and can
-only go back. Without `--apps` the agent can do nothing. iOS's own prompts (a password
-prompt, a call) belong to the Home screen: the agent can't see or answer them, so you may have
-to dismiss one yourself.
+only go back. Without `--apps` the agent can do nothing. A permission prompt one of your apps
+raises (notifications, location, tracking), the agent can see and answer with `alert`. Other iOS
+prompts (a password prompt, a call) belong to the Home screen: the agent can't see or answer
+them, so you may have to dismiss one yourself.
 
 **A dedicated test device.** Start it with `tapwright mcp --dedicated`: the agent may use
 every app, the Home screen and system prompts. Use this only on a phone kept for testing,

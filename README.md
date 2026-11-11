@@ -41,7 +41,7 @@ Appium) on your phone, signed with your developer identity, and talks to it thro
 no admin rights and works on any OS.
 
 Tapwright drives **the whole phone from the outside** (any app, system alerts, the home
-screen). Its sibling project [Tapline](https://github.com/<you>/tapline) drives **your own
+screen). Its sibling project [Tapline](https://github.com/<owner>/tapline) drives **your own
 React Native app from the inside**, through a small SDK in the app.
 
 ## You need
@@ -57,7 +57,7 @@ React Native app from the inside**, through a small SDK in the app.
 ## Quick start
 
 ```sh
-pip install git+https://github.com/<you>/tapwright
+pip install git+https://github.com/<owner>/tapwright
 ```
 
 **One-time setup**, phone plugged in and unlocked:
@@ -87,7 +87,8 @@ claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
 ```
 
 - `--apps` takes bundle ids or exact names, comma-separated. The agent is refused every
-  other app (`not_allowed`) and is never shown another app's screen.
+  other app (`not_allowed`) and is never shown another app's screen, except a permission
+  prompt one of your apps raises, which it can see and answer.
 - On a phone kept for testing, with no personal accounts on it, use `--dedicated` instead:
   the agent may then use every app, the Home screen and system prompts.
 - With neither, the agent can do nothing. That is deliberate: the phone may be yours.
@@ -148,13 +149,13 @@ tapwright view      # opens the live view in your browser
 You see the phone's screen live and can drive it: click to tap, hold to long-press, drag to
 swipe, use the mouse wheel to scroll, and type into the focused field. Each step, the
 agent's or yours, shows in plain words under the phone (`Tap "Save trip"`), and **Steps**
-lists them. The bar has **Pause agent**; **More** holds Home, volume, the picture quality and
+lists them. A step that couldn't be done shows in red with the reason (`Tap "Save" – covered`). The bar has **Pause agent**; **More** holds Home, volume, the picture quality and
 **Details** (the element names and boxes, for when you're debugging). Your input goes first:
 the agent waits while you drive. The live view is reachable from this computer only, with an
 access token in the link.
 
 - Drags play on the phone after you let go: WebDriverAgent can't follow a finger live.
-- The picture is a stream of JPEG frames, about 26 a second while the screen changes and 5
+- The picture is a stream of JPEG frames, about 28 a second while the screen changes and 5
   while it is still.
 - `tapwright serve --video` plays the phone's own video instead, 60 frames a second, with
   nothing installed on the phone. The phone and the computer must be on the same Wi-Fi, and
@@ -208,7 +209,7 @@ experimental.
 | Measured over USB | a tap, with its answer: 0.65 s; a look: 0.14 s; a toggle 0.66 s; typing 0.73 s; a scroll 1.46 s; a person's tap in the live view shows after 0.23 s; the reliability suite with no misses |
 | Measured over Wi-Fi | slower: a tap 1.0 s, a look 0.4 s, typing 1.3 s; the reliability suite with no misses |
 | Agents | a first-time agent with the skill tested the whole lab charter in 44 calls (40 with Tapline connected too) |
-| Not done | speed over Wi-Fi within the bar; a second phone or an iPad; a run by anyone but the authors |
+| Not done | over Wi-Fi, a tap (1.03 s) and typing (1.33 s) within Wi-Fi's own bar of 1.0 s (the toggle meets it), and a scroll within 1.5 s; a second phone or an iPad; a run by anyone but the authors |
 
 Every number, how it was measured and how to run it yourself: [docs/benchmarks.md](docs/benchmarks.md).
 The bar they are held against: [docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
