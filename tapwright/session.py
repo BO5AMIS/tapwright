@@ -34,6 +34,15 @@ ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" hei
 # Calculator in each landscape side: the frame turned this way reads upright)
 TURN_FOR_Z = {90: 90, 270: 270}
 TURN_RECHECK = 1.0  # seconds: in landscape, how often which side is asked again (the tree can't tell the sides apart)
+# Tapwright's own WebDriverAgent build (TAPWRIGHT_WDA=fork) has a fast tap route: one touch, with no element lookup and
+# no idle wait (WebDriverAgentLib/Commands/TWFastTapCommands.m in the fork). Asked for once per session; Appium's
+# build answers the probe with an error, and taps keep going through W3C actions there. TAPWRIGHT_FAST_TAP=0 turns the
+# route off. The route's answer waits until the touch has been played (`wait`): answering as soon as it was queued was
+# no faster per tap on the phone (0.466 s against 0.469 s, 2026-11-12), and what came next raced the touch (typing
+# looked for the focused field before the tap had focused it, and its keys hit "only one gesture at a time").
+FAST_TAP = os.environ.get("TAPWRIGHT_FAST_TAP", "1")
+FAST_VERSION_PATH = "/session/{sid}/wda/tw/version"
+FAST_TAP_PATH = "/session/{sid}/wda/tw/tap"
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -87,6 +96,7 @@ class Session:
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
         # banner landing between the check and the touch takes it (Daemon._taken_away)
         self.top_touch = False
+        self.fast_tap: bool | None = None  # whether this session's runner has the fast tap route (None: not asked yet)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -108,6 +118,7 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
         self.screen = (float(size["width"]), float(size["height"]))
+        self.fast_tap = None  # a new session may be a new runner: ask again
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -429,9 +440,39 @@ class Session:
         self.typed_into = None
         x, y, what = self._target(target)
         await self._touching(hold_ms, (x, y))
-        await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms), timeout=hold_ms / 1000 + ACTION_WAIT)
+        if not await self._fast_tap(x, y, hold_ms):
+            await self._call("POST", "/session/{sid}/actions", ui.tap(x, y, hold_ms), timeout=hold_ms / 1000 + ACTION_WAIT)
         self.last_point = (x, y)
         return f"{'Long-pressed' if hold_ms > 300 else 'Tapped'} {what}."
+
+    async def _fast_tap(self, x: float, y: float, hold_ms: int) -> bool:
+        """Touch through the fork's fast tap route when this runner has it (see FAST_TAP). False when the touch is
+        left to W3C actions: no route, not portrait (the route's points are portrait screen points), or an error
+        that says nothing was played. An error that may come after the touch was played is raised, never retried."""
+        if FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
+            return False
+        await self.ensure()
+        if self.fast_tap is None:
+            try:
+                answer = await self._call("GET", FAST_VERSION_PATH, timeout=LOCK_WAIT)
+            except DeviceError:
+                answer = {}
+            value = answer.get("value")
+            self.fast_tap = isinstance(value, dict) and isinstance(value.get("tapwright"), int) and value["tapwright"] >= 1
+        if not self.fast_tap:
+            return False
+        body = {"x": x, "y": y, "duration": hold_ms / 1000, "wait": True}
+        try:
+            await self._call("POST", FAST_TAP_PATH, body, timeout=hold_ms / 1000 + ACTION_WAIT)
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" in said or "unknown method" in said:
+                self.fast_tap = False  # not this runner's route after all
+            elif not ("invalid argument" in said or "too many touches" in said):
+                raise  # it may have been played (a timeout, XCTest's own error): touching again could do it twice
+            getattr(self.device, "log", lambda *a: None)(f"fast tap refused ({e}): W3C actions instead")
+            return False
+        return True
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False,
                         target: ui.Target | None = None, at: tuple[float, float] | None = None) -> str:

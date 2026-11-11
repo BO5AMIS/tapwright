@@ -25,7 +25,7 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.0", "839a33f80bd159438b9f71cf49451949b27f03088045c1e9fdefab781fc78154", "fork-tw-16.15.3.0"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.1", "22cdfcc0c0036dc997e0213f88f8a901127990bd4a177e1396147a8d27e42b4d", "fork-tw-16.15.3.1"),
 }
 WDA_DEFAULT = "appium"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]

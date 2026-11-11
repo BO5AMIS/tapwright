@@ -1017,3 +1017,110 @@ def test_typing_into_a_field_that_took_focus_from_another_checks_the_keys_landed
     asyncio.run(s2.type_text("abc", replace=True, target=ui_module.Target(ref="e1")))
     assert [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]][-1] == "keys" and not s2.retyped
     assert "clear" not in [p.rsplit("/", 1)[1] for _, p, _ in phone.requests[before:]]
+
+
+class FastRunner(Recorder):
+    """Tapwright's own runner: it has the fast tap route. `tap_error` makes the route answer with that error."""
+
+    def __init__(self, has_route=True):
+        super().__init__()
+        self.has_route, self.tap_error = has_route, None
+
+    async def http(self, method, path, payload=None, timeout=30.0):
+        if path.endswith("/wda/tw/version") or path.endswith("/wda/tw/tap"):
+            self.requests.append((method, path, payload))
+            if not self.has_route:
+                raise DeviceError("WebDriverAgent: unknown command: Unhandled endpoint: /session/S/wda/tw/version")
+            if path.endswith("/wda/tw/version"):
+                return {"value": {"tapwright": 1}}
+            if self.tap_error:
+                raise self.tap_error
+            return {"value": None}
+        return await super().http(method, path, payload, timeout)
+
+
+def _paths(phone):
+    return [p.replace("/session/S", "") for _, p, _ in phone.requests if "/wda/tw/" in p or p.endswith("/actions")]
+
+
+def test_a_tap_goes_through_the_fast_route_when_the_runner_has_it(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    s = Session(runner)
+    asyncio.run(s.tap(ui_module.Target(x=30.4, y=800)))
+    asyncio.run(s.tap(ui_module.Target(x=60, y=90)))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/tap", "/wda/tw/tap"]  # asked once per session
+    body = [p for _, path, p in runner.requests if path == "/session/S/wda/tw/tap"][0]
+    assert body == {"x": 30.4, "y": 800.0, "duration": 0.02, "wait": True} and s.last_point == (60.0, 90.0)
+
+
+def test_a_new_session_asks_for_the_route_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    s = Session(runner)
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    asyncio.run(s.reset())
+    runner.rsd = "tunnel"
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/tap", "/wda/tw/version", "/wda/tw/tap"]
+
+
+def test_appiums_runner_taps_through_w3c_actions_and_is_asked_once(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner(has_route=False)
+    s = Session(runner)
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/wda/tw/version", "/actions", "/actions"] and s.fast_tap is False
+
+
+def test_a_refused_fast_tap_falls_back_to_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    runner.tap_error = DeviceError("WebDriverAgent: unknown error: too many touches are still being played; try again")
+    s = Session(runner)
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/tap", "/actions"] and s.fast_tap is True
+    runner.tap_error = DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner)[3:] == ["/wda/tw/tap", "/actions", "/actions"] and s.fast_tap is False
+
+
+def test_a_long_press_waits_for_the_touch_and_a_timeout_is_not_touched_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    s = Session(runner)
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40), hold_ms=1000))
+    body = [p for _, path, p in runner.requests if path.endswith("/wda/tw/tap")][-1]
+    assert body["duration"] == 1.0 and body["wait"] is True
+    runner.tap_error = DeviceError("WebDriverAgent: timeout: the touch was not played in time")
+    with pytest.raises(DeviceError):
+        asyncio.run(s.tap(ui_module.Target(x=30, y=40), hold_ms=1000))
+    assert "/actions" not in _paths(runner)  # it may have been played: never a second touch
+
+
+def test_landscape_and_the_off_switch_keep_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    s.screen, s.turn = (932.0, 430.0), 90
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/actions"]
+    monkeypatch.setattr(session_module, "FAST_TAP", "0")
+    s.screen, s.turn = (430.0, 932.0), 0
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/actions", "/actions"]
+
+
+def test_an_error_that_may_follow_the_touch_is_raised_not_touched_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    runner = FastRunner()
+    runner.tap_error = DeviceError("WebDriverAgent: unknown error: XCTest could not play the touch")
+    s = Session(runner)
+    with pytest.raises(DeviceError):
+        asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    runner.tap_error = DeviceError("WebDriverAgent: invalid argument: x and y must be finite numbers (screen points)")
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/tap", "/wda/tw/tap", "/actions"]
