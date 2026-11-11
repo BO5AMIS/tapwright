@@ -9,7 +9,10 @@ video transport (`WS /video`) next to the JPEG stream, the state `not-answering`
 code `not_answering`, and the page at `/viewer` as well as `/`; the user handed these
 decisions to the two projects on 2026-11-10, and both agree on it. Version 1.3 (2026-11-10)
 adds `tool` to the status and `overlay` to `accepts`, for the one viewer page both tools now
-serve (`viewer.html`, identical in both repos).
+serve (`viewer.html`, identical in both repos). Version 1.4 (2026-11-11) adds an optional `caption` to
+`action` messages: a short plain-language name for the step, which the page shows to people watching. It also
+defines `kind`. Without a caption the page makes one from `kind` and `label`. Agreed between the two projects
+for the owner's presentation view.
 
 - **Server:** a tool's own process: Tapline's host, or `tapwright serve`.
 - **Client:** the viewer page, or an adapter.
@@ -133,8 +136,92 @@ JSON text messages. Both sides ignore types and fields they don't know.
 |---|---|
 | `{ "type": "status", "protocol": 1, "tool", "state", "detail", "via", "fps", "driver", "paused", "size": { "w", "h" }, "accepts": […], "quality" }` | `tool`: optional, the server's name for the page's title (`Tapline`, `Tapwright`); the page shows `<tool> live view`. `state`: `live`, `connecting`, `reconnecting`, `locked` (the phone is locked; the server can't unlock it; the page shows "Phone locked" and then `detail`), `not-answering` (the app in front is there but doesn't answer; `detail` names it, and the page shows "App not answering") or `no-device`. `detail`: optional plain text (needs setup, phone not found …). `via`: how the phone is reached (`usb`, `wifi`, `tailscale`). `driver`: `agent`, `person` or `null`. `size` in points. `accepts`: the input this server supports, from `tap`, `longPress`, `drag`, `scroll`, `text`, `enter`, `backspace`, `home`, `volume`, `quality`, `video` (the server offers `/video`) and `overlay` (the server can send overlays); clients hide the rest. `quality`: optional, the current stream preset (`sharp`, `balanced`, `light`) when the server accepts `quality`. |
 | `{ "type": "overlay", "rev", "at", "elements": [{ "ref", "type", "label", "id", "rect": { "x", "y", "w", "h" } }] }` | the elements on screen while overlays are on. `rev` matches `X-Tree-Rev` when the server has revisions; `at` is when it was read, so a client can dim an overlay older than the latest action. |
-| `{ "type": "action", "by": "agent" \| "person", "kind", "label", "rect", "point", "at", "ok", "code" }` | what was just done, for the viewer to show (a highlight or a tap mark). `rect`, `point` (in 0..1), `at`, `ok` optional; when `ok` is `false`, `code` says why (see errors). |
+| `{ "type": "action", "by": "agent" \| "person", "kind", "label", "caption", "rect", "point", "at", "ok", "code", "reason" }` | What was just done, for the viewer to show: a highlight or touch mark, and a caption. `rect`, `point` (in 0..1), `at`, `ok`, `label`, `caption` and `reason` are optional; when `ok` is `false`, `code` says why (see errors), and with `code` `not_actionable`, `reason` is the reason word from AGENT-TOOLS §4 (`covered`, `off_screen`, `disabled`, `under_tab_bar`, `behind_alert`, `no_action`). `kind` is the step's name (see "Kinds"). `label` is the element's name, for the page's details view. `caption` is the step in plain words, for people (see "Captions"). |
 | `{ "type": "error", "message", "code" }` | `code`, optional and machine-readable: `busy` (a person is driving), `paused`, `stale` (the screen changed; look again), `locked`, `reconnecting`, `not_answering` (the app in front doesn't answer; close it and open it again), `unsupported`, `unauthorized`, `not_actionable` (the input reached the app, but a real touch there would do nothing or couldn't reach what's there; the message starts with the reason word, as in AGENT-TOOLS.md §4, e.g. `no_action: Nothing at (120, 640) takes a touch.`), `internal` (a bug or a failure on the phone side; the message says which) |
+
+## Steps: kinds and captions
+
+### Kinds
+
+- **For the agent's steps,** `kind` is the AGENT-TOOLS tool name: `tap`, `long_press`, `type_text`, `scroll`,
+  `swipe`, `toggle`, `back`, `alert`, `open_url`, `open_app`, `close_app`, `rotate`, `reload`, `app_command`,
+  `wait_for`.
+- **For a person's input,** it is the viewer input name: `tap`, `longPress`, `drag`, `scroll`, `text`, `enter`,
+  `backspace`, `home`, `volume`.
+- **A page treats a kind it doesn't know** by the table's last row.
+
+### Captions
+
+- **What a caption is:**
+  - one short sentence fragment, at most 60 characters, sentence case, no full stop;
+  - it names the step as a person would: `Tap "Sign up"`, `Type into "Email"`, `Scroll down`,
+    `Switch "Remind me"`, `Answer the alert`, `Go back`, `Open Wayfare`, `Turn the phone`.
+- **What a caption never contains:**
+  - refs, coordinates, element types, JSON or bundle identifiers;
+  - the text typed into a field: the phone shows that itself, and a password must never appear;
+  - a link's address: `open_url` is always "Open link", because a URL can carry codes or tokens;
+  - the failure reason: the page adds it (see below), so it is never said twice.
+- **Element names** longer than 24 characters are cut with "…", by the server and by the page alike.
+- **The server's caption** is for the agent's steps. It may say more than the table, e.g. `app_command` →
+  "Switch to dark mode". When it sends none, the page uses the table. A person's steps always use the table's
+  person column.
+
+| `kind` | Agent's step | Person's step |
+|---|---|---|
+| `tap`, `double_tap` | `Tap "<label>"` (`Tap` without a label) | `You tapped "<label>"` (`You tapped`) |
+| `long_press`, `longPress` | `Press and hold "<label>"` | `You pressed and held "<label>"` |
+| `type_text`, `text` | `Type into "<label>"` (`Type` without a label) | `You typed` |
+| `enter` | `Press Return` | `You pressed Return` |
+| `backspace` | `Delete` | `You deleted` |
+| `scroll` | `Scroll` (`Scroll up/down/left/right` when known) | `You scrolled` |
+| `swipe`, `drag` | `Swipe` | `You swiped` |
+| `toggle` | `Switch "<label>"` | `You switched "<label>"` |
+| `back` | `Go back` | `You went back` |
+| `alert` | `Answer the alert` | `You answered the alert` |
+| `open_url` | `Open link` | `You opened a link` |
+| `open_app` / `close_app` | `Open <label>` / `Close <label>` | `You opened <label>` / `You closed <label>` |
+| `rotate` | `Turn the phone` | `You turned the phone` |
+| `home` | `Home` | `You pressed Home` |
+| `volume` | `Volume up` / `Volume down` | `You pressed Volume up` / `down` |
+| `reload` | `Reload the app` | `You reloaded the app` |
+| `app_command` | `Run "<label>"` | `You ran "<label>"` |
+| `wait_for` | no caption, no pill (not a step a viewer needs) | — |
+| anything else | the `kind`, with `_` as spaces | `You: ` and the `kind`, with `_` as spaces |
+
+- **Failures:** when `ok` is `false`, the page shows the caption with the reason after a dash:
+  `Tap "Save" – covered`. The reason is `reason` when the message has one, else `code`. The wording is fixed:
+
+| Code or reason word | Shown as |
+|---|---|
+| `covered` | covered |
+| `off_screen` | off screen |
+| `disabled` | disabled |
+| `under_tab_bar` | under the tab bar |
+| `behind_alert` | behind an alert |
+| `no_action` | nothing there |
+| `stale` | the screen changed |
+| `busy` | someone else is using it |
+| `paused` | paused |
+| `not_answering` | app not answering |
+| `timeout` | took too long |
+| anything else | didn't work |
+
+### The page's presentation view
+
+These are listed so both tools show them the same way. They are the page's own behaviour.
+
+- **Touches:** a soft ripple at `point`, and a fading trail for a drag, swipe or scroll. No text beside the
+  touch.
+- **Caption pill:** under the phone, the latest step's caption. It is in the agent's or the person's colour,
+  stays for 2.5 s or until the next step, and is red with the reason when `ok` is `false`.
+- **Steps drawer,** closed by default: the steps of this session, newest first (the last 50), each with a small
+  icon by kind, its caption, and how long ago it happened.
+- **Details toggle,** off by default: shows the developer view (the `label` beside a touch, the element boxes
+  when `overlay` is accepted). The choice is remembered per browser.
+- **Reduced motion:** with `prefers-reduced-motion`, no ripple animation and no trail; a static ring shows
+  briefly instead.
+- **The caption is announced politely to screen readers** (the existing `announce` region), at most once a
+  second.
 
 ## Control
 

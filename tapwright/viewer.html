@@ -17,6 +17,7 @@
   --stage-hi: #ffffff;
   --stage-lo: #d9dee6;
   --panel: rgba(255, 255, 255, 0.72);
+  --panel-solid: #ffffff;
   --line: rgba(17, 24, 39, 0.12);
   --text: #111827;
   --muted: #4b5563;
@@ -52,6 +53,7 @@
     --stage-hi: #2d3440;
     --stage-lo: #0b0d11;
     --panel: rgba(22, 26, 33, 0.78);
+    --panel-solid: #161a21;
     --line: rgba(255, 255, 255, 0.1);
     --text: #e8ebf0;
     --muted: #9aa4b2;
@@ -153,6 +155,12 @@ button, select {
   cursor: pointer;
 }
 select { padding-right: 8px; }
+/* The list a select opens is drawn by the system, on its own background: the options get the theme's
+   colours, or dark mode drew the page's light text on the system's white (seen by the owner, 2026-11-11). */
+select option { background: #ffffff; color: #111827; }
+@media (prefers-color-scheme: dark) {
+  select option { background: #1b2029; color: #e8ebf0; }
+}
 button:hover, select:hover { border-color: var(--btn-line-hover); }
 button[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -384,6 +392,102 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   pointer-events: none;
 }
 #notice.on { opacity: 1; }
+#notice { bottom: auto; top: 12px; }
+/* Presentation view (VIEWER-PROTOCOL 1.4): people see the step in plain words under the phone and a ripple at
+   the touch. The element's name beside a touch, the boxes and the coordinates are the Details view's. */
+body:not(.details) .mark .tag { display: none; }
+.mark.ring::after {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: -16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--c);
+  animation: ripple 0.7s ease-out forwards;
+}
+@keyframes ripple {
+  0% { transform: scale(0.6); opacity: 0.9; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+#caption {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: 18px;
+  max-width: calc(100% - 32px);
+  transform: translate(-50%, 6px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+#caption.on { opacity: 1; transform: translate(-50%, 0); }
+#caption::before {
+  content: "";
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--agent);
+}
+#caption.person::before { background: var(--person); }
+#caption.fail { border-color: var(--notice-line); color: var(--notice-text); background: var(--notice-bg); }
+#caption.fail::before { background: var(--fail); }
+#steps {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  right: 16px;
+  bottom: 64px;
+  width: 320px;
+  max-width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 20px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.steps-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 10px 10px 18px;
+  border-bottom: 1px solid var(--line); }
+.steps-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+#steps-close { min-height: 32px; width: 32px; padding: 0; font-size: 20px; line-height: 1; }
+#steps-list { list-style: none; margin: 0; padding: 6px 8px 10px; overflow-y: auto; flex: 1; }
+#steps-list li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 12px; }
+#steps-list li + li { margin-top: 2px; }
+#steps-list .ico { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font: 15px/1 "Segoe UI Symbol", "Apple Symbols", system-ui, sans-serif;
+  color: var(--on-mark); background: var(--agent); }
+#steps-list li.person .ico { background: var(--person); }
+#steps-list li.fail .ico { background: var(--fail); }
+#steps-list .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#steps-list li.fail .txt { color: var(--dot-bad); }
+#steps-list .ago { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+#steps-empty { margin: 0; padding: 18px; color: var(--muted); }
+#steps-list:not(:empty) + #steps-empty { display: none; }
+@media (max-width: 560px) {
+  #steps { top: auto; left: 12px; right: 12px; bottom: 72px; width: auto; max-width: none; height: 48%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mark.ring::after { animation: none; opacity: 0; }
+  #caption { transition: none; }
+}
 </style>
 </head>
 <body>
@@ -396,6 +500,8 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
   </div>
   <div id="tools" role="toolbar" aria-label="Viewer controls">
     <button type="button" id="pause" aria-pressed="false">Pause agent</button>
+    <button type="button" id="steps-btn" aria-expanded="false" aria-controls="steps">Steps</button>
+    <button type="button" id="details" aria-pressed="false">Details</button>
     <button type="button" id="boxes" aria-pressed="false" hidden>Boxes</button>
     <label class="q" id="quality-wrap" hidden>Quality
       <select id="quality" aria-label="Stream quality">
@@ -424,6 +530,15 @@ label.q { display: inline-flex; align-items: center; gap: 6px; color: var(--mute
     </div>
     <div id="glass" aria-hidden="true"><div id="island"></div></div>
   </div>
+  <div id="caption" aria-hidden="true"></div>
+  <aside id="steps" aria-label="Steps" hidden>
+    <div class="steps-head">
+      <h2>Steps</h2>
+      <button type="button" id="steps-close" aria-label="Close steps">&times;</button>
+    </div>
+    <ol id="steps-list"></ol>
+    <p id="steps-empty">No steps yet. Each touch, typing and scroll shows here.</p>
+  </aside>
   <div id="notice" role="alert"></div>
 </main>
 <script>
@@ -990,8 +1105,9 @@ function createVideoBlock(io) {
   }
   function layout() {
     var pad = 24;
+    var room = 84; /* under the phone: the step caption */
     var aw = Math.max(40, stage.clientWidth - pad * 2);
-    var ah = Math.max(40, stage.clientHeight - pad * 2);
+    var ah = Math.max(40, stage.clientHeight - pad * 2 - room);
     var a = aspect();
     var sr = Math.min(1, 1 / a); /* the short side, per unit of width */
     var w = Math.min(aw / (1 + 2 * BEZEL * sr), ah / (1 / a + 2 * BEZEL * sr));
@@ -1297,6 +1413,117 @@ function createVideoBlock(io) {
     return reach(points) < TAP_SLOP;
   }
 
+  /* Captions (VIEWER-PROTOCOL 1.4): the step in plain words. The server's caption when it sends one (the
+     agent's steps), else one made from kind and label with the protocol's table. */
+  var NAME_MAX = 24;
+  var CAPTION_MAX = 60;
+  function cut(text, max) { return text.length <= max ? text : text.slice(0, max - 1) + "\u2026"; }
+  function q(name) { return name ? " \"" + name + "\"" : ""; }
+  var KIND_CAPTION = {
+    tap: ["Tap", "You tapped"], double_tap: ["Tap", "You tapped"],
+    long_press: ["Press and hold", "You pressed and held"], longPress: ["Press and hold", "You pressed and held"],
+    type_text: ["Type into", "You typed"], text: ["Type into", "You typed"],
+    enter: ["Press Return", "You pressed Return"], backspace: ["Delete", "You deleted"],
+    scroll: ["Scroll", "You scrolled"], swipe: ["Swipe", "You swiped"], drag: ["Swipe", "You swiped"],
+    toggle: ["Switch", "You switched"], back: ["Go back", "You went back"],
+    alert: ["Answer the alert", "You answered the alert"], open_url: ["Open link", "You opened a link"],
+    open_app: ["Open", "You opened"], close_app: ["Close", "You closed"],
+    rotate: ["Turn the phone", "You turned the phone"], home: ["Home", "You pressed Home"],
+    reload: ["Reload the app", "You reloaded the app"], app_command: ["Run", "You ran"]
+  };
+  /* kinds whose caption names the element; the rest stand alone (a link's address is never shown) */
+  var NAMED = { tap: 1, double_tap: 1, long_press: 1, longPress: 1, type_text: 1, toggle: 1, app_command: 1 };
+  var PLAIN_NAME = { open_app: 1, close_app: 1 };
+  var REASON = {
+    covered: "covered", off_screen: "off screen", disabled: "disabled", under_tab_bar: "under the tab bar",
+    behind_alert: "behind an alert", no_action: "nothing there", stale: "the screen changed",
+    busy: "someone else is using it", paused: "paused", not_answering: "app not answering", timeout: "took too long"
+  };
+  var KIND_ICON = {
+    tap: "\u25cf", double_tap: "\u25cf", long_press: "\u25c9", longPress: "\u25c9", type_text: "\u270e", text: "\u270e",
+    enter: "\u21b5", backspace: "\u232b", scroll: "\u2195", swipe: "\u21c6", drag: "\u21c6", toggle: "\u25d0",
+    back: "\u2039", alert: "!", open_url: "\u2197", open_app: "\u2197", close_app: "\u00d7", rotate: "\u27f3",
+    home: "\u2302", volume: "\u266a", reload: "\u21bb", app_command: "\u2318"
+  };
+  function captionOf(m) {
+    var kind = String(m.kind || "");
+    if (kind === "wait_for") return null;
+    var person = m.by === "person";
+    var name = cut(String(m.label || "").trim(), NAME_MAX);
+    var text;
+    if (!person && typeof m.caption === "string" && m.caption.trim()) {
+      text = m.caption.trim();
+    } else if (kind === "volume") {
+      var up = /up/i.test(name);
+      text = person ? "You pressed Volume " + (up ? "up" : "down") : "Volume " + (up ? "up" : "down");
+    } else if (KIND_CAPTION[kind]) {
+      var w = KIND_CAPTION[kind][person ? 1 : 0];
+      if (PLAIN_NAME[kind]) text = w + " " + (name || "the app");
+      else if (NAMED[kind] && name && !(person && (kind === "text" || kind === "type_text"))) text = w + q(name);
+      else if (kind === "type_text" && !name && !person) text = "Type";
+      else text = w;
+    } else {
+      text = (person ? "You: " : "") + kind.replace(/_/g, " ");
+    }
+    text = cut(text, CAPTION_MAX);
+    if (m.ok === false) {
+      var why = REASON[String(m.reason || "")] || REASON[String(m.code || "")] || "didn\u2019t work";
+      text += " \u2013 " + why;
+    }
+    return text;
+  }
+  var captionEl = $("caption");
+  var stepsList = $("steps-list");
+  var steps = [];
+  var lastSpoken = 0;
+  function noteStep(m) {
+    var text = captionOf(m);
+    if (!text) return;
+    var cls = (m.by === "person" ? "person" : "agent") + (m.ok === false ? " fail" : "");
+    captionEl.textContent = text;
+    captionEl.className = "on " + cls;
+    clearTimeout(noteStep.timer);
+    noteStep.timer = setTimeout(function () { captionEl.classList.remove("on"); }, m.ok === false ? 4000 : 2500);
+    var now = Date.now();
+    if (now - lastSpoken >= 1000) { /* politely, at most once a second */
+      lastSpoken = now;
+      $("announce").textContent = text;
+    }
+    steps.unshift({ text: text, cls: cls, icon: KIND_ICON[String(m.kind || "")] || "\u2022", at: now });
+    if (steps.length > 50) steps.length = 50;
+    if (!$("steps").hidden) renderSteps();
+  }
+  function ago(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 5) return "now";
+    if (s < 60) return s + " s";
+    var min = Math.round(s / 60);
+    return min < 60 ? min + " min" : Math.round(min / 60) + " h";
+  }
+  function renderSteps() {
+    var now = Date.now();
+    stepsList.textContent = "";
+    for (var i = 0; i < steps.length; i++) {
+      var li = document.createElement("li");
+      li.className = steps[i].cls;
+      var ico = document.createElement("span");
+      ico.className = "ico";
+      ico.setAttribute("aria-hidden", "true");
+      ico.textContent = steps[i].icon;
+      var txt = document.createElement("span");
+      txt.className = "txt";
+      txt.textContent = steps[i].text;
+      var when = document.createElement("span");
+      when.className = "ago";
+      when.textContent = ago(now - steps[i].at);
+      li.appendChild(ico);
+      li.appendChild(txt);
+      li.appendChild(when);
+      stepsList.appendChild(li);
+    }
+  }
+  setInterval(function () { if (!$("steps").hidden) renderSteps(); }, 10000);
+
   /* Actions: short-lived marks. */
   function showAction(m) {
     if (isNum(m.at) && m.at > lastActionAt) {
@@ -1347,6 +1574,7 @@ function createVideoBlock(io) {
       trimMarks();
     }
     setTimeout(function () { removeMark(el); }, ok ? 1700 : 2700);
+    noteStep(m);
   }
 
   /* WebSocket. */
@@ -1463,6 +1691,32 @@ function createVideoBlock(io) {
   /* The drawn keys are a mouse shortcut for the toolbar's buttons (which stay the keyboard's way). */
   $("key-vol-up").addEventListener("click", function () { if (accepts.volume) $("vol-up").click(); });
   $("key-vol-down").addEventListener("click", function () { if (accepts.volume) $("vol-down").click(); });
+
+  /* Steps drawer and the Details view (VIEWER-PROTOCOL 1.4, presentation view). Details is remembered per
+     browser; storage may be unavailable (a private window), and then it simply starts off. */
+  function setSteps(open) {
+    $("steps").hidden = !open;
+    $("steps-btn").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) renderSteps();
+  }
+  $("steps-btn").addEventListener("click", function () {
+    setSteps($("steps").hidden);
+    release(this);
+  });
+  $("steps-close").addEventListener("click", function () {
+    setSteps(false);
+    $("steps-btn").focus();
+  });
+  function setDetails(on) {
+    document.body.classList.toggle("details", on);
+    $("details").setAttribute("aria-pressed", on ? "true" : "false");
+    try { localStorage.setItem("viewer.details", on ? "1" : "0"); } catch (e) { /* not kept */ }
+  }
+  $("details").addEventListener("click", function () {
+    setDetails(!document.body.classList.contains("details"));
+    release(this);
+  });
+  try { if (localStorage.getItem("viewer.details") === "1") setDetails(true); } catch (e) { /* starts off */ }
 
   /* Drag trail: the path under the pointer while a person drags, on its own canvas so it
      never mixes with the action marks. It is drawn in the person's colour with a dark edge,
