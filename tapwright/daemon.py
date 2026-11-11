@@ -2052,7 +2052,8 @@ class Daemon:
         skips it, and nothing here touches the phone."""
         if element is None:
             return ""
-        hit = _POLICY.get().check(self._app_bundle(), element.text)
+        # an input is matched by its label only: what someone typed into it is data, not what a touch does
+        hit = _POLICY.get().check(self._app_bundle(), element.label if element.role == "input" else element.text)
         if hit is None:
             return ""
         kind, word = hit
