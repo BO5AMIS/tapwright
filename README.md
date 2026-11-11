@@ -9,9 +9,9 @@ on the phone: your TestFlight builds, development builds, the App Store version.
 Nothing is added to your app, and no Mac or Xcode is needed.
 
 > [!NOTE]
-> Early. It works and is measured on one phone (an iPhone 14 Pro Max on iOS 26) from one
-> Windows PC, over USB and Wi-Fi. Nobody but its authors has run it yet; see
-> [Status](#status).
+> Version 1 is for testing and QA on a **test phone that sits next to your computer**, over
+> USB or the same Wi-Fi. It is measured on one phone (an iPhone 14 Pro Max on iOS 26) from
+> one Windows PC; see [Status](#status).
 
 ## How it works
 
@@ -34,7 +34,7 @@ no admin rights and works on any OS.
 
 Tapwright drives **the whole phone from the outside** (any app, system alerts, the home
 screen). Its sibling project [Tapline](https://github.com/<you>/tapline) drives **your own
-React Native app from the inside**, from anywhere, with nothing but the app and Tailscale.
+React Native app from the inside**, through a small SDK in the app.
 
 ## You need
 
@@ -82,7 +82,7 @@ claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
   other app (`not_allowed`) and is never shown another app's screen.
 - On a phone kept for testing, with no personal accounts on it, use `--dedicated` instead:
   the agent may then use every app, the Home screen and system prompts.
-- With neither, the agent can do nothing. That is deliberate: it is your phone.
+- With neither, the agent can do nothing. That is deliberate: the phone may be yours.
 
 Other MCP clients: run `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
 on my phone, sign up with a test email, and tell me if anything looks broken."*
@@ -153,16 +153,13 @@ live view protocol in [docs/VIEWER-PROTOCOL.md](docs/VIEWER-PROTOCOL.md).
 
 ## Without the cable
 
-After setup, unplug: on the same Wi-Fi, Tapwright finds the phone by itself. To reach the
-phone over a VPN such as Tailscale, give its address:
+After setup, unplug: on the same Wi-Fi, Tapwright finds the phone by itself, or give its
+address with `tapwright serve --phone 192.168.x.y`. Over Wi-Fi every step is slower than
+over USB (see [Status](#status)); for long unattended runs, keep the cable in.
 
-```sh
-tapwright probe --host 100.x.y.z --watch   # can the phone be reached there? (experimental)
-tapwright serve --phone 100.x.y.z    # the daemon dials that address
-```
-
-Whether iOS accepts the developer connection through a VPN is what `probe` finds out.
-Treat it as experimental until it has been confirmed on your phone.
+Reaching the phone from another network (a VPN such as Tailscale, or cellular) is not part
+of version 1. `tapwright probe --host <address> --watch` exists to try it; treat it as
+experimental.
 
 ## Limits
 
@@ -173,19 +170,25 @@ Treat it as experimental until it has been confirmed on your phone.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
   on a test device, or an unattended run stops there.
-- It's your phone. An agent gets only the apps you name, and that is enforced. Inside those
-  apps, the agent guide tells agents to stay away from purchases, sending, deleting and
-  account changes unless you asked for exactly that: this part is guidance, not enforcement.
-- Landscape isn't supported yet: the picture arrives sideways.
+- A test phone is the intended setup. If you use a phone with your own accounts on it, an
+  agent gets only the apps you name, and that is enforced; inside those apps, the agent guide
+  tells agents to stay away from purchases, sending, deleting and account changes unless you
+  asked for exactly that: this part is guidance, not enforcement.
+- Notification banners cover the top of the screen for a few seconds. Tapwright waits them
+  out and won't touch under one, which can slow a run on a phone that gets notifications.
+  Don't silence them with a Focus: iOS shares a Focus with your other devices.
+- Landscape: the live view and screenshots turn with the phone; touches in landscape have not
+  been checked yet.
 
 ## Status
 
 | | |
 |---|---|
-| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated` |
-| Measured over USB | a tap, with its answer: 0.7 s; a look: 0.16 s; typing 1.1 s; a scroll 1.5 s; a person's tap in the live view shows after 0.27 s |
-| Measured over Wi-Fi | slower: a tap 1.15 s, a look 0.38 s |
-| Not done | landscape; a run over 5G or a VPN; a second phone or an iPad; a run by anyone but the authors |
+| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated`; landscape pictures |
+| Measured over USB | a tap, with its answer: 0.68 s; a look: 0.16 s; a toggle 0.65 s; typing 0.74 s; a scroll 1.45 s; a person's tap in the live view shows after 0.23 s; the reliability suite with no misses |
+| Measured over Wi-Fi | slower: a tap 0.9 s, a look 0.26 s, typing 0.9 to 1.3 s; the reliability suite with 2 misses in 142 |
+| Agents | a first-time agent with the skill tested the whole lab charter in 44 calls (40 with Tapline connected too) |
+| Not done | touches in landscape; a second phone or an iPad; a run by anyone but the authors |
 
 The measurements, and the bar they are held against, are in
 [docs/QUALITY-BAR.md](docs/QUALITY-BAR.md).
