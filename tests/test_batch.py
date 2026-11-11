@@ -171,3 +171,20 @@ def test_a_dry_run_batch_resolves_step_one_and_touches_nothing():
         assert "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
+
+
+def test_a_fresh_replay_reopens_the_app_and_waits_for_what_step_one_aims_at(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = list(FORM)
+        await d.run_tool("a", "look", {"screenshot": False})
+        path = tmp_path / "s.json"
+        path.write_text(json.dumps(batch.script("fresh", "com.example.app", [{"tool": "tap", "target": {"id": "save"}}])),
+                        "utf-8")
+        r = await d.run_tool("a", "replay", {"path": str(path)})
+        assert r["text"].startswith("Ran 1 of 1 steps")
+        calls = [c for c in d.session.calls if isinstance(c, str)]
+        assert calls.index("terminate") < calls.index("launch") < len(calls) - 1 - calls[::-1].index("tap")
+        await finish(stop, task)
+    run(go)

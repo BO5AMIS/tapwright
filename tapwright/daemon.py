@@ -45,6 +45,7 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate"})
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
+FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
 STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
@@ -918,6 +919,17 @@ class Daemon:
             # a known start: the app closed and opened again (Tapline reloads its JS instead)
             await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
             await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
+            # a fresh start takes the app a while (a development build loads its bundle): wait for what step 1 aims
+            # at, up to FRESH_WAIT. If it never comes, step 1 says not_found, which is the honest answer.
+            aim = data["steps"][0].get("target")
+            kind = next((k for k in ("id", "label", "text") if isinstance(aim, dict) and aim.get(k)), None)
+            if kind is not None:
+                try:
+                    await self.run_tool(client_id, "wait_for", {kind: aim[kind], "timeout": FRESH_WAIT, "look": False},
+                                        scope)
+                except Refused as e:
+                    if e.code != "timeout":
+                        raise
         points = [n for n, step in enumerate(data["steps"], 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
