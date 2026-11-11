@@ -3,6 +3,7 @@ holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
 import io
+import re
 from dataclasses import dataclass
 
 from . import store, ui
@@ -21,6 +22,9 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
+ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
+# How far to turn a captured frame clockwise for each WebDriverAgent rotation z: to be checked on the phone
+TURN_FOR_Z = {90: 270, 270: 90}
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -62,6 +66,9 @@ class Session:
         # what a sheet hides, each with the element in front that names the sheet (for `covered`)
         self.behind: list[tuple[ui.Element, ui.Element | None]] = []
         self.front_items: list[ui.Element] = []  # the list as back_point last read it
+        # Degrees the stream's frames are turned clockwise to stand upright: 0 in portrait. In landscape the tree
+        # and window are 932x430 while WebDriverAgent's frames stay as captured (measured 2026-11-11).
+        self.turn = 0
         # Awaited with a touch's length in ms just before each touch while it is set: the daemon sets it for the
         # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
         self.touch_hook = None
@@ -161,6 +168,27 @@ class Session:
                 raise ConnectionLost(str(e)) from e
             raise
 
+    async def _follow_orientation(self, source: str | None) -> None:
+        """Keep `screen` and `turn` with the phone's orientation: the tree's root says the screen's size in points
+        now (932x430 in landscape), and WebDriverAgent's rotation says which way it turned (z 90 or 270)."""
+        if not isinstance(source, str):
+            return
+        root = ROOT_SIZE.search(source[:2000])
+        if root is None:
+            return
+        w, h = float(root.group(1)), float(root.group(2))
+        if w <= 0 or h <= 0 or (w > h) == (self.screen[0] > self.screen[1]):
+            return
+        self.screen = (w, h)
+        if w <= h:
+            self.turn = 0
+            return
+        try:
+            z = int((await self._call("GET", "/session/{sid}/rotation", timeout=LOCK_WAIT)).get("value", {}).get("z", 0))
+        except (DeviceError, TypeError, ValueError):
+            z = 90
+        self.turn = TURN_FOR_Z.get(z % 360, 90)
+
     async def _banner_over_an_app(self, source: str | None) -> bool:
         """Is this tree only a notification banner sliding over the app in front? While one shows, WebDriverAgent
         answers with SpringBoard's tree: the banner and nothing of the app (seen on the phone 2026-11-10: the
@@ -183,6 +211,7 @@ class Session:
         try:
             # (asked a second time by _call when the first got no answer: a frozen app answers neither)
             source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            await self._follow_orientation(source)
             waited = 0.0
             while await self._banner_over_an_app(source) and waited < min(BANNER_WAIT, timeout):
                 await asyncio.sleep(BANNER_POLL)

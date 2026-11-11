@@ -23,7 +23,8 @@ from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, Pas
                      PhoneNotFound)
 from .session import Snapshot
 from .tapline import AgentTouches
-from .stream import NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of
+from .stream import (NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump, alike, jpeg_of,
+                     turn_jpeg)
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
@@ -344,6 +345,7 @@ class Daemon:
         # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
         self.agent_stream = os.environ.get("TAPWRIGHT_AGENT_STREAM", "1") != "0"
         self._agent_touches = AgentTouches()
+        self._turned: tuple | None = None  # ((frame seq, degrees), the turned JPEG): see turned()
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
         self.preset = os.environ.get("TAPWRIGHT_PRESET", "balanced")  # (a trial switch: the stream's preset at start)
@@ -946,6 +948,15 @@ class Daemon:
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         return await self._add_shot(answer, view, shot)
+
+    async def turned(self, seq: int, jpeg: bytes, degrees: int) -> bytes:
+        """A stream frame turned upright for landscape, made once per frame for every viewer."""
+        kept = self._turned
+        if kept is not None and kept[0] == (seq, degrees):
+            return kept[1]
+        out = await asyncio.to_thread(turn_jpeg, jpeg, degrees)
+        self._turned = ((seq, degrees), out)
+        return out
 
     async def _toggle_landed(self, view, result: "Toggled") -> tuple[Snapshot, float] | None:
         """A switch's value changes the moment the touch lands; the knob's slide after it is only drawing. Waiting

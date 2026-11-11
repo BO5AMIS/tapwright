@@ -148,6 +148,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                         jpeg = await jpeg_of(frame)  # a video picture is encoded off the loop, once
                     except PictureGone:
                         continue  # a newer frame is already there
+                    turn = getattr(daemon.session, "turn", 0)
+                    if turn and picture is None:  # landscape: the WebDriverAgent frame comes as captured, portrait
+                        jpeg = await daemon.turned(frame.seq, jpeg, turn)
                     head = (f"Content-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n"
                             f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\nX-Coverage: screen\r\n"
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")

@@ -148,6 +148,35 @@ def test_a_touch_near_the_top_waits_out_a_notification_banner(phone, monkeypatch
     assert len(touched) == 4
 
 
+def test_the_session_follows_the_phone_into_landscape_and_back(phone):
+    """Measured on the phone 2026-11-11: in landscape the tree's root and the window are 932x430 and WebDriverAgent's
+    rotation says z 90 or 270, while the stream's frames stay as captured. The session's screen follows the tree,
+    and `turn` says how far to turn a frame."""
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    s.screen = (430.0, 932.0)
+    z, real = [270], phone.http
+
+    def tree(w, h):
+        return ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Calculator" '
+                f'label="Calculator" enabled="true" x="0" y="0" width="{w}" height="{h}"/></AppiumAUT>')
+    sizes = [(932, 430), (932, 430), (430, 932)]
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if "/source" in path:
+            w, h = sizes.pop(0)
+            return {"value": tree(w, h)}
+        if path.endswith("/rotation"):
+            return {"value": {"x": 0, "y": 0, "z": z[0]}}
+        return await real(method, path, payload, timeout)
+    phone.http = http
+    asyncio.run(s.refresh())
+    assert s.screen == (932.0, 430.0) and s.turn == session_module.TURN_FOR_Z[270]
+    asyncio.run(s.refresh())  # still landscape: nothing asked again
+    asyncio.run(s.refresh())
+    assert s.screen == (430.0, 932.0) and s.turn == 0
+
+
 def test_one_stalled_touch_keeps_the_session_and_says_it_is_not_known(phone):
     """Seen on the phone over Wi-Fi 2026-11-10: a tap got no answer for 30 s, then WebDriverAgent was started
     again, though it answered every other request. A touch can't be sent twice, so the caller hears that the

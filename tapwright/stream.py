@@ -137,6 +137,21 @@ class PictureFrame(Frame):
         return f"PictureFrame(seq={self.seq}, at={self.at})"
 
 
+TURNED_QUALITY = 70  # JPEG quality of a frame turned upright on this computer (landscape)
+
+
+def turn_jpeg(jpeg: bytes, degrees: int) -> bytes:
+    """The frame turned clockwise by `degrees` (90, 180 or 270). In landscape WebDriverAgent still sends the screen
+    as captured, upright for portrait; turning it on the phone would cost its runner more than iOS allows
+    (measured 2026-11-09), so it is turned here: about 28 ms a frame."""
+    img = Image.open(io.BytesIO(jpeg))
+    turned = img.transpose({90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180,
+                            270: Image.Transpose.ROTATE_90}[degrees])
+    buf = io.BytesIO()
+    turned.convert("RGB").save(buf, "JPEG", quality=TURNED_QUALITY)
+    return buf.getvalue()
+
+
 async def jpeg_of(frame: Frame) -> bytes:
     """The frame's JPEG; a picture that isn't encoded yet is encoded off the event loop."""
     if isinstance(frame, PictureFrame) and not frame.picture.encoded:

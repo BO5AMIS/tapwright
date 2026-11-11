@@ -170,3 +170,23 @@ def test_presets_never_make_the_phone_redraw_frames():
     and iOS kills it above 80% over a minute; frames sent as captured cost about 15% (measured)."""
     for preset in PRESETS.values():
         assert preset["mjpegScalingFactor"] == 100 and preset["mjpegFixOrientation"] is False
+
+
+def test_a_landscape_frame_is_turned_upright():
+    """In landscape WebDriverAgent's frames stay as captured (1290x2796): turned here, they are as wide as tall
+    the other way round, and the turn goes the asked way."""
+    import io
+
+    from PIL import Image
+
+    from tapwright.stream import turn_jpeg
+    img = Image.new("RGB", (40, 80), "white")
+    img.paste((255, 0, 0), (0, 0, 40, 10))  # a red band along the top of the captured frame
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=95)
+    for degrees, red_side in ((90, "right"), (270, "left")):
+        out = Image.open(io.BytesIO(turn_jpeg(buf.getvalue(), degrees))).convert("RGB")
+        assert out.size == (80, 40)
+        left, right = out.getpixel((2, 20)), out.getpixel((77, 20))
+        red = right if red_side == "right" else left
+        assert red[0] > 200 and red[1] < 80, (degrees, left, right)
