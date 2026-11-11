@@ -993,6 +993,9 @@ def blank_point(items: list[Element], screen: tuple[float, float], top: float,
     buttons sit near edges and corners), else None. A scroll view doesn't count as one that takes a touch: its
     empty area does nothing, and one often fills the whole screen."""
     blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
+    # the text edit menu over a field (Select, Paste) lists its items as `menuitem`, with no action: a touch on one
+    # selects or pastes (blank_point picked "Select" on the phone 2026-11-11, both orientations)
+    blocks += [e.rect for e in items if e.role == "menuitem" and not e.in_alert]
     blocks += [e.rect for e in items if e.type in COVERING_BARS]
     blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
     icons = [e.rect for e in items if e.role == "image" and not e.in_alert]

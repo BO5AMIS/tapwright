@@ -712,6 +712,14 @@ def test_blank_point_falls_back_to_the_grid():
     assert (x, y) == (180.0, 320.0)  # the grid point farthest from the button and the band's edges
 
 
+def test_blank_point_never_touches_the_text_edit_menu():
+    """The edit menu over a focused field ("Select", "Paste") lists as menuitem with no action; on the phone
+    (2026-11-11) blank_point chose the label "Select" inside it."""
+    items = [el("e1", "menuitem", "Select", rect=(24, 193, 83, 50)), el("e2", "text", "Select", rect=(40, 206, 51, 24)),
+             el("e3", "text", "Free", rect=(0, 300, 100, 20))]
+    assert ui.blank_point(items, SCREEN, 60, 500) == (50.0, 310.0)
+
+
 def test_blank_point_keeps_clear_of_a_floating_buttons_icon():
     """In landscape on the lab (2026-11-11) the first free grid point, (20, 80), was 13 pt from Expo's dev tools
     gear (a 26 pt image at 28,93), which takes touches 20-30 pt around it: closing the keyboard opened the
