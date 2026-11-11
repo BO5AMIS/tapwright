@@ -191,3 +191,4 @@ took more than a few seconds (`Settled in` gives the time).
 | calling `back` again when it answered `no_action` | the message names what is open: tap its close control |
 | using `x` and `y` because a ref went stale | `look`, then use the id or the new ref |
 | reporting "couldn't sign in" as a bug | list it under what you couldn't test |
+| reporting a button that does nothing on one spot only | take a `screenshot`. A grey cursor ring there, or a dark menu with Home and Notification Center, is iOS AssistiveTouch, which the element list doesn't show. Tap well outside the menu once to close it, and tell the user to disconnect the pointer |

@@ -178,8 +178,13 @@ experimental.
 - Notification banners cover the top of the screen for a few seconds. Tapwright waits them
   out and won't touch under one, which can slow a run on a phone that gets notifications.
   Don't silence them with a Focus: iOS shares a Focus with your other devices.
-- Landscape: the live view and screenshots turn with the phone; touches in landscape have not
-  been checked yet.
+- Landscape: `rotate` turns the phone; the live view, screenshots and touches follow it (checked
+  on both sides: taps, typing, scrolling, the keyboard, a live-view tap).
+- AssistiveTouch: with a mouse or other pointer connected, iOS shows a cursor, and a tap on
+  that cursor opens the AssistiveTouch menu (Home, Notification Center, ...). Neither the cursor
+  nor the menu is in what Tapwright reads, so a tap there looks like "No visible change", and the
+  next tap only closes the menu. On a test phone, disconnect the pointer or turn AssistiveTouch
+  off while an agent drives it.
 
 ## Status
 
