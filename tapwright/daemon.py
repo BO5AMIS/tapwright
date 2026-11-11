@@ -913,7 +913,10 @@ class Daemon:
         if name == "back" and not done.changed:
             raise Refused("not_actionable", "no_action: nothing changed after back" + self._still_open())
         # a toggle that changed nothing on the stream is not trusted: the tree says whether the switch flipped
+        # Never on the AirPlay video's word alone: a mirror that stalls repeats its last picture, which looks exactly
+        # like a still screen, so "No visible change" could be false. Then the tree read decides (0.16 s).
         if (not done.changed and name != "toggle" and not (full[0] or view.moved) and not view.shown_off
+                and not self._fed_by_video()
                 and (mark[1] is view.read_mark[1] or alike(mark[1], view.read_mark[1]))):
             # no frame changed after the call returned, and the picture at its start is the one the agent's
             # list was read against (nothing changed silently before it): no tree read, the list stays.

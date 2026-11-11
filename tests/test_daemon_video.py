@@ -182,3 +182,29 @@ def test_close_stops_the_feeder():
         await d.close()
         assert task.done()
     run(go)
+
+
+def test_a_mirror_that_stalls_cannot_make_an_action_say_no_visible_change():
+    """A stalled AirPlay mirror repeats its last picture, exactly like a still screen. With video feeding the settle,
+    an action's answer always comes from a tree read: a change the video missed is still in the answer."""
+    async def go():
+        video = FakeVideo()
+        video.show(screen((255, 0, 0)))  # and nothing else: the mirror has stalled
+        session = FakeSession()
+        d = make(session, settle_still=0.08, settle_quiet=0.08, settle_first_frame=0.3)
+        fed(d, video)
+        stop, task = await started(d)
+        await until(lambda: d._fed_by_video() and d.hub.latest is not None)
+        await d.run_tool("a", "look", {"screenshot": False})
+        real = session.tap
+
+        async def tap(*args, **kwargs):  # the phone changes; the stalled video doesn't show it
+            from test_daemon import button
+            session.tree = [*session.tree, button("e9", "Done", "done")]
+            return await real(*args, **kwargs)
+        session.tap = tap
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert 'button "Done"' in r["text"] and "No visible change" not in r["text"]
+        await d.close()
+        await finish(stop, task)
+    run(go)
