@@ -292,6 +292,44 @@ def _kind(node: ET.Element) -> str:
     return _text(node.get("type") or node.tag).removeprefix("XCUIElementType")
 
 
+def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
+    """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError."""
+    try:
+        root = ET.fromstring(_clean(source))
+    except ET.ParseError as e:
+        raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    if screen is not None and screen[0] > screen[1]:
+        _upright_keyboard(root, screen)
+    return root
+
+
+def _upright_keyboard(root: ET.Element, screen: tuple[float, float]) -> None:
+    """In landscape the keyboard's window holds a view of the portrait screen's size (430x932 on a 932x430
+    screen), and everything in it is framed as if the phone were upright: seen on the phone 2026-11-11, the
+    keyboard at (2, 117, 162, 698) turned left and (266, 117, 162, 698) turned right, where it is drawn as the
+    bottom strip (0, 266, 932, 164) either way. Its frames are turned into the screen's, in place. Which way the
+    phone is turned shows in which edge of that view the keys hug, as they are at the bottom of the screen."""
+    width, height = screen
+    parents = {child: up for up in root.iter() for child in up}
+    for view in list(root.iter()):
+        x, y, w, h = _rect(view)
+        up = parents.get(view)
+        if not (_same_rect((x, y, w, h), (0, 0, height, width)) and up is not None
+                and _same_rect(_rect(up), (0, 0, width, height))):
+            continue
+        keys = next((_rect(n) for n in view.iter() if _kind(n) == "Keyboard" and _rect(n)[2] > 0), None)
+        if keys is None:
+            continue  # nothing shows which way it is turned
+        hug_left = keys[0] + keys[2] / 2 < height / 2
+
+        def turn(r: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+            x, y, w, h = r
+            return (y, height - x - w, h, w) if hug_left else (width - y - h, x, h, w)
+        for n in view.iter():
+            for key, value in zip(("x", "y", "width", "height"), turn(_rect(n))):
+                n.set(key, f"{value:g}")
+
+
 def _alert(node: ET.Element) -> Alert:
     buttons = [_text(n.get("label")) or _text(n.get("name")) for n in node.iter() if _kind(n) == "Button"]
     return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
@@ -440,10 +478,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                     hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
-    try:
-        root = ET.fromstring(_clean(source))
-    except ET.ParseError as e:
-        raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    root = _parse(source, screen)
     parents = {child: up for up in root.iter() for child in up}
     # On the phone the keyboard has a window of its own: Window > a full-screen view > [an empty view, the strip
     # with the globe key, the views holding the Keyboard node].
@@ -819,10 +854,7 @@ def back_button(source: str, screen: tuple[float, float]) -> Back:
     the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
     leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
     does something else; else no point (a bar without a back button is usually a root screen)."""
-    try:
-        root = ET.fromstring(_clean(source))
-    except ET.ParseError as e:
-        raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    root = _parse(source, screen)
 
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect
@@ -881,6 +913,10 @@ def at_point(items: list[Element], point: tuple[float, float], role: str) -> Ele
 
 
 BLANK_GRID = 40.0  # points between the points blank_point tries when no label offers one
+# how far a text's centre must be from any image for blank_point to rest a finger there: a
+# floating button takes touches well outside its icon (Expo's dev tools gear, a 26 pt image, took them 20-30 pt
+# around it on the phone 2026-11-11, and opened the developer menu)
+BLANK_CLEAR = 44.0
 
 
 # iOS's own views that carry an identifier but nothing to read or act on: listing them is noise (a first-time agent
@@ -951,27 +987,37 @@ def blank_point(items: list[Element], screen: tuple[float, float], top: float,
                 bottom: float) -> tuple[float, float] | None:
     """A point to touch that does nothing but take focus away from a text field: between `top` and `bottom` (the
     bars' edges, y), inside no element that takes an action and no bar that covers content. The centre of the
-    first passive label or header there if it is free (a finger rests on text without pressing anything), else
-    the first free point of a coarse grid, else None. A scroll view doesn't count as one that takes a touch:
-    its empty area does nothing, and one often fills the whole screen."""
+    first passive label or header there that is free and BLANK_CLEAR from every image (a finger rests on text
+    without pressing anything; a floating button can show as only its icon, and takes touches around it), else
+    the free point of a coarse grid farthest from what takes a touch, images and the band's edges (floating
+    buttons sit near edges and corners), else None. A scroll view doesn't count as one that takes a touch: its
+    empty area does nothing, and one often fills the whole screen."""
     blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
     blocks += [e.rect for e in items if e.type in COVERING_BARS]
     blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+    icons = [e.rect for e in items if e.role == "image" and not e.in_alert]
 
     def free(x: float, y: float) -> bool:
         return (0 <= x < screen[0] and top <= y < bottom and not any(_holds(r, (x, y)) for r in blocks))
+
+    def clearance(x: float, y: float, rects: list[tuple[float, float, float, float]]) -> float:
+        """How far the point is from the nearest of `rects`."""
+        return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
+                    for r in rects), default=math.inf)
     for e in items:
-        if e.role in ("text", "header") and not e.in_alert and free(*e.center):
+        if (e.role in ("text", "header") and not e.in_alert and free(*e.center)
+                and clearance(*e.center, icons) >= BLANK_CLEAR):
             return e.center
+    best, room = None, -1.0
     y = top + BLANK_GRID / 2
     while y < bottom:
         x = BLANK_GRID / 2
         while x < screen[0]:
-            if free(x, y):
-                return x, y
+            if free(x, y) and (r := min(clearance(x, y, blocks + icons), x, screen[0] - x, y - top, bottom - y)) > room:
+                best, room = (x, y), r
             x += BLANK_GRID
         y += BLANK_GRID
-    return None
+    return best
 
 
 def _pointer(steps: list[dict]) -> dict:

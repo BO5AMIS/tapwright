@@ -1,4 +1,6 @@
 """The tree-reading helpers the tools use: the navigation bar's back button, and scroll areas."""
+import math
+
 import pytest
 from fakes import el
 
@@ -515,6 +517,34 @@ def test_a_shown_keyboard_is_a_bottom_inset_so_swipes_stay_above_it():
     assert ui.read(under_window(lab_base(), node("Other", 0, 0, 430, 932, children=[parked])), PHONE).bottom_inset is None
 
 
+@pytest.mark.parametrize("hug_x", [2, 266], ids=["turned_left", "turned_right"])
+def test_in_landscape_the_keyboard_framed_as_if_upright_is_turned_to_the_bottom_strip(hug_x):
+    """Seen on the phone 2026-11-11 (932x430, the lab's landscape screen): the keyboard's window holds a 430x932
+    view framed as if the phone were upright, the keys at x 2 (turned left) or 266 (turned right). Read as they
+    came, the keyboard was a strip down the left edge and a 430 pt bottom inset: a scroll toward a row below
+    moved nothing. It is the bottom strip from y 266, either way."""
+    land = (932.0, 430.0)
+    app = node("Other", 0, 0, 932, 430, children=[node("Button", 65, 36, 44, 44, "TL", name="lab-l-corner-tl"),
+                                                  node("Button", 115, 362, 226, 44, "One", name="lab-l-bottom-1"),
+                                                  node("ScrollView", 527, 69, 346, 285, name="lab-l-scroll")])
+    globe = (-4, 2) if hug_x == 2 else (365, 849)
+    keys = node("Other", hug_x, 117, 162, 698, children=[
+        node("Keyboard", hug_x, 117, 162, 698, children=[node("Key", hug_x + 20, 130, 40, 50, "q")])])
+    strip = node("Other", hug_x - (2 if hug_x == 2 else 0), 0, 164, 932, children=[
+        keys, node("Button", *globe, 69, 81, "Next keyboard")])
+    keyboard = node("Window", 0, 0, 932, 430, children=[node("Other", 0, 0, 430, 932, children=[
+        node("Other", 0, 0, 430, 932), strip])])
+    source = f"<AppiumAUT>{node('Application', 0, 0, 932, 430, children=[node('Window', 0, 0, 932, 430, children=[app]), keyboard])}</AppiumAUT>"
+    tree = ui.read(source, land)
+    assert tree.keyboard and tree.bottom_inset == 164.0
+    assert "Next keyboard" not in labels(tree.items)
+    by_id = {e.identifier: e for e in tree.items}
+    assert by_id["lab-l-corner-tl"].covered_by == ()
+    assert [(b.kind, b.rect) for b in by_id["lab-l-bottom-1"].covered_by] == [("Keyboard", (0.0, 266.0, 932.0, 164.0))]
+    # the same tree in portrait is left as it came
+    assert ui._rect(ui._parse(source, PHONE).find(".//XCUIElementTypeKeyboard")) == (hug_x, 117.0, 162.0, 698.0)
+
+
 def test_a_share_sheet_hides_the_app_behind_it_even_with_nothing_listed_to_act_on():
     """The share sheet is a Popover behind a dimming view; its share targets list as text, not as buttons, so the
     backdrop rule saw nothing to act on and left the app's buttons listed: a touch on one reached the sheet,
@@ -679,7 +709,19 @@ def test_blank_point_skips_a_text_whose_centre_is_inside_a_button():
 def test_blank_point_falls_back_to_the_grid():
     items = [el("e1", "button", "Wide", rect=(0, 60, 400, 100)), el("e2", "text", "Under", rect=(0, 60, 400, 20))]
     x, y = ui.blank_point(items, SCREEN, 60, 500)
-    assert (x, y) == (20.0, 160.0)  # the first grid point below the button
+    assert (x, y) == (180.0, 320.0)  # the grid point farthest from the button and the band's edges
+
+
+def test_blank_point_keeps_clear_of_a_floating_buttons_icon():
+    """In landscape on the lab (2026-11-11) the first free grid point, (20, 80), was 13 pt from Expo's dev tools
+    gear (a 26 pt image at 28,93), which takes touches 20-30 pt around it: closing the keyboard opened the
+    developer menu, every time. A text right beside it isn't used either."""
+    land = (932.0, 430.0)
+    items = [el("e1", "image", "gearshape.fill", rect=(28, 93, 26, 26)),
+             el("e2", "text", "Beside", rect=(60, 95, 40, 20)),
+             el("e3", "button", "Centre", rect=(247, 137, 80, 44))]
+    x, y = ui.blank_point(items, land, 60, 266)
+    assert math.hypot(x - 41, y - 106) > 120 and 60 <= y < 266
 
 
 def test_blank_point_is_none_on_a_screen_filled_by_one_button():
