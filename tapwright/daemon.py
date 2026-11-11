@@ -924,12 +924,18 @@ class Daemon:
         if isinstance(result, Toggled):
             # say only what the new list shows; if the switch can't be found again, claim nothing
             old = result.before
-            now = next((e for e in view.items if e.ref == result.ref and (e.role, e.label, e.identifier)
-                        == (old.role, old.label, old.identifier)), None)
+            same = [e for e in view.items if (e.role, e.label, e.identifier) == (old.role, old.label, old.identifier)]
+            # by its ref; when the answer is a full list that numbered it anew (an agent's first call), by being the
+            # only switch with that identity
+            now = next((e for e in same if e.ref == result.ref), same[0] if len(same) == 1 else None)
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now, bool(view.alert)), 1)
         if isinstance(result, Typed):  # the value as the new list shows it, not as it was typed
-            now = next((e for e in view.items if result.same_field(e)), None)
+            old = result.field
+            alike_fields = [e for e in view.items if e.role == old.role and (
+                e.identifier == old.identifier if old.identifier else e.label == old.label)]
+            now = next((e for e in view.items if result.same_field(e)),
+                       alike_fields[0] if len(alike_fields) == 1 else None)  # renumbered in a first full list
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         return await self._add_shot(answer, view, shot)

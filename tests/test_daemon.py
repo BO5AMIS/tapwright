@@ -2485,6 +2485,25 @@ def test_a_toggle_answers_as_soon_as_the_switch_reads_flipped():
     run(go)
 
 
+def test_a_toggle_that_is_an_agents_first_call_still_says_what_the_switch_did():
+    """Seen on the phone 2026-11-11: with no list before it, the answer is a full list that numbers the switch anew,
+    and the first line stayed "Tapped …" instead of "Toggled … checked=true"."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = [switch(False)]
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            d.session.tree = [switch(True)]
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        r = await d.run_tool("b", "toggle", {"target": {"label": "Wi-Fi"}})
+        assert r["text"].splitlines()[0].startswith("Toggled ") and "checked=true" in r["text"].splitlines()[0]
+        await finish(stop, task)
+    run(go)
+
+
 def test_toggle_followed_by_a_confirm_alert_is_not_refused():
     async def go():
         d = make()
