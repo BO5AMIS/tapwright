@@ -30,7 +30,7 @@ _CORE = (
     'Errors: `Error <code>: <message>`. The message says what to do next.\n'
     '- `not_found`: nothing matches. `look`, then pick another target.\n'
     "- `ambiguous`: several match. Retry with one candidate's ref, or add `index`.\n"
-    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause (`scroll` with `to: "target"`, close the alert) or pass `force: true`. For `no_action`, pick another element or tool.\n'
+    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause (`scroll` with `to: "target"`, close the alert) or pass `force: true` (never for `disabled`: the app has to enable it). For `no_action`, pick another element or tool.\n'
     '- `stale`: a person changed the screen since your list. `look` again.\n'
     '- `busy`: a person is using the app. Wait a few seconds, retry.\n'
     '- `paused`: the user paused you. Ask them to resume.\n'
