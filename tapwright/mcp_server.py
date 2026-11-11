@@ -21,7 +21,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import client, device, ui
+from . import client, device, repair, ui
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -128,6 +128,22 @@ server = TapwrightServer("tapwright", instructions=INSTRUCTIONS)
 CLIENT_ID = uuid.uuid4().hex  # this agent's own last look, kept by the daemon
 
 
+_notice_given = False
+
+
+def _first_answer_notice() -> str | None:
+    """The signing's expiry warning (see repair.expiry_warning), once per session: the agent can tell the user
+    before WebDriverAgent stops starting. Never fails a call."""
+    global _notice_given
+    if _notice_given:
+        return None
+    _notice_given = True
+    try:
+        return repair.expiry_warning()
+    except Exception:
+        return None
+
+
 async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
@@ -139,6 +155,8 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
         logger.exception("tool %s crashed", tool)
         return _error("internal", f"{tool} failed unexpectedly. This is a bug; report it.")
     text, image = answer.get("text") or "(no answer)", answer.get("image")
+    if notice := _first_answer_notice():
+        text += "\n" + notice
     if image and SHOTS_DIR is not None:  # file mode: one text item, the picture on disk
         try:
             text += "\n" + save_screenshot(SHOTS_DIR, tool, base64.b64decode(image), answer.get("image_size") or [0, 0])
@@ -268,4 +286,9 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     if SHOTS_DIR is not None:
         check_screenshots_dir(SHOTS_DIR)
+    try:
+        if warning := repair.expiry_warning():
+            logger.warning(warning)
+    except Exception:
+        pass
     device.run(server.run_stdio_async)
