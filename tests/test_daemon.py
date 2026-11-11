@@ -4931,11 +4931,52 @@ def test_scroll_to_a_target_nearly_as_tall_as_the_view_does_not_go_back_and_fort
     run(go)
 
 
-def test_the_live_views_mark_names_the_tool_and_the_element_briefly():
-    """The whole answer line drawn beside a touch covered the keys around it (recording the demo, 2026-11-11)."""
-    label = daemon_module.mark_label
-    assert label("tap", 'Tapped e25 button "Equals" @320,780 95x90.') == 'tap "Equals"'
-    assert label("type_text", 'Typed into e3 input "Email" id=email.') == 'type text "Email"'
-    assert label("open_app", "Opened Calculator (com.apple.calculator).") == "open app"
-    long = label("tap", 'Tapped e4 cell "A row whose name runs on and on" @0,0 1x1.')
-    assert long == 'tap "A row whose name runs o…"' and len(long) <= len('tap ""') + daemon_module.MARK_NAME_MAX
+def test_an_agents_tap_reaches_the_live_view_with_its_caption():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        queue = d.subscribe()
+        await looked(d, [el("e1", "button", "Sign up", "signup-submit")])
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        sent = []
+        while not queue.empty():
+            m = queue.get_nowait()
+            if m["type"] == "action":
+                sent.append(m)
+        assert [(m["by"], m["kind"], m.get("label"), m.get("caption")) for m in sent] == \
+            [("agent", "tap", "Sign up", 'Tap "Sign up"')]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_live_view_gets_the_elements_name_and_a_plain_caption():
+    """VIEWER-PROTOCOL 1.4: `label` is the element's name, `caption` the step in plain words. The whole answer line
+    drawn beside a touch covered the keys around it (recording the demo, 2026-11-11)."""
+    name, caption = daemon_module.element_name, daemon_module.step_caption
+    assert name('Tapped e25 button "Equals" @320,780 95x90.') == "Equals"
+    assert name('Tapped e4 cell "A row whose name runs on and on" @0,0 1x1.') == "A row whose name runs o…"
+    assert name("Opened Calculator (com.apple.calculator).") == ""
+    cases = [
+        ("tap", 'Tapped e25 button "Equals" @320,780 95x90.', {}, 'Tap "Equals"'),
+        ("long_press", 'Long-pressed e2 cell "Kyoto" @0,0 1x1.', {}, 'Press and hold "Kyoto"'),
+        ("type_text", 'Typed into e3 input "Email" id=email.', {"text": "secret@x.io"}, 'Type into "Email"'),
+        ("scroll", 'Scrolled e5 scroll "Trips" down.', {"direction": "down"}, "Scroll down"),
+        ("scroll", 'Scrolled e5 scroll "Trips" down.', {"to": "end"}, "Scroll down"),
+        ("scroll", 'e9 button "Save trip" @0,0 1x1 is already on screen.', {"to": "target"}, 'Scroll to "Save trip"'),
+        ("swipe", "Swiped.", {}, "Swipe"),
+        ("toggle", 'Tapped e12 switch "Remind me" @0,0 1x1.', {}, 'Switch "Remind me"'),
+        ("back", "Tapped the back button.", {}, "Go back"),
+        ("alert", 'Accepted the alert "Allow notifications?".', {"action": "accept"}, "Answer the alert"),
+        ("open_url", "opened https://example.com/?code=1234", {"url": "https://example.com/?code=1234"}, "Open link"),
+        ("open_app", "Opened Wayfare (host.exp.Exponent).", {"app": "Wayfare"}, "Open Wayfare"),
+        ("close_app", "Closed Calculator (com.apple.calculator).", {}, "Close Calculator"),
+        ("rotate", "Turned to landscape_left.", {"to": "landscape_left"}, "Turn the phone"),
+        ("press_button", "Pressed home.", {"name": "home"}, "Home"),
+        ("press_button", "Pressed volumeUp.", {"name": "volumeUp"}, "Volume up"),
+        ("wait_for", "Done after 0.1 s.", {"text": "46"}, None),
+    ]
+    for tool, result, args, want in cases:
+        assert caption(tool, result, args) == want, tool
+    assert "secret" not in caption("type_text", 'Typed into e3 input "Email".', {"text": "secret"})
+    long = caption("tap", 'Tapped e4 cell "' + "x" * 80 + '".', {})
+    assert len(long) <= daemon_module.CAPTION_MAX

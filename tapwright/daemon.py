@@ -121,21 +121,63 @@ def _size(jpeg: bytes | None) -> list[int] | None:
         return None
 
 
-MARK_NAME_MAX = 24  # characters of an element's name in the live view's mark
+MARK_NAME_MAX = 24  # characters of an element's name in the live view (VIEWER-PROTOCOL 1.4)
+CAPTION_MAX = 60  # characters of a step's caption (VIEWER-PROTOCOL 1.4)
+BUTTON_CAPTIONS = {"home": "Home", "volumeUp": "Volume up", "volumeDown": "Volume down"}
 
 
-def mark_label(tool: str, result: str) -> str:
-    """The short label the live view draws beside an agent's action: the tool and the element's name
-    (`tap "Equals"`). The whole answer line ("Tapped e25 button "Equals" @320,780 95x90.") covered the keys
-    around the touch and ran off the picture's edge (seen while recording the demo, 2026-11-11)."""
-    verb = tool.replace("_", " ")
+def element_name(result: str) -> str:
+    """The element's name in an action's first answer line ("Tapped e25 button "Equals" @320,780 95x90." →
+    `Equals`), cut to MARK_NAME_MAX; "" when it names none. The live view's `label` (VIEWER-PROTOCOL 1.4): the
+    whole answer line covered the keys around a touch and ran off the picture (recording the demo, 2026-11-11)."""
     name = re.search(r'"([^"]+)"', result)
     if name is None:
-        return verb
+        return ""
     text = name.group(1)
-    if len(text) > MARK_NAME_MAX:
-        text = text[:MARK_NAME_MAX - 1] + "…"
-    return f'{verb} "{text}"'
+    return text if len(text) <= MARK_NAME_MAX else text[:MARK_NAME_MAX - 1] + "…"
+
+
+def step_caption(tool: str, result: str, args: dict) -> str | None:
+    """The agent's step in plain words for people watching the live view (VIEWER-PROTOCOL 1.4, "Captions"):
+    `Tap "Sign up"`, `Type into "Email"`, `Scroll down`, `Open Wayfare`. Never the typed text, a link's address,
+    refs or coordinates. None for a step a viewer needn't see."""
+    name = element_name(result)
+    quoted = f'"{name}"' if name else ""
+    if tool in ("tap", "double_tap"):
+        text = f"Tap {quoted}"
+    elif tool == "long_press":
+        text = f"Press and hold {quoted}"
+    elif tool == "type_text":
+        text = f"Type into {quoted}" if name else "Type"
+    elif tool == "scroll":
+        to = args.get("to")
+        if to == "target" and name:
+            text = f"Scroll to {quoted}"
+        else:
+            text = f"Scroll {args.get('direction') or {'end': 'down', 'start': 'up'}.get(to or '', '')}"
+    elif tool == "swipe":
+        text = "Swipe"
+    elif tool == "toggle":
+        text = f"Switch {quoted}"
+    elif tool == "back":
+        text = "Go back"
+    elif tool == "alert":
+        text = "Answer the alert"
+    elif tool == "open_url":
+        text = "Open link"  # never the address: a link can carry codes or tokens
+    elif tool in ("open_app", "close_app"):
+        app = re.match(r"(?:Opened|Closed) (.+?)(?: \(|\.|,|$)", result)
+        text = f"{'Open' if tool == 'open_app' else 'Close'} {app.group(1) if app else 'the app'}"
+    elif tool == "rotate":
+        text = "Turn the phone"
+    elif tool == "press_button":
+        text = BUTTON_CAPTIONS.get(str(args.get("name") or ""), "Press a button")
+    elif tool == "wait_for":
+        return None
+    else:
+        text = tool.replace("_", " ")
+    text = " ".join(text.split())
+    return text if len(text) <= CAPTION_MAX else text[:CAPTION_MAX - 1] + "…"
 
 
 def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | None = None) -> dict:
@@ -462,10 +504,12 @@ class Daemon:
         return {"x": round(point[0] / w, 4), "y": round(point[1] / h, 4)}
 
     def _announce(self, by: str, kind: str, label: str | None = None, point=None, ok: bool = True,
-                  code: str | None = None) -> None:
+                  code: str | None = None, caption: str | None = None) -> None:
         message = {"type": "action", "by": by, "kind": kind, "at": int(time.time() * 1000), "ok": ok}
         if label:
             message["label"] = label
+        if caption:
+            message["caption"] = caption
         if point:
             message["point"] = point
         if code:
@@ -939,7 +983,8 @@ class Daemon:
         view.moved = view.moved or not looks
         if not reads_only:
             self.unsettled = not looks
-        self._announce("agent", name, label=mark_label(name, str(result)), point=self._point(self.session.last_point))
+        self._announce("agent", name, label=element_name(str(result)), caption=step_caption(name, str(result), args),
+                       point=self._point(self.session.last_point))
         if not looks:
             view.unlooked += 0 if reads_only else 1
             taken = await self._taken_away(view, box.get("app"))
