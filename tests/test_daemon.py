@@ -4146,6 +4146,25 @@ def test_an_app_that_comes_to_the_front_a_moment_after_a_look_false_touch_is_cau
     run(go)
 
 
+def test_the_home_screen_is_never_the_app_a_touch_was_meant_for():
+    """A read while a banner slides over an app names SpringBoard; the next touch near the top then "went back" to
+    the home screen, over Settings (on the phone 2026-11-11). Nor is a home screen icon that opens an app a theft."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.foreground, s.app = "com.apple.springboard", ("Home screen", "com.apple.springboard")
+        s.tree = [button("e1", "Settings", "settings", rect=(10, 120, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.taken_by = ("Settings", "com.apple.Preferences")
+        for look in (False, True):
+            await d.run_tool("a", "tap", {"target": {"id": "settings"}, "look": look})
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert s.launched == []
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_touch_lower_down_that_opens_another_app_is_left_alone():
     """Banners come down over the top only: a link lower down that opens another app is the app's own doing."""
     async def go():

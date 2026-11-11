@@ -994,6 +994,11 @@ class Daemon:
         if before is None or not (s.top_touch if top is None else top):
             return None
         name, bundle = before
+        if bundle == SPRINGBOARD:
+            # never the app a touch is meant for: a read taken while a banner slides over an app names SpringBoard
+            # (seen on the phone 2026-11-11: "opened" the home screen over Settings), and a touch on the home
+            # screen that opens an app is what it is for
+            return None
         if read is not None and read[1] == bundle:
             return None
         front = await self._read(s.foreground_bundle_id)
