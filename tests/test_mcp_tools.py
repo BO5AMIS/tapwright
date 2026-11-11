@@ -7,12 +7,12 @@ from tapwright import client, mcp_server
 
 EXPECTED = {
     "look": {"screenshot", "width", "labels"},
-    "tap": {"target", "force", "look", "screenshot"},
-    "long_press": {"target", "seconds", "force", "look", "screenshot"},
-    "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot"},
-    "scroll": {"direction", "amount", "to", "target", "look", "screenshot"},
-    "toggle": {"target", "value", "force", "look", "screenshot"},
-    "back": {"look", "screenshot"},
+    "tap": {"target", "force", "look", "screenshot", "dry_run"},
+    "long_press": {"target", "seconds", "force", "look", "screenshot", "dry_run"},
+    "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot", "dry_run"},
+    "scroll": {"direction", "amount", "to", "target", "look", "screenshot", "dry_run"},
+    "toggle": {"target", "value", "force", "look", "screenshot", "dry_run"},
+    "back": {"look", "screenshot", "dry_run"},
     "open_url": {"url", "look", "screenshot"},
     "wait": {"seconds", "look", "screenshot"},
     "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot"},
@@ -22,7 +22,7 @@ EXPECTED = {
     "close_app": {"app"},
     "alert": {"action", "look", "screenshot"},
     "press_button": {"name", "look", "screenshot"},
-    "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot"},
+    "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
     "audit": {"types"},
     "run": {"steps", "trace", "look", "screenshot"},
@@ -34,14 +34,16 @@ REQUIRED = {"run": ["steps"], "replay": ["path"], "tap": ["target"], "long_press
             "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
 DEFAULTS = {
     "look": {"screenshot": True, "width": 600, "labels": False},
-    "tap": {"force": False, "look": True, "screenshot": False},
-    "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False},
-    "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": False},
+    "tap": {"force": False, "look": True, "screenshot": False, "dry_run": False},
+    "long_press": {"seconds": 1.0, "force": False, "look": True, "screenshot": False, "dry_run": False},
+    "type_text": {"target": None, "replace": True, "submit": False, "force": False, "look": True, "screenshot": False,
+                  "dry_run": False},
     # no default direction in the schema: it is down, or the way `to` goes (as Tapline declares it)
-    "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False},
-    "toggle": {"value": None, "force": False, "look": True, "screenshot": False},
+    "scroll": {"direction": None, "amount": 0.8, "to": None, "target": None, "look": True, "screenshot": False,
+               "dry_run": False},
+    "toggle": {"value": None, "force": False, "look": True, "screenshot": False, "dry_run": False},
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
-    "swipe": {"seconds": 0.35, "look": True, "screenshot": False},
+    "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
 }
 READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for"}
 
@@ -116,10 +118,11 @@ def test_tools_forward_their_arguments_to_the_daemon(monkeypatch):
     asyncio.run(mcp_server.wait_for(text="Done", gone=True))
     asyncio.run(mcp_server.open_app(app="Settings"))
     assert seen == [
-        ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "screenshot": False}),
+        ("tap", {"target": {"label": "Log in", "index": 1}, "force": False, "look": True, "screenshot": False,
+                 "dry_run": False}),
         ("look", {"screenshot": True, "width": 600, "labels": False}),
         ("scroll", {"direction": None, "amount": 0.8, "to": "start", "target": None, "look": True,
-                    "screenshot": False}),
+                    "screenshot": False, "dry_run": False}),
         ("wait", {"seconds": 1.5, "look": True, "screenshot": False}),
         ("wait_for", {"text": "Done", "id": None, "label": None, "gone": True, "timeout": 10.0, "look": True,
                       "screenshot": False}),
@@ -139,7 +142,8 @@ def test_round_trip_through_the_server(monkeypatch):
     out = asyncio.run(mcp_server.server.call_tool("press_button", {"name": "home", "look": False}))
     assert not out.is_error and out.content[0].text == "did press_button"
     assert seen == [
-        ("toggle", {"target": {"id": "wifi"}, "value": True, "force": False, "look": True, "screenshot": False}),
+        ("toggle", {"target": {"id": "wifi"}, "value": True, "force": False, "look": True, "screenshot": False,
+                   "dry_run": False}),
         ("press_button", {"name": "home", "look": False, "screenshot": False}),
     ]
     bad = asyncio.run(mcp_server.server.call_tool("press_button", {"name": "power"}))

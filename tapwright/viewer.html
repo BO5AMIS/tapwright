@@ -520,6 +520,35 @@ body:not(.details) .mark .tag { display: none; }
 @media (max-width: 560px) {
   #steps { top: auto; left: 12px; right: 12px; bottom: 72px; width: auto; max-width: none; height: 48%; }
 }
+/* The person's OK (VIEWER-PROTOCOL 1.5): a small dialog over the phone area when the agent touches something the safety
+   policy guards. Same tokens as the Steps drawer and the More menu, so it follows the theme. */
+#confirm {
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.38);
+}
+#confirm-card {
+  width: min(340px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  border-radius: 20px;
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.45);
+}
+#confirm-title { margin: 0; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0.02em; }
+#confirm-text { margin: 0; font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
+#confirm-word { margin: 0; color: var(--muted); }
+#confirm-word:empty { display: none; }
+#confirm-actions { display: flex; gap: 8px; margin-top: 8px; }
+#confirm-actions button { flex: 1; min-height: 40px; }
+#confirm-allow { background: var(--accent); border-color: var(--accent); color: var(--panel-solid); }
 @media (prefers-reduced-motion: reduce) {
   .mark.ring::after { animation: none; opacity: 0; }
   #caption { transition: none; }
@@ -594,6 +623,17 @@ body:not(.details) .mark .tag { display: none; }
     <p id="steps-empty">No steps yet. Each touch, typing and scroll shows here.</p>
   </aside>
   <div id="notice" role="alert"></div>
+  <div id="confirm" hidden>
+    <div id="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text confirm-word">
+      <h2 id="confirm-title">Allow this step?</h2>
+      <p id="confirm-text"></p>
+      <p id="confirm-word"></p>
+      <div id="confirm-actions">
+        <button type="button" id="confirm-allow">Allow once</button>
+        <button type="button" id="confirm-deny">Don't allow</button>
+      </div>
+    </div>
+  </div>
 </main>
 <script>
 "use strict";
@@ -1647,6 +1687,84 @@ function createVideoBlock(io) {
     return false;
   }
 
+  /* The person's OK (VIEWER-PROTOCOL 1.5): the agent touched something the safety policy guards, and the server asks
+     here. One request shows at a time, the others wait. It closes on an answer (here or in another live view, which
+     the server reports as confirm_closed) or when it expires. */
+  var asks = [];
+  var asking = null;
+  var askTimer = null;
+  var askFrom = null;
+  var askSpace = false;
+  function addAsk(m) {
+    if (typeof m.id !== "string" || !m.id) return;
+    asks.push({
+      id: m.id,
+      caption: typeof m.caption === "string" && m.caption ? m.caption : "An action",
+      word: typeof m.word === "string" ? m.word : "",
+      expires: isNum(m.expires) ? m.expires : 0
+    });
+    showAsk();
+  }
+  function showAsk() {
+    if (asking || !asks.length) return;
+    asking = asks.shift();
+    $("confirm-text").textContent = asking.caption;
+    $("confirm-word").textContent = asking.word ? "Policy word: \"" + asking.word + "\"" : "";
+    askFrom = document.activeElement;
+    $("confirm").hidden = false;
+    $("confirm-deny").focus();
+    var left = asking.expires - Date.now();
+    if (!(left > 0 && left <= 120000)) left = 120000;
+    var id = asking.id;
+    askTimer = setTimeout(function () { endAsk(id, true); }, left);
+  }
+  function endAsk(id, expired) {
+    if (!asking || asking.id !== id) {
+      asks = asks.filter(function (a) { return a.id !== id; });
+      return;
+    }
+    clearTimeout(askTimer);
+    asking = null;
+    $("confirm").hidden = true;
+    if (askFrom && typeof askFrom.focus === "function" && document.contains(askFrom)) askFrom.focus();
+    askFrom = null;
+    if (expired) notify("The request ran out");
+    showAsk();
+  }
+  function answerAsk(allow) {
+    if (!asking) return;
+    if (send({ type: "confirm_answer", id: asking.id, allow: allow })) endAsk(asking.id, false);
+  }
+  $("confirm-allow").addEventListener("click", function () { answerAsk(true); });
+  $("confirm-deny").addEventListener("click", function () { answerAsk(false); });
+  /* While the dialog is up every key is its own: Escape is Don't allow, Enter and Space press the focused button,
+     Tab and the arrows move between the two. Nothing reaches the phone (typing goes to it otherwise). */
+  document.addEventListener("keydown", function (ev) {
+    if (!asking) return;
+    var altGr = typeof ev.getModifierState === "function" && ev.getModifierState("AltGraph");
+    if (ev.metaKey || ((ev.ctrlKey || ev.altKey) && !altGr)) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    var allow = $("confirm-allow");
+    var deny = $("confirm-deny");
+    if (ev.key === "Escape") {
+      answerAsk(false);
+    } else if (ev.key === "Enter" || ev.key === " ") {
+      askSpace = ev.key === " ";
+      answerAsk(document.activeElement === allow);
+    } else if (ev.key === "Tab" || ev.key.indexOf("Arrow") === 0) {
+      (document.activeElement === deny ? allow : deny).focus();
+    }
+  }, true);
+  /* a Space pressed in the dialog must not click what has the focus once the dialog has closed */
+  document.addEventListener("keyup", function (ev) {
+    if (ev.key === " " && askSpace) {
+      askSpace = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+  }, true);
+
   function handleMessage(data) {
     if (typeof data !== "string") return;
     var m;
@@ -1666,6 +1784,10 @@ function createVideoBlock(io) {
       drawOverlay();
     } else if (m.type === "action") {
       showAction(m);
+    } else if (m.type === "confirm") {
+      addAsk(m);
+    } else if (m.type === "confirm_closed") {
+      endAsk(String(m.id), false);
     } else if (m.type === "error") {
       var text = String(m.message || "Error");
       dropPending();

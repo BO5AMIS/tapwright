@@ -597,11 +597,22 @@ def main() -> int:
                             "default: without this list the agent can do nothing)")
     scope.add_argument("--dedicated", action="store_true",
                        help="the phone is kept for testing: the agent may use every app on it")
+    rules = p.add_mutually_exclusive_group()
+    rules.add_argument("--policy", metavar="FILE",
+                       help="the safety policy as JSON: words on a button or switch that need a person's OK in the live "
+                            "view, or are blocked, for all apps or one (default: Buy, Delete, Send, Sign out and the like "
+                            "need an OK)")
+    rules.add_argument("--no-policy", action="store_true",
+                       help="no words need an OK or are blocked (the same as empty lists)")
     a = ap.parse_args()
     if a.cmd == "mcp":
-        from . import mcp_server
+        from . import mcp_server, policy
         apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
-        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated)
+        try:
+            chosen = policy.NONE if a.no_policy else policy.load(a.policy) if a.policy else None
+        except ValueError as e:
+            raise SystemExit(f"tapwright mcp: {e}") from e
+        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen)
         return 0
     if a.cmd == "view":
         return view()
