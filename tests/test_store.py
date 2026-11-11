@@ -15,11 +15,13 @@ def _zip_with_app() -> bytes:
     return buf.getvalue()
 
 
-def test_default_is_appium(monkeypatch):
+def test_default_is_tapwrights_own_build_and_appium_is_one_variable_away(monkeypatch):
     monkeypatch.delenv("TAPWRIGHT_WDA", raising=False)
     repo, tag, sha, folder = store.wda_source()
-    assert (repo, tag) == ("appium/WebDriverAgent", "v16.15.3")
+    assert (repo, tag) == ("bo5amis/WebDriverAgent", "tw-16.15.3.1")
     assert sha == store.WDA_SHA256 and folder == store.WDA_VERSION
+    monkeypatch.setenv("TAPWRIGHT_WDA", "appium")
+    assert store.wda_source()[:2] == ("appium/WebDriverAgent", "v16.15.3")
 
 
 def test_fork_selected_by_env(monkeypatch):

@@ -21,13 +21,14 @@ STATE = HOME / "state.json"
 SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, token (kept after it stops)
 
 # Where the WebDriverAgent runner comes from: (repo, release tag, SHA-256, cache folder).
-# Appium's prebuilt runner is the default; TAPWRIGHT_WDA=fork selects Tapwright's own build.
+# Tapwright's own build (Appium's 16.15.3 plus a fast tap, built on GitHub Actions) is the default since 1.1:
+# 29% faster taps over USB, and over Wi-Fi a tap within its bar. TAPWRIGHT_WDA=appium selects Appium's prebuilt runner.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
     "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.1", "22cdfcc0c0036dc997e0213f88f8a901127990bd4a177e1396147a8d27e42b4d", "fork-tw-16.15.3.1"),
 }
-WDA_DEFAULT = "appium"
+WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]
 WDA_SHA256 = WDA_SOURCES[WDA_DEFAULT][2]
 

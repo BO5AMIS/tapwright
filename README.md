@@ -268,5 +268,7 @@ The bar they are held against: [docs/QUALITY-BAR.md](https://github.com/bo5amis/
 
 ## License
 
-MIT. WebDriverAgent (BSD) and rcodesign (MPL-2.0) are downloaded at setup, not included.
+MIT. WebDriverAgent (BSD) and rcodesign (MPL-2.0) are downloaded at setup, not included. The runner is
+Tapwright's build of Appium's WebDriverAgent 16.15.3 with a faster tap ([bo5amis/WebDriverAgent](https://github.com/bo5amis/WebDriverAgent),
+built by GitHub Actions, checked by its SHA-256); `TAPWRIGHT_WDA=appium tapwright setup --force` installs Appium's own.
 Tapwright is not affiliated with Microsoft's Playwright or with Apple.
