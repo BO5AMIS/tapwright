@@ -536,7 +536,9 @@ Optional on every step. One of `text`, `id`, `label` (same matching as `wait_for
 - `value`: with `id` or `label`, the element's value must equal it (a switch: `"on"` or `"off"`; `"true"` and `"false"` also work, as its line shows `checked=`);
 - `timeout`: seconds, 0.5–30, default **2**.
 
-After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout.
+After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout. It
+matches as `wait_for` does: exact text first, then part of a text. Tapline looks through the app's whole list, off
+screen too; Tapwright looks at what is on the screen.
 
 ### 9.3 `run`
 
@@ -556,15 +558,15 @@ Same screen. Changes:
 
 **Answer when a step stopped it** (`isError: true`; the code is the failing step's code, or `expect_failed`):
 ```
-Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): text "Saved" didn't appear within 2 s.
+Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): its action ran, but text "Saved" didn't appear within 2 s.
 Same screen. Changes:
 + e51 text "Name is required" @16,300 398x18
 ```
 ```
 Error not_actionable: Ran 1 of 4 steps; stopped at step 2 (tap "Delete"): covered: e47 button "Delete" is covered by e45 button "Cancel"; close it or pass force: true.
 ```
-- `Ran <k>` counts steps whose action and expectation both held. The failing step's action may have
-  happened (a tap that ran but whose expectation failed); the change block shows what it did.
+- `Ran <k>` counts steps whose action and expectation both held. When the failing step's action ran and only its
+  expectation missed, the reason starts with `its action ran, but`; the change block shows what it did.
 - `(<step>)` names the step: its tool and its target as the agent wrote it (`tap "Save"`, `tap id=save`,
   `type_text "Email"`, `scroll down`, `wait 1.0`).
 - After the first line: the change block since the batch began, then notes. Steps after it don't run.

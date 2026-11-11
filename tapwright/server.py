@@ -240,6 +240,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                 if not queue.full():
                     queue.put_nowait(daemon.status())
 
+        page = websocket.headers.get("origin") is not None  # ws_allowed checked it is this server's own
+
         async def receive_all():
             while True:
                 event = await websocket.receive()
@@ -251,6 +253,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                 try:
                     message = json.loads(text)
                 except (ValueError, RecursionError):
+                    continue
+                # a person's OK comes from the live view page only, which a browser sends with its Origin; a socket a
+                # script opened has none (an agent holds the link). This guards against slips, not a determined agent.
+                if isinstance(message, dict) and message.get("type") == "confirm_answer" and not page:
                     continue
                 if isinstance(message, dict):
                     error = await daemon.viewer_message(message)

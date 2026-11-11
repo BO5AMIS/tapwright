@@ -38,6 +38,13 @@ def test_a_near_miss_is_not_a_match(label):
     assert policy.DEFAULT.check("com.example.app", label) is None
 
 
+@pytest.fixture(autouse=True)
+def _known_request_ids(monkeypatch):
+    """Request ids carry a random part so that only someone shown the request can answer it; here it is fixed."""
+    from tapwright import daemon
+    monkeypatch.setattr(daemon.secrets, "token_hex", lambda n=4: "x")
+
+
 def test_a_block_word_wins_over_a_confirm_word_and_phrases_need_all_their_words():
     rules = policy.parse({"confirm": ["Delete"], "block": ["Delete account"]})
     assert rules.check(None, "Delete account") == ("blocked", "Delete account")
@@ -156,21 +163,21 @@ def test_a_confirm_word_asks_the_live_view_and_the_retry_after_an_allow_passes_o
         e = await refused(d, "tap", TAP)
         assert e.code == "not_allowed" and str(e) == NEEDS and "tap" not in d.session.calls
         (ask,) = [m for m in sent(d) if m["type"] == "confirm"]
-        assert (ask["id"], ask["by"], ask["kind"], ask["caption"], ask["word"]) == ("c1", "agent", "tap",
+        assert (ask["id"], ask["by"], ask["kind"], ask["caption"], ask["word"]) == ("c1-x", "agent", "tap",
                                                                                       'Tap "Delete trip"', "Delete")
         assert isinstance(ask["expires"], int)
         await refused(d, "tap", TAP)  # asked again before an answer: no second request
         assert not [m for m in sent(d) if m["type"] == "confirm"]
-        assert await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": True}) is None
-        assert sent(d) == [{"type": "confirm_closed", "id": "c1", "allow": True}]
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": False})  # the first answer won
+        assert await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True}) is None
+        assert sent(d) == [{"type": "confirm_closed", "id": "c1-x", "allow": True}]
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})  # the first answer won
         assert sent(d) == []
         answer = await d.run_tool("a", "tap", TAP)
         assert answer["text"].splitlines()[-1] == "Note: a person allowed this." and d.session.calls.count("tap") == 1
         e = await refused(d, "tap", TAP)  # the OK was for one call: a second one needs a new one
         assert str(e) == NEEDS and "They declined" not in str(e)
         (again,) = [m for m in sent(d) if m["type"] == "confirm"]
-        assert again["id"] == "c2"
+        assert again["id"] == "c2-x"
         await finish(stop, task)
     run(go)
 
@@ -182,7 +189,7 @@ def test_an_allow_is_for_the_same_tool_and_the_same_element_only():
         other = button("e2", "Remove photo", "photo-remove", rect=(10, 200, 100, 40))
         stop, task = await ready(d, [TRIP, other])
         await refused(d, "tap", TAP)
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": True})
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         e = await refused(d, "tap", {"target": {"id": "photo-remove"}, "look": False})  # another element
         assert "needs_confirmation" in str(e) and "Remove photo" in str(e)
         e = await refused(d, "long_press", TAP)  # another tool
@@ -199,16 +206,16 @@ def test_a_decline_and_an_expiry_are_said_on_the_retry_and_it_asks_again():
         d._queues_seen = d.subscribe()
         stop, task = await ready(d)
         await refused(d, "tap", TAP)
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": False})
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})
         e = await refused(d, "tap", TAP)
         assert str(e) == NEEDS + " They declined."
-        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c1", "c2"]
+        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c1-x", "c2-x"]
         d.control.clock.t += 121  # nobody answered c2
-        await d.viewer_message({"type": "confirm_answer", "id": "c2", "allow": True})  # too late: ignored
+        await d.viewer_message({"type": "confirm_answer", "id": "c2-x", "allow": True})  # too late: ignored
         e = await refused(d, "tap", TAP)
         assert str(e) == NEEDS + " Nobody answered."
-        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c3"]
-        await d.viewer_message({"type": "confirm_answer", "id": "c3", "allow": True})
+        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c3-x"]
+        await d.viewer_message({"type": "confirm_answer", "id": "c3-x", "allow": True})
         d.control.clock.t += 121  # an allow nobody used lapses
         e = await refused(d, "tap", TAP)
         assert str(e) == NEEDS and "tap" not in d.session.calls
@@ -239,7 +246,7 @@ def test_a_point_over_a_delete_button_is_checked_as_the_button():
         stop, task = await ready(d)
         e = await refused(d, "tap", {"target": {"x": 60, "y": 120}, "look": False})
         assert str(e) == NEEDS and "tap" not in d.session.calls
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": True})
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         answer = await d.run_tool("a", "tap", {"target": {"x": 60, "y": 120}, "look": False})
         assert d.session.calls.count("tap") == 1 and answer["text"].endswith("Note: a person allowed this.")
         d.session.tap_points.clear()
@@ -260,7 +267,7 @@ def test_a_switch_is_checked_too_and_a_toggle_to_where_it_is_asks_nothing():
         assert "tap" not in d.session.calls
         r = await d.run_tool("a", "toggle", {"target": {"id": "notify"}, "value": False, "look": False})
         assert "already false" in r["text"]
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": True})
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         r = await d.run_tool("a", "toggle", {"target": {"id": "notify"}, "look": False})
         assert d.session.calls.count("tap") == 1 and r["text"].endswith("Note: a person allowed this.")
         await finish(stop, task)
@@ -334,7 +341,7 @@ def test_a_dry_run_does_not_use_up_a_persons_ok():
         d = make()
         stop, task = await ready(d)
         await refused(d, "tap", TAP)
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": True})
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         r = await d.run_tool("a", "tap", {**TAP, "dry_run": True})
         assert r["text"] == 'Would tap e1 button "Delete trip" at 60,120.'  # it is allowed: nothing to add
         assert (await d.run_tool("a", "tap", TAP))["text"].endswith("Note: a person allowed this.")
@@ -428,8 +435,8 @@ def test_a_viewer_that_connects_while_a_request_is_open_is_sent_it():
         assert d.open_confirms() == []
         await refused(d, "tap", TAP)
         (ask,) = d.open_confirms()
-        assert ask["type"] == "confirm" and ask["id"] == "c1" and ask["word"]
-        await d.viewer_message({"type": "confirm_answer", "id": "c1", "allow": False})
+        assert ask["type"] == "confirm" and ask["id"] == "c1-x" and ask["word"]
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})
         assert d.open_confirms() == []
         await finish(stop, task)
     run(go)

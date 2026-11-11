@@ -12,6 +12,7 @@ import math
 import os
 import pathlib
 import re
+import secrets
 import time
 import traceback
 from contextlib import nullcontext
@@ -1047,7 +1048,7 @@ class Daemon:
                 BATCH.reset(token)
             if missed is not None:
                 failed = ("expect_failed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
-                                           f"{missed}")
+                                           f"its action ran, but {missed}")
                 break
             done += 1
         first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
@@ -2220,7 +2221,8 @@ class Daemon:
             del self._confirms[c.id]
         if not open_:
             self._confirm_seq += 1
-            request = Confirm(f"c{self._confirm_seq}", tool, key, now + CONFIRM_TTL)
+            # not guessable: an answer must come from someone who was shown the request
+            request = Confirm(f"c{self._confirm_seq}-{secrets.token_hex(4)}", tool, key, now + CONFIRM_TTL)
             self._confirms[request.id] = request
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
                                "caption": step_caption(tool, what, a), "word": word,

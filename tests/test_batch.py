@@ -72,7 +72,7 @@ def test_run_stops_at_a_missed_expectation_and_names_the_step():
                 {"tool": "tap", "target": {"id": "save"}, "expect": {"text": "Saved", "timeout": 0.5}},
                 {"tool": "tap", "target": {"id": "save"}}]})
         assert e.value.code == "expect_failed"
-        assert str(e.value).splitlines()[0] == ('Ran 0 of 2 steps; stopped at step 1 (tap id=save): text "Saved" '
+        assert str(e.value).splitlines()[0] == ('Ran 0 of 2 steps; stopped at step 1 (tap id=save): its action ran, but text "Saved" '
                                                 "didn't appear within 0.5 s.")
         assert d.session.calls.count("tap") == 1  # step 2 never ran
         await finish(stop, task)
