@@ -5,6 +5,12 @@
 Agents get more done per call, a session becomes a test you keep, and every touch that matters asks you
 first. The interface is AGENT-TOOLS 1.8, shared with Tapline.
 
+**A faster tap**
+- Tapwright installs its own build of the on-phone runner (Appium's WebDriverAgent 16.15.3 plus a fast tap,
+  github.com/bo5amis/WebDriverAgent, checked by its SHA-256). A tap is 0.49 s over USB (0.69 before); over
+  Wi-Fi a tap and a toggle are within Wi-Fi's bar. `TAPWRIGHT_WDA=appium tapwright setup --force` goes back to
+  Appium's runner. Run `tapwright setup --force` once after upgrading to install it.
+
 **Do more per call**
 - `run`: several steps in one call, each an ordinary tool call with an optional `expect` (text, id or
   label appears or goes; a value; a timeout). It stops at the first step that fails, says which, and keeps
@@ -37,6 +43,12 @@ first. The interface is AGENT-TOOLS 1.8, shared with Tapline.
 - `tapwright doctor --fix` repairs the usual breaks (developer disk image, WebDriverAgent missing or its
   profile running out, the network pairing); `doctor` warns 30 days before the signing expires.
 - `tapwright setup` run again skips what is done and ends with the next commands.
+
+**Fixes**
+- Closing the keyboard before a touch: the touch goes inside a list first, then a short pull on the list,
+  and WebDriverAgent's slow attempt isn't repeated in an app where it failed. A control the keyboard still
+  covers is refused with how to close it.
+- A person's OK is taken only from the live view page, with request ids that can't be guessed.
 
 **Live view**
 - Every control by keyboard with a visible focus ring; keys on the page's own controls never reach the
