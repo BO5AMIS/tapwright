@@ -2455,8 +2455,31 @@ def test_toggle_with_no_frame_change_still_reads_the_tree():
         feeder = FrameFeeder(d.hub).start(then=b"A")
         reads = d.session.calls.count("snapshot")
         r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
-        assert d.session.calls.count("snapshot") == reads + 1  # the tree was read, not skipped
+        assert d.session.calls.count("snapshot") > reads  # the tree was read, not skipped
         assert "but it is still checked=false." in r["text"].splitlines()[0]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_toggle_answers_as_soon_as_the_switch_reads_flipped():
+    """Measured on the phone 2026-11-11: waiting for the knob's slide to end cost 0.33 to 0.65 s a toggle. The
+    first read that shows the switch flipped is the answer; no wait for a still screen."""
+    async def go():
+        d = make(settle_still=5.0, settle_quiet=5.0)  # a still-screen wait would take seconds here
+        stop, task = await started(d)
+        await looked(d, [switch(False)])
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):
+            d.session.tree = [switch(True)]
+            return await real(target, hold_ms)
+        d.session.tap = tap
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "toggle", {"target": {"ref": "e1"}})
+        assert asyncio.get_running_loop().time() - began < 1.0
+        assert r["text"].splitlines()[0].startswith("Toggled e1 switch")
         await feeder.stop()
         await finish(stop, task)
     run(go)

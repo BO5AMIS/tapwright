@@ -85,6 +85,7 @@ PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input
 PACE_TICK = 0.25  # how often the pace is checked
 LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
 BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
+TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 NOTE_PERSON = "a person used the phone since your last look."
 NOTE_KEYBOARD = "closed the keyboard first."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -892,7 +893,12 @@ class Daemon:
             return _answer([str(result)], notes)
         mark = box["mark"]  # the stream as the gesture went out; the settle only trusts frames after the return
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
-        done = await self._settle(self._mark()[0], cap=settle, since=mark[1], early=mark[0] if settle == CAP else None)
+        landed = await self._toggle_landed(view, result) if isinstance(result, Toggled) else None
+        if landed is not None:
+            done = Settled(landed[1], True, False)
+        else:
+            done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
+                                      early=mark[0] if settle == CAP else None)
         if done.capped:
             notes = [*notes, NOTE_CAPPED.format(cap=settle)]
         if name == "back" and not done.changed:
@@ -911,7 +917,8 @@ class Daemon:
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target)
+        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target,
+                                   snap=landed[0] if landed is not None else None)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -926,6 +933,29 @@ class Daemon:
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         return await self._add_shot(answer, view, shot)
+
+    async def _toggle_landed(self, view, result: "Toggled") -> tuple[Snapshot, float] | None:
+        """A switch's value changes the moment the touch lands; the knob's slide after it is only drawing. Waiting
+        for the screen to stand still cost a toggle 0.33 to 0.65 s (measured on the phone 2026-11-11). So the tree
+        is read until the switch shows its new value, and that read is the answer. Not when anything else
+        appeared or went away in that read (a toggle that opens a section may still be animating it in): then
+        None, and the usual wait for a still screen follows. None too when the switch doesn't flip in
+        TOGGLE_LAND_WAIT."""
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        old = result.before
+        while loop.time() - began < TOGGLE_LAND_WAIT:
+            snap = await self._read(lambda: self.session.snapshot())
+            if snap.tree.alert is not None:
+                return None  # a confirm alert came up: the usual wait, and the verdict knows about alerts
+            now = next((e for e in snap.tree.items if (e.role, e.identifier or "", e.label if not e.identifier else "")
+                        == (old.role, old.identifier or "", old.label if not old.identifier else "")), None)
+            if now is not None and now.checked == result.flipped:
+                if len(snap.tree.items) != len(view.items):
+                    return None
+                return snap, loop.time() - began
+            await asyncio.sleep(TOGGLE_POLL)
+        return None
 
     async def _apps(self, notes: list) -> dict:
         apps = await self._read(self.session.apps)
