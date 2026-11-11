@@ -16,7 +16,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import store
+from . import policy, store
 from .control import Refused
 from .daemon import Scope
 from .errors import HTTP_STATUS
@@ -107,8 +107,15 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
         apps = tuple(a.strip() for a in request.headers.get("x-tapwright-apps", "").split(",") if a.strip())
         scope = None if request.headers.get("x-tapwright-mode") == "dedicated" else Scope(apps)
+        # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
+        sent = request.headers.get("x-tapwright-policy")
         try:
-            return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope))
+            rules = policy.loads(sent) if sent else None
+        except ValueError as e:
+            return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
+        try:
+            return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
+                                                      policy=rules))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net

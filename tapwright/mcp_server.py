@@ -21,7 +21,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import client, device, ui
+from . import client, device, policy, ui
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -154,40 +154,44 @@ async def look(screenshot: bool = True, width: int = 600, labels: bool = False) 
 
 
 @server.tool(description=describe("tap"), structured_output=False)
-async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot)
+async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool = False,
+              dry_run: bool = False) -> CallToolResult:
+    return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot, dry_run=dry_run)
 
 
 @server.tool(description=describe("long_press"), structured_output=False)
 async def long_press(target: Target, seconds: float = 1.0, force: bool = False, look: bool = True,
-                     screenshot: bool = False) -> CallToolResult:
-    return await _tool("long_press", target=target, seconds=seconds, force=force, look=look, screenshot=screenshot)
+                     screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+    return await _tool("long_press", target=target, seconds=seconds, force=force, look=look, screenshot=screenshot,
+                       dry_run=dry_run)
 
 
 @server.tool(description=describe("type_text"), structured_output=False)
 async def type_text(text: str, target: Target | None = None, replace: bool = True, submit: bool = False,
-                    force: bool = False, look: bool = True, screenshot: bool = False) -> CallToolResult:
+                    force: bool = False, look: bool = True, screenshot: bool = False,
+                    dry_run: bool = False) -> CallToolResult:
     return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, force=force,
-                       look=look, screenshot=screenshot)
+                       look=look, screenshot=screenshot, dry_run=dry_run)
 
 
 @server.tool(description=describe("scroll"), structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
                  to: Literal["start", "end", "target"] | None = None, target: Target | None = None, look: bool = True,
-                 screenshot: bool = False) -> CallToolResult:
+                 screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
-                       screenshot=screenshot)
+                       screenshot=screenshot, dry_run=dry_run)
 
 
 @server.tool(description=describe("toggle"), structured_output=False)
 async def toggle(target: Target, value: bool | None = None, force: bool = False, look: bool = True,
-                 screenshot: bool = False) -> CallToolResult:
-    return await _tool("toggle", target=target, value=value, force=force, look=look, screenshot=screenshot)
+                 screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+    return await _tool("toggle", target=target, value=value, force=force, look=look, screenshot=screenshot,
+                       dry_run=dry_run)
 
 
 @server.tool(description=describe("back"), structured_output=False)
-async def back(look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("back", look=look, screenshot=screenshot)
+async def back(look: bool = True, screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+    return await _tool("back", look=look, screenshot=screenshot, dry_run=dry_run)
 
 
 @server.tool(description=describe("open_url"), structured_output=False)
@@ -247,8 +251,9 @@ async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bo
 
 @server.tool(description=describe("swipe"), structured_output=False)
 async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True,
-                screenshot: bool = False) -> CallToolResult:
-    return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot)
+                screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+    return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot,
+                       dry_run=dry_run)
 
 
 @server.tool(description=describe("rotate"), structured_output=False)
@@ -257,8 +262,10 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
     return await _tool("rotate", to=to, look=look, screenshot=screenshot)
 
 
-def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False) -> None:
+def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
+        rules: policy.Policy | None = None) -> None:
     client.set_scope(apps, dedicated)
+    client.set_policy(rules)
     global SHOTS_DIR
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     if SHOTS_DIR is not None:

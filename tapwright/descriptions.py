@@ -61,6 +61,8 @@ _TAPWRIGHT = (
     "- The header shows `Keyboard: shown` or `hidden`. Its keys aren't listed: type with `type_text`.\n"
     '- Stay in the app under test: if a link takes you elsewhere, go back with `open_app`.\n'
     "- On the owner's own phone you can read and touch only the apps you were given. Anything else answers `not_allowed`, and nothing of another app is shown.\n"
+    "- A touch on a button or switch with a policy word (Buy, Delete, Send, Sign out and the like) needs a person's OK in the live view: `not_allowed: needs_confirmation` means a person is being asked, so make the same call again once they allow it, or ask your user. `not_allowed: blocked` is final: don't try another way. `force` doesn't skip it.\n"
+    "- `dry_run: true` on `tap`, `long_press`, `toggle`, `type_text`, `swipe`, `scroll` and `back` checks the call and says what it would do, touching nothing.\n"
     "- It's the user's own phone. The safety rules above matter most here."
 )
 
@@ -128,26 +130,26 @@ EXTRA = {
     'look': 'reads the whole phone; the header may add `Keyboard:`.',
     'tap': (
         "makes a real touch at the element's centre, or at the centre of its visible part when a bar "
-        'covers the centre.'
+        'covers the centre. `dry_run: true` says what it would tap and whether a person\'s OK is needed, touching nothing.'
     ),
-    'long_press': 'holds for `seconds`.',
+    'long_press': 'holds for `seconds`. The policy and `dry_run` are as for `tap`.',
     'type_text': (
         'taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. '
         "It can't see which field is focused, so without a target it uses the only input on screen. A "
-        "secure field's value is reported as hidden."
+        "secure field's value is reported as hidden. `dry_run: true` says what it would type into (only how many characters), typing nothing."
     ),
     'scroll': (
         "drags on the screen; the main scroll view is the one at the screen's centre. `to: \"target\"` drags "
-        'toward the element until it is clear; a row a lazy list has not made yet is `not_found`.'
+        'toward the element until it is clear; a row a lazy list has not made yet is `not_found`. `dry_run: true` says what it would do, scrolling nothing.'
     ),
     'toggle': (
         'reads the switch, then taps it only if the value differs. With `look: false` the first line is '
-        "`Tapped …`: the new state isn't read."
+        "`Tapped …`: the new state isn't read. The policy and `dry_run` are as for `tap`."
     ),
     'back': (
         "closes an open popover with a touch outside it; else taps the navigation bar's back button (never "
         'a Cancel, Close or Done), or swipes from the left edge when there is no navigation bar; '
-        '`no_action` when nothing changed.'
+        '`no_action` when nothing changed. `dry_run: true` says which of these it would do, doing none.'
     ),
     'open_url': 'opens it on the phone, so another app may take it. The answer says which app came up.',
     'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
@@ -168,7 +170,7 @@ EXTRA = {
     ),
     'swipe': (
         'Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sliders, '
-        'carousels, swipe actions and edge gestures; for lists, use `scroll`.'
+        'carousels, swipe actions and edge gestures; for lists, use `scroll`. `dry_run: true` says what it would drag, touching nothing.'
     ),
     'rotate': (
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app '

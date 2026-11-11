@@ -3,6 +3,7 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
+import contextvars
 import io
 import json
 import dataclasses
@@ -17,6 +18,7 @@ from typing import NamedTuple
 from PIL import Image, UnidentifiedImageError
 
 from . import changes, ui
+from . import policy as safety
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
@@ -39,6 +41,17 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
+
+
+# The safety policy of the call being run (docs/AGENT-TOOLS.md 11.1): set by run_tool for that call only, so two
+# agents with different policies never see each other's.
+_POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwright_policy", default=safety.DEFAULT)
+# Set to a list by run_tool; a touch a person's OK let through puts True in it, and the answer then ends with NOTE_ALLOWED
+_GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright_granted", default=[])
+CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
+CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
+NOTE_ALLOWED = "a person allowed this."
+DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
 
 
 class Scope(NamedTuple):
@@ -267,9 +280,11 @@ def _checked(name: str, args: dict) -> dict:
         timeout = args.get("timeout", WAIT_FOR_DEFAULT)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not WAIT_FOR_MIN <= timeout <= WAIT_MAX:
             raise Refused("bad_params", f"timeout must be a number from {WAIT_FOR_MIN:g} to {WAIT_MAX:g}, not {timeout!r}")
-    for key in ("look", "screenshot", "labels"):
+    for key in ("look", "screenshot", "labels", "dry_run"):
         if key in args and not isinstance(args[key], bool):
             raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if args.get("dry_run") and name not in DRY_TOOLS:
+        raise Refused("bad_params", f"dry_run is for {', '.join(DRY_TOOLS)}, not {name}")
     if name == "wait":
         seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, a string isn't one to us
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not WAIT_MIN <= seconds <= WAIT_MAX:
@@ -279,6 +294,30 @@ def _checked(name: str, args: dict) -> dict:
     if name == "toggle" and args.get("value") is not None and not isinstance(args["value"], bool):
         raise Refused("bad_params", f"value must be true or false, not {args['value']!r}")
     return checked
+
+
+class DryRun(Refused):
+    """A dry run's whole answer (`Would tap ...`), raised where the touch would go out. It is a Refused so the
+    controller counts nothing as done: no new screen generation, so the agent's refs stay good."""
+
+    def __init__(self, line: str) -> None:
+        super().__init__("dry_run", line)
+
+
+@dataclasses.dataclass
+class Confirm:
+    """One request for a person's OK (docs/AGENT-TOOLS.md 11.3) and where it stands: `pending`, then `allowed` or
+    `declined`. `until` is the clock time (the controller's) a pending request expires, or an allow lapses."""
+    id: str
+    tool: str
+    key: tuple[str, ...]  # the element: its id, else its role, label and text
+    until: float
+    state: str = "pending"
+
+
+def _brief(e: ui.Element) -> str:
+    """An element as a dry run names it: `e12 button "Delete trip"`."""
+    return " ".join(p for p in (e.ref, e.role, ui.clip(e.text) if e.text else "") if p)
 
 
 class Noted(str):
@@ -460,6 +499,8 @@ class Daemon:
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._queues: set = set()
+        self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
+        self._confirm_seq = 0
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
 
@@ -763,11 +804,15 @@ class Daemon:
                         self._set_state("live")
 
     # ---- agent tools ----
-    async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None) -> dict:
+    async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
+                       policy: "safety.Policy | None" = None) -> dict:
         """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
-        `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit."""
+        `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
+        `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
+        token, granted = _POLICY.set(policy or safety.DEFAULT), []
+        grant_token = _GRANTED.set(granted)
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
@@ -775,8 +820,12 @@ class Daemon:
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
                 if scope is None:
-                    return await self._run_tool(client_id, name, args)
-                return await self._within(scope, client_id, name, args)
+                    answer = await self._run_tool(client_id, name, args)
+                else:
+                    answer = await self._within(scope, client_id, name, args)
+                if granted:  # a person's OK let a touch through: the answer ends with it
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {NOTE_ALLOWED}"}
+                return answer
         except Refused:
             raise
         except DeviceError as e:  # WebDriverAgent or the link answered with an error; not our bug
@@ -785,6 +834,9 @@ class Daemon:
         except Exception as e:  # one failed step never takes the daemon down
             self.log(f"{name} failed unexpectedly:\n{traceback.format_exc()}")
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
+        finally:
+            _POLICY.reset(token)
+            _GRANTED.reset(grant_token)
 
     # ---- personal mode: the agent stays in the apps it was given ----
     async def _given(self, scope: "Scope") -> dict[str, str]:
@@ -954,6 +1006,7 @@ class Daemon:
                                             or (name in ("type_text", "toggle", "scroll") and target.kind == "point"))
 
         fresh, full, box = [True], [False], {}
+        dry = bool(args.get("dry_run"))  # resolve and check, but send nothing to the phone (_dry)
 
         async def act():
             self._require_connected()
@@ -987,7 +1040,7 @@ class Daemon:
                     self._refuse_behind_alert(view, force=False)
                 self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 if not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
-                    if name in KEYBOARD_TOOLS and view.read_keyboard and self._under_keyboard(target):
+                    if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
                         closed = await self._dismiss_keyboard_now(view)
@@ -996,11 +1049,13 @@ class Daemon:
                     if "closed" not in box:
                         self._refuse_off_screen(target)
             # a person would close the keyboard before the touch
-            box["note"] = box.pop("closed", "") or await self._close_keyboard(view, name, target)
+            box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, target))
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
+            if dry and name == "swipe":
+                self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
             return await (handler(view, args) if handler else call(s, args))
 
         async def act_as_agent():
@@ -1028,6 +1083,8 @@ class Daemon:
             self._announce("agent", name, ok=False, code="reconnecting")
             raise Refused("reconnecting", "the connection dropped during the action; look to check what "
                                           "happened") from None
+        except DryRun as e:  # nothing was sent: the answer is what would have been
+            return _answer([str(e)], notes)
         except Refused as e:
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
@@ -1438,6 +1495,8 @@ class Daemon:
         else:
             self._guard(view, field)
             at = self._touch_point(field)
+        self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
+
         async def typed() -> None:
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
                                          submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
@@ -1463,6 +1522,8 @@ class Daemon:
         s = self.session
         target, to = a.get("target"), a.get("to")
         if to == "target":
+            if a.get("dry_run"):
+                self._dry(a, f"Would scroll until {_brief(self._anywhere(view, target))} is on screen.")
             return await self._scroll_to(view, target)
         if target is None:
             area = ui.scroll_container(view.items, s.screen)
@@ -1495,6 +1556,7 @@ class Daemon:
             # (13 s over Wi-Fi, 2026-11-11). (A list that keeps only its visible rows shows none either way and
             # is scrolled as before.)
             return Scrolled(f"{area.line(actions=False) if area else 'The screen'} is already at its {to}.")
+        self._dry(a, f"Would scroll {direction}{f' to the {to}' if to else ''}: swipe from ({x0:g}, {y0:g}) to ({x1:g}, {y1:g}).")
         loop = asyncio.get_running_loop()
         began, previous, note = loop.time(), self._mark()[1], ""
         for swipes in range(1, MAX_SCROLL_SWIPES + 1):
@@ -1743,6 +1805,86 @@ class Daemon:
         if not element.in_alert:
             self._refuse_behind_alert(view)
 
+    @staticmethod
+    def _dry(a: dict, line: str) -> None:
+        """For a dry run: stop here with what would be done (docs/AGENT-TOOLS.md 11.4). Nothing was sent."""
+        if a.get("dry_run"):
+            raise DryRun(line)
+
+    def _element_at(self, point: tuple[float, float]) -> ui.Element | None:
+        """The front-most element of the agent's list whose rect contains the point (a later one is drawn over an
+        earlier one), or None."""
+        x, y = point
+        return next((e for e in reversed(self.session.items)
+                     if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
+
+    def _police(self, tool: str, a: dict, element: ui.Element | None) -> str:
+        """The safety policy's say on a touch of `element` (docs/AGENT-TOOLS.md 11): nothing when it has no word,
+        `not_allowed: blocked` for a block word, and for a confirm word `not_allowed: needs_confirmation` (a
+        request goes to the live view) unless a person's OK for this very call is waiting. That OK is used up
+        here. For a dry run, nothing is asked or used up: the sentence for the answer's end, or "". `force` never
+        skips it, and nothing here touches the phone."""
+        if element is None:
+            return ""
+        hit = _POLICY.get().check(self._app_bundle(), element.text)
+        if hit is None:
+            return ""
+        kind, word = hit
+        what = f"{element.role} {ui.clip(element.text)}"
+        if kind == safety.BLOCKED:
+            raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
+                                         "don't try another way.")
+        key = (element.identifier and ("id", element.identifier)) or ("role", element.role, element.label, element.text)
+        now = self.control.clock()
+        grant = next((c for c in self._confirms.values()
+                      if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
+        if a.get("dry_run"):
+            return "" if grant else f' It needs a person\'s OK (policy word "{word}").'
+        if grant is not None:
+            del self._confirms[grant.id]
+            _GRANTED.get().append(True)
+            return ""
+        raise Refused("not_allowed", self._ask(tool, a, key, element, word, what, now))
+
+    def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
+             now: float) -> str:
+        """The `needs_confirmation` message, after asking the live view (once for a request still open). An
+        earlier request for this call that was declined, or ran out unanswered, is said at the message's end."""
+        for stale in [c for c in self._confirms.values() if c.until < now - CONFIRM_KEEP]:
+            del self._confirms[stale.id]
+        said, open_ = "", False
+        for c in [c for c in self._confirms.values() if c.tool == tool and c.key == key]:
+            if c.state == "pending" and c.until >= now:
+                open_ = True
+                continue
+            if c.state != "allowed":  # an allow nobody used lapses without a word
+                said = " They declined." if c.state == "declined" else " Nobody answered."
+            del self._confirms[c.id]
+        if not open_:
+            self._confirm_seq += 1
+            request = Confirm(f"c{self._confirm_seq}", tool, key, now + CONFIRM_TTL)
+            self._confirms[request.id] = request
+            self.broadcast({"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
+                            "caption": step_caption(tool, what, a), "word": word,
+                            "expires": int((time.time() + CONFIRM_TTL) * 1000)})
+        return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"). The live view asks them "
+                "now; when they allow it, make the same call again. If nobody is watching, ask your user." + said)
+
+    def _answer_confirm(self, message: dict) -> None:
+        """A live view's answer to a request. The first one wins; an unknown, answered or expired id is ignored."""
+        request = self._confirms.get(message.get("id")) if isinstance(message.get("id"), str) else None
+        now = self.control.clock()
+        if request is None or request.state != "pending" or request.until < now:
+            return
+        allow = message.get("allow") is True
+        request.state = "allowed" if allow else "declined"
+        request.until = now + CONFIRM_TTL  # an allow is good for one call within CONFIRM_TTL
+        self.broadcast({"type": "confirm_closed", "id": request.id, "allow": allow})
+
+    def _app_bundle(self) -> str | None:
+        """The bundle id of the app the last read found in front, for the per-app policy."""
+        return (self.session.app or (None, None))[1]
+
     def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
         """Where a finger would touch an element a bar (or the keyboard) is drawn over its centre: the middle of
         the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
@@ -1775,15 +1917,25 @@ class Daemon:
         s, target = self.session, _target(a)
         verb = "Long-pressed" if hold_ms > 300 else "Tapped"
         found = ui.resolve(s.items, target)
-        if isinstance(found, tuple):
+        tool = "long_press" if hold_ms > 300 else "tap"
+        word = "long-press" if hold_ms > 300 else "tap"
+        if isinstance(found, tuple):  # the policy looks at the element under the point, if the list has one
+            said = self._police(tool, a, self._element_at(found))
+            self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
             return await s.tap(target, hold_ms=hold_ms)
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
+            said = self._police(tool, a, found)  # `force` skips the checks above, never the policy
+            self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
             done = Noted(await s.tap(target, hold_ms=hold_ms))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
-        if (point := self._touch_point(found)) is None:
+        point = self._touch_point(found)
+        said = self._police(tool, a, found)
+        at = point or found.center
+        self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
+        if point is None:
             return await s.tap(target, hold_ms=hold_ms)
         await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
         return f"{verb} {found.line(actions=False)} at its visible part ({round(point[0])}, {round(point[1])})."
@@ -1838,6 +1990,9 @@ class Daemon:
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{line} is already {'true' if want else 'false'}.")
+        said = self._police("toggle", a, found)
+        at = point or found.center
+        self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
         where = "" if shown is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
@@ -1884,6 +2039,7 @@ class Daemon:
         s = self.session
         back = await self._still_back()
         if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
+            self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
             return "Closed the sheet."
         behind = getattr(s, "behind", [])
@@ -1891,13 +2047,16 @@ class Daemon:
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
         # sheet open); one that shows is the sheet's own and is tapped as usual.
         if behind and not (back.point is not None and not any(ui._holds(e.rect, back.point) for e, _ in behind)):
+            self._dry(a, "Would close the sheet in front.")
             return await self._close_sheet(view)
         if back.point is not None:
+            self._dry(a, "Would tap the back button.")
             await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
             return "Tapped the back button."
         if back.bar:
             raise Refused("not_actionable", "no_action: the navigation bar has no back button")
         width, height = s.screen
+        self._dry(a, "Would swipe from the left edge.")
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
@@ -2254,6 +2413,9 @@ class Daemon:
                 return None
             if kind == "quality":
                 await self.set_quality(str(message.get("preset")))
+                return None
+            if kind == "confirm_answer":  # a person's answer to the policy's request (VIEWER-PROTOCOL 1.5)
+                self._answer_confirm(message)
                 return None
             if kind not in ("gesture", "scroll", "text", "key", "button"):
                 return None  # "overlay" comes in part 2; anything else is unknown

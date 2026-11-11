@@ -48,7 +48,8 @@ def test_shared_texts_are_pinned_word_for_word():
     assert SHARED["viewer"].endswith("Their touches go first, and they can pause you. Give the link to the user only.")
     assert SHARED["back"].endswith("`not_actionable: no_action` when there is nothing to go back to.")
     assert EXTRA["tap"] == ("makes a real touch at the element's centre, or at the centre of its visible part "
-                            "when a bar covers the centre.")
+                            "when a bar covers the centre. `dry_run: true` says what it would tap and whether a "
+                            "person's OK is needed, touching nothing.")
     assert EXTRA["swipe"].startswith("Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35).")
 
 

@@ -175,6 +175,17 @@ Reaching the phone from another network (a VPN such as Tailscale, or cellular) i
 of version 1. `tapwright probe --host <address> --watch` exists to try it; treat it as
 experimental.
 
+## Safety
+
+A touch on a button or switch whose own label or text holds a policy word (Buy, Purchase, Subscribe,
+Pay, Delete, Remove, Send, Post, Publish, Sign out, Log out, Erase; whole words, any case, never a
+testID) needs a person's OK. The agent's call answers `not_allowed: needs_confirmation`, the live view
+asks you (Allow once / Don't allow), and after an allow the agent repeats the same call once. `force`
+doesn't skip it, and `alert` answers are never checked. `tapwright mcp --policy FILE` sets your own
+words as JSON: `confirm` and `block` lists, and per app lists that replace them for that app (a block
+is final: `not_allowed: blocked`); `--no-policy` turns the check off, for a test phone with test data.
+`dry_run: true` on a touch tool says what it would do, policy included, and touches nothing.
+
 ## Limits
 
 - Apple's automation sees what accessibility sees. Give important views accessibility

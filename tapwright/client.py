@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import store
+from . import policy, store
 
 
 class DaemonError(RuntimeError):
@@ -39,6 +39,15 @@ def set_scope(apps: list[str] | None = None, dedicated: bool = False) -> None:
         SCOPE["X-Tapwright-Mode"] = "dedicated"
     elif apps:
         SCOPE["X-Tapwright-Apps"] = ",".join(apps)
+
+
+def set_policy(rules: policy.Policy | None = None) -> None:
+    """The safety policy this process's agent works under (docs/AGENT-TOOLS.md 11.1). None, the built-in one, is
+    sent as no header at all. The daemon refuses a call whose policy it can't read."""
+    if rules is None or rules == policy.DEFAULT:
+        SCOPE.pop("X-Tapwright-Policy", None)
+    else:
+        SCOPE["X-Tapwright-Policy"] = rules.dumps()
 
 
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,

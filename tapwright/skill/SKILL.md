@@ -112,6 +112,7 @@ with no element.
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
 | open a link a person would scan as a QR code (pairing Tapline, an Expo project, a deep link) | `open_url` with the link itself, then answer the app's prompt (Tapline's "Connect for testing?": tap Connect). Ask for the link as text; don't ask the user to scan. A pairing link works once: never log it or put it in a file. On a project's first load, Expo Go (and a development build) opens its developer menu by itself: tap Continue, then Close |
 | drag a slider or a carousel | `swipe` between two points |
+| see what a touch would do, and whether it needs a person's OK, without touching | `dry_run: true` on `tap`, `long_press`, `toggle`, `type_text`, `swipe`, `scroll` or `back`: it answers `Would tap e12 ...` and sends nothing to the phone |
 
 **With both tools connected:** when the two tools answer differently, both are right about their own way in: Tapwright does what a finger can do, Tapline what the app's own code allows (Tapline's `back` calls a sheet's own close; Tapwright's needs a gesture the sheet accepts). Test what the user can do with Tapwright; use Tapline to get there faster. Each tool's `was` is from its own last answer: after the other tool acted, read the current value, not the old one.
 
@@ -127,7 +128,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `stale` | a person changed the screen since your list: `look` again |
 | `busy` | a person is using the phone: wait a few seconds, retry |
 | `paused`, `locked` | ask the user (to resume; to unlock or enter the passcode) |
-| `not_allowed` | you weren't given this app: go back with `open_app`, or tell the user |
+| `not_allowed` | the first word is why. `outside_apps`, `no_apps`: you weren't given this app, so go back with `open_app`, or tell the user. `needs_confirmation`: a button with a policy word (Delete, Buy, Send, Sign out ...) needs a person's OK and the live view asks them; when they allow it, make the same call again, once; if nobody is watching, ask the user. `blocked`: final, tell the user. Never work around the last two (another element, a point, `force`) |
 | `not_answering` | the app froze: `close_app`, then `open_app` |
 | `reconnecting` | wait a few seconds, then `look` |
 | `timeout` | the action may have happened: `look` before you retry |
