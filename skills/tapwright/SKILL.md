@@ -84,7 +84,8 @@ with no element.
   A sheet opened by the first action and closed by the second shows as no change. That is
   true of the two together; it doesn't mean the second did nothing.
 - **Refs** stay with their elements from answer to answer. Only `look` starts again at `e1`,
-  so after a `look` use the new list's refs.
+  so after a `look` use the new list's refs. A full list (a new screen, or a `run` that ended on one) gives new
+  refs too: use those.
 - **An empty input** shows `placeholder="…"` (its hint text), never `value=`: `value=` is only what
   the field holds. After typing, its `~` line reads `(was placeholder "Email")`.
 - **Long text is cut** and says by how much: `"…(+57)"`. `wait_for` with the text checks all
@@ -107,6 +108,8 @@ with no element.
 | set a switch, or read it | `toggle` with `value: true` or `false`. It does nothing if the switch is already there, and its answer says the switch's state either way |
 | fill a field and send it | `type_text` with `submit: true` |
 | do a known sequence (fill a form, submit, check the result) | `run` with the steps, each an ordinary call, and an `expect` on the step that should change something: `{"tool": "tap", "target": {"id": "save"}, "expect": {"text": "Saved"}}`. One call instead of five; it stops at the first step that fails, says which, and keeps that step's own error code |
+| check a switch inside `run` | `"expect": {"id": "alerts", "value": "off"}`: a switch's value is `"on"`/`"off"` (`"true"`/`"false"` work too) |
+| get rid of a keyboard that covers what you need | nothing: a touch on something it covers closes it first. If the answer says it stayed up, `type_text` into the field with `submit: true` |
 | leave the user a test they can rerun | `record` with `start: true`, do the flow, then `record` with `stop: true` and a `path`. `replay` runs it; people run it in CI with `tapwright replay FILE --junit out.xml` |
 | check the screen's accessibility | `audit`. Report each issue it lists with its element and fix; they are real findings for the developer |
 | leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
