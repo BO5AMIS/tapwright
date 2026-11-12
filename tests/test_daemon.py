@@ -1772,7 +1772,25 @@ def test_the_list_is_not_current_without_a_stream_to_say_so():
 
 
 def run_virtual(scenario):
-    asyncio.run(scenario(), loop_factory=VirtualLoop)
+    # asyncio.run takes loop_factory only from Python 3.12, and the package allows 3.10: the loop is run by hand
+    # The cleanup is asyncio.run's own: what is still pending is cancelled and awaited, then async generators and
+    # the default executor are shut down, whether the scenario passed or failed.
+    loop = VirtualLoop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 def test_a_silent_change_before_the_action_is_not_reported_as_no_visible_change():
@@ -3630,9 +3648,10 @@ def test_back_closes_a_sheet_by_a_touch_beside_it():
 
         async def tap(target, hold_ms=60):
             d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]  # the backdrop closes it
+            feeder.then = b"B"  # the picture changes with the touch, not before the action's mark (3.10 ran the feeder first)
             return await real(target, hold_ms)
         d.session.tap = tap
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.")
         assert d.session.tap_points == [(215.0, (60.0 + 647.0) / 2)] and "swipe" not in d.session.calls
@@ -3651,9 +3670,10 @@ def test_back_pulls_a_sheet_down_when_the_touch_beside_it_closed_nothing():
         async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
             d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]
             d.session.pulled = (x0, y0, x1, y1)
+            feeder.then = b"B"  # the picture changes with the pull
             return await real(x0, y0, x1, y1, duration_ms, hold_ms)
         d.session.swipe = swipe
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.") and len(d.session.tap_points) == 1
         assert d.session.pulled == (215.0, 661.0, 215.0, 911.0)  # from just inside its top edge, straight down
@@ -3680,9 +3700,10 @@ def test_back_finds_the_sheet_inside_a_backdrop_that_fills_the_screen():
 
         async def tap(target, hold_ms=60):
             d.session.behind, d.session.tree = [], [button("e5", "Open sheet 2", "lab-open-sheet2")]
+            feeder.then = b"B"  # the picture changes with the touch
             return await real(target, hold_ms)
         d.session.tap = tap
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.")
         assert d.session.tap_points == [(215.0, (60.0 + 690.0) / 2)]  # on the backdrop, above the panel
