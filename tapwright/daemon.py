@@ -2309,6 +2309,7 @@ class Daemon(journey_tool.JourneyTools):
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
+            box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
             handler = self._handlers.get(name)
@@ -2416,8 +2417,10 @@ class Daemon(journey_tool.JourneyTools):
             # Not when something lies off screen: the action's effect may be there, and only a read shows it
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             view.unlooked = 0  # this block covers them: nothing changed since the list
-            if box.get("hint"):
-                notes = [*notes, NOTE_DELIVERED.format(seconds=done.seconds, hint=box["hint"])]
+            if _health_sheet(view.items):  # iOS's own Health access sheet takes touches and changes nothing
+                notes = [*notes, NOTE_HEALTH]
+            elif box.get("hint"):
+                notes = [*notes, NOTE_DELIVERED.format(seconds=time.monotonic() - box["began"], hint=box["hint"])]
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -2427,7 +2430,8 @@ class Daemon(journey_tool.JourneyTools):
         answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
                                    drifted=to_target or bool(box.get("scrolled")),
                                    snap=landed[0] if landed is not None else None,
-                                   hint="" if done.capped else box.get("hint", ""))  # (a screen still moving: no "nothing changed")
+                                   hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
+                                   watched=time.monotonic() - box["began"])
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -4220,11 +4224,12 @@ class Daemon(journey_tool.JourneyTools):
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,
                      seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False,
-                     hint: str = "") -> dict:
+                     hint: str = "", watched: float | None = None) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
         `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements. `hint`: a tap
-        or long press's advice for when nothing changed (NOTE_DELIVERED), given with `seconds`."""
+        or long press's advice for when nothing changed (NOTE_DELIVERED), given with `seconds`; the note's own time
+        is `watched`, from the touch to now (the settle's `seconds` start only when the call returns)."""
         s = self.session
         tail = [] if seconds is None else [settled_line(seconds)]
         app_before, listed_before = view.app, view.shown
@@ -4278,7 +4283,7 @@ class Daemon(journey_tool.JourneyTools):
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             notes = [*notes, NOTE_HEALTH]  # iOS's own Health access sheet takes touches and changes nothing
         elif changes.NO_CHANGE in up.lines and hint and seconds is not None:
-            notes = [*notes, NOTE_DELIVERED.format(seconds=seconds, hint=hint)]
+            notes = [*notes, NOTE_DELIVERED.format(seconds=seconds if watched is None else watched, hint=hint)]
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:

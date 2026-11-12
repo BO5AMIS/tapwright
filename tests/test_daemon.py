@@ -2457,6 +2457,53 @@ def test_the_delivered_note_is_also_given_when_the_tree_read_is_skipped():
     run(go)
 
 
+def test_the_delivered_note_counts_its_seconds_from_the_touch_not_from_the_calls_return():
+    """Review of 1.5.1 (L1): a tap's call takes a while, and "within 0.0 s" read as "after the tap" was wrong."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        slow_tap = d.session.tap
+
+        async def tap(*args, **kwargs):
+            await asyncio.sleep(0.4)
+            return await slow_tap(*args, **kwargs)
+        d.session.tap = tap
+
+        def seconds(text: str) -> float:
+            return float(re.search(r"changed within (\d+\.\d) s", text).group(1))
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert seconds((await d.run_tool("a", "tap", {"target": {"ref": "e1"}}))["text"]) >= 0.4  # the tree-read path
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.session.calls.count("snapshot") == reads and seconds(r["text"]) >= 0.4  # and the one that reads none
+        await feeder.stop()
+    run(go)
+
+
+def test_the_health_sheet_note_is_also_given_when_the_tree_read_is_skipped():
+    """Review of 1.5.1 (M1): with a live picture feed the tree isn't read after a touch that changes nothing, and the
+    agent was told to retry and report a finding on the one sheet iOS doesn't let automation change."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await looked(d, [button("e1", "Turn On All", rect=(20, 200, 200, 40)),
+                         button("e2", "Don’t Allow", rect=(20, 60, 100, 40)),
+                         button("e3", "Allow", rect=(300, 60, 80, 40), enabled=False)])
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.session.calls.count("snapshot") == reads  # the path that reads no tree
+        assert "No visible change." in r["text"]
+        assert "Note: this is iOS's Health access sheet; iOS doesn't let automation change it." in r["text"]
+        assert delivered(r["text"]) == []  # that note stands alone, as on the other path
+        await feeder.stop()
+    run(go)
+
+
 def test_the_app_names_are_read_at_connect():
     async def go():
         d = make()
