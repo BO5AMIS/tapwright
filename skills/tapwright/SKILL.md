@@ -23,7 +23,7 @@ themselves; what follows is what they can't tell you.
   prompt one of those apps raises. That is by design: don't look for a way around it.
 - **`locked`** means a person must act: the phone is locked, or it is asking for its passcode.
   You can't pass Face ID, Touch ID or the passcode. Tell the user and wait.
-- **A person may be watching** in the live view (`viewer` gives the link) and can take over.
+- **A person may be watching** in the live view (`viewer` opens it for the user) and can take over.
   Their input goes first.
 - **Each tool's description lists its arguments.** The calls below show the ones that matter.
 

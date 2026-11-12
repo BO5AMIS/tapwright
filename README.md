@@ -137,7 +137,7 @@ repository too.
 | `press_button` | home, volume |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `open_url` | deep links |
-| `viewer` | the link to the live view |
+| `viewer` | opens the live view in a browser on this computer, for you (the agent never gets the link: its key could approve a held-back touch) |
 | `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once |
 | `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`) |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |

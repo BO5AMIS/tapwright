@@ -273,8 +273,15 @@ async def viewer() -> CallToolResult:
         info = await asyncio.to_thread(client.find_or_start)
     except client.DaemonError as e:
         return _error(e.code, str(e))
-    return _result(f"Live view: {client.viewer_url(info)}\n"
-                   "The link carries a key and is for the user only: give it to no one else, and don't repeat it.")
+    # The link carries the key that can drive the phone and approve a touch the policy holds back: the agent never
+    # gets it (safety review M2). The page opens in a browser on this computer, where the phone is.
+    import webbrowser
+    opened = await asyncio.to_thread(webbrowser.open, client.viewer_url(info))
+    if opened:
+        return _result("Opened the live view in a browser on this computer, for the user. The link isn't shown here: "
+                       "it carries a key. If the user doesn't see it, they can run `tapwright view` on this computer.")
+    return _result("No browser could be opened here. Ask the user to run `tapwright view` on the computer the phone is "
+                   "connected to; it opens the live view.")
 
 
 @server.tool(description=describe("close_app"), structured_output=False)

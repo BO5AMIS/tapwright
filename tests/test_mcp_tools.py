@@ -157,12 +157,19 @@ def test_the_old_tool_names_are_gone(monkeypatch):
         assert out.is_error and out.content[0].text.startswith("Error unsupported: ")
 
 
-def test_viewer_answers_with_the_live_views_link(monkeypatch):
-    monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "T"})
+def test_viewer_opens_the_live_view_for_the_user_and_never_gives_the_agent_its_key(monkeypatch):
+    """The link's key can drive the phone and approve a held-back touch (safety review M2, 2026-11-12)."""
+    import webbrowser
+    opened: list[str] = []
+    monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "T0KEN"})
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
     out = asyncio.run(mcp_server.viewer())
-    lines = out.content[0].text.splitlines()
-    assert not out.is_error and lines[0] == "Live view: http://127.0.0.1:8417/?token=T"
-    assert len(lines) == 2 and "key" in lines[1] and "user" in lines[1]
+    text = out.content[0].text
+    assert not out.is_error and opened == ["http://127.0.0.1:8417/?token=T0KEN"]
+    assert "T0KEN" not in text and text.startswith("Opened the live view in a browser on this computer")
+    monkeypatch.setattr(webbrowser, "open", lambda url: False)
+    text = asyncio.run(mcp_server.viewer()).content[0].text
+    assert "T0KEN" not in text and "tapwright view" in text
 
 
 def test_viewer_never_logs_the_token(monkeypatch, caplog):

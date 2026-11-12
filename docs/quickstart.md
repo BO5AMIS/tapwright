@@ -88,7 +88,7 @@ which keeps tests stable.
 
 ## Watching and stopping
 
-- `tapwright view`, or the agent's `viewer` tool, gives a link to open in a browser on your
+- `tapwright view`, or the agent's `viewer` tool, opens the live view in a browser on your
   computer: the phone's screen, live, in a drawn iPhone. Under the phone each step, the agent's
   or yours, is captioned in plain words (`Tap "Save trip"`); **Steps** lists them, and **More**
   holds Home, volume, the picture quality and **Details** (element names and boxes). You can tap, drag and type there too, and your input goes first.

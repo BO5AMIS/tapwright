@@ -61,7 +61,7 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     `not_allowed: needs_confirmation`: the live view asks the person; repeat the same call once
     they allow it, or ask your user. Never look for another way. `dry_run: true` shows what a touch
     would do without touching.
-12. A person may be watching the live view (`viewer` gives the link), or driving. Their input
+12. A person may be watching the live view (`viewer` opens it for the user), or driving. Their input
     goes first. Errors say what to do: `not_found` (look, then pick another target), `ambiguous`
     (use a candidate's ref, or `index`), `not_actionable` (the first word says why: `disabled`,
     `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass

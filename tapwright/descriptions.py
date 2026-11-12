@@ -196,7 +196,10 @@ EXTRA = {
     'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
     'apps': 'the apps installed on the phone, with bundle ids.',
     'open_app': 'launches the app or brings it to the front, and answers the first screen.',
-    'viewer': 'opens in a browser; shows the whole phone.',
+    'viewer': (
+        "opens it in a browser on this computer and gives you no link (the link's key could approve a touch the "
+        'policy holds back); shows the whole phone.'
+    ),
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
