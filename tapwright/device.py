@@ -323,6 +323,44 @@ class Device:
                 await control.kill(pid)
         return len(pids)
 
+    # ---- diagnostics (AGENT-TOOLS §15) ----
+    async def app_pids(self, bundle_id: str) -> list[int]:
+        """The pids of that app's running processes, from iOS's process list (empty: it isn't running)."""
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
+            procs = await info.proclist()
+        return [p["pid"] for p in procs if p.get("bundleIdentifier") == bundle_id and isinstance(p.get("pid"), int)]
+
+    async def app_log_stream(self, pid: int):
+        """The unified log entries of one process, as they come: (epoch ms, os_trace level byte, text, pid). The
+        stream is asked for that pid only, and an entry of any other pid is dropped here as well."""
+        from pymobiledevice3.services.os_trace import OsTraceService
+        service = OsTraceService(lockdown=self.rsd)
+        try:
+            async for entry in service.syslog(pid=pid):
+                if entry.pid == pid:
+                    yield int(entry.timestamp.timestamp() * 1000), int(entry.level), entry.message, entry.pid
+        finally:
+            await self._close(service)
+
+    async def crash_reports(self, executable: str, count: int) -> list:
+        """The newest `count` crash reports of the process named `executable` (parsed; newest first)."""
+        from pymobiledevice3.services.crash_reports import CrashReportsManager
+        from .diagnostics import crash_pattern, only_mine
+        async with CrashReportsManager(self.rsd) as manager:
+            try:
+                found = await manager.parse_latest("/", match=[crash_pattern(executable)], count=count)
+            except ValueError:  # none match
+                return []
+        return only_mine(found, executable)
+
+    async def crash_file(self, filename: str) -> bytes:
+        """The whole of one crash report, as it is on the phone."""
+        from pymobiledevice3.services.crash_reports import CrashReportsManager
+        async with CrashReportsManager(self.rsd) as manager:
+            return await manager.afc.get_file_contents(filename)
+
     async def wda_alive(self) -> bool:
         try:
             await self.http("GET", "/status", timeout=3)
@@ -477,7 +515,8 @@ class Device:
             apps = await proxy.get_apps(application_type="User")
         return sorted(({"bundle_id": bid, "name": info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
                         "version": info.get("CFBundleShortVersionString", ""),
-                        "build": info.get("CFBundleVersion", "")} for bid, info in apps.items()),
+                        "build": info.get("CFBundleVersion", ""),
+                        "executable": info.get("CFBundleExecutable", "")} for bid, info in apps.items()),
                       key=lambda a: a["name"].lower())
 
     async def _stop_runner(self) -> None:
