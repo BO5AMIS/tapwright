@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapline.
