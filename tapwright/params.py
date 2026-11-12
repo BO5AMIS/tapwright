@@ -18,7 +18,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "back": (*_SHOT, "dry_run"),
     "open_url": ("url", *_SHOT),
     "wait": ("seconds", *_SHOT),
-    "wait_for": ("text", "id", "label", "gone", "timeout", *_SHOT),
+    "wait_for": ("text", "id", "label", "gone", "timeout", "network_idle", *_SHOT),
     "run": ("steps", "trace", "dry_run", *_SHOT),
     "record": ("start", "stop", "name", "path"),
     "replay": ("name", "path", *_SHOT, "update_references"),  # (update_references: the CLI's, not the MCP tool's)
@@ -40,6 +40,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
 NOT_IN_MCP: dict[str, set[str]] = {t: {"index"} for t, names in ALLOWED.items() if "index" in names}
 NOT_IN_MCP["replay"] = {"update_references"}
 NOT_IN_MCP["scroll"] = NOT_IN_MCP["scroll"] | {"force"}
+NOT_IN_MCP["wait_for"] = NOT_IN_MCP.get("wait_for", set()) | {"network_idle"}  # Tapline's: answered unsupported, not bad_params
 
 
 def unknown(tool: str, args: dict) -> list[str]:

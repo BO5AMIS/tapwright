@@ -62,8 +62,11 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
             return e.line()
     # the tree has no such element: say what XCTest itself says of it (its label or id, and its frame in points)
     kind = str(attrs.get("type") or "").removeprefix("XCUIElementType")
-    named = f' "{label}"' if label else ""
-    shown = f" id={ident}" if ident else ""
+    # what the app's own text says is shown as element lines show text: one line, quoted and capped (review 1.3.1:
+    # a raw label could add a line of its own to the answer)
+    named = f" {ui.clip(label)}" if label else ""
+    plain_id = " ".join(str(ident).split())[:ui.TEXT_LIMIT] if ident else ""
+    shown = f" id={plain_id}" if plain_id else ""
     if not kind:
         if not (label or ident or any(box[2:])):
             return ""
@@ -81,7 +84,7 @@ def _box(rect: object) -> tuple[int, int, int, int]:
         if isinstance(rect, str):
             x, y, w, h = (round(float(n)) for n in re.findall(r"-?\d+(?:\.\d+)?", rect)[:4])
             return x, y, w, h
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (an infinite or absurd number is no frame)
         pass
     return 0, 0, 0, 0
 

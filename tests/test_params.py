@@ -52,3 +52,22 @@ def test_names_every_tool_takes_still_pass_and_a_batch_step_is_held_to_the_same_
         check_steps([{"tool": "wait", "seconds": 1}, {"tool": "tap", "target": {"id": "x"}, "labels": True}])
     assert e.value.code == "bad_params"
     assert str(e.value).startswith("step 2: tap doesn't take labels; it takes target, ")
+
+
+def test_a_steps_own_look_and_screenshot_are_ignored_on_every_step_tool():
+    """Review 1.3.1: §9.1 says a step's look and screenshot are ignored, but close_app, performance and compare_screen
+    steps carrying them were refused."""
+    check_steps([{"tool": "close_app", "app": "x", "look": False},
+                 {"tool": "performance", "launch": True, "look": False},
+                 {"tool": "compare_screen", "name": "home", "screenshot": False}])
+
+
+def test_network_idle_is_unsupported_not_an_unknown_argument():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "wait_for", {"network_idle": True})
+        assert e.value.code == "unsupported" and "network_idle" in str(e.value)
+        await finish(stop, task)
+    run(go)

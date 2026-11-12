@@ -11,6 +11,7 @@ def package(tmp_path, source="x = 1\n", git=True):
     (pkg / "mod.py").write_text(source, encoding="utf-8")
     if git:
         (tmp_path / "repo" / ".git").mkdir()
+        (tmp_path / "repo" / "pyproject.toml").write_text("[project]\nname = 'tapwright'\n", encoding="utf-8")
     return pkg
 
 
@@ -20,6 +21,16 @@ def git_says(out="", code=0):
 
 def test_an_installed_package_is_fine(tmp_path):
     assert checkout.check(package(tmp_path, git=False))[0] == "ok"
+
+
+def test_a_pinned_release_in_a_venv_inside_a_git_repo_is_installed(tmp_path):
+    """Review 1.3.1: the docs' own advice (a venv with a pinned release) gave a 'development checkout' note when the venv
+    sat inside a git repository."""
+    pkg = tmp_path / "repo" / "venv" / "Lib" / "site-packages" / "tapwright"
+    pkg.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    assert checkout.work_tree(pkg) is None
+    assert checkout.check(pkg, git_says(" M x\n"))[0] == "ok"
 
 
 def test_conflict_markers_fail_and_say_where(tmp_path):

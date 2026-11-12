@@ -15,7 +15,7 @@ EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
               "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance")
 EXPECT_KINDS = ("text", "id", "label")
-STEP_KEYS = ("tool", "expect", "route", "secure")  # what a step has besides its tool's own arguments
+STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot")  # besides its tool's own arguments (a step's look and screenshot are ignored, §9.1)
 FORMAT, VERSION = "agent-tools-script", 1
 
 

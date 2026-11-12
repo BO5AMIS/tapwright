@@ -14,7 +14,13 @@ Verdict = tuple[Literal["ok", "note", "fail"], str]
 
 
 def work_tree(package: Path) -> Path | None:
-    """The folder with a `.git` above the package (or holding it), else None: an installed package."""
+    """The folder with a `.git` above the package (or holding it), else None: an installed package. A package in a
+    venv's site-packages is installed even when the venv sits inside a git repository (review 1.3.1), and a source
+    checkout has its pyproject.toml next to the package."""
+    if {"site-packages", "dist-packages"} & {part.lower() for part in package.parts}:
+        return None
+    if not (package.parent / "pyproject.toml").exists():
+        return None
     for folder in (package, *package.parents):
         if (folder / ".git").exists():
             return folder

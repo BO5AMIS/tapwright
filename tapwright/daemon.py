@@ -312,6 +312,10 @@ def _checked(name: str, args: dict) -> dict:
     if name == "rotate" and args.get("to") not in ("portrait", "landscape_left", "landscape_right"):
         raise Refused("bad_params", f"to must be portrait, landscape_left or landscape_right, not {args.get('to')!r}")
     if name == "wait_for":
+        if args.get("network_idle"):  # AGENT-TOOLS §5.1: Tapline's; Tapwright can't see the app's requests
+            raise Refused("unsupported", "Tapwright can't see the app's network requests, so it can't wait for "
+                                         "network_idle; wait_for a text, id or label the loaded screen shows, or use "
+                                         "Tapline")
         given = [k for k in WAIT_FOR_KINDS if args.get(k) is not None]
         if len(given) != 1:
             raise Refused("bad_params", "wait_for needs exactly one of text, id or label")
@@ -1442,20 +1446,12 @@ class Daemon:
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
         if data.get("fresh", True) and data.get("app"):
-            # a known start: the app closed and opened again (Tapline reloads its JS instead)
-            await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
-            await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
-            # a fresh start takes the app a while (a development build loads its bundle): wait for what step 1 aims
-            # at, up to FRESH_WAIT. If it never comes, step 1 says not_found, which is the honest answer.
-            aim = data["steps"][0].get("target")
-            kind = next((k for k in ("id", "label", "text") if isinstance(aim, dict) and aim.get(k)), None)
-            if kind is not None:
-                try:
-                    await self.run_tool(client_id, "wait_for", {kind: aim[kind], "timeout": FRESH_WAIT, "look": False},
-                                        scope)
-                except Refused as e:
-                    if e.code != "timeout":
-                        raise
+            # (these calls are the replay's own: marked nested, so the first-answer note goes on the replay's answer)
+            nested = _NESTED.set(True)
+            try:
+                await self._fresh_start(client_id, data, scope)
+            finally:
+                _NESTED.reset(nested)
         points = [n for n, step in enumerate(data["steps"], 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
@@ -1463,12 +1459,33 @@ class Daemon:
             notes.append("Note: the app was closed and opened again first (the script's \"fresh\").")
         return await self._batch(client_id, data["steps"], scope, args, notes)
 
+    async def _fresh_start(self, client_id: str, data: dict, scope: "Scope | None") -> None:
+        """A script's fresh start: the app closed and opened, then step 1's target waited for."""
+        # a known start: the app closed and opened again (Tapline reloads its JS instead)
+        await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
+        await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
+        # a fresh start takes the app a while (a development build loads its bundle): wait for what step 1 aims
+        # at, up to FRESH_WAIT. If it never comes, step 1 says not_found, which is the honest answer.
+        aim = data["steps"][0].get("target")
+        kind = next((k for k in ("id", "label", "text") if isinstance(aim, dict) and aim.get(k)), None)
+        if kind is not None:
+            try:
+                await self.run_tool(client_id, "wait_for", {kind: aim[kind], "timeout": FRESH_WAIT, "look": False},
+                                    scope)
+            except Refused as e:
+                if e.code != "timeout":
+                    raise
+
     async def _dry_batch(self, client_id: str, steps: list[dict], scope: "Scope | None") -> dict:
         """`run` with dry_run (§11.4): every step's parameters are checked already; step 1 is resolved and checked like a
         dry run of its own, and nothing touches the phone. Later steps depend on what step 1 does, so they aren't."""
         first, n = steps[0], len(steps)
         if first["tool"] in DRY_TOOLS:
-            answer = await self.run_tool(client_id, first["tool"], {**batch.args_of(first), "dry_run": True}, scope)
+            nested = _NESTED.set(True)  # the dry run's own call: the first-answer note goes on the run's answer
+            try:
+                answer = await self.run_tool(client_id, first["tool"], {**batch.args_of(first), "dry_run": True}, scope)
+            finally:
+                _NESTED.reset(nested)
             would = answer["text"].splitlines()[0]
             what = "w" + would[1:] if would.startswith("Would ") else would
         else:
