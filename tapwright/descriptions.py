@@ -224,7 +224,11 @@ EXTRA = {
     'open_url': 'opens it on the phone, so another app may take it. The answer says which app came up.',
     'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
     'apps': 'the apps installed on the phone, with bundle ids.',
-    'open_app': 'launches the app or brings it to the front, and answers the first screen.',
+    'open_app': (
+        'launches the app or brings it to the front, and answers the first screen. `language` (`ar`), `region` '
+        '(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone\'s default) open it as if the phone were '
+        'set that way, for this launch only and without Settings: a running app is reopened.'
+    ),
     'viewer': (
         "opens it in a browser on this computer and gives you no link (the link's key could approve a touch the "
         'policy holds back); shows the whole phone.'
@@ -248,6 +252,11 @@ EXTRA = {
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app looks '
         'and works in landscape. Answers with the whole screen in its new size; a screen that only supports '
         'portrait stays as it is, and the answer says so.'
+    ),
+    'network': (
+        'Make the network bad on purpose, for the whole phone: `mode` `offline`, `3g`, `lossy`, or `normal` to '
+        'restore it. Every answer says the condition while it is on, and it goes back to normal by itself when the '
+        'session ends. Test what users on a bad connection see: errors, retries, loading states.'
     ),
     'logs': (
         "reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a "

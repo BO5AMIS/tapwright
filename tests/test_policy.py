@@ -384,7 +384,7 @@ def test_dry_run_is_validated_and_belongs_to_the_touch_tools():
         e = await refused(d, "tap", {**TAP, "dry_run": "yes"})
         assert e.code == "bad_params" and "dry_run must be true or false" in str(e)
         e = await refused(d, "open_app", {"app": "Example", "dry_run": True})
-        assert e.code == "bad_params" and str(e) == "open_app doesn't take dry_run; it takes app, look, screenshot."
+        assert e.code == "bad_params" and str(e) == "open_app doesn't take dry_run; it takes app, language, region, text_size, look, screenshot."
         await finish(stop, task)
     run(go)
 

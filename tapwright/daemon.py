@@ -21,8 +21,8 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
-               performance, ui)
+from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, launch as launchlib, needs,
+               network, ocr, params, performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -46,7 +46,7 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "network"})
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -219,6 +219,8 @@ def step_caption(tool: str, result: str, args: dict) -> str | None:
         text = f"{'Open' if tool == 'open_app' else 'Close'} {app.group(1) if app else 'the app'}"
     elif tool == "rotate":
         text = "Turn the phone"
+    elif tool == "network":
+        text = "Set the network"
     elif tool == "press_button":
         text = BUTTON_CAPTIONS.get(str(args.get("name") or ""), "Press a button")
     elif tool == "wait_for":
@@ -368,6 +370,12 @@ def _checked(name: str, args: dict) -> dict:
             raise Refused("bad_params", f"seconds must be a number from {WAIT_MIN:g} to {WAIT_MAX:g}, not {seconds!r}")
     if name in ("open_app", "close_app") and (not isinstance(args["app"], str) or not args["app"].strip()):
         raise Refused("bad_params", f"app must be a bundle id or an app's name, not {args['app']!r}")
+    if name == "open_app":  # §16.3: language, region and text size, checked before anything reaches the phone
+        for key in launchlib.KEYS:
+            checked.pop(key, None)
+        checked.update(launchlib.check(args))
+    if name == "network" and args.get("mode") not in network.MODES:
+        raise Refused("bad_params", f"mode must be one of {', '.join(network.MODES)}, not {args.get('mode')!r}")
     if name == "toggle" and args.get("value") is not None and not isinstance(args["value"], bool):
         raise Refused("bad_params", f"value must be true or false, not {args['value']!r}")
     return checked
@@ -576,8 +584,9 @@ _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("ta
 _GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar("tapwright_given", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-SPECIAL = ("wait", "wait_for", "performance")  # sleep before they answer, so they don't hold the phone's queue meanwhile
-REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
+# not on the phone's queue: the first three sleep before they answer, network talks to the instruments service
+SPECIAL = ("wait", "wait_for", "performance", "network")
+REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",), "compare_screen": ("name",)}
@@ -688,6 +697,7 @@ class Daemon:
                           "alert": self._alert, "swipe": self._swipe}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
+        self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -752,6 +762,52 @@ class Daemon:
         else:
             self._announced = message
 
+    # ---- network conditions (AGENT-TOOLS §16.4) ----
+    def _drop_network(self) -> None:
+        """The condition is over: the link dropped, so the connection that held it goes with it."""
+        if self._network is not None:
+            self.log(f"network: {self._network} ended with the connection")
+        self._network = None
+        drop = getattr(self.session.device, "drop_network", None)
+        if drop is not None:
+            drop()
+
+    async def _clear_network(self) -> None:
+        """Back to normal, politely (the phone's condition ends when the connection that holds it closes)."""
+        self._network = None
+        clear = getattr(self.session.device, "clear_network", None)
+        if clear is not None:
+            await clear()
+
+    async def _network_tool(self, args: dict, notes: list) -> dict:
+        """`network`: put the whole phone's network in a bad condition, or back to normal. Over Wi-Fi, offline and
+        lossy would cut Tapwright's own link, so they are `unsupported`."""
+        mode = args["mode"]
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if mode == "normal":
+            await self._clear_network()
+            self.log("network: normal")
+            self._announce("agent", "network", label="normal")
+            return _answer([network.line(mode)], notes)
+        if device.rsd is None:
+            raise self._not_connected()
+        if mode in network.BREAKING and str(getattr(device, "via", "") or "").lower() != "usb":
+            raise Refused("unsupported", f"{mode} would cut Tapwright's own link, which runs over the network here "
+                                         f"({getattr(device, 'via', None) or 'not USB'}); connect the phone with a cable, "
+                                         "or use 3g.")
+        try:
+            profile = await device.set_network(mode)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
+        self._network = mode
+        self.log(f"network: {mode} ({profile})")
+        self._announce("agent", "network", label=mode)
+        return _answer([network.line(mode)], notes)
+
     # ---- the connection ----
     def lost(self, reason: "str | Exception") -> None:
         """A request found the line dead: the supervisor reconnects. When the request was cut because the app in
@@ -764,6 +820,7 @@ class Daemon:
             self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
+        self._drop_network()  # the phone is never left in a condition by a link that has dropped
         self._lost.set()
 
     def _not_connected(self) -> Refused:
@@ -1009,10 +1066,21 @@ class Daemon:
         ptoken = _POLICY.set(policy) if policy is not None else None
         try:
             answer = await self._run_tool_policed(client_id, name, args, scope)
+            if outer:
+                answer = self._with_network(name, answer)
             return self._first_answer(client_id, answer) if outer else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+
+    def _with_network(self, name: str, answer: dict) -> dict:
+        """While a network condition is on, every answer's header carries `Network: 3g (Tapwright, whole phone).`
+        (§16.4): as the line after the first. (The `network` call's own answer is that line.)"""
+        if self._network is None or name == "network":
+            return answer
+        lines = answer["text"].split("\n")
+        lines.insert(1, network.line(self._network))
+        return {**answer, "text": "\n".join(lines)}
 
     def _first_answer(self, client_id: str, answer: dict) -> dict:
         """The first answer an agent gets carries what only the phone's owner can clear (needs.py), as Note: lines. (A
@@ -1912,6 +1980,8 @@ class Daemon:
             return await self._audit(view, args, notes)
         if name == "performance":
             return await self._performance(client_id, args, notes)
+        if name == "network":
+            return await self._network_tool(args, notes)
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":
@@ -2305,8 +2375,18 @@ class Daemon:
 
     async def _open_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"])
+        extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
         try:
-            await self.session.launch(bundle_id)
+            if extra:
+                try:
+                    await self.session.terminate(bundle_id)  # a running app is closed first
+                except ConnectionLost:
+                    raise
+                except DeviceError:
+                    pass  # not running
+                await self.session.launch(bundle_id, extra)
+            else:
+                await self.session.launch(bundle_id)
         except ConnectionLost:
             raise
         except DeviceError as e:
@@ -2314,7 +2394,7 @@ class Daemon:
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
-        return f"Opened {shown}."
+        return f"Opened {shown}{launchlib.said(a)}."
 
     async def _close_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"], partial=False)
@@ -3877,6 +3957,10 @@ class Daemon:
         return text
 
     async def close(self) -> None:
+        try:
+            await asyncio.wait_for(self._clear_network(), 10)  # first: the phone is never left in a condition
+        except Exception as e:
+            self.log(f"closing: network: {e}")
         if self._feeder_task is not None:
             self._feeder_task.cancel()
             await asyncio.gather(self._feeder_task, return_exceptions=True)

@@ -13,7 +13,7 @@ MAX_STEPS = 50
 BATCH_LIMIT = 120.0  # seconds a whole batch may take
 EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
-              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance")
+              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance", "network")
 EXPECT_KINDS = ("text", "id", "label")
 STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot")  # besides its tool's own arguments (a step's look and screenshot are ignored, §9.1)
 FORMAT, VERSION = "agent-tools-script", 1
@@ -136,7 +136,7 @@ def summary(step: dict) -> str:
     extra = {"scroll": step.get("to") or step.get("direction") or "down", "wait": step.get("seconds"),
              "open_app": step.get("app"), "close_app": step.get("app"), "open_url": step.get("url"),
              "alert": step.get("action"), "press_button": step.get("name"), "rotate": step.get("to"),
-             "performance": "launch" if step.get("launch") else step.get("seconds"),
+             "performance": "launch" if step.get("launch") else step.get("seconds"), "network": step.get("mode"),
              "compare_screen": json.dumps(step["name"], ensure_ascii=False) if isinstance(step.get("name"), str) else None,
              "wait_for": next((json.dumps(step[k], ensure_ascii=False) for k in EXPECT_KINDS if step.get(k)), None)}
     shown = extra.get(tool)
