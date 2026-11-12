@@ -1772,7 +1772,15 @@ def test_the_list_is_not_current_without_a_stream_to_say_so():
 
 
 def run_virtual(scenario):
-    asyncio.run(scenario(), loop_factory=VirtualLoop)
+    # asyncio.run takes loop_factory only from Python 3.12, and the package allows 3.10: the loop is run by hand
+    loop = VirtualLoop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(scenario())
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 def test_a_silent_change_before_the_action_is_not_reported_as_no_visible_change():

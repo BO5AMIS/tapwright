@@ -349,7 +349,7 @@ class _VirtualSelector:
 
 
 class VirtualLoop(asyncio.SelectorEventLoop):
-    """An event loop on fake time: timers fire in order, instantly. Pass as asyncio.run's loop_factory."""
+    """An event loop on fake time: timers fire in order, instantly. Run with test_daemon.run_virtual."""
 
     def __init__(self) -> None:
         super().__init__()
