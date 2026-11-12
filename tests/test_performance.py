@@ -65,6 +65,30 @@ def test_limits_fail_with_every_reason_and_an_unmeasured_number_fails_too():
         "memory wasn't measured, so it can't be checked"]
 
 
+def test_a_limit_is_not_passed_on_a_partial_window_an_unsettled_launch_or_a_number_that_is_not_one():
+    """CodeRabbit, PR #4: partial sampling, a launch whose wait hit its cap, and NaN samples must not pass a check."""
+    partial = performance.summarize(Measurement(memory_mb=[100.0], cpu_pct=[10.0], fps=[60.0], failed="service stopped"),
+                                    2.0, opened_s=1.0)
+    assert partial.partial
+    assert performance.failures(partial, {"memory_mb": 300, "cpu_percent": 50, "fps_min": 30, "drops": 5}) == [
+        "memory: only part of the window was measured, so it can't be checked",
+        "CPU: only part of the window was measured, so it can't be checked",
+        "frames: only part of the window was measured, so it can't be checked",
+        "frames: only part of the window was measured, so it can't be checked"]
+    assert performance.failures(partial, {"launch_s": 2.0}) == []  # the launch time comes from the wait, not the samples
+    over = performance.summarize(Measurement(memory_mb=[400.0], failed="x"), 2.0)
+    assert performance.failures(over, {"memory_mb": 300}) == ["memory peaked at 400 MB, over 300 MB"]  # already over: said so
+    capped = performance.summarize(Measurement(), 8.0, opened_s=8.0, unsettled=True)
+    assert performance.failures(capped, {"launch_s": 10.0}) == [
+        "the screen was still changing when the launch wait ended, so the launch time can't be checked"]
+    assert performance.failures(capped, {"launch_s": 2.0}) == ["opened in 8.0 s, over 2.0 s"]
+    nan = float("nan")
+    r = performance.summarize(Measurement(memory_mb=[nan, 120.0], cpu_pct=[nan, float("inf")], fps=[nan, 60.0]), 1.0)
+    assert (r.memory_avg, r.memory_peak, r.cpu_avg, r.cpu_peak, r.fps_avg) == (120.0, 120.0, None, None, 60.0)
+    assert performance.failures(r, {"cpu_percent": 50}) == ["CPU wasn't measured, so it can't be checked"]
+    assert "CPU" in performance.answer_lines(r)[-1]  # listed under what was not measured
+
+
 def test_under_is_checked_before_anything_runs():
     from tapwright import batch
     ok = [{"tool": "performance", "launch": True, "expect": {"under": {"launch_s": 2.0, "js_heap_mb": 50}}}]
