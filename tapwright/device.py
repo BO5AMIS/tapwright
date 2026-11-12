@@ -17,7 +17,7 @@ import sys
 import time
 
 from . import aio, store
-from .diagnostics import CrashSearch, crash_pattern, only_mine
+from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
@@ -352,10 +352,12 @@ class Device:
         and, when a report names one, its bundle id is `bundle_id`. Each report is read on its own: one that can't be
         parsed (half written, as the app has just died) is counted in `unreadable` and passed over, never taken for
         "no crash". Errors of the phone's file service are not caught here."""
+        from pycrashreport.crash_report import get_crash_report_from_buf
         from pymobiledevice3.services.crash_reports import CrashReportsManager
         pattern = re.compile(crash_pattern(executable))
         found: list = []
-        unreadable = 0
+        unreadable = too_big = scanned = 0
+        incomplete = False
         async with CrashReportsManager(self.rsd) as manager:
             candidates = []
             async for entry in manager.afc.dirlist("/", depth=1):
@@ -363,23 +365,33 @@ class Device:
                     continue
                 stat = await manager.afc.stat(entry)
                 if stat.get("st_ifmt") == "S_IFREG":
-                    candidates.append((stat["st_mtime"].timestamp(), entry))
-            for _, path in sorted(candidates, reverse=True)[:count + 10]:
+                    candidates.append((stat["st_mtime"].timestamp(), entry, _size_of(stat)))
+            # Two installed apps can share an executable name, so the count is of this app's own reports: the search
+            # goes on past other apps' files, up to CRASH_SCAN files, and says so when that was not enough
+            ordered = sorted(candidates, reverse=True)
+            for _, path, size in ordered[:CRASH_SCAN]:
                 if len(found) >= count:
                     break
+                scanned += 1
                 try:
-                    report = await manager.parse(path)
+                    data = await _read_capped(manager.afc, path, size)
+                    report = get_crash_report_from_buf(data.decode(), filename=path)
+                except CrashTooBig:
+                    too_big += 1
+                    continue
                 except (ValueError, KeyError, TypeError, AttributeError, IndexError):  # not a readable report
                     unreadable += 1
                     continue
                 found += only_mine([report], executable, bundle_id)
-        return CrashSearch(found, unreadable)
+            incomplete = len(found) < count and len(ordered) > CRASH_SCAN
+        return CrashSearch(found, unreadable, too_big, incomplete, scanned)
 
     async def crash_file(self, filename: str) -> bytes:
-        """The whole of one crash report, as it is on the phone."""
+        """The whole of one crash report, as it is on the phone (CrashTooBig when it is over the byte cap)."""
         from pymobiledevice3.services.crash_reports import CrashReportsManager
         async with CrashReportsManager(self.rsd) as manager:
-            return await manager.afc.get_file_contents(filename)
+            stat = await manager.afc.stat(filename)
+            return await _read_capped(manager.afc, filename, _size_of(stat))
 
     def meter(self, bundle_id: str) -> "AppMeter":
         """A meter for that app's own process (`performance`): start() it, do the thing, stop() it."""
@@ -558,7 +570,48 @@ class Device:
             await self.tunnel.aclose()
 
 
-PID_REFRESH = 2.0  # seconds between looks at which process ids the app has (it has new ones after a launch)
+CRASH_MAX_BYTES = CRASH_MAX_MB * 1024 * 1024  # no crash file is read beyond this (AGENT-TOOLS §15.2 words it in MB)
+CRASH_CHUNK = 256 * 1024  # bytes asked of the phone's file service at a time
+CRASH_SCAN = 40  # crash files of one executable name looked at in one search
+
+
+class CrashTooBig(DeviceError):
+    """A crash file over CRASH_MAX_BYTES: it is not read."""
+
+
+def _size_of(stat: dict) -> int:
+    try:
+        return int(stat.get("st_size", 0))
+    except (TypeError, ValueError):
+        return CRASH_MAX_BYTES + 1  # a size that can't be read is not trusted to be small
+
+
+async def _read_capped(afc, path: str, size: int) -> bytes:
+    """A file of the phone, read in chunks and never beyond CRASH_MAX_BYTES: the size from the listing is checked
+    first, and the reads are counted too, since a file can grow after it was looked at."""
+    if size > CRASH_MAX_BYTES:
+        raise CrashTooBig(f"{posixpath.basename(path)} is {size} bytes, over {CRASH_MAX_BYTES}")
+    handle = await afc.fopen(path)
+    if not handle:
+        raise DeviceError(f"couldn't open {path}")
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            ask = min(CRASH_CHUNK, CRASH_MAX_BYTES + 1 - total)
+            chunk = await afc.fread(handle, ask)
+            total += len(chunk)
+            if total > CRASH_MAX_BYTES:
+                raise CrashTooBig(f"{posixpath.basename(path)} grew over {CRASH_MAX_BYTES} bytes while it was read")
+            chunks.append(chunk)
+            if len(chunk) < ask:  # the end of the file
+                break
+    finally:
+        await afc.fclose(handle)
+    return b"".join(chunks)
+
+
+PID_REFRESH = 2.0 # seconds between looks at which process ids the app has (it has new ones after a launch)
 PID_RETRY = 0.25  # the same while no sample has shown the app's process (it is starting)
 METER_START = 15.0  # seconds the instruments service may take to start sampling
 MB = 1024 * 1024

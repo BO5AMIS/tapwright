@@ -29,7 +29,7 @@ from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
+from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
                      PhoneNotFound)
 from .session import Snapshot
 from .tapline import AgentTouches
@@ -1276,7 +1276,7 @@ class Daemon:
         search = await self._phone_files("read the phone's crash reports",
                                          self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT, bundle))
         infos = [diagnostics.describe_crash(r, exe) for r in search.reports]
-        skipped = ([diagnostics.CRASH_UNREADABLE.format(n=search.unreadable)] if search.unreadable else [])
+        skipped = diagnostics.skipped_notes(search)
         # AGENT-TOOLS §15.2: only reports since the session began; `all` is the last 5 of those, not the newest alone
         infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:diagnostics.CRASH_RECENT if args["all"] else 1]
         self._diag_count = len(infos)
@@ -1291,7 +1291,13 @@ class Daemon:
 
     async def _pull_crash(self, bundle: str, info: "diagnostics.CrashInfo") -> str:
         """Copy the whole report from the phone into ~/.tapwright/crashes/<bundle id>/; its path."""
-        data = await self._phone_files("copy the crash report", self.session.device.crash_file(info.remote))
+        async def read() -> bytes:
+            try:
+                return await self.session.device.crash_file(info.remote)
+            except CrashTooBig:
+                raise Refused("unsupported", f"the crash report {info.filename} is too big to copy (over "
+                                             f"{diagnostics.CRASH_MAX_MB} MB)") from None
+        data = await self._phone_files("copy the crash report", read())
         path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

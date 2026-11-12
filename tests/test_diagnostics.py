@@ -235,7 +235,8 @@ def test_only_8_frames_and_the_top_frame_when_none_is_the_apps():
 
 def test_reports_of_other_processes_are_dropped():
     reports = [FakeReport(name="Example"), FakeReport(name="ExampleHelper"), FakeReport(name="Other")]
-    assert [r.name for r in diagnostics.only_mine(reports, "Example")] == ["Example"]
+    reports = [FakeReport(name=r.name, bundle_id=APP) for r in reports]
+    assert [r.name for r in diagnostics.only_mine(reports, "Example", APP)] == ["Example"]
     pattern = re.compile(diagnostics.crash_pattern("Example"))
     assert pattern.search("Example-2026-11-12-101010.ips") and pattern.search("Example-2026-11-12-101010-1.ips")
     for other in ("Example-Dev-2026-11-12-101010.ips", "Example.cpu_resource-2026-11-12-101010.ips",
@@ -450,7 +451,7 @@ def test_a_failure_without_warnings_adds_no_logs_and_a_crash_adds_its_note():
 def test_a_report_is_the_apps_only_by_exact_name_type_and_bundle_id():
     mine = FakeReport(name="Example", bundle_id=APP)
     other_app = FakeReport(name="Example", bundle_id="com.other.app")  # same executable name, another app
-    no_bundle = FakeReport(name="Example")  # an old-format report names no bundle: the name decides
+    no_bundle = FakeReport(name="Example")  # names no bundle: nothing proves it is this app's (Codex, PR #4)
     unnamed = FakeReport(name=None)
 
     class Unreadable:
@@ -463,7 +464,7 @@ def test_a_report_is_the_apps_only_by_exact_name_type_and_bundle_id():
     helper = FakeReport(name="Example-Dev", bundle_id=APP)
     resource = FakeReport(name="Example", bundle_id=APP, bug_type="385")  # a resource report is not a crash
     kept = diagnostics.only_mine([mine, other_app, no_bundle, unnamed, helper, resource], "Example", APP)
-    assert kept == [mine, no_bundle]
+    assert kept == [mine]
     assert diagnostics.only_mine([unreadable], "Example", APP) == []
 
 
@@ -632,6 +633,9 @@ def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_rep
         device.crashes["Example"] = [FakeReport()]
         r = await d.run_tool("a", "crash", {})
         assert "Crash of " in r["text"] and "couldn't be read" in r["text"]
+        device.crash_too_big = 2  # a report over the byte cap: never read, and the answer says so
+        r = await d.run_tool("a", "crash", {})
+        assert diagnostics.CRASH_TOO_BIG.format(n=2, mb=diagnostics.CRASH_MAX_MB) in r["text"]
         await finish(stop, task)
     run(go)
 

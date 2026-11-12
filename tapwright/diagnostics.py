@@ -44,6 +44,10 @@ NONE_SINCE = "No crash report for {app} since the session began."
 CRASH_NO_EXECUTABLE = ("{app} has no executable name on record (only apps you installed have one), so its crash "
                        "reports can't be told from other apps'.")
 CRASH_UNREADABLE = "{n} crash report(s) of this app couldn't be read (half written, or a format this version doesn't know) and were skipped."
+CRASH_MAX_MB = 8  # a crash report is read only up to this size (real ones are 0.1 to 2 MB); a bigger file is skipped, said so
+CRASH_TOO_BIG = "{n} crash report(s) of this app were too big to read (over {mb} MB) and were skipped."
+CRASH_INCOMPLETE = ("Only the newest {n} crash reports with this app's file name were looked at, so an older one of "
+                    "this app may exist.")
 SAVED = "Saved: {path}"
 CRASH_MARK = "*"  # in front of a frame of the app's own code
 FAILURE_CRASH_FILE = "Crash report: {path}"
@@ -183,6 +187,21 @@ class CrashSearch:
     file name couldn't be read (they are passed over, and the answer says so)."""
     reports: list
     unreadable: int = 0
+    too_big: int = 0  # files over CRASH_MAX_MB, never read
+    incomplete: bool = False  # the search stopped at its budget with reports of the file name still unlooked at
+    scanned: int = 0  # how many files the search looked at
+
+
+def skipped_notes(search: "CrashSearch") -> list[str]:
+    """What a crash answer says was left out of the search, one line each."""
+    notes = []
+    if search.unreadable:
+        notes.append(CRASH_UNREADABLE.format(n=search.unreadable))
+    if search.too_big:
+        notes.append(CRASH_TOO_BIG.format(n=search.too_big, mb=CRASH_MAX_MB))
+    if search.incomplete:
+        notes.append(CRASH_INCOMPLETE.format(n=search.scanned))
+    return notes
 
 
 def _safely(fn: Callable[[], object], default=None):
@@ -320,14 +339,26 @@ def _bundle_ids_in(report) -> list[str]:
     info = data.get("bundleInfo") if isinstance(data, dict) else None
     if isinstance(info, dict) and isinstance(info.get("CFBundleIdentifier"), str):
         found.append(info["CFBundleIdentifier"])
+    if isinstance(data, str):  # the old text body: `Identifier:          com.example.app`
+        for line in data.splitlines():
+            if line.startswith("Identifier:") and line[len("Identifier:"):].strip():
+                found.append(line[len("Identifier:"):].strip())
+                break
     return found
 
 
 def only_mine(reports: Iterable, executable: str, bundle_id: str | None = None) -> list:
     """The crash reports of this app: its process is named exactly `executable` (a name that can't be read is not
-    this app's), the report is a crash and not a resource report, and the bundle id inside it, when it has one, is the
-    app's (two installed apps can share an executable name). Anything else is dropped."""
-    return [r for r in reports
-            if _safely(lambda: r.name) == executable
-            and _safely(lambda: r.bug_type_str) in CRASH_BUG_TYPES
-            and all(b == bundle_id for b in _bundle_ids_in(r) if bundle_id is not None)]
+    this app's), the report is a crash and not a resource report, and the bundle id inside the report (its header, its
+    `bundleInfo`, or an old report's `Identifier:` line) is affirmatively the app's and no id in it is another's.
+    Two installed apps can share an executable name, so a report that names no bundle id proves nothing and is left
+    out, as is every report when there is no bundle id to prove it with (AGENT-TOOLS §15.2: only the app's own)."""
+    if bundle_id is None:
+        return []
+    mine = []
+    for r in reports:
+        ids = _bundle_ids_in(r)
+        if (_safely(lambda: r.name) == executable and _safely(lambda: r.bug_type_str) in CRASH_BUG_TYPES
+                and ids and all(b == bundle_id for b in ids)):
+            mine.append(r)
+    return mine

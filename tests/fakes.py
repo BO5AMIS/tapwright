@@ -152,6 +152,7 @@ class FakeDevice:
         self.replay: dict[int, list] = {}  # pid -> entries every new stream of it gives first (the phone's replay)
         self.crash_error: Exception | None = None  # crash_reports / crash_file raise this
         self.crash_unreadable = 0  # how many reports crash_reports says it passed over
+        self.crash_too_big = 0  # how many it says were over the byte cap
         self.app_pids_calls = 0
 
     async def app_pids(self, bundle_id: str) -> list[int]:
@@ -186,7 +187,7 @@ class FakeDevice:
         self.crash_asks += 1
         if self.crash_error is not None:
             raise self.crash_error
-        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable)
+        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable, self.crash_too_big)
 
     async def crash_file(self, filename: str) -> bytes:
         if self.crash_error is not None:
