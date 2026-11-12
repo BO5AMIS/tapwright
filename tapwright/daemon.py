@@ -22,7 +22,7 @@ from typing import NamedTuple
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (actionlog, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, launch as launchlib,
-               needs, network, ocr, params, performance, report, ui)
+               media as medialib, needs, network, ocr, params, performance, report, ui, uxcheck)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -46,9 +46,9 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
-READ_LOGGED = frozenset({"look", "wait_for", "audit", "apps"})  # (compare_screen writes its own line: _log_compare)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
@@ -575,7 +575,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash", "session_report")
+READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -593,7 +593,7 @@ _GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 # not on the phone's queue: the first three sleep before they answer, network talks to the instruments service
-SPECIAL = ("wait", "wait_for", "performance", "network")
+SPECIAL = ("wait", "wait_for", "performance", "network", "media")
 REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
@@ -1125,11 +1125,12 @@ class Daemon:
 
     # ---- agent tools ----
     async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
-                       policy: "safety.Policy | None" = None) -> dict:
+                       policy: "safety.Policy | None" = None, ux_rules: "uxcheck.Rules | None" = None) -> dict:
         """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
-        `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
+        `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one. `ux_rules` are its house
+        rules (§17.3); None is none."""
         self.last_request = time.monotonic()
         self._network_seen_by(client_id)
         outer = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
@@ -1137,6 +1138,7 @@ class Daemon:
             params.check(name, args)
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
+        utoken = uxcheck._RULES.set(ux_rules) if ux_rules is not None else None
         try:
             answer = await self._run_tool_policed(client_id, name, args, scope)
             if outer:
@@ -1147,6 +1149,8 @@ class Daemon:
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+            if utoken is not None:
+                uxcheck._RULES.reset(utoken)
 
     def _with_network(self, name: str, answer: dict) -> dict:
         """While a network condition is on, every answer's header carries `Network: 3g (Tapwright, whole phone).`
@@ -2051,8 +2055,8 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip", "compare_screen",
-                                                                       "performance"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "ux_check", "filmstrip",
+                                                                       "compare_screen", "performance"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -2070,7 +2074,7 @@ class Daemon:
             _GIVEN.reset(given_token)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
-        if name in ("filmstrip", "performance"):  # asked of the phone before and after filming (_filmstrip): the last read is no guide
+        if name in ("filmstrip", "performance", "media"):  # asked of the phone before and after filming (_filmstrip): the last read is no guide
             return answer
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
@@ -2154,6 +2158,10 @@ class Daemon:
             return await self._wait_for(view, args, notes, shot)
         if name == "audit":
             return await self._audit(view, args, notes)
+        if name == "ux_check":
+            return await self._ux_check(client_id, view, notes)
+        if name == "media":
+            return await self._media(client_id, args, notes)
         if name == "performance":
             return await self._performance(client_id, args, notes)
         if name == "network":
@@ -2168,6 +2176,7 @@ class Daemon:
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
             if args.get("ocr"):
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
@@ -2656,6 +2665,104 @@ class Daemon:
         name = app[0] if app else "the screen"
         text = audit.report(f'"{name}"', issues, view.items, types)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    UX_AUDIT = ("clipped_text", "contrast", "hit_region")  # the audit types ux_check reports (§17.3)
+
+    async def _ux_check(self, client_id: str, view, notes: list) -> dict:
+        """AGENT-TOOLS §17.3: the screen in front against the usability basics (tapwright/uxcheck.py), with the audit's
+        cut-off text, contrast and target size. The tree is read first, as `audit` does."""
+        await self._settle_pending()
+        await self._read(lambda: self._silent_read(view))
+        rows: list[tuple[str, str, str]] = []
+        notes = list(notes)
+        try:
+            issues = await self._read(lambda: self.session.audit([audit.XCTEST[t] for t in self.UX_AUDIT]))
+            rows = audit.rows_of(issues, view.items, list(self.UX_AUDIT))
+        except DeviceError as e:
+            notes.append(f"the phone's accessibility audit isn't available here ({e}), so cut-off text, contrast and "
+                         "target size were not checked.")
+        rules = uxcheck.rules_in_force()
+        result = uxcheck.check(view.items, self.session.screen, client_id, rules, rows)
+        app = getattr(self.session, "app", None)
+        title = uxcheck.title_of(view.items)
+        screen = f'"{app[0] if app else "the screen"}"' + (f" ({ui.clip(title)[1:-1]})" if title else "")
+        uxcheck.tell_journey(client_id, result, screen)
+        text = uxcheck.report(screen, result, rules)
+        return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    async def _media(self, client_id: str, args: dict, notes: list) -> dict:
+        """AGENT-TOOLS §17.6: put test pictures in the phone's photo library (add-only access), or delete what this
+        daemon added (full access, which iOS asks the person for, and iOS asks them to confirm each delete)."""
+        add, remove = args.get("add"), args.get("remove")
+        if remove is not None and not isinstance(remove, bool):
+            raise Refused("bad_params", f"remove must be true or false, not {remove!r}")
+        if add is not None and (not isinstance(add, list) or not all(isinstance(p, str) for p in add)):
+            raise Refused("bad_params", "add must be a list of paths of pictures on this computer")
+        if add and remove:
+            raise Refused("bad_params", "media adds or removes in one call, not both: use add, then a separate call "
+                                        "with remove: true")
+        if not add and not remove:
+            raise Refused("bad_params", "media needs add (the paths of pictures) or remove: true")
+        if args.get("confirm") is not True:
+            raise Refused("bad_params", medialib.NEED_CONFIRM)
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        if self.state == "locked":
+            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+        pictures: list[tuple[str, bytes]] = []
+        if add:
+            try:
+                pictures = await asyncio.to_thread(medialib.read_pictures, add)
+            except ValueError as e:
+                raise Refused("bad_params", str(e)) from None
+        await self.wait_connected()
+        if await self._read(lambda: self.session.runner_version()) < medialib.MIN_TW_VERSION:
+            raise Refused("unsupported", medialib.OLD_RUNNER)
+        access = await self._read(lambda: self.session.photos_access())
+        if add:
+            if access.get("add") in ("denied", "restricted"):
+                raise Refused("unsupported", "the runner may not add to the photo library: iOS has it denied. Ask the "
+                                             "user to allow WebDriverAgentRunner in Settings > Privacy & Security > "
+                                             "Photos, then try again.")
+            names = [name for name, _ in pictures]
+            ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures")
+            if len(ids) != len(names):
+                raise Refused("internal", f"the phone made {len(ids)} pictures for {len(names)} sent. Check Photos > "
+                                          "Recently Added.")
+            medialib.record(client_id, ids, names)
+            return _answer([medialib.added_text(names)], notes)
+        held, earlier = medialib.held_by(client_id)
+        if not held:
+            return _answer(["Nothing to remove: this daemon has added no pictures that are still recorded."], notes)
+        names = [e["name"] for e in held]
+        if access.get("full") in ("denied", "restricted"):
+            return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library "
+                                                        "(iOS has it denied).")], notes)
+        try:
+            deleted = await self._media_write(lambda: self.session.photos_delete([e["id"] for e in held]),
+                                              "removing the pictures")
+        except DeviceError:  # (only the "full access" refusal gets here: _media_write words the rest)
+            return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library.")], notes)
+        lead = "Pictures from an earlier session: " if earlier else ""
+        if not deleted:
+            return _answer([f"{lead}Removed none of {medialib.pictures(len(held))}: the person declined the delete on "
+                            "the phone, or they were already gone. Ask them to confirm it on the phone, then call "
+                            "again."], notes)
+        medialib.drop([e["id"] for e in held])
+        return _answer([lead + medialib.removed_text(names[:deleted], len(held))], notes)
+
+    async def _media_write(self, call, doing: str):
+        """A write to the phone's photo library, once: sent again after a drop it could be done twice."""
+        try:
+            return await self.control.read(lambda: self._connected_only(call))
+        except ConnectionLost as e:
+            self.lost(e)
+            raise Refused("reconnecting", f"the connection dropped while {doing}; it may or may not have happened: "
+                                          "wait a few seconds, then check Photos > Recently Added") from None
+        except DeviceError as e:
+            if "full access" in str(e).lower():
+                raise
+            raise Refused("unsupported", f"the phone couldn't do it while {doing}: {e}") from None
 
     async def _performance(self, client_id: str, args: dict, notes: list) -> dict:
         """PLAN-1.3 item 3: memory, CPU and frames of the app in front while the call runs (`seconds`, around an optional

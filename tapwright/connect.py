@@ -28,8 +28,9 @@ class ConnectError(RuntimeError):
 
 
 def mcp_args(apps: list[str], dedicated: bool, policy: str | None = None, no_policy: bool = False,
-             screenshots: str | None = None) -> list[str]:
-    """The arguments after `tapwright`: `mcp --apps a,b` or `mcp --dedicated`, then the policy and screenshot flags."""
+             screenshots: str | None = None, ux_rules: str | None = None) -> list[str]:
+    """The arguments after `tapwright`: `mcp --apps a,b` or `mcp --dedicated`, then the policy, screenshot and
+    ux-rules flags."""
     args = ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
     if policy:
         args += ["--policy", policy]
@@ -37,7 +38,19 @@ def mcp_args(apps: list[str], dedicated: bool, policy: str | None = None, no_pol
         args.append("--no-policy")
     if screenshots:
         args += ["--screenshots", screenshots]
+    if ux_rules:
+        args += ["--ux-rules", ux_rules]
     return args
+
+
+def existing_ux_rules(args: list[str]) -> str | None:
+    """The `--ux-rules` file of an existing `tapwright mcp` argument list."""
+    for i, a in enumerate(args):
+        if a == "--ux-rules" and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith("--ux-rules="):
+            return a.split("=", 1)[1]
+    return None
 
 
 def existing_flags(args: list[str]) -> tuple[str | None, bool, str | None]:
@@ -57,7 +70,7 @@ def existing_flags(args: list[str]) -> tuple[str | None, bool, str | None]:
 
 
 def merge_flags(old: list[str] | None, apps: list[str], dedicated: bool, policy: str | None,
-                no_policy: bool) -> tuple[list[str], list[str]]:
+                no_policy: bool, ux_rules: str | None = None) -> tuple[list[str], list[str]]:
     """(new args, notes). Flags of the existing entry that this run doesn't set are kept. When this run's flag
     replaces an earlier policy, a note says what was replaced; a policy is never dropped without one."""
     old_policy, old_no_policy, old_shots = existing_flags(old or [])
@@ -72,7 +85,10 @@ def merge_flags(old: list[str] | None, apps: list[str], dedicated: bool, policy:
     if policy and no_policy:  # a hand-edited entry with both: keep the stricter, say so
         no_policy = False
         notes.append("the existing entry had both --policy and --no-policy; kept --policy")
-    return mcp_args(apps, dedicated, policy, no_policy, old_shots), notes
+    old_rules = existing_ux_rules(old or [])
+    if ux_rules and old_rules and old_rules != ux_rules:
+        notes.append(f"replaced the earlier --ux-rules {old_rules}")
+    return mcp_args(apps, dedicated, policy, no_policy, old_shots, ux_rules or old_rules), notes
 
 
 def _json_args(path: Path, *keys: str) -> list[str] | None:
@@ -286,9 +302,9 @@ def config_path(client: str, project: str | None, home: Path | None = None) -> P
 
 def install(client: str, apps: list[str], dedicated: bool, project: str | None = None, home: Path | None = None,
             runner: Runner = _run, which: Callable[[str], str | None] = shutil.which,
-            policy: str | None = None, no_policy: bool = False) -> list[str]:
+            policy: str | None = None, no_policy: bool = False, ux_rules: str | None = None) -> list[str]:
     """Register the server with `client` and install the skill. Returns the lines to print. A rerun keeps the
-    `--policy`, `--no-policy` and `--screenshots` of the existing entry that this run doesn't set."""
+    `--policy`, `--no-policy`, `--ux-rules` and `--screenshots` of the existing entry that this run doesn't set."""
     from . import skills
     check_scope(apps, dedicated)
     if policy and no_policy:
@@ -297,11 +313,15 @@ def install(client: str, apps: list[str], dedicated: bool, project: str | None =
         policy = str(Path(policy).expanduser().resolve())  # the agent starts the server from another folder
         if not Path(policy).is_file():
             raise ConnectError(f"the policy file {policy} doesn't exist; nothing was changed.")
+    if ux_rules:
+        ux_rules = str(Path(ux_rules).expanduser().resolve())
+        if not Path(ux_rules).is_file():
+            raise ConnectError(f"the ux rules file {ux_rules} doesn't exist; nothing was changed.")
     chosen: list[list[str]] = []
     notes: list[str] = []
 
     def args_for(old: list[str] | None) -> list[str]:
-        args, notes[:] = merge_flags(old, apps, dedicated, policy, no_policy)
+        args, notes[:] = merge_flags(old, apps, dedicated, policy, no_policy, ux_rules)
         chosen[:] = [args]
         return args
 

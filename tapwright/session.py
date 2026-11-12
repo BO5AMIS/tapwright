@@ -49,6 +49,11 @@ FAST_TAP_PATH = "/session/{sid}/wda/tw/tap"
 # its end and never flings. TAPWRIGHT_FAST_DRAG=0 (or TAPWRIGHT_FAST_TAP=0) keeps drags on W3C actions.
 FAST_DRAG = os.environ.get("TAPWRIGHT_FAST_DRAG", "1")
 FAST_DRAG_PATH = "/session/{sid}/wda/tw/drag"
+# The fork's route version 3 adds the photo routes (AGENT-TOOLS §17.6, `media`): GET access, POST add, POST delete.
+PHOTOS_ACCESS_PATH = "/session/{sid}/wda/tw/photos/access"
+PHOTOS_ADD_PATH = "/session/{sid}/wda/tw/photos/add"
+PHOTOS_DELETE_PATH = "/session/{sid}/wda/tw/photos/delete"
+PHOTOS_WAIT = 150.0  # seconds: iOS may be asking the person to allow the runner photo access
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -104,6 +109,7 @@ class Session:
         self.top_touch = False
         self.fast_tap: bool | None = None  # whether this session's runner has the fast tap route (None: not asked yet)
         self.fast_drag: bool | None = None  # and the fast drag route (asked with the tap's)
+        self.tw_version = 0  # the fork's route version the runner answered with (0: Appium's build, or not asked yet)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -126,6 +132,7 @@ class Session:
             raise await self._why_stuck(bool(locked), e) from e
         self.screen = (float(size["width"]), float(size["height"]))
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
+        self.tw_version = 0
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -487,6 +494,35 @@ class Session:
         version = value.get("tapwright") if isinstance(value, dict) else None
         version = version if isinstance(version, int) and not isinstance(version, bool) else 0
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
+        self.tw_version = version
+
+    async def runner_version(self) -> int:
+        """The fork's route version of this phone's runner (0: not the fork)."""
+        await self.ensure()
+        await self._fast_routes()
+        return self.tw_version
+
+    async def photos_access(self) -> dict:
+        """The runner's access to the photo library: {"add": "authorized|denied|notDetermined|…", "full": …}."""
+        value = (await self._call("GET", PHOTOS_ACCESS_PATH, timeout=LOCK_WAIT)).get("value")
+        return value if isinstance(value, dict) else {}
+
+    async def photos_add(self, pictures: list[tuple[str, bytes]]) -> list[str]:
+        """Add pictures (file name, bytes) to the photo library with add-only access; the local identifiers made. It
+        may wait for the person to allow the runner once. Never sent twice."""
+        body = {"images": [base64.b64encode(data).decode("ascii") for _, data in pictures],
+                "names": [name for name, _ in pictures]}
+        value = (await self._call("POST", PHOTOS_ADD_PATH, body, timeout=PHOTOS_WAIT)).get("value")
+        found = value.get("identifiers") if isinstance(value, dict) else None
+        return [i for i in found if isinstance(i, str)] if isinstance(found, list) else []
+
+    async def photos_delete(self, identifiers: list[str]) -> int:
+        """Delete pictures by local identifier (needs the runner's full access; iOS asks the person to confirm).
+        Returns how many were deleted; a DeviceError whose message says "full access" when that isn't granted."""
+        value = (await self._call("POST", PHOTOS_DELETE_PATH, {"identifiers": identifiers},
+                                  timeout=PHOTOS_WAIT)).get("value")
+        deleted = value.get("deleted") if isinstance(value, dict) else None
+        return deleted if isinstance(deleted, int) and not isinstance(deleted, bool) else 0
 
     async def _drag(self, points: list, w3c: dict) -> None:
         """Play a finger path, [(t_ms from the press, x, y), ...] in points: through the fork's fast drag route when

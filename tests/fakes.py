@@ -326,6 +326,30 @@ class FakeSession:
         return 3.0
 
     audit_issues: list = []  # what `audit` answers: WebDriverAgent's issue dicts
+    tw_version = 3  # the runner's route version (media needs 3)
+    photo_access: dict = {"add": "authorized", "full": "authorized"}
+    photo_deletes = 1  # how many a delete reports (0: the person declined); an Exception is raised instead
+
+    async def runner_version(self):
+        self._record("runner_version")
+        return self.tw_version
+
+    async def photos_access(self):
+        self._record("photos_access")
+        return dict(self.photo_access)
+
+    async def photos_add(self, pictures):
+        self._record(("photos_add", tuple(name for name, _ in pictures)))
+        self.photos = getattr(self, "photos", [])
+        ids = [f"ID-{len(self.photos) + n}/L0/001" for n, _ in enumerate(pictures)]
+        self.photos += ids
+        return ids
+
+    async def photos_delete(self, identifiers):
+        self._record(("photos_delete", tuple(identifiers)))
+        if isinstance(self.photo_deletes, Exception):
+            raise self.photo_deletes
+        return len(identifiers) if self.photo_deletes else 0
 
     async def audit(self, types):
         self._record(("audit", tuple(types)))
