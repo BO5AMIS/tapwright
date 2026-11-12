@@ -4,7 +4,7 @@ import asyncio
 import json
 
 import pytest
-from fakes import FakeSession, button, el
+from fakes import FakeSession, button
 from test_daemon import finish, make, started
 
 from tapwright import device as device_module
