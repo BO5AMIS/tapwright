@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.0, "the Regression Update" (2026-11-12)
+
+A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
+Tapline.
+
+**Visual checks**
+- `compare_screen`: the first call for a `name` saves the screen as a reference picture; later calls answer
+  `Matches` or `Differs`, with how much changed and where (each region named by the elements it touches), and on a
+  difference a picture with the changes in red. `threshold` is the percent that may change and still match
+  (default 0.5); `ignore` paints out elements or areas that always change. The status bar is never compared.
+- In `run` and scripts it is a check: `expect: {"matches": "home"}` on a step, or a `compare_screen` step. A screen
+  that differs stops the batch as `expect_failed`, naming where it changed.
+- `record` folds a `compare_screen` after an action into that step, and saves the reference pictures next to the
+  script in `<script>.references/`, so a script and its pictures travel together. A `run` made while recording keeps
+  its visual checks too (`expect.matches` and `compare_screen` steps). A script keeps one picture for each name, so a
+  recording that compares one name in two apps is refused.
+- `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it. A picture
+  far larger than any screen, or one a script's reference would stretch to such a size, is refused before it is
+  resized. A recording refuses an update that would change a picture it already compared, before anything is written.
+- The safe write covers the reference pictures (the store's and a script's `.references/` folder) and a script's
+  `.diff/` folder, and nothing else: they are written whole or not at all, and never through a link (a symlinked
+  folder is refused, a symlinked file is replaced). On Linux and macOS every folder is held open while the file is
+  written. On Windows the folders are checked again before and after the move, which narrows the window for a folder
+  swapped for a link, but can't close it: a process running as the same user that swaps a folder at that very moment
+  can still get a write through.
+
+**Watching motion**
+- `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
+  stream. With `tap`, frame 1 is taken before the tap and the other frames follow it, so the strip shows what the tap
+  sets off. A filmstrip is composed in memory. With `tapwright mcp --screenshots DIR`, filmstrips and the picture
+  `compare_screen` returns for a difference are saved to that folder by the ordinary screenshot writer, which is
+  outside the safe write above.
+
 ## 1.1.1 (2026-11-12)
 
 - A touch that had to close the keyboard first failed with an internal error while a layer was open in front

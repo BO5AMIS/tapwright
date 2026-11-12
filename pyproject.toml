@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapwright"
-version = "1.1.1"
+version = "1.2.0"
 description = "Let LLM agents test apps on your real iPhone, from Windows, Linux or macOS. No Mac needed."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ dependencies = [
     "starlette>=1.0",  # the daemon's HTTP and WebSocket app
     "uvicorn>=0.30",
     "wsproto>=1.2",  # uvicorn's WebSocket implementation (server.py uses ws="wsproto")
-    "pillow",
+    "pillow>=10.1",  # filmstrip.py draws its numbers with ImageFont.load_default(size), new in 10.1
 ]
 
 [project.urls]
