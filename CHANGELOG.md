@@ -13,13 +13,19 @@ Tapline.
 - In `run` and scripts it is a check: `expect: {"matches": "home"}` on a step, or a `compare_screen` step. A screen
   that differs stops the batch as `expect_failed`, naming where it changed.
 - `record` folds a `compare_screen` after an action into that step, and saves the reference pictures next to the
-  script in `<script>.references/`, so a script and its pictures travel together.
+  script in `<script>.references/`, so a script and its pictures travel together. A `run` made while recording keeps
+  its visual checks too (`expect.matches` and `compare_screen` steps). A script keeps one picture for each name, so a
+  recording that compares one name in two apps is refused.
 - `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
-  check writes its picture to `<script>.diff/`, and the JUnit failure names it.
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it. References and pictures are written
+  whole or not at all, and never through a link: a symlinked folder is refused, a symlinked file is replaced. A picture
+  far larger than any screen, or one a script's reference would stretch to such a size, is refused before it is
+  resized.
 
 **Watching motion**
 - `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
-  stream; `tap` taps first and films what it sets off.
+  stream. With `tap`, frame 1 is taken before the tap and the other frames follow it, so the strip shows what the tap
+  sets off.
 
 ## 1.1.1 (2026-11-12)
 
