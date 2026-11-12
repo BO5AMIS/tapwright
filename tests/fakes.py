@@ -352,8 +352,17 @@ class FakeSession:
         self._record("photos_access")
         return dict(self.photo_access)
 
+    photos_gate: "asyncio.Event | None" = None  # while set and not set(): photos_add waits, as the runner for iOS's prompt
+
+    async def peek_alert(self, timeout=5.0):
+        """The system alert on screen now, read apart from `items` (what media's watch asks while it waits)."""
+        self._record("peek_alert")
+        return self.last_alert
+
     async def photos_add(self, pictures):
         self._record(("photos_add", tuple(name for name, _ in pictures)))
+        if self.photos_gate is not None:
+            await self.photos_gate.wait()
         self.photos = getattr(self, "photos", [])
         ids = [f"ID-{len(self.photos) + n}/L0/001" for n, _ in enumerate(pictures)]
         self.photos += ids

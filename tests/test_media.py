@@ -4,7 +4,7 @@ import base64
 
 import pytest
 
-from tapwright import client, media, mcp_server, session as session_module, store
+from tapwright import client, daemon as daemon_module, media, mcp_server, session as session_module, store, ui
 from tapwright.control import Refused
 from tapwright.daemon import Scope
 from tapwright.device import ConnectionLost, DeviceError
@@ -211,6 +211,123 @@ def test_media_works_in_personal_mode_and_shows_nothing_of_another_app(pictures)
     run(go)
 
 
+# ---- the runner's photo prompt (phone checks, 2026-11-12: media waited 120 s on an alert nobody could read) ----
+RUNNER_PROMPT = ui.Alert("“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library",
+                         ("Limit Access…", "Allow Full Access", "Don’t Allow"), (60.0, 300.0, 300.0, 200.0))
+NEEDS_A_PERSON = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person answers "
+                  "it on the phone (to add pictures: \"Allow\" or \"Limit Access…\"; never needed: full access), then "
+                  "call media again.")
+
+
+@pytest.fixture
+def quick(monkeypatch):
+    monkeypatch.setattr(daemon_module, "MEDIA_WATCH", 0.02)
+    monkeypatch.setattr(daemon_module, "FRONT_RETRY", 0.001)  # (a look waits out a banner before it refuses)
+
+
+def prompted(d):
+    """The phone with iOS's photo prompt up and the runner's add waiting for the person to answer it."""
+    d.session.photos_gate = asyncio.Event()
+    d.session.last_alert = RUNNER_PROMPT
+    d.session.foreground, d.session.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
+
+
+def test_media_stops_waiting_at_once_when_a_system_alert_is_in_front(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        began = asyncio.get_running_loop().time()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "not_allowed" and str(e) == NEEDS_A_PERSON
+        assert asyncio.get_running_loop().time() - began < 2.0  # not the runner's 150 s
+        assert media.load() == {}  # nothing is recorded until the runner says it added them
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_alert_tool_is_not_queued_behind_a_waiting_media(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.photos_gate = asyncio.Event()
+        waiting = asyncio.ensure_future(d.run_tool("a", "media", {"add": pictures, "confirm": True}))
+        await asyncio.sleep(0.1)
+        assert not waiting.done()  # no alert yet: media waits for the runner
+        d.session.last_alert = ui.Alert("Allow?", ("Allow",), (0.0, 0.0, 10.0, 10.0))
+        r = await asyncio.wait_for(d.run_tool("b", "alert", {"action": "text"}), 2.0)  # (before the 150 s wait ends)
+        assert r["text"]
+        with pytest.raises(Refused):
+            await asyncio.wait_for(waiting, 2.0)  # and media has given up waiting on it
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_pictures_are_added_once_when_media_is_called_again_after_the_person_answers(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        d.session.last_alert = None  # the person allowed it: the runner's add goes on and finishes
+        d.session.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures to the photo library: food.jpg, label.PNG, scan.heic.")
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # sent once, never again
+        assert [e["name"] for e in media.load()["a"]] == ["food.jpg", "label.PNG", "scan.heic"]  # and kept for remove
+        r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
+        assert r["text"].startswith("Removed 3 pictures")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_person_driving_still_holds_media_back(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.control.person_active = lambda: True
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "busy"
+        await finish(stop, task)
+    run(go)
+
+
+def test_in_personal_mode_the_runners_prompt_can_be_read_but_never_answered_by_the_tool(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s, mine = d.session, Scope(("com.example.app",))
+        s.alert_text = "“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library"
+        prompted(d)
+
+        async def text(action):
+            s.calls.append(("alert", action))
+            return s.alert_text
+        s.alert = text
+
+        async def running():
+            return ["com.example.app"]
+        s.device.foreground_apps = running
+        r = await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
+        assert r["text"] == s.alert_text and "outside_apps" not in r["text"]
+        for action in ("accept", "dismiss"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "alert", {"action": action}, scope=mine)
+            assert e.value.code == "not_allowed" and str(e.value) == NEEDS_A_PERSON
+        assert [c for c in s.calls if isinstance(c, tuple) and c[0] == "alert"] == [("alert", "text")]  # only the text
+        with pytest.raises(Refused) as e:  # `look` still shows nothing of it: only the alert's text is read
+            await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        assert str(e.value).startswith("outside_apps")
+        s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Allow",), (0.0, 0.0, 10.0, 10.0))
+        with pytest.raises(Refused) as e:  # another app's prompt is no one of the given apps'
+            await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
+        assert str(e.value).startswith("outside_apps")
+        await finish(stop, task)
+    run(go)
+
+
 # ---- the MCP tool ----
 def test_the_mcp_tool_sends_absolute_paths_and_only_what_was_given(monkeypatch, tmp_path):
     seen = []
@@ -269,6 +386,22 @@ def test_an_older_or_appiums_runner_has_version_zero():
     assert asyncio.run(s.runner_version()) == 0
     s, _ = runner({"version": {"tapwright": 2}})
     assert asyncio.run(s.runner_version()) == 2 and s.fast_drag and s.fast_tap
+
+
+def test_the_session_reads_the_system_alert_apart_from_the_agents_list():
+    s, _ = runner({})
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="SpringBoard" label="SpringBoard" '
+              'x="0" y="0" width="430" height="932"><XCUIElementTypeAlert type="XCUIElementTypeAlert" '
+              'label="“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library" x="60" y="300" '
+              'width="310" height="200"><XCUIElementTypeButton type="XCUIElementTypeButton" label="Allow Full Access" '
+              'x="60" y="440" width="310" height="50"/></XCUIElementTypeAlert></XCUIElementTypeApplication></AppiumAUT>')
+
+    async def read(timeout=60):
+        return source
+    s._source, s.screen, s.items = read, (430.0, 932.0), ["the agent's list"]
+    alert = asyncio.run(s.peek_alert())
+    assert alert is not None and "WebDriverAgentRunner" in alert.title and alert.buttons == ("Allow Full Access",)
+    assert s.items == ["the agent's list"]  # (what the agent works with is untouched)
 
 
 # ---- review fixes (W14) ----
