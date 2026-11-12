@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -414,7 +414,7 @@ text items.
 | `not_connected` | nothing to drive: no app connected, or no phone found | follow the setup steps in the message | both. Replaces Tapline's `no_app` and `unknown_session` |
 | `timeout` | no answer in time; the action may have happened | look before retrying | both. Tapwright adds two messages for a phone that gave one request no answer while the line is alive (over Wi-Fi a single request can stall). After a touch: `the phone didn't answer within <N> s; the action may have happened: look before you retry.`, after the touch's own length plus 10 s; the session stays. From `wait_for`, when not one read of the screen came back in its time, or in 3 s if that is longer: `The phone didn't answer within <N> s, so it isn't known whether <kind> "<value>" is on screen; look, then wait again.` It says "it didn't happen" only after it has read the screen at least once |
 | `expect_failed` | an expectation of a `run` step didn't hold (§9.2) | look, then fix the step or report the bug | both |
-| `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today |
+| `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today. (v1.11) An argument the tool doesn't take is never ignored: `Error bad_params: audit doesn't take labels, ocr; it takes types.` (a tool with none: `…; it takes no arguments.`), on every path (MCP, HTTP, `run` steps, where a step's message starts `step 3: `) |
 | `unsupported` | this tool, app or phone can't do it | use the alternative named in the message | both |
 | `not_allowed` | a read or a touch outside the apps the agent was given (v1.5). The message's first word is the reason: `outside_apps` (another app is in front, or the call names one), `no_apps` (the agent was given none) | for `outside_apps`, go back to a given app with `open_app`; for `no_apps`, tell the user | Tapwright, in personal mode (it was `unsupported` with the same reason words). Tapline drives one app and never answers it |
 | `internal` | a bug | report it | both |
@@ -453,6 +453,7 @@ text items.
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
 | `compare_screen`, `filmstrip` | both (Tapwright since v1.9) | image work: §14 |
 | `record`, `replay` | both (v1.8) | scripts by id, label or text work for both (§9.4) |
+| `session_report`, `network` | both (v1.11) | §16. Tapline's `network` is an `app_command` |
 | `logs`, `crash`, `performance` | both (v1.10) | diagnostics: §15. What each tool reads differs, and the answers say so |
 | `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
 
@@ -520,9 +521,9 @@ checking `covered` costs (`hittable`, §4).
 
 A step is one tool call written as an object: `{"tool": "<name>", ...its parameters, "expect": {...}}`.
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
-`wait_for`, `compare_screen` (a check, §14.2), `performance` (v1.10, §15.3), and where the tool has them `alert`,
+`wait_for`, `compare_screen` (a check, §14.2), `performance` (v1.10, §15.3), `network` (v1.11, §16.4), and where the tool has them `alert`,
 `press_button`, `rotate`, `open_app`, `close_app`, `app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`,
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`, `session_report`,
 and where the tool has them `inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
@@ -646,6 +647,7 @@ Checked: contrast, hit_region, description, dynamic_type, clipped_text, trait, e
 - The name in quotes is the screen's title where the tool knows it (Tapline: the route's), else the app's
   name (Tapwright: XCTest gives no screen title).
 - An element off screen is audited only where the tool can (XCTest audits what is on screen).
+- (v1.11) An issue whose element isn't in the tree is named from what the audit itself reports, text first as in an element line: `an element "Total" at @16,300 120x20`; "the screen" only when nothing at all is known.
 
 ## 11. Safety policy, confirmation and dry runs
 
@@ -924,3 +926,88 @@ launch): opened in 2.6 s, over 2.0 s; 4 drops, over 0.` `record` saves a `perfor
 
 Network capture, energy, disk and thermal numbers, and symbolicating native frames. Tapwright shows a crash
 report's own symbols; full symbols need the app's dSYM files.
+
+## 16. Fewer steps (v1.11)
+
+The same check should cost an agent no more calls than on Android. This section is what each call does to make the
+next one unnecessary.
+
+### 16.1 The call log and `session_report`
+
+- The action log (§12) also records reads (`look`, `wait_for`, `logs`, `audit`, `compare_screen`, …) with
+  `"kind": "read"`, and every entry gains the agent's client id and the size of its answer in characters. Typed text,
+  pictures and log text are still never written.
+- `session_report` (a read; also `tapline report` / `tapwright report`, with `--since <time>` and, in Tapwright,
+  `--client <id>`): `since` (epoch ms, default the start of this agent's session). Answer:
+  ```
+  Session: 212 calls in 31 min (look 64, tap 71, scroll 38, run 4, …). Failed: 19 (not_found 12, ambiguous 4, not_actionable 3).
+  Waste:
+  - 22 looks right after an action whose answer already had the changes (calls 14, 18, 31, …)
+  - 6 retries after not_found that found the same element by another target (calls 40, 77, …): use its id first
+  - 4 scroll hunts of 3 or more scrolls for an element already in the list (calls 90–93, …): let the action scroll
+  - 9 runs of 3 or more actions with no answer read in between (calls 101–104, …): one run each
+  ```
+  At most 5 call numbers per flag, then `…`. A flag with nothing to show is left out; with no waste: `Waste: none.`
+- A scroll hunt is exact when the element was in the tree's off-screen list before the first scroll; otherwise the
+  flag says `(maybe)`.
+
+### 16.2 Off-screen targets and closest matches
+
+- `tap`, `long_press`, `toggle` and `type_text` on a target that is in the tree but off screen scroll it into view,
+  clear of the bars, and then act, in one call. The policy check (§11) runs on the target before the scroll. The first
+  line says so: `Scrolled to it, then tapped e41 button "Save" id=save.` `dry_run` answers
+  `Would scroll to it, then tap e41 button "Save" id=save at 215,640.` (the point it expects after the scroll).
+- When no scroll can bring it on screen (it isn't inside a scroll view, or a scroll ends with it still covered), the
+  action is refused as before, `not_actionable: off_screen`, and the message says why.
+- An element a list hasn't made yet (a lazy row) isn't in the tree: it stays `not_found`.
+- `not_found` adds up to 3 closest matches, each as an element line with its ref and, when off screen, where:
+  `Closest: e12 button "Save draft" id=save-draft, e30 text "Saved" (off screen, below).` Close means: the same words
+  in another case or order; one contained in the other; or a small edit distance (at most 2 for up to 10 characters,
+  3 above). A match on only a common word ("the", "a", "of", "to", "and", "in") doesn't count. With none, no
+  `Closest:` part.
+
+### 16.3 Language, region and text size
+
+Shared values:
+- `language`: a BCP 47 code (`ar`, `en`, `en-GB`).
+- `region`: an ISO 3166 country code (`QA`).
+- `text_size`: one of these, with the font scale each means (the number React Native reports as `fontScale`):
+
+  | size | xs | s | m | l (iOS default) | xl | xxl | xxxl | ax1 | ax2 | ax3 | ax4 | ax5 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | scale | 0.82 | 0.88 | 0.94 | 1.0 | 1.12 | 1.24 | 1.35 | 1.65 | 1.94 | 2.35 | 2.76 | 3.12 |
+
+- **Tapwright:** `open_app` takes `language`, `region` and `text_size`. It (re)launches the app with Apple's launch
+  arguments (`-AppleLanguages`, `-AppleLocale`, `-UIPreferredContentSizeCategoryName`), for that launch of that app
+  only; nothing in Settings changes. A running app is closed first, and the answer's first line says what it opened
+  with: `Opened JLD (app.jld.mobile) in ar, QA, text size xl.` The next `open_app` without them is the app as the phone
+  sets it.
+- **Tapline:** `app_command` names `language` (`{ language }`), `region` (`{ region }`) and `text_size`
+  (`{ size }`), which the app provides (`init` adds them for i18next and expo-localization). `text_size` needs the app
+  to use the SDK's font-scale helper; without it, `unsupported`, naming `audit`'s `dynamic_type` check and
+  Tapwright's `open_app`. A switch to or from a right-to-left language needs a restart in React Native: in a
+  development build Tapline reloads the app and says so; in other builds the answer says the app must be restarted.
+
+### 16.4 Network conditions
+
+- `network` (Tapwright: a tool; Tapline: a built-in `app_command`), `{ mode: "offline" | "3g" | "lossy" | "normal" }`.
+  - `offline`: no request gets through. `3g`: about 400 ms more latency and 750 kbit/s. `lossy`: about 1 in 5 requests
+    fails, the rest a little slower. `normal`: as before.
+  - The answer is one line, `Network: 3g (Tapwright, whole phone).` / `Network: 3g (Tapline).`, and while a condition
+    is on every answer's header carries the same line.
+  - It returns to `normal` by itself when the session ends or the tool loses the phone or the app, so the phone is never
+    left offline.
+- **Tapwright:** the phone's own network conditioner (Apple's developer condition inducer). It is phone-wide: other apps
+  are affected too, which is why the line says `whole phone`. Tapwright's link over USB keeps working; over Wi-Fi,
+  `offline` and `lossy` would cut Tapwright off, so they are `unsupported` with that reason.
+- **Tapline:** the app's own JavaScript requests (and WebSockets where the SDK wraps them); not images the native side
+  loads or native SDKs, which the answer names. Tapline's own connection is never conditioned.
+
+### 16.5 The skill, and the benchmark
+
+- Both skills carry `run` examples for the common patterns (sheet → choose → save → check; form → submit → wait for the
+  confirmation; a tab tour with `compare_screen`) and a "spend fewer calls" list: read the change list instead of
+  `look`; target by id; let the action scroll; put known steps in `run`.
+- QUALITY-BAR gains a calls-per-check section: a fixed list of checks on Wayfare (open a screen, change a setting,
+  fill a form, find an item in a long list, check an error state), each scored by calls and seconds. The bar: no more
+  calls than the same check on Android.
