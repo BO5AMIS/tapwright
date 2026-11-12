@@ -46,8 +46,8 @@ def test_retries_after_not_found_with_another_target_name_the_failed_call():
           entry(1, "tap", target={"id": "save"}),
           entry(2, "tap", ok=False, code="not_found", target={"text": "X"}),
           entry(3, "tap", ok=False, code="not_found", target={"text": "X"})]
-    assert ("- 1 retry after not_found that found the same element by another target (calls 1): use its id first"
-            in build(es))
+    assert ("- 1 retry after not_found then worked with another kind of target, likely the same element (calls 1): "
+            "use its id first" in build(es))
 
 
 def test_a_scroll_hunt_is_sure_only_when_the_action_after_it_aimed_at_what_was_off_screen():
@@ -122,7 +122,7 @@ def test_the_tool_reports_this_agents_calls_from_the_log_in_personal_mode_too(tm
         assert answer["text"].startswith("Session: 2 calls in 1 min (look 1, tap 1). Failed: 0.")
         assert answer["text"].splitlines()[1].startswith("Waste:")
         from tapwright.daemon import Scope
-        scoped = await d.run_tool("a", "session_report", {"since": 0}, scope=Scope(apps=[]))
+        scoped = await d.run_tool("a", "session_report", {"since": 0}, scope=Scope(apps=["com.example.app"]))
         assert scoped["text"].startswith("Session: 2 calls")
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "session_report", {"since": "yesterday"})

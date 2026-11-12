@@ -22,6 +22,7 @@ class ActionLog:
         self.now = now or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self.report = report
         self.broken = False
+        self._pruned_on: datetime.date | None = None
         if folder is not None:
             self.prune()
 
@@ -34,6 +35,7 @@ class ActionLog:
         """Delete the day files older than KEEP_DAYS (by the date in their name, not the file's clock)."""
         if self.folder is None or not self.folder.is_dir():
             return
+        self._pruned_on = self.now().date()
         oldest = (self.now() - datetime.timedelta(days=KEEP_DAYS)).date()
         for f in self.folder.glob(f"{PREFIX}*{SUFFIX}"):
             try:
@@ -51,6 +53,8 @@ class ActionLog:
         path = self.path()
         if path is None or self.broken:
             return
+        if self._pruned_on != self.now().date():
+            self.prune()  # a daemon that runs for weeks prunes once a day, not only when it starts
         stamp = self.now().isoformat(timespec="milliseconds").replace("+00:00", "Z")
         line = json.dumps({"t": stamp, **{k: v for k, v in entry.items() if v is not None}}, ensure_ascii=False)
         try:

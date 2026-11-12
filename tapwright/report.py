@@ -21,12 +21,27 @@ RUNNABLE = frozenset({"tap", "long_press", "type_text", "toggle", "back", "swipe
                       "close_app", "alert", "press_button", "rotate", "wait"})
 
 
-def read_entries(folder: Path | None) -> list[dict]:
-    """Every entry of the day files in the log's folder, oldest first. A line that isn't an object is skipped."""
+def read_entries(folder: Path | None, since_ms: int | None = None) -> list[dict]:
+    """Every entry of the day files in the log's folder, oldest first. A line that isn't an object is skipped. With
+    `since_ms`, only the day files that can hold an entry from then on are read (a day file is named for its UTC
+    date; one day more is kept for the edge)."""
     if folder is None or not folder.is_dir():
         return []
+    oldest = None
+    if since_ms is not None:
+        try:
+            oldest = (datetime.datetime.fromtimestamp(since_ms / 1000, datetime.timezone.utc)
+                      - datetime.timedelta(days=1)).date()
+        except (OverflowError, OSError, ValueError):
+            oldest = None
     found: list[dict] = []
     for f in sorted(folder.glob(f"{PREFIX}*{SUFFIX}")):
+        if oldest is not None:
+            try:
+                if datetime.date.fromisoformat(f.name[len(PREFIX):-len(SUFFIX)]) < oldest:
+                    continue
+            except ValueError:
+                pass  # not named for a day: read it as before
         try:
             text = f.read_text("utf-8")
         except OSError:
@@ -50,13 +65,19 @@ def epoch_ms(stamp: str) -> int | None:
 
 
 _RELATIVE = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd])", re.I)
+SECONDS_BELOW = 100_000_000_000  # an epoch number below this is in seconds (as ms it would be before March 1973)
+
+
+def to_epoch_ms(value: float) -> int:
+    """An epoch time given in seconds (10 digits, like 1762950000) or milliseconds (13), as milliseconds."""
+    return int(value * 1000) if value < SECONDS_BELOW else int(value)
 
 
 def parse_since(text: str, now_ms: int) -> int:
-    """`--since`: epoch milliseconds, an ISO time ("2026-11-12T10:00"), or how long ago ("30m", "2h", "1d")."""
+    """`--since`: epoch seconds or milliseconds, an ISO time ("2026-11-12T10:00"), or how long ago ("30m", "2h", "1d")."""
     text = text.strip()
     if re.fullmatch(r"\d{10,}", text):
-        return int(text)
+        return to_epoch_ms(int(text))
     if (m := _RELATIVE.fullmatch(text)) is not None:
         unit = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2).lower()]
         return now_ms - round(float(m.group(1)) * unit * 1000)
@@ -120,20 +141,34 @@ def looks_after_answers(cs: list[dict]) -> list[int]:
     for i in range(1, len(cs)):
         prev, e = cs[i - 1], cs[i]
         if (e.get("tool") == "look" and e.get("ok") and not e.get("labels") and not e.get("ocr")
+                and not e.get("screenshot")  # a look that asked for the picture adds something
                 and not _is_read(prev) and prev.get("ok") and prev.get("listed")):
             found.append(i + 1)
     return found
 
 
 def retries_after_not_found(cs: list[dict]) -> list[int]:
-    """A call that failed `not_found`, then the same tool a call later with another target that worked."""
+    """A call that failed `not_found`, then the same tool in the next call (or the one after, with one `look`
+    between) with another kind of target (text, then id) that worked: likely the same element."""
     found = []
     for i in range(len(cs) - 1):
-        e, nxt = cs[i], cs[i + 1]
-        if (e.get("code") == "not_found" and e.get("target") and nxt.get("tool") == e.get("tool") and nxt.get("ok")
-                and nxt.get("target") and _target_key(nxt) != _target_key(e)):
+        e = cs[i]
+        if e.get("code") != "not_found" or not e.get("target"):
+            continue
+        j = i + 1
+        if cs[j].get("tool") == "look" and e.get("tool") != "look" and j + 1 < len(cs):
+            j += 1
+        nxt = cs[j]
+        if (nxt.get("tool") == e.get("tool") and nxt.get("ok") and nxt.get("target")
+                and _target_kind(nxt) != _target_kind(e)):
             found.append(i + 1)
     return found
+
+
+def _target_kind(e: dict) -> str:
+    """How the call named its target: id, label, text, ref or point."""
+    t = e.get("target") or {}
+    return next((k for k in ("id", "label", "text", "ref") if k in t), "point")
 
 
 def scroll_hunts(cs: list[dict]) -> list[tuple[int, int, bool]]:
@@ -200,8 +235,8 @@ def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
                      f"(calls {_numbers([str(x) for x in looks])})")
     if retries := retries_after_not_found(cs):
         n = len(retries)
-        flags.append(f"- {n} {_plural(n, 'retry', 'retries')} after not_found that found the same element by another "
-                     f"target (calls {_numbers([str(x) for x in retries])}): use its id first")
+        flags.append(f"- {n} {_plural(n, 'retry', 'retries')} after not_found then worked with another kind "
+                     f"of target, likely the same element (calls {_numbers([str(x) for x in retries])}): use its id first")
     if hunts := scroll_hunts(cs):
         n = len(hunts)
         spans = [f"{a}–{b}" + ("" if sure else " (maybe)") for a, b, sure in hunts]
