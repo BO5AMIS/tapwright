@@ -867,6 +867,10 @@ then the `Latest:` line.
 - (Tapline, when the app went away without a JS error) `Note: the app disconnected during this call (it may have
   crashed; Tapline can't read native crash reports, Tapwright's crash can).`
 
+The note goes on error answers too (a call the crash cut short usually ends `not_connected` or `not_answering`).
+When the crash only reaches the tool later (Tapline: the app sends a saved JS error when it connects again), the
+next answer carries the note once, with when it happened: `Note: the app crashed at 10:42:07: …`.
+
 **`crash`.** Parameters: `all` (the last 5, not only the newest), and (Tapwright) `pull`.
 - Answer per crash: the time, the error or exception type and reason, the crashed thread's top 8 frames with the
   app's own frames marked `*`, and (Tapline) the component stack.
@@ -888,10 +892,12 @@ Answer: a first line, then the numbers in one line, then what wasn't measured.
 - `Opened in 1.42 s (to the first settled screen).` (Tapwright) /
   `Reloaded in 1.12 s (to the first settled screen; JavaScript only, not a cold start).` (Tapline, development
   builds; release builds answer `unsupported`) / `Measured 3.0 s.`
-- Tapwright: `Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps; 3 drops over 50 ms.` (the process's
-  memory and CPU, and rendered frames).
-- Tapline: `JS heap 48 MB (peak 52). JS frames 57 fps; 3 drops over 50 ms; JS thread busy at most 180 ms.`, and in a
-  development build `Slowest renders: TripList 48 ms (3 times), DayCard 12 ms.`
+- Tapwright: `Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 drops over 50 ms.` (the
+  process's memory and CPU, and rendered frames).
+- Tapline: `JS heap 48 MB (peak 52). JS frames 57 fps (lowest 41); 3 drops over 50 ms; JS thread busy at most
+  180 ms.`, and in a development build `Slowest renders: TripList 48 ms (3 times), DayCard 12 ms.`
+- fps is the average over the window; `lowest` is the lowest one-second sample (the whole window when it is shorter),
+  the number `fps_min` checks.
 - Last line, when anything wasn't measured: `Not measured here: CPU, process memory.`
 
 **In `run` and scripts** a `performance` step is allowed (§9.1) and may carry `expect: {"under": {…}}`, with keys
