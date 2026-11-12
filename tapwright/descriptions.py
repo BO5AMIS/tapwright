@@ -171,6 +171,16 @@ SHARED = {
         'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
         '`compare_screen` step.'
     ),
+    'journey': (
+        'Test a feature as a real user would: `start: true` with a `goal` ("log breakfast by scanning its barcode") '
+        'and, if useful, a `persona` and `conditions` (language, text size, network). While it runs you see the '
+        'screen as a user does: no ids, nothing off screen, no jump-scrolling; target by ref or visible text. The tool '
+        'measures taps, time, wrong turns and hesitations. `stress` adds a real-world moment (leaving the app, a bad '
+        'network, a double tap, rotating, relaunching) and checks what `survives`. `stop: true` with `reached` writes '
+        'a visual report (screenshots, a GIF) and answers its summary; `export` puts it in a GitHub PR or issue, only '
+        'when your user asks. Build personas for this app\'s own users and agree them with your user; examples are in '
+        'the skill.'
+    ),
     'filmstrip': (
         'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
         'shots. `tap` first taps an element, then films what it sets off.'

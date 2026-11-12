@@ -147,6 +147,7 @@ repository too.
 | `session_report` | where this session's calls went (the same from the shell: `tapwright report [--since TIME] [--client ID]`): calls per tool, failures by code, and waste to cut, each with its call numbers: looks right after an answer that had the changes, retries after `not_found`, scroll hunts, runs of actions that could have been one `run` |
 | `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
 | `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
+| `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
 screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`

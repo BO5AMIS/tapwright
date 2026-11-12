@@ -21,8 +21,8 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, launch as launchlib,
-               needs, network, ocr, params, performance, report, ui)
+from . import (actionlog, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, journey,
+               journey_tool, launch as launchlib, needs, network, ocr, params, performance, report, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -81,6 +81,14 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# True while a journey's `double_tap` stress makes its tap: the touch goes out twice, DOUBLE_TAP_GAP apart (§17.4)
+_DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
+DOUBLE_TAP_GAP = 0.08  # seconds between the two touches of a double tap
+STRESS_BACKGROUND_S = 1.0  # seconds the app stays in the background in a `background` stress moment
+STRESS_ROTATE_S = 0.6  # seconds in landscape in a `rotate` stress moment
+# the calls after which a journey keeps a picture of the screen (§17.5): the actions that can change it
+JOURNEY_FRAMES = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
+                            "alert", "press_button", "rotate", "wait_for", "wait", "run", "replay"})
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
@@ -610,7 +618,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon:
+class Daemon(journey_tool.JourneyTools):
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
@@ -706,6 +714,7 @@ class Daemon:
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll,
                           "alert": self._alert, "swipe": self._swipe}
+        self._journeys: dict[str, journey.Journey] = {}  # {agent: its journey} (AGENT-TOOLS §17): one at a time
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
         self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
@@ -1130,6 +1139,33 @@ class Daemon:
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
+        jr = self._journeys.get(client_id)
+        if jr is None or name == "journey":
+            return await self._run_tool_plain(client_id, name, args, scope, policy)
+        return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy)
+
+    async def _run_tool_in_journey(self, jr: "journey.Journey", client_id: str, name: str, args: dict,
+                                   scope: "Scope | None", policy: "safety.Policy | None") -> dict:
+        """A call by an agent that has a journey running (§17): checked against what a user could do, answered in the
+        user's eyes (ui.USERS_EYES), and counted. The tool's own calls (stress moments, conditions) are `muted`."""
+        if not jr.muted:
+            args = self._journey_gate(jr, name, args)
+        token = ui.USERS_EYES.set(jr.users_eyes)
+        began, outer = self.control.clock(), BATCH.get() is None and not _NESTED.get()
+        try:
+            answer = await self._run_tool_plain(client_id, name, args, scope, policy)
+        except Refused as e:
+            if not jr.muted and name not in BATCH_TOOLS:
+                jr.note_call(name, args, "", self.control.clock() - began, e.code)
+            raise
+        finally:
+            ui.USERS_EYES.reset(token)
+        if not jr.muted:
+            await self._journey_after(client_id, jr, name, args, answer, self.control.clock() - began, outer)
+        return answer
+
+    async def _run_tool_plain(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
+                              policy: "safety.Policy | None" = None) -> dict:
         self.last_request = time.monotonic()
         self._network_seen_by(client_id)
         outer = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
@@ -1167,6 +1203,8 @@ class Daemon:
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        if name == "journey":  # AGENT-TOOLS §17: its own calls go through run_tool, so personal mode and the policy hold
+            return await self._journey_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2216,8 +2254,10 @@ class Daemon:
                     # an alert hides the app's elements: say so, not "not found". (When only the `index` is
                     # out of range the alert's own elements matched, and that miss is the answer.)
                     self._refuse_behind_alert(view, force=False)
-                self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
-                if not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
+                eyes = ui.USERS_EYES.get()  # a user doesn't know what lies behind a sheet or past an edge (§17.1)
+                if not eyes:
+                    self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
+                if not eyes and not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
@@ -3326,7 +3366,7 @@ class Daemon:
         if self._other_app_shown():
             return ""
         hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
-        off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
+        off = [] if ui.USERS_EYES.get() else [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
         return closest.find(target, view.items, off, self.session.screen)
 
     async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> bool:
@@ -3535,6 +3575,14 @@ class Daemon:
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
+    async def _press(self, target: ui.Target, hold_ms: int) -> str:
+        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
+        done = await self.session.tap(target, hold_ms=hold_ms)
+        if _DOUBLE.get():
+            await asyncio.sleep(DOUBLE_TAP_GAP)
+            await self.session.tap(target, hold_ms=hold_ms)
+        return done
+
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
         element under a bar that shows. `force` skips all of it. A point is a raw touch."""
@@ -3555,12 +3603,12 @@ class Daemon:
                 under = self._element_at(found, (await s.refresh()).items)
             said = self._police(tool, a, under)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
-            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
+            return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             said = self._police(tool, a, found)  # `force` skips the checks above, never the policy
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
-            done = Noted(ui.without_place(await s.tap(target, hold_ms=hold_ms)))  # at its centre, whatever is drawn there
+            done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
@@ -3569,8 +3617,8 @@ class Daemon:
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         if point is None:
-            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
-        await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
+            return ui.without_place(await self._press(target, hold_ms))
+        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
         return f"{verb} {found.line(actions=False, place=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     def _moved_under(self, view, x: float, y: float) -> bool:
@@ -3991,8 +4039,8 @@ class Daemon:
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
-            up = changes.update(view.items, read_now.tree.items, app_changed, view.top_ref, view.shown, full, head,
-                                moves_content)
+            seen = ui.on_glass(read_now.tree.items) if ui.USERS_EYES.get() else read_now.tree.items  # (§17.1)
+            up = changes.update(view.items, seen, app_changed, view.top_ref, view.shown, full, head, moves_content)
             return read_now, up
         try:
             snap, up = await self._read(read)
@@ -4015,7 +4063,7 @@ class Daemon:
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
         still = not (moves_content is not False or drifted or view.unlooked)
         off = (changes.off_screen(off_was, view.shown_off, by_place=still, listed=listed_before)
-               if same_app and not full else [])
+               if same_app and not full and not ui.USERS_EYES.get() else [])  # a user sees nothing change off screen
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
