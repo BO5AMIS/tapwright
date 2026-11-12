@@ -9,19 +9,26 @@ milliseconds: the largest channel of the difference, a cut at 0.1 of 255 (Taplin
 JPEG noise from counting as a change), a histogram for the count, and a grid of 16 px cells that the Python code joins."""
 from __future__ import annotations
 
+import contextlib
+import errno
 import io
 import os
 import re
-import shutil
+import secrets
+import stat
+import tempfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import BinaryIO, Callable, NamedTuple
 
 from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 
 from . import ui
 from .control import Refused
 
-NAME = re.compile(r"^[A-Za-z0-9][\w.-]{0,60}$")
+# ASCII only, as AGENT-TOOLS §14.1 reads in Tapline's JavaScript, where \w is [A-Za-z0-9_]. Python's \w takes any
+# Unicode letter, and Unicode names alias on real file systems (case, NFC/NFD on macOS, ignorable characters on
+# case-folding ext4: Codex, PR #3 cycles 9 to 11), so a later picture could replace an earlier check's.
+NAME = re.compile(r"^[A-Za-z0-9][\w.-]{0,60}$", re.ASCII)
 DEFAULT_THRESHOLD = 0.5  # percent of the screen that may change and still match
 TOLERANCE = 0.1  # of 255: how far the largest channel of a pixel must move to count as changed
 CUT = int(TOLERANCE * 255) + 1  # 26: the first channel difference that counts (> 25.5)
@@ -136,37 +143,186 @@ def _regions(mask: Image.Image) -> list[Region]:
 
 
 def fit(png: bytes, width: int) -> Image.Image:
-    """A screenshot as an RGB picture `width` px wide."""
-    img = Image.open(io.BytesIO(png)).convert("RGB")
+    """A screenshot as an RGB picture `width` px wide. `bad_params` for a picture larger than any screen, or one that
+    would be scaled to such a size (a very tall, narrow one), before anything is decoded or allocated."""
+    img = Image.open(io.BytesIO(png))
+    if img.width * img.height > MAX_PIXELS:
+        raise Refused("bad_params", f"the screenshot is {img.width}x{img.height} px, larger than any screen")
+    height = max(1, round(img.height * width / img.width))
+    if img.width != width and width * height > MAX_PIXELS:
+        raise Refused("bad_params", f"the screenshot ({img.width}x{img.height} px) would be {width}x{height} px at "
+                                    f"width {width}, larger than any screen")
+    img = img.convert("RGB")
     if img.width != width:
-        img = img.resize((width, max(1, round(img.height * width / img.width))), Image.LANCZOS)
+        img = img.resize((width, height), Image.LANCZOS)
     return img
 
 
-def load(path: Path) -> Image.Image:
-    """A saved reference as an RGB picture; `bad_params` when the file isn't a picture, or is far larger than any
-    phone screen (a script's references come from anyone, so a huge one is refused before it is decoded)."""
+def read(path: Path) -> tuple[Image.Image, bytes]:
+    """A saved reference as an RGB picture, and the exact bytes it was decoded from (the file is read once, so the
+    two can't differ); `bad_params` when the file isn't a picture, or is far larger than any phone screen (a script's
+    references come from anyone, so a huge one is refused before it is decoded)."""
     unreadable = Refused("bad_params", f"the reference file {path} can't be read as a picture; save the reference "
                                        "again with update: true.")
     try:
-        with Image.open(path) as img:
+        data = path.read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > MAX_PIXELS:
                 raise Refused("bad_params", f"the reference file {path} is {img.width}x{img.height} px, larger than "
                                             "any screen; save the reference again with update: true.")
-            return img.convert("RGB")
+            return img.convert("RGB"), data
     except Refused:
         raise
     except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
         raise unreadable from None
 
 
-def save(path: Path, image: Image.Image) -> None:
-    """Write a reference as PNG (lossless: a reference must not drift), whole or not at all: to a file beside it,
-    then moved over it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    part = path.with_name(path.name + ".part")
-    image.save(part, "PNG")
-    os.replace(part, path)
+def load(path: Path) -> Image.Image:
+    """A saved reference as an RGB picture (see `read`)."""
+    return read(path)[0]
+
+
+# Directory file descriptors (POSIX): the walk, the temporary file and the move all go through a folder that is held
+# open, so nothing is looked up by path after a folder was checked. Windows has none of this (`dir_fd` is not there).
+ANCHORED = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and {os.open, os.mkdir, os.stat, os.unlink, os.rename} <= os.supports_dir_fd)  # (os.replace goes with rename)
+
+
+def _after_check(folder: Path) -> None:
+    """A seam for tests, called once the folder is checked and before the file is written: the moment in which a
+    second process could swap a folder for a link. Does nothing."""
+
+
+def real_folder(folder: Path, root: Path) -> Path:
+    """`folder` made (as far as it isn't there), and checked: every folder from `root` down to it must be a real
+    folder, not a symlink or a junction to somewhere else (`OSError` otherwise, before anything is made behind the
+    link). `root` is trusted, even when it is a link itself; it is made when it isn't there. The folder's real path.
+    By path, so only the fallback for systems without directory handles (see `write_file`)."""
+    root = Path(os.path.abspath(root))
+    try:
+        parts = Path(os.path.abspath(folder)).relative_to(root).parts
+    except ValueError:
+        raise OSError(errno.EPERM, f"{folder} is outside {root}; nothing is written there") from None
+    root.mkdir(parents=True, exist_ok=True)
+    here = Path(os.path.realpath(root))
+    for part in parts:
+        step = here / part
+        if os.path.normcase(os.path.realpath(here)) != os.path.normcase(str(here)):  # (looked at again just before)
+            raise OSError(errno.EPERM, f"{here} is a link to another folder; nothing is written through it")
+        step.mkdir(exist_ok=True)
+        if os.path.normcase(os.path.realpath(step)) != os.path.normcase(str(step)):
+            raise OSError(errno.EPERM, f"{step} is a link to another folder; nothing is written through it")
+        here = step
+    return here
+
+
+def _same_folder(path: Path | str, folder: Path) -> bool:
+    """Is `path`'s real folder still the checked `folder`?"""
+    return os.path.normcase(os.path.dirname(os.path.realpath(path))) == os.path.normcase(str(folder))
+
+
+def _write_by_path(dest: Path, write: Callable[[BinaryIO], object], root: Path) -> None:
+    """The fallback for Windows. The folders are checked, then the temporary file is written, and its real folder is
+    resolved again before it is moved: when it is no longer the checked one the file is deleted and the write is
+    refused; the destination's folder is looked at once more after the move. This narrows the window in which a
+    folder can be swapped for a link, but can't close it: between a check and the next call there is still a moment
+    (Windows offers no way to hold a folder open and have a file made and moved through it)."""
+    folder = real_folder(dest.parent, root)
+    dest = folder / dest.name
+    _after_check(folder)
+    fd, name = tempfile.mkstemp(dir=folder, prefix=dest.name + ".", suffix=".part")
+    swapped = OSError(errno.EPERM, f"{folder} changed into a link to another folder while the file was written; "
+                                   "nothing is written through it")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            write(out)
+        if not _same_folder(name, folder):
+            raise swapped
+        os.replace(name, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
+    if not _same_folder(dest, folder):  # (too late to undo; said, so that nobody trusts the file)
+        raise swapped
+
+
+def _open_folder(parent_fd: int, part: str, step: Path) -> int:
+    """`part` of the folder `parent_fd`, made when it isn't there, opened without following a link (the handle is
+    what the rest goes through)."""
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(part, 0o777, dir_fd=parent_fd)
+    try:
+        return os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR) and stat.S_ISLNK(os.stat(part, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+            raise OSError(errno.EPERM, f"{step} is a link to another folder; nothing is written through it") from None
+        raise
+
+
+def _write_anchored(dest: Path, write: Callable[[BinaryIO], object], root: Path) -> None:
+    """POSIX: from `root` (trusted, opened as it is) down, each folder is made and opened with `dir_fd` and
+    `O_NOFOLLOW`, the temporary file is made in the last one with `O_EXCL | O_NOFOLLOW`, and moved with
+    `os.replace(src_dir_fd, dst_dir_fd)`: no name is resolved by path after it was checked, so a folder swapped for a
+    link in the meantime changes nothing (the file lands in the folder that was checked, wherever it is by then)."""
+    root = Path(os.path.abspath(root))
+    try:
+        parts = Path(os.path.abspath(dest.parent)).relative_to(root).parts
+    except ValueError:
+        raise OSError(errno.EPERM, f"{dest.parent} is outside {root}; nothing is written there") from None
+    root.mkdir(parents=True, exist_ok=True)
+    opened = [os.open(root, os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        here = root
+        for part in parts:
+            here = here / part
+            opened.append(_open_folder(opened[-1], part, here))
+        folder_fd = opened[-1]
+        _after_check(here)
+        name = f"{dest.name}.{secrets.token_hex(8)}.part"
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                write(out)
+            os.replace(name, dest.name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(name, dir_fd=folder_fd)
+            raise
+    finally:
+        for held in opened:
+            os.close(held)
+
+
+def write_file(dest: Path, write: Callable[[BinaryIO], object], root: Path | None = None) -> None:
+    """Write a file whole or not at all, and never through a link. Every folder from `root` (the trusted tree the
+    file belongs in: the references store, the script's folder; by default the folder above `dest`'s) down to
+    `dest`'s must be a real folder (a symlink or a junction to somewhere else is refused: `OSError`), the bytes go
+    to a new file with its own name beside `dest` (made exclusively, so it can't be a link someone planted), and
+    that is moved over `dest`. A link at `dest` is replaced, not followed. A failed write leaves no temporary file.
+
+    The threat: a second process of the same user that swaps a folder for a link between the check and the write.
+    This is a local tool writing into the user's own folders (`~/.tapwright`, the folders beside their scripts), so
+    that takes a hostile process running as the user at that very moment; a script file alone can't do it. Still it
+    is closed as far as the system allows: on POSIX with directory handles (nothing is resolved by path after the
+    check, `_write_anchored`), on Windows by looking again before and after the move (`_write_by_path`), which narrows
+    the window and can't close it."""
+    root = dest.parent.parent if root is None else root
+    (_write_anchored if ANCHORED else _write_by_path)(dest, write, root)
+
+
+def encode(image: Image.Image) -> bytes:
+    """A reference's PNG bytes (lossless: a reference must not drift)."""
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    return out.getvalue()
+
+
+def save(path: Path, image: Image.Image, root: Path | None = None) -> bytes:
+    """Write a reference as PNG, whole or not at all (see `write_file`). The bytes that were written."""
+    data = encode(image)
+    write_file(path, lambda out: out.write(data), root)
+    return data
 
 
 # ---- the words ----
@@ -310,13 +466,26 @@ def find(name: str, bundle: str, script: Path | None = None) -> Path | None:
     return stored if stored.is_file() else None
 
 
-def copy_to_script(names: list[str], bundle: str | None, script: Path) -> tuple[Path, int]:
-    """Copy the stored references of `names` next to a script. (the folder, how many were copied)"""
+def export_to_script(pictures: dict[str, bytes], script: Path) -> tuple[Path, int]:
+    """Write the pictures (name -> the exact PNG bytes a recording's checks used) next to a script. (the folder, how
+    many were written) Nothing is read from the store or from any file: what a check used is what is exported, whoever
+    rewrote the reference since."""
+    folder = script_references(script)
+    for name, data in pictures.items():
+        write_file(folder / f"{name}.png", lambda out, data=data: out.write(data), script.parent)
+    return folder, len(pictures)
+
+
+def copy_to_script(names: list[str], bundle: str | None, script: Path,
+                   sources: dict[str, Path] | None = None) -> tuple[Path, int]:
+    """Copy the references of `names` next to a script. (the folder, how many were copied) A name in `sources` is
+    copied from that file (the one a check was made against: a replayed script's own, say); any other from the
+    store's folder for `bundle`, where _compare saved it."""
     folder, count = script_references(script), 0
     for name in dict.fromkeys(names):
-        source = reference_path(bundle or "unknown", name)  # the folder _compare saved it in
+        source = (sources or {}).get(name) or reference_path(bundle or "unknown", name)
         if source.is_file():
-            folder.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, folder / f"{name}.png")
+            data = source.read_bytes()
+            write_file(folder / f"{name}.png", lambda out: out.write(data), script.parent)
             count += 1
     return folder, count

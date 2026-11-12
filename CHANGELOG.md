@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0, "the Diagnostics Update" (unreleased)
+## 1.3.0, "the Diagnostics Update" (2026-11-13)
 
 A failure now comes with its cause: the app's log, its crash, and how it performed. The interface is AGENT-TOOLS
 1.10, shared with Tapline.
@@ -26,7 +26,7 @@ A failure now comes with its cause: the app's log, its crash, and how it perform
 - A `run` or `replay` step that fails adds the app's warnings and errors since that step began. `tapwright replay
   --junit` puts them in the test case's output, and pulls a crash report next to the script.
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapline.
@@ -39,13 +39,26 @@ Tapline.
 - In `run` and scripts it is a check: `expect: {"matches": "home"}` on a step, or a `compare_screen` step. A screen
   that differs stops the batch as `expect_failed`, naming where it changed.
 - `record` folds a `compare_screen` after an action into that step, and saves the reference pictures next to the
-  script in `<script>.references/`, so a script and its pictures travel together.
+  script in `<script>.references/`, so a script and its pictures travel together. A `run` made while recording keeps
+  its visual checks too (`expect.matches` and `compare_screen` steps). A script keeps one picture for each name, so a
+  recording that compares one name in two apps is refused.
 - `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
-  check writes its picture to `<script>.diff/`, and the JUnit failure names it.
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it. A picture
+  far larger than any screen, or one a script's reference would stretch to such a size, is refused before it is
+  resized. A recording refuses an update that would change a picture it already compared, before anything is written.
+- The safe write covers the reference pictures (the store's and a script's `.references/` folder) and a script's
+  `.diff/` folder, and nothing else: they are written whole or not at all, and never through a link (a symlinked
+  folder is refused, a symlinked file is replaced). On Linux and macOS every folder is held open while the file is
+  written. On Windows the folders are checked again before and after the move, which narrows the window for a folder
+  swapped for a link, but can't close it: a process running as the same user that swaps a folder at that very moment
+  can still get a write through.
 
 **Watching motion**
 - `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
-  stream; `tap` taps first and films what it sets off.
+  stream. With `tap`, frame 1 is taken before the tap and the other frames follow it, so the strip shows what the tap
+  sets off. A filmstrip is composed in memory. With `tapwright mcp --screenshots DIR`, filmstrips and the picture
+  `compare_screen` returns for a difference are saved to that folder by the ordinary screenshot writer, which is
+  outside the safe write above.
 
 ## 1.1.1 (2026-11-12)
 

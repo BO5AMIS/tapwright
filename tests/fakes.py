@@ -34,19 +34,24 @@ class Clock:
 
 class FrameFeeder:
     """Publishes fake frames into a FrameHub from a background task, a few ms apart.
-    `frames` go out once; then `then` repeats forever, or (churn=True) a new picture every time."""
+    `frames` go out once; then `then` repeats forever, or (churn=True) a new picture every time.
+    `then` may be set while the feeder runs: a test that changes the screen on a touch sets it there, so the
+    change doesn't depend on when the feeder's first frame goes out against the action's mark."""
 
     def __init__(self, hub, every: float = 0.004) -> None:
         self.hub, self.every, self._task = hub, every, None
+        self.then: bytes | None = None
 
     def start(self, frames=(), then=None, churn: bool = False) -> "FrameFeeder":
+        self.then = then
+
         async def feed():
             for frame in frames:
                 self.hub.publish(frame)
                 await asyncio.sleep(self.every)
             i = 0
-            while then is not None or churn:
-                self.hub.publish(b"churn%d" % i if churn else then)
+            while self.then is not None or churn:
+                self.hub.publish(b"churn%d" % i if churn else self.then)
                 i += 1
                 await asyncio.sleep(self.every)
         self._task = asyncio.create_task(feed())
@@ -455,7 +460,7 @@ class _VirtualSelector:
 
 
 class VirtualLoop(asyncio.SelectorEventLoop):
-    """An event loop on fake time: timers fire in order, instantly. Pass as asyncio.run's loop_factory."""
+    """An event loop on fake time: timers fire in order, instantly. Run with test_daemon.run_virtual."""
 
     def __init__(self) -> None:
         super().__init__()

@@ -9,15 +9,17 @@ import io
 import json
 import dataclasses
 import datetime
+import hashlib
 import math
 import os
 import pathlib
 import re
 import secrets
 import time
+import unicodedata
 import traceback
 from contextlib import nullcontext
-from typing import NamedTuple
+from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
@@ -77,11 +79,52 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# Set to a list by the recording branch of run_tool; a compare_screen call puts what it found there (the folder, the
+# bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
+# change it.
+_COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
+# While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
+# digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _name_key(name: str) -> str:
+    """What a file system may make of a reference name: Windows and macOS ignore case (`home.png`, `HOME.png`), and
+    macOS also treats a name's Unicode forms as one (NFC and NFD Hangul or accents). Names with one key are one file."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _refuse_case_only(seen: str, name: str) -> None:
+    """A recording that compared one name refuses another with the same key (_name_key), so a later picture can't
+    replace an earlier check's (Codex, PR #3 cycles 9 and 10)."""
+    if seen != name:
+        raise Refused("bad_params", f'record: "{name}" differs from "{seen}", already compared in this recording, only in '
+                                    "case or in Unicode form, and on Windows or macOS they are one file; give this check "
+                                    "another name.")
+
+
+_BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
+    contextvars.ContextVar("tapwright_baselines", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
 NOTE_ALLOWED = "a person allowed this."
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
+
+
+_T = TypeVar("_T")
+
+
+async def _wait_for(awaitable: Awaitable[_T], seconds: float) -> _T:
+    """`asyncio.wait_for`, except that a cancel of the caller is never lost. Before Python 3.12, wait_for gives its
+    result and drops the cancel when the two come in the same loop turn, and a loop that waits for something again
+    then never ends (found in `_watch_logs`, which `supervise` cancels)."""
+    inner = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({inner}, timeout=seconds)
+        if not done:
+            raise asyncio.TimeoutError
+        return inner.result()
+    finally:
+        if not inner.done():
+            inner.cancel()
 
 
 class Scope(NamedTuple):
@@ -441,6 +484,16 @@ class Compared:
     reason: str | None = None
     image: bytes | None = None
     percent: float | None = None
+    folder: str | None = None  # the references folder (bundle id) it was compared in
+    # the exact bytes the check used: those it read from the reference it compared with, or wrote as the one it saved.
+    # A recording keeps these, never the path, so a later write to the file by anyone changes nothing it exports.
+    picture: bytes | None = None
+
+
+def _picture_digest(data: bytes | None) -> str | None:
+    """The hash of the bytes a check used (None when it used none): two checks of one name in a recording are the same
+    baseline only when this is the same."""
+    return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
 def _reference_names(steps: list[dict]) -> set[str]:
@@ -602,6 +655,9 @@ class Daemon:
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
+        # while a client records, its calls run one at a time: a check's guard, its save and its registration in the
+        # recording are one step, so two overlapping checks can't both pass the guard (Codex, PR #3 cycle 6)
+        self._record_locks: dict[str, asyncio.Lock] = {}
         self._batch_ids = itertools.count(1)
         # diagnostics (AGENT-TOOLS §15): the app's log in a ring per bundle id, read by a task per app
         self._rings: dict[str, diagnostics.LogRing] = {}
@@ -998,8 +1054,22 @@ class Daemon:
         self.last_request = time.monotonic()
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
+        # While a client records, or starts or stops a recording, its outer calls run one at a time (a batch's steps are
+        # inside its call): a check's guard, its save and its registration are one step, and the recording a call checks
+        # against is the one in force once it holds the lock, read inside it (Codex, PR #3 cycles 6 and 7: a call queued
+        # behind a recording's restart checked the old one). Other clients, and a person's input, never wait on it.
+        outer = _BASELINES.get() is None
+        locks = outer and (client_id in self._recording or name == "record")
         try:
-            return await self._run_tool_policed(client_id, name, args, scope)
+            if not locks:
+                return await self._run_tool_policed(client_id, name, args, scope)
+            async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+                rec = self._recording.get(client_id)
+                btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
+                try:
+                    return await self._run_tool_policed(client_id, name, args, scope)
+                finally:
+                    _BASELINES.reset(btoken)
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
@@ -1015,10 +1085,17 @@ class Daemon:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
             return answer
-        if name == "compare_screen" and client_id in self._recording and BATCH.get() is None:
+        if name == "compare_screen" and client_id in self._recording:
             ignore = self._recorded_ignore(client_id, args)  # before the call: a ref that can't be saved is refused first
-            answer = await self._run_tool_inner(client_id, name, args, scope)
-            self._record_compare(client_id, args, ignore)
+            compared: list[Compared] = []
+            token = _COMPARED.set(compared)
+            try:
+                answer = await self._run_tool_inner(client_id, name, args, scope)
+            finally:
+                _COMPARED.reset(token)
+            # a step of a run stays the step the agent wrote; a call of its own is folded into the action before it
+            self._record_compare(client_id, args, ignore, compared[0].folder if compared else None,
+                                 compared[0].picture if compared else None, fold=BATCH.get() is None)
             return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
@@ -1116,7 +1193,7 @@ class Daemon:
                     if reader.done():
                         break
                     try:
-                        now = await asyncio.wait_for(self.session.device.app_pids(bundle), 5)
+                        now = await _wait_for(self.session.device.app_pids(bundle), 5)
                     except Exception:
                         continue  # the phone can't say now: the stream stays
                     if pid not in now:  # the process is gone, or the app started again as another
@@ -1356,24 +1433,47 @@ class Daemon:
             return None
         return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
 
-    def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None) -> None:
+    def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
+                        picture: bytes | None,
+                        fold: bool = True) -> None:
         """While recording: a `compare_screen` right after an action becomes that step's `expect.matches` (beside the
-        text, id or label already expected, if any); otherwise it is a step of its own. Its `name` is remembered, so
-        `stop` can copy the reference next to the script (§14.3)."""
+        text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name`, the
+        `folder` (bundle id) it was compared in and the `picture` (the exact bytes the check used: read from the
+        reference it was compared with, or written as the one it saved) are remembered, so `stop` writes those very
+        bytes next to the script (§14.3), whatever anyone writes to the store or the script's folder in between. A
+        script keeps one picture per name: the same name in another app is refused, and so is the same name against
+        other bytes in the same app."""
         rec = self._recording[client_id]
+        folder = folder or self._bundle() or "unknown"
+        digest = _picture_digest(picture)
+        for bundle, seen, before in rec.get("references", ()):
+            if _name_key(seen) != _name_key(args["name"]):
+                continue
+            _refuse_case_only(seen, args["name"])
+            if bundle != folder:
+                raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
+                                            f"keeps one picture for each name; give the one in {folder} another name")
+            if digest is not None and digest != before:
+                raise Refused("bad_params", f'record: "{args["name"]}" was already compared against another picture in '
+                                            "this recording; give this check another name.")
         extra: dict = {}
         if args.get("threshold") not in (None, compare.DEFAULT_THRESHOLD):  # (the default isn't written down)
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((getattr(self, "_compared_in", None) or self._bundle(), args["name"]))
-        last = rec["steps"][-1] if rec["steps"] else None
+        if digest is not None:
+            # Bounded: a name has one picture in a recording (the guard above refuses any other), so `pictures` holds at
+            # most one PNG per name and `references` one entry per (app, name, picture), however many checks are made.
+            rec.setdefault("pictures", {}).setdefault(args["name"], picture)
+            if (folder, args["name"], digest) not in rec.setdefault("references", []):
+                rec["references"].append((folder, args["name"], digest))
+        last = rec["steps"][-1] if fold and rec["steps"] else None
         if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
             return
         step = {"tool": "compare_screen", "name": args["name"], **extra}
         if args.get("width") not in (None, shotlib.DEFAULT_WIDTH):
-            step["width"] = args["width"]
+            step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
@@ -1485,17 +1585,17 @@ class Daemon:
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
-            # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
+            # the references the steps use travel with the script (§14.3): the exact bytes the checks used, never read
+            # from the store again (another client may have rewritten it since)
             wanted = _reference_names(rec["steps"])
-            bundles = {name: bundle for bundle, name in rec.get("references", ()) if name in wanted}
+            kept = {name: data for name, data in rec.get("pictures", {}).items() if name in wanted}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
             try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
-                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1]  # (small files: a few ms)
-                             for name, bundle in bundles.items())
+                copied = compare.export_to_script(kept, pathlib.Path(path))[1]
             except OSError as e:
                 copied = 0
                 note.append(f"the reference pictures couldn't be copied to {folder}: {e.strerror or e}; copy them from "
@@ -1526,8 +1626,10 @@ class Daemon:
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
+            before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
+                recorded = before is not None and len(self._recording[client_id]["steps"]) > before
                 lines = answer["text"].splitlines()
                 step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
                                for line in lines if line.startswith("Note: ")]
@@ -1540,7 +1642,7 @@ class Daemon:
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
-                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes)
+                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
                               if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
@@ -1588,10 +1690,11 @@ class Daemon:
         return diagnostics.failure_logs(self._rings.get(bundle), step, 0 if mark is None else mark + 1)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
-                      notes: list[str] | None = None) -> str | None:
+                      notes: list[str] | None = None, fold: bool = False) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
         for up to the timeout; `matches` is then checked once, on the screen as it is by then (§14.2). `notes`
-        collects what a picture check has to say (an ignored element that isn't there)."""
+        collects what a picture check has to say (an ignored element that isn't there). While this client records,
+        a check that held is saved with the step (`fold`: the step itself was saved, so it goes in its `expect`)."""
         if any(expect.get(k) is not None for k in batch.EXPECT_KINDS):
             missed = await self._expect_element(client_id, view, scope, expect)
             if missed is not None:
@@ -1599,10 +1702,15 @@ class Daemon:
         if expect.get("matches") is None:
             return None
         given = await self._given(scope) if scope is not None else None
+        recording = client_id in self._recording
+        kept = batch.recorded_ignore(expect["ignore"], view.items) if recording and expect.get("ignore") else None
         done = await self._compare(view, expect["matches"], threshold=expect.get("threshold"),
                                    ignore=expect.get("ignore"), check=True, given=given)
         if notes is not None:
             notes.extend(done.notes)
+        if recording and done.reason is None and client_id in self._recording:
+            self._record_compare(client_id, {"name": expect["matches"], "threshold": expect.get("threshold")}, kept,
+                                 done.folder, done.picture, fold=fold)
         return done.reason
 
     async def _expect_element(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
@@ -2510,7 +2618,10 @@ class Daemon:
         arrivals = [at for _, at, _ in shots]
         later = arrivals[1:] if tap is not None and count >= 3 else arrivals  # the tap's own time isn't a spacing
         spacing = round((later[-1] - later[0]) / (len(later) - 1))
-        strip, _ = await asyncio.to_thread(filmlib.compose, [picture for _, _, picture in shots], width)
+        try:
+            strip, _ = await asyncio.to_thread(filmlib.compose, [picture for _, _, picture in shots], width)
+        except ValueError as e:  # a frame far larger than any screen
+            raise Refused("internal", str(e)) from None
         head = (f"Filmstrip: {count} frames about {spacing} ms apart, numbered in order, left to right and top to "
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
@@ -2529,6 +2640,8 @@ class Daemon:
                 raise Refused("locked", "the phone is locked; ask the user to unlock it")
             done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
                                        threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
+            if (held := _COMPARED.get()) is not None:
+                held.append(done)
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
@@ -2567,24 +2680,31 @@ class Daemon:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
                                                       ", ".join(given.values())))
             bundle = front
-        folder = self._compared_in = bundle or "unknown"  # (record copies the reference from this folder)
+        folder = bundle or "unknown"  # (a recording copies the reference from this folder: it comes back in Compared)
         rects, notes = compare.ignored(view.items, ignore or [])
         found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
         if found is None and check and not keep:
-            return Compared("missing", [], notes, compare.missing(name))
+            return Compared("missing", [], notes, compare.missing(name), folder=folder)
         png = await self._read(self.session.screenshot_png)
         if given is not None:  # the picture is saved or compared only if a given app was still in front for it
             await self._still_given(given)
-        before = await asyncio.to_thread(compare.load, found) if found is not None else None
+        before, before_bytes = await asyncio.to_thread(compare.read, found) if found is not None else (None, None)
         size = width or (before.width if before is not None and check else shotlib.DEFAULT_WIDTH)
+        if not shotlib.MIN_WIDTH <= size <= shotlib.MAX_WIDTH:  # a reference's own width is a script's, not ours
+            raise Refused("bad_params", f'the reference "{name}" is {size} px wide, and a screen picture is '
+                                        f"{shotlib.MIN_WIDTH}-{shotlib.MAX_WIDTH} px wide; save the reference again with "
+                                        "update: true.")
         after = await asyncio.to_thread(compare.fit, png, size)
         if before is None:
             dest = compare.script_references(script["path"]) / f"{name}.png" if keep else compare.reference_path(folder, name)
+            trusted = script["path"].parent if keep else compare.references_dir()  # nothing below it may be a link
+            await asyncio.to_thread(self._refuse_changed_baseline, name, folder, after)  # before anything is written
             try:
-                await asyncio.to_thread(compare.save, dest, after)
+                written = await asyncio.to_thread(compare.save, dest, after, trusted)
             except OSError as e:
                 raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
-            return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes)
+            return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes,
+                            folder=folder, picture=written)
         if before.size != after.size:
             raise Refused("bad_params", f'the reference "{name}" is {before.width}x{before.height} px and this screen is '
                                         f"{after.width}x{after.height}; take it at the same width, or update: true.")
@@ -2597,25 +2717,49 @@ class Daemon:
         share = compare.shown(result.percent, result.changed, threshold)
         if result.percent <= threshold:
             return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
-                            result.percent)
+                            result.percent, folder, before_bytes)
         reason = compare.failure(name, result, threshold, scale)
         if check:
             if script is not None and (where := await asyncio.to_thread(self._write_diff, script["path"], name, result)):
                 reason += f" (diff: {where})"
-            return Compared("differs", [], notes, reason, None, result.percent)
+            return Compared("differs", [], notes, reason, None, result.percent, folder, before_bytes)
         n = len(result.regions)
         lines = [f'Differs from the reference "{name}": {share} changed, in {n} region{"s" if n != 1 else ""} (points):',
                  *compare.region_lines(result.regions, scale, view.items)]
         image = await asyncio.to_thread(result.picture)
-        return Compared("differs", lines, notes, reason, image, result.percent)
+        return Compared("differs", lines, notes, reason, image, result.percent, folder, before_bytes)
+
+    @staticmethod
+    def _refuse_changed_baseline(name: str, folder: str, picture: "Image.Image") -> None:
+        """While a client records: a reference about to be saved under a name the recording already compared (in this
+        app), as a picture that isn't the one it compared, is refused before anything is written, so the stored file
+        and what `record stop` exports stay the baseline. The same bytes are no change (the same screen again)."""
+        seen = _BASELINES.get()
+        if not seen:
+            return
+        # the same name in another app is refused here too, before the save (it was refused only after, so a replay
+        # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
+        for _, was, _ in seen:
+            if _name_key(was) == _name_key(name):
+                _refuse_case_only(was, name)
+        other = next((bundle for bundle, was, _ in seen if was == name and bundle != folder), None)
+        if other is not None:
+            raise Refused("bad_params", f'this recording already compares "{name}" in {other}, and a script keeps one '
+                                        f"picture for each name; give the one in {folder} another name")
+        wanted = [digest for bundle, was, digest in seen if was == name and bundle == folder]
+        if not wanted:
+            return
+        if hashlib.sha256(compare.encode(picture)).hexdigest() not in wanted:  # (the bytes compare.save would write)
+            raise Refused("bad_params", f'record: "{name}" was already compared against another picture in this '
+                                        "recording; give this check another name.")
 
     @staticmethod
     def _write_diff(script: pathlib.Path, name: str, result: "compare.Result") -> str | None:
         """A failed check's picture, next to the script (§14.3): its path, or None when it can't be written."""
         path = compare.script_diffs(script) / f"{name}.png"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(result.picture("PNG"))
+            data = result.picture("PNG")
+            compare.write_file(path, lambda out: out.write(data), script.parent)  # not through a link; see write_file
         except OSError:
             return None
         return str(path)

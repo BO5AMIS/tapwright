@@ -1,6 +1,8 @@
 """The picture diff of `compare_screen` (AGENT-TOOLS §14): synthetic pictures, no phone."""
 import io
+import os
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -161,3 +163,231 @@ def test_references_live_in_the_store_per_app_and_a_scripts_folder_comes_first(t
     with pytest.raises(Refused) as e:
         compare.load(folder / "bad.png")
     assert e.value.code == "bad_params"
+
+
+# ---- sizes (review of PR #3: a skinny picture must not be resized into billions of pixels) ----
+def png_of(size, mode="RGB", colour=WHITE) -> bytes:
+    buf = io.BytesIO()
+    Image.new(mode, size, colour if mode == "RGB" else 0).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def watch_resize(monkeypatch) -> list[tuple[int, int]]:
+    """Every size a picture is resized to; one beyond MAX_PIXELS fails the test, before any memory is spent."""
+    seen: list[tuple[int, int]] = []
+    real = Image.Image.resize
+
+    def resize(self, size, *args, **kwargs):
+        seen.append(tuple(size))
+        assert size[0] * size[1] <= compare.MAX_PIXELS, f"asked to allocate {size[0]}x{size[1]}"
+        return real(self, size, *args, **kwargs)
+    monkeypatch.setattr(Image.Image, "resize", resize)
+    return seen
+
+
+def test_a_skinny_screenshot_is_refused_before_it_is_resized(monkeypatch):
+    seen = watch_resize(monkeypatch)
+    with pytest.raises(Refused) as e:
+        compare.fit(png_of((1, 100_000)), 600)  # 100,000 px in the file; 600 x 60,000,000 once scaled
+    assert e.value.code == "bad_params" and "600" in str(e.value) and seen == []
+    assert compare.fit(png_of((600, 1304)), 600).size == (600, 1304)  # a real screen is untouched
+    assert compare.fit(png_of((1320, 2868)), 600).size == (600, 1304)
+
+
+def test_a_screenshot_larger_than_any_screen_is_refused_before_it_is_decoded(monkeypatch):
+    def decoded(self, *args, **kwargs):
+        raise AssertionError("decoded")
+    monkeypatch.setattr(Image.Image, "convert", decoded)
+    with pytest.raises(Refused) as e:
+        compare.fit(png_of((5000, 5000), mode="1"), 600)  # a few hundred bytes of PNG, 25 Mpx of picture
+    assert e.value.code == "bad_params"
+
+
+# ---- files (review of PR #3: no write may follow a link out of its folder) ----
+def link(path: Path, target: Path, directory: bool = False) -> None:
+    try:
+        os.symlink(target, path, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("this system doesn't let the tests make symlinks")
+
+
+def test_a_reference_is_written_beside_its_name_and_never_through_a_link(tmp_path):
+    outside = tmp_path / "important.txt"
+    outside.write_text("keep")
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    link(folder / "home.png", outside)
+    link(folder / "home.png.part", outside)
+    compare.save(folder / "home.png", screen(size=(32, 32)))
+    assert outside.read_text() == "keep"
+    assert not (folder / "home.png").is_symlink() and compare.load(folder / "home.png").size == (32, 32)
+    assert sorted(p.name for p in folder.iterdir()) == ["home.png", "home.png.part"]  # and no temporary file is left
+
+
+def test_a_failed_save_leaves_no_temporary_file(tmp_path, monkeypatch):
+    # **k: on POSIX the save passes src_dir_fd and dst_dir_fd
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        compare.save(tmp_path / "refs" / "home.png", screen(size=(32, 32)))
+    assert list((tmp_path / "refs").iterdir()) == []
+
+
+def test_a_folder_that_is_a_link_is_not_written_to(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link(tmp_path / "flow.references", elsewhere, directory=True)
+    with pytest.raises(OSError, match="link"):
+        compare.save(tmp_path / "flow.references" / "home.png", screen(size=(32, 32)))
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    with pytest.raises(OSError, match="link"):
+        compare.copy_to_script(["home"], "com.example.app", tmp_path / "flow.json")
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(tmp_path / "flow.references" / "x.png", lambda f: f.write(b"x"))
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_copying_a_reference_next_to_a_script_replaces_a_link_and_never_follows_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    outside = tmp_path / "important.txt"
+    outside.write_text("keep")
+    folder = tmp_path / "flow.references"
+    folder.mkdir()
+    link(folder / "home.png", outside)
+    assert compare.copy_to_script(["home"], "com.example.app", tmp_path / "flow.json") == (folder, 1)
+    assert outside.read_text() == "keep" and compare.load(folder / "home.png").size == (32, 32)
+
+
+def junction(path: Path, target: Path) -> None:
+    """A directory junction (Windows only); a test skips when the system really can't make one."""
+    if os.name != "nt":
+        pytest.skip("junctions are Windows only")
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(target), str(path))
+    except (OSError, ImportError, AttributeError):
+        pytest.skip("this system doesn't let the tests make junctions")
+
+
+def either_link(kind: str, path: Path, target: Path) -> None:
+    link(path, target, directory=True) if kind == "symlink" else junction(path, target)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_a_link_higher_up_than_the_folder_is_not_written_through(tmp_path, kind):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    root.mkdir()
+    either_link(kind, root / "linked", elsewhere)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(root / "linked" / "flow.references" / "home.png", lambda f: f.write(b"x"), root=root)
+    with pytest.raises(OSError, match="link"):
+        compare.save(root / "linked" / "app" / "home.png", screen(size=(32, 32)), root=root)
+    assert list(elsewhere.iterdir()) == []  # not even a folder was made there
+
+
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_a_link_in_the_middle_of_the_references_store_is_not_written_through(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "refs").mkdir()
+    either_link(kind, tmp_path / "refs" / "com.example.app", elsewhere)  # the bundle's own folder is the link
+    with pytest.raises(OSError, match="link"):
+        compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)), root=compare.references_dir())
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_folder_that_is_not_below_its_root_is_refused(tmp_path):
+    with pytest.raises(OSError, match="outside"):
+        compare.write_file(tmp_path / "other" / "x.png", lambda f: f.write(b"x"), root=tmp_path / "tree")
+    assert not (tmp_path / "other").exists()
+
+
+def test_a_root_that_is_itself_a_link_is_trusted_and_real_folders_below_it_are_written(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link(tmp_path / "home", real, directory=True)  # (~/.tapwright may well be a link the owner made)
+    compare.save(tmp_path / "home" / "refs" / "app" / "home.png", screen(size=(32, 32)), root=tmp_path / "home")
+    assert compare.load(real / "refs" / "app" / "home.png").size == (32, 32)
+
+
+def test_a_reference_is_copied_from_the_file_it_was_given_and_not_the_stores_of_that_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    own = tmp_path / "old.references" / "home.png"
+    compare.save(own, screen(size=(48, 48)))
+    folder, copied = compare.copy_to_script(["home"], "com.example.app", tmp_path / "new.json", {"home": own})
+    assert copied == 1 and compare.load(folder / "home.png").size == (48, 48)
+    compare.copy_to_script(["home"], "com.example.app", tmp_path / "other.json")  # without a source: the store's
+    assert compare.load(tmp_path / "other.references" / "home.png").size == (32, 32)
+
+
+# ---- a folder swapped after it was checked (review of PR #3, round 3, P1) ----
+def swap_for_link(folder: Path, elsewhere: Path) -> None:
+    """What a second hostile process would do: the checked folder moves aside and a link to `elsewhere` takes its name."""
+    folder.rename(folder.with_name(folder.name + ".moved"))
+    either_link("symlink" if os.name != "nt" else "junction", folder, elsewhere)
+
+
+def test_a_folder_swapped_for_a_link_after_the_check_is_refused_by_path(tmp_path, monkeypatch):
+    """The fallback (Windows has no directory handles): the temp file's real folder is looked at again before it is moved."""
+    monkeypatch.setattr(compare, "ANCHORED", False)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    monkeypatch.setattr(compare, "_after_check", lambda checked: swap_for_link(checked, elsewhere))
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []  # the temporary file is deleted, and nothing was moved over a name there
+    assert not (folder.with_name(folder.name + ".moved") / "home.png").exists()
+
+
+def test_a_folder_swapped_for_a_link_after_the_move_is_refused_by_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "ANCHORED", False)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    real_replace = os.replace
+
+    def replace_then_swap(src, dst, *a, **k):
+        real_replace(src, dst, *a, **k)
+        swap_for_link(folder, elsewhere)
+    monkeypatch.setattr(os, "replace", replace_then_swap)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.skipif(not compare.ANCHORED, reason="directory file descriptors (dir_fd) are not available on this system "
+                                                  "(Windows); the by-path fallback is tested above")
+def test_a_folder_swapped_for_a_link_after_the_check_is_written_in_the_folder_that_was_checked(tmp_path, monkeypatch):
+    """With directory file descriptors nothing is looked up by path after the walk: the swap changes nothing."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    monkeypatch.setattr(compare, "_after_check", lambda checked: swap_for_link(checked, elsewhere))
+    compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+    assert (folder.with_name(folder.name + ".moved") / "home.png").read_bytes() == b"x"
+    assert sorted(p.name for p in folder.with_name(folder.name + ".moved").iterdir()) == ["home.png"]
+
+
+@pytest.mark.skipif(not compare.ANCHORED, reason="directory file descriptors (dir_fd) are not available on this system "
+                                                  "(Windows); the by-path fallback is tested above")
+def test_the_anchored_walk_makes_nothing_behind_a_link_and_leaves_no_temporary_file(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    root.mkdir()
+    link(root / "linked", elsewhere, directory=True)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(root / "linked" / "deeper" / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+    compare.write_file(root / "a" / "b" / "home.png", lambda f: f.write(b"x"), root=root)
+    assert [p.name for p in (root / "a" / "b").iterdir()] == ["home.png"]

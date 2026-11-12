@@ -12,6 +12,7 @@ GAP = 8  # pixels between frames and around the strip
 JPEG_QUALITY = 80
 LARGE_FRAME = 160  # a frame this wide or wider gets the larger number
 LABEL_BOX, WHITE = (20, 20, 20), (255, 255, 255)
+MAX_PIXELS = 4000 * 4000  # a frame larger than this, or scaled to it, is no screen
 
 
 def compose(frames: list[bytes], frame_width: int) -> tuple[bytes, tuple[int, int]]:
@@ -22,6 +23,10 @@ def compose(frames: list[bytes], frame_width: int) -> tuple[bytes, tuple[int, in
     pictures = []
     for data in frames:
         img = Image.open(io.BytesIO(data))
+        scaled = max(1, round(img.height * frame_width / img.width))
+        if img.width * img.height > MAX_PIXELS or frame_width * scaled > MAX_PIXELS:
+            raise ValueError(f"a frame of {img.width}x{img.height} px can't be put in a filmstrip "
+                             f"({frame_width}x{scaled} px at the width asked)")
         img.draft("RGB", (frame_width, max(1, frame_width * img.height // img.width)))
         img = img.convert("RGB")
         pictures.append(img.resize((frame_width, max(1, round(img.height * frame_width / img.width))), Image.LANCZOS))

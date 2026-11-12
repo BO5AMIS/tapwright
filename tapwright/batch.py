@@ -203,14 +203,13 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
         if not value:
             continue
         aim = {kind: value}
-        try:
-            ui.resolve(items, ui.parse_target(aim))
-        except Refused as e:
-            if e.code != "ambiguous":
-                continue
-            same = [e2 for e2 in items if _matches(e2, kind, value)]
-            if found in same:
-                aim["index"] = same.index(found)
+        # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
+        same = ui.candidates(items, ui.parse_target(aim))
+        place = next((n for n, e in enumerate(same) if e is found), None)
+        if place is None:
+            continue  # this selector never reaches the element (a nested text, a match behind an alert): try the next
+        if len(same) > 1:
+            aim["index"] = place
         return aim
     x, y = found.center
     return {"x": round(x, 1), "y": round(y, 1)}
@@ -237,14 +236,6 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
                                         "height} instead")
         saved.append(aim)
     return saved
-
-
-def _matches(element: ui.Element, kind: str, value: str) -> bool:
-    if kind == "id":
-        return element.identifier == value or element.name == value
-    if kind == "label":
-        return element.label.lower() == value.lower()
-    return element.text == value
 
 
 def scripts_dir() -> Path:
