@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.4.0, "the Fewer Steps Update" (unreleased)
+
+The same check should cost an agent no more calls on the iPhone than on Android. A QA pass found iPhone lanes took
+about 1.5 times the calls: failed targets, scrolling to search, detours through iOS Settings, and a `look` after every
+action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
+
+**See where the calls go**
+- The action log now records reads too, which agent made each call, and how long each answer was (never typed text,
+  pictures or log text).
+- `session_report` (and `tapwright report`): calls per tool, failures by code, and the waste to cut, with call numbers:
+  a `look` right after an answer that already had the changes, retries after `not_found`, scroll hunts, and actions
+  that could have been one `run`.
+
+**One call where it took several**
+- `tap`, `long_press`, `toggle` and `type_text` on an element that is off screen scroll it into view and act, in one
+  call (`Scrolled to it, then tapped …`). The safety check runs before the scroll.
+- `not_found` names up to 3 closest matches (`Closest: e12 button "Save draft" id=save-draft, …`).
+
+**No more trips through Settings**
+- `open_app` takes `language`, `region` and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`, `system`): the app opens as if the
+  phone were set that way, for that launch only, through Apple's launch arguments. Nothing in Settings changes.
+- `network`: `offline`, `3g`, `lossy` or `normal`, through the phone's own network conditioner. It affects the whole
+  phone, every answer says so while it's on, and it goes back to normal by itself when the agent that set it goes
+  quiet, the connection drops or the daemon stops. Over Wi-Fi, `offline` and `lossy` are refused, as they would cut
+  Tapwright's own link.
+
+**Habits that save calls**
+- The skill has `run` examples for common patterns and a "spend fewer calls" list: read the change list instead of
+  calling `look`, target by id, let the action scroll, and put known steps in `run`.
+- The shared benchmark (QUALITY-BAR 2.4) adds calls per check: five everyday checks on Wayfare, held to no more calls
+  than Android.
+
 ## 1.3.1 (unreleased)
 
 Four small fixes from a QA pass.
