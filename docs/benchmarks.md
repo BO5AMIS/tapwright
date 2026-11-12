@@ -30,6 +30,9 @@ in seconds.
   0.25 s on the phone instead of 0.4: the runner hands it to XCTest without waiting for the app to go idle,
   and the read after it confirms what happened, as before. Its p95 is less even (one slow read in 20 is
   enough). `TAPWRIGHT_WDA=appium tapwright setup --force` goes back to Appium's runner.
+- **tw-16.15.3.2 adds a fast drag** (the same lab, USB, speed and reliability): tap 0.47 / 0.49, toggle 0.44 /
+  0.45, scroll 1.07 / 1.49 (1.45 / 1.91 before), typing 0.74 / 0.76, R1 to R6 0 misses. It is the default; the
+  scroll over Wi-Fi measured 1.62 / 2.23 s against 2.00 / 2.41 s in the worker's interleaved run.
 - **Still over the bar:** typing over USB (0.75 s, both runners) and over Wi-Fi (1.13 s), the Wi-Fi scroll,
   and the Wi-Fi V1 p95.
 - **Answer size (J6), same lab:** look 431 tokens (p95 447), an action's answer 12 tokens (p95 423, when a new

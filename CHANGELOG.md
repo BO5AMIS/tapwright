@@ -6,9 +6,9 @@ Agents get more done per call, a session becomes a test you keep, and every touc
 first. The interface is AGENT-TOOLS 1.8, shared with Tapline.
 
 **A faster tap**
-- Tapwright installs its own build of the on-phone runner (Appium's WebDriverAgent 16.15.3 plus a fast tap,
-  github.com/bo5amis/WebDriverAgent, checked by its SHA-256). A tap is 0.49 s over USB (0.69 before); over
-  Wi-Fi a tap and a toggle are within Wi-Fi's bar. `TAPWRIGHT_WDA=appium tapwright setup --force` goes back to
+- Tapwright installs its own build of the on-phone runner (Appium's WebDriverAgent 16.15.3 plus a fast tap and drag,
+  github.com/bo5amis/WebDriverAgent, checked by its SHA-256). Over USB a tap is 0.47 s (0.69 before) and a
+  scroll 1.07 s (1.45); over Wi-Fi a tap and a toggle are within Wi-Fi's bar. `TAPWRIGHT_WDA=appium tapwright setup --force` goes back to
   Appium's runner. After upgrading, `tapwright doctor --fix` (or `setup`) sees the older runner and installs this one.
 
 **Do more per call**
