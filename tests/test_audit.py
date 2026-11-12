@@ -132,4 +132,27 @@ def test_the_no_trait_finding_follows_the_asked_types_and_xctests_own_trait_issu
     assert audit.rows_of([], items, ["contrast", "duplicate_id"]) == []
     both = audit.rows_of([issue("trait", "Weekly", rect=(16, 250, 398, 44), element_type="XCUIElementTypeOther",
                                 text="Trait missing")], items, ["trait"])
-    assert len(both) == 4 and both[0][2] == "Trait missing"  # XCTest's first, ours after
+    # one row per element: XCTest's own row for Weekly stands in for ours, the other two options keep ours
+    assert [r[1] for r in both] == ['e3 radio "Weekly" @16,250 398x44 [tap]', 'e1 radio "Daily" checked=true @16,200 398x44 [tap]',
+                                    'e5 checkbox "Remember me" checked=false @16,400 398x44 [tap]']
+    assert both[0][2] == "Trait missing"
+
+
+def test_the_fix_text_follows_our_own_rows_not_the_words_of_xctests():
+    items = _rn_screen()
+    own = issue("trait", "Back", rect=(10, 10, 40, 40), text="no trait: it says this itself")
+    text = audit.report('"Plans"', [own], items, ["trait"])
+    [line] = [ln for ln in text.splitlines() if "it says this itself" in ln]
+    assert line.endswith("Fix: " + audit.FIX["trait"]) and "accessibilityRole" not in line
+    assert text.count("accessibilityRole") == 3  # the three options, each with our fix
+
+
+def test_audit_skips_plain_labelled_views():
+    """Scroll indicators, cards and labelled views are no finding: only the radio and checkbox words are."""
+    from test_ui import SCREEN, node, xml
+    from tapwright import ui
+    root = node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 100, 4, 200)),
+        node("Other", "Order summary", rect=(16, 300, 300, 80), children=[node("StaticText", "Total", rect=(20, 310, 60, 24))]),
+        node("Other", "Help", rect=(16, 500, 100, 44))])
+    assert audit.rows_of([], ui.elements(xml(root), SCREEN), ["trait"]) == []

@@ -434,28 +434,41 @@ def test_a_react_native_checkbox_and_the_state_words():
     assert (e.role, e.label, e.value, e.checked) == ("checkbox", "Remember me", "", True)
 
 
-def test_an_other_with_a_label_and_no_role_words_is_listed_as_other():
-    [e] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
-        node("Other", "Help", rect=(16, 100, 100, 44))])), SCREEN)
-    assert e.line() == 'e1 other "Help" @16,100 100x44 [tap]' and e.no_trait
-    # a label with children whose text it isn't made of is listed too
-    [e, _] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
-        node("Other", "Plan: daily", rect=(16, 100, 300, 44),
-             children=[node("StaticText", "Daily", rect=(20, 110, 60, 24))])])), SCREEN)
-    assert e.role == "other"
+def _screen_of(*children: ET.Element) -> list[ui.Element]:
+    return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=children)), SCREEN)
 
 
-def test_a_container_whose_label_is_its_childrens_text_stays_out():
-    kids = [node("StaticText", "Name", rect=(20, 110, 60, 24)), node("StaticText", "Email", rect=(100, 110, 60, 24))]
-    for label in ("Name Email", "Name, Email", "name\nemail"):
-        items = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
-            node("Other", label, rect=(16, 100, 300, 44), children=kids)])), SCREEN)
-        assert [e.line() for e in items] == ['e1 text "Name" @20,110 60x24', 'e2 text "Email" @100,110 60x24'], label
-    # also when the text sits a level down, in a view with no text of its own
-    deep = node("Other", "Name Email", rect=(16, 100, 300, 44), children=[node("Other", rect=(16, 100, 300, 44),
-                                                                              children=kids)])
-    assert [e.type for e in ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[deep])), SCREEN)] == [
-        "StaticText", "StaticText"]
+def test_an_other_without_role_words_is_listed_as_before():
+    """Only React Native's role words make an `Other` a control. Any other `Other` is as it was before 1.5.1: a plain
+    labelled view is not listed (reading `accessible` would say which are controls, and that is not read yet)."""
+    # the scroll indicators UIKit adds to an alert's scroll area, seen on the phone 2026-11-12
+    bars = [node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 100, 4, 200)),
+            node("Other", "Horizontal scroll bar, 1 page", value="0%", rect=(16, 300, 200, 4))]
+    assert _screen_of(*bars) == []
+    # a card with a custom label, with or without children, is not a control either
+    card = node("Other", "Order summary", rect=(16, 100, 300, 80),
+                children=[node("StaticText", "Total", rect=(20, 110, 60, 24)), node("StaticText", "$5", rect=(100, 110, 30, 24))])
+    assert [e.line() for e in _screen_of(card)] == ['e1 text "Total" @20,110 60x24', 'e2 text "$5" @100,110 30x24']
+    assert _screen_of(node("Other", "Help", rect=(16, 100, 100, 44))) == []
+    # the label "..." over a text "…" (symbols only) is no longer a guess about children's text
+    assert [e.role for e in _screen_of(node("Other", "...", rect=(16, 100, 300, 44),
+                                            children=[node("StaticText", "…", rect=(20, 110, 20, 24))]))] == ["text"]
+    assert not any(e.no_trait for e in _screen_of(*bars, card))
+
+
+def test_a_label_target_stays_unique_beside_an_other_with_the_same_label():
+    items = _screen_of(node("Other", "Help", rect=(16, 100, 40, 40)), node("StaticText", "Help", rect=(100, 100, 60, 24)))
+    assert [e.role for e in items] == ["text"]
+    assert ui.resolve(items, ui.parse_target({"label": "Help"})).role == "text"
+    assert ui.resolve(items, ui.parse_target({"text": "Help"})).role == "text"
+
+
+def test_the_off_screen_list_has_no_plain_other_either():
+    group = node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 1000, 4, 200)),
+        node("Other", "Help", rect=(16, 1100, 100, 44))])
+    tree = ui.read(xml(group), SCREEN)
+    assert tree.items == [] and tree.offscreen == []
 
 
 def test_an_other_with_an_identifier_keeps_its_line():

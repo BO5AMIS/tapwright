@@ -15,8 +15,10 @@ Small fixes from the first real-app runs. No new tools.
   `grep` or `sed`), send known steps as one `run`, ask for the app's deep links and use them with `open_url`, and
   connect once as an MCP server (a wrapper that starts a new process for every call adds about 2 s to each call).
 - React Native radio and checkbox options are listed, with their checked state (`radio "Daily" checked=true`). iOS
-  gives them no accessibility trait, so they were typed `Other` and left out of `look` unless they had an id. `audit`
-  now flags such an element: no trait, so VoiceOver doesn't announce it as a control.
+  gives them no accessibility trait, so they were typed `Other` and left out of `look` unless they had an id. They are
+  found by React Native's role words in the label or value (`radio button`, `checkbox`, English only), so no other
+  `Other` changes: a card, a scroll indicator or a plain labelled view is listed as before. `audit` flags each such
+  element once: no trait, so VoiceOver doesn't announce it as a control.
 
 ## 1.5.0, "the Real User Update" (unreleased)
 

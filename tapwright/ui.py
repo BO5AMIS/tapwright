@@ -103,7 +103,7 @@ class Element:
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
-    no_trait: bool = False  # an Other listed for its label alone (see _no_trait): VoiceOver gets no control from it
+    no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
 
     @property
     def x(self) -> float:
@@ -346,65 +346,29 @@ class _NoTrait(NamedTuple):
     checked: bool | None
 
 
-def _squash(text: str) -> str:
-    """The letters and digits only, in lower case: "Name, Email" and "name\nemail" are the same text."""
-    return re.sub(r"\W+", "", text).casefold()
-
-
-def _text_below(node: ET.Element) -> list[str]:
-    """The text of the nearest descendants that carry any, in order: a view with text of its own stands for what is
-    under it, so a nested container isn't counted on top of its own children."""
-    found: list[str] = []
-    for child in node:
-        text = _text(child.get("label")) or _text(child.get("value"))
-        if text:
-            found.append(text)
-        else:
-            found.extend(_text_below(child))
-    return found
-
-
-def _made_of(text: str, pieces: list[str]) -> bool:
-    """Is `text` some of `pieces`, in order, joined? React Native gives a view the text of the labels under it, those
-    that are no controls of their own ("Welcome Log in" over a Welcome, an Email field and a Log in button). False
-    when there are no pieces, or something is left over (the role's words, "Daily, radio button")."""
-    rest, used = _squash(text), 0
-    for piece in map(_squash, pieces):
-        if piece and rest.startswith(piece):
-            rest, used = rest[len(piece):], used + 1
-    return used > 0 and not rest
-
-
 def _no_trait(node: ET.Element, kind: str, label: str, value: str, identifier: str) -> _NoTrait | None:
-    """An `Other` without an identifier that has a label or value, and isn't a container whose label only repeats its
-    children's text, is something VoiceOver can focus but XCUITest gives no type (React Native's radio and checkbox
-    options). Its role is `radio` or `checkbox` when the label or value carries those words (matched in any case,
-    split at commas), with its checked state from `checked`, `selected`, `unchecked` and `not checked`; the words
-    are left out of the text. Otherwise `other`. Role words always make it a control; without them a label that is
-    only its children's text (see _made_of) is a container. None for every other node: containers and anything with
-    an identifier stay as they were."""
-    text = label or value
-    if kind != "Other" or identifier or not text:
+    """An `Other` without an identifier whose label or value carries React Native's role words (`radio button`,
+    `checkbox`, matched in any case, split at commas) is a radio or checkbox option that XCUITest gives no type. Its
+    role is `radio` or `checkbox`, its checked state comes from `checked`, `selected`, `unchecked` and `not checked`,
+    and the words are left out of the text. None for every other node: an `Other` without the words (a card, a scroll
+    indicator, a plain labelled view) and anything with an identifier stay as they were. Which plain views are
+    controls only the `accessible` attribute says, and it is not read."""
+    if kind != "Other" or identifier or not (label or value):
         return None
-    role, checked = "other", None
-    kept: list[list[str]] = []
-    for whole in (label, value):
-        parts = [p.strip() for p in whole.split(",") if p.strip()]
+    role, checked = "", None
+    kept = [[p.strip() for p in whole.split(",") if p.strip()] for whole in (label, value)]
+    for parts in kept:
         for p in parts:
-            if p.casefold() in _RN_ROLES and role == "other":
-                role = _RN_ROLES[p.casefold()]
-        kept.append(parts)
-    if role == "other" and _made_of(text, _text_below(node)):
+            role = role or _RN_ROLES.get(p.casefold(), "")
+    if not role:
         return None
-    if role != "other":
-        words = {*_RN_ROLES, *_RN_STATES}
-        for parts in kept:
-            for p in parts:
-                if p.casefold() in _RN_STATES and checked is None:
-                    checked = _RN_STATES[p.casefold()]
-        kept = [[p for p in parts if p.casefold() not in words] for parts in kept]
-        label, value = ", ".join(kept[0]), ", ".join(kept[1])
-    return _NoTrait(role, label, value, checked)
+    for parts in kept:
+        for p in parts:
+            if p.casefold() in _RN_STATES and checked is None:
+                checked = _RN_STATES[p.casefold()]
+    words = {*_RN_ROLES, *_RN_STATES}
+    kept = [[p for p in parts if p.casefold() not in words] for parts in kept]
+    return _NoTrait(role, ", ".join(kept[0]), ", ".join(kept[1]), checked)
 
 
 def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
