@@ -103,3 +103,52 @@ def test_a_child_that_ignores_the_first_cancel_is_still_joined():
             await aio.wait_for(child(), 0.01)
         assert log == ["finished"]
     run(go)
+
+
+def test_a_second_cancel_of_the_caller_still_waits_for_the_childs_nested_cleanup():
+    """Codex, PR #4 cycle 2: the second cancel made the helper return while the child's next cleanup still ran."""
+    log: list[str] = []
+
+    async def child():
+        try:
+            await asyncio.sleep(60)
+        finally:
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                await asyncio.sleep(0.05)
+                log.append("inner cleaned")
+            log.append("outer cleaned")
+
+    async def go():
+        caller = asyncio.create_task(aio.wait_for(child(), 60))
+        await asyncio.sleep(0.01)
+        caller.cancel()
+        await asyncio.sleep(0.02)  # the first cleanup is running
+        caller.cancel()  # and the caller is cancelled again
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert log == ["inner cleaned", "outer cleaned"]  # joined: nothing of the child runs after the caller is gone
+    run(go)
+
+
+def test_a_timeout_joined_while_the_caller_is_cancelled_twice_keeps_the_cancel():
+    log: list[str] = []
+
+    async def child():
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0.1)
+            log.append("cleaned")
+
+    async def go():
+        caller = asyncio.create_task(aio.wait_for(child(), 0.01))
+        await asyncio.sleep(0.03)  # timed out; the join is waiting for the cleanup
+        caller.cancel()
+        await asyncio.sleep(0.01)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert log == ["cleaned"]
+    run(go)

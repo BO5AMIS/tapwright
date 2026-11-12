@@ -615,6 +615,7 @@ def _started_of(proc: dict) -> float | None:
 CRASH_MAX_BYTES = CRASH_MAX_MB * 1024 * 1024  # no crash file is read beyond this (AGENT-TOOLS §15.2 words it in MB)
 CRASH_CHUNK = 256 * 1024  # bytes asked of the phone's file service at a time
 CRASH_SCAN = 40  # crash files of one executable name looked at in one search
+CRASH_CLOSE_WAIT = 2.0  # seconds a close of a file on the phone may take: a service that stopped answering is left
 
 
 class CrashTooBig(DeviceError):
@@ -626,6 +627,19 @@ def _size_of(stat: dict) -> int:
         return int(stat.get("st_size", 0))
     except (TypeError, ValueError):
         return CRASH_MAX_BYTES + 1  # a size that can't be read is not trusted to be small
+
+
+async def _close_file(afc, handle) -> None:
+    """Close a file of the phone, waiting at most CRASH_CLOSE_WAIT: this runs when a read was cancelled too, and a file
+    service that stopped answering would hold the cancel (and whoever joins it) for ever. A close that fails is no
+    matter. The abandoned close is cancelled and its error read."""
+    closing = asyncio.ensure_future(afc.fclose(handle))
+    try:
+        await asyncio.wait({closing}, timeout=CRASH_CLOSE_WAIT)
+    finally:
+        if not closing.done():
+            closing.cancel()
+        closing.add_done_callback(lambda t: t.cancelled() or t.exception())
 
 
 async def _read_capped(afc, path: str, size: int) -> bytes:
@@ -649,7 +663,7 @@ async def _read_capped(afc, path: str, size: int) -> bytes:
             if len(chunk) < ask:  # the end of the file
                 break
     finally:
-        await afc.fclose(handle)
+        await _close_file(afc, handle)
     return b"".join(chunks)
 
 

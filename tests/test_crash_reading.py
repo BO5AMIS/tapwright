@@ -169,3 +169,23 @@ def test_a_search_that_ran_out_of_its_budget_says_so_instead_of_no_crash(phone, 
 def test_the_answer_says_a_report_was_too_big():
     found = diagnostics.CrashSearch([], too_big=2)
     assert diagnostics.CRASH_TOO_BIG.format(n=2, mb=diagnostics.CRASH_MAX_MB) in diagnostics.skipped_notes(found)
+
+
+def test_a_crash_read_cancelled_on_a_file_service_that_stops_answering_ends_within_a_deadline(phone, monkeypatch):
+    """Codex, PR #4 cycle 2: the cancel of fread entered the finally, whose fclose waited on the same dead service, and
+    the join of aio.wait_for waited for that, so the lookup never reached its own timeout."""
+    monkeypatch.setattr(device_module, "CRASH_CLOSE_WAIT", 0.1, raising=False)
+    dev, afc = phone({name_of(1): ips(bundle=APP)})
+
+    async def hang(*args, **kwargs):
+        await asyncio.sleep(3600)
+    afc.fread = hang
+    afc.fclose = hang
+
+    async def lookup():
+        from tapwright import aio
+        began = asyncio.get_running_loop().time()
+        with pytest.raises(asyncio.TimeoutError):
+            await aio.wait_for(dev.crash_reports("Example", 1, APP), 0.1)
+        return asyncio.get_running_loop().time() - began
+    assert go(asyncio.wait_for(lookup(), 5)) < 1.5

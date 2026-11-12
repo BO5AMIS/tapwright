@@ -14,18 +14,19 @@ def _retrieved(task: asyncio.Future) -> None:
 
 
 async def _join(inner: asyncio.Future) -> None:
-    """Cancel the child and wait until it has ended (its own cleanup included), whatever it ended with."""
+    """Cancel the child and wait until it has ended (its own cleanup included), whatever it ended with. A cancel of
+    the caller during the wait is kept, not acted on: the child is still waited for (it is not cancelled again, which
+    would cut its cleanup short), and the cancel is raised once it has ended."""
     inner.cancel()
+    cancelled = False
     while not inner.done():
         try:
             await asyncio.wait({inner})
         except asyncio.CancelledError:
-            # the caller is cancelled again while the child still cleans up: the child is waited for all the same,
-            # then the cancel goes on (it is raised by the caller's own `raise`, after this)
-            inner.cancel()
-            inner.add_done_callback(_retrieved)
-            raise
+            cancelled = True  # (the child was cancelled once already: its cleanup is not cut short by this)
     _retrieved(inner)
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def wait_for(awaitable: Awaitable[_T], seconds: float) -> _T:
