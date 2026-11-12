@@ -1039,7 +1039,8 @@ a visual report. Nothing here is required setup: an agent can start a journey wi
   out, and the header says `more below` / `more above` only where a view can really scroll further (no counts).
 - No ids. An element's line shows its visible text; an icon-only button shows as `e12 button (icon only)`, with its
   accessibility label apart as `(VoiceOver: "Settings")`. `placeholder` stays (it is on the glass).
-- Targets: `ref`, visible `text`, and `{x, y}`. `id` and `label` answer `bad_params: in a journey, ids and labels are
+- Targets: `ref`, visible `text` (only text a person can read on the glass: never an icon-only button's VoiceOver label,
+  nor an element clipped out of view), and `{x, y}`. `id` and `label` answer `bad_params: in a journey, ids and labels are
   hidden; use a ref or the visible text`.
 - No shortcuts: act-after-scroll (§16.2) and `scroll` `to: "target"` are off; `wait_for` looks at the screen only;
   `open_url` and test `app_command`s are refused unless `allow` names them, and the report lists the ones used.
@@ -1081,7 +1082,8 @@ close control or a tab bar). An unknown key is `bad_params` when the file is rea
 ### 17.4 Stress moments
 
 `journey` with `stress` (during a journey): `background` (the app leaves and comes back), `network` (with `mode`, a 1.4
-condition starting mid-flow), `double_tap` (with a `target`: the same touch twice, 80 ms apart), `rotate` and
+condition starting mid-flow), `double_tap` (with a `target`: the same touch twice, 80 ms apart; refused when the safety policy flags the target, since
+one OK never covers two touches, and otherwise each touch is checked), `rotate` and
 `relaunch`, and `survives` (what must still be there after: `{text}` or `{goal_step}`). Answer:
 `Stress: background; it survived: text "2 eggs" is still in the field.` or `…; it didn't survive: …`.
 - **Tapwright** does all of them (`relaunch` closes and opens the app).
@@ -1103,11 +1105,14 @@ basis; and a GIF of the journey (360 px wide, taps drawn as rings, at most 3 MB;
 Tapline from frames it keeps after each settled action), or a short video where there is one. Pictures stay in files,
 never in the agent's context beyond the stop answer.
 
-**Export** (only when the user asks, since it writes to their GitHub): `export: {"to": "pr", "repo": "...", "pr": 310}`
-commits the report into that PR's branch under `.tapwright/reports/<name>/` (Tapline: `.tapline/reports/<name>/`) and
-comments on the PR with the summary, the pictures linked; `{"to": "issue", "repo": "..."}` pushes the pictures to the
-repository's `qa-reports` branch and opens an issue that links them. Both use `gh` with the user's own sign-in, and the
-answer says what was written where.
+**Export** (only when the user asks, since it writes to their GitHub) needs `confirm: true` (the agent says its user
+asked). It uploads `report.md`, `report.html`, the GIF, the filmstrip and the finding pictures in one commit.
+`{"to": "pr", "repo": "...", "pr": 310}` commits them into that PR's branch under `.tapwright/reports/<name>/`
+(Tapline: `.tapline/reports/<name>/`) and comments on the PR with the summary and the pictures linked; when the PR's
+branch lives in another repository (a fork), it is refused unless `fork: true`, and the answer names that repository.
+`{"to": "issue", "repo": "..."}` pushes them to the repository's `qa-reports` branch and opens an issue that links
+them. A public repository is refused unless `public: true` is also given. Both use `gh` with the user's own sign-in,
+and the answer says what was written where.
 
 ### 17.6 `media`: test pictures for photo pickers
 
