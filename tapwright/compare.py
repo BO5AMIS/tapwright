@@ -14,6 +14,8 @@ import errno
 import io
 import os
 import re
+import secrets
+import stat
 import tempfile
 from pathlib import Path
 from typing import BinaryIO, Callable, NamedTuple
@@ -170,10 +172,22 @@ def load(path: Path) -> Image.Image:
         raise unreadable from None
 
 
+# Directory file descriptors (POSIX): the walk, the temporary file and the move all go through a folder that is held
+# open, so nothing is looked up by path after a folder was checked. Windows has none of this (`dir_fd` is not there).
+ANCHORED = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and {os.open, os.mkdir, os.stat, os.unlink, os.rename} <= os.supports_dir_fd)  # (os.replace goes with rename)
+
+
+def _after_check(folder: Path) -> None:
+    """A seam for tests, called once the folder is checked and before the file is written: the moment in which a
+    second process could swap a folder for a link. Does nothing."""
+
+
 def real_folder(folder: Path, root: Path) -> Path:
     """`folder` made (as far as it isn't there), and checked: every folder from `root` down to it must be a real
     folder, not a symlink or a junction to somewhere else (`OSError` otherwise, before anything is made behind the
-    link). `root` is trusted, even when it is a link itself; it is made when it isn't there. The folder's real path."""
+    link). `root` is trusted, even when it is a link itself; it is made when it isn't there. The folder's real path.
+    By path, so only the fallback for systems without directory handles (see `write_file`)."""
     root = Path(os.path.abspath(root))
     try:
         parts = Path(os.path.abspath(folder)).relative_to(root).parts
@@ -183,6 +197,8 @@ def real_folder(folder: Path, root: Path) -> Path:
     here = Path(os.path.realpath(root))
     for part in parts:
         step = here / part
+        if os.path.normcase(os.path.realpath(here)) != os.path.normcase(str(here)):  # (looked at again just before)
+            raise OSError(errno.EPERM, f"{here} is a link to another folder; nothing is written through it")
         step.mkdir(exist_ok=True)
         if os.path.normcase(os.path.realpath(step)) != os.path.normcase(str(step)):
             raise OSError(errno.EPERM, f"{step} is a link to another folder; nothing is written through it")
@@ -190,23 +206,99 @@ def real_folder(folder: Path, root: Path) -> Path:
     return here
 
 
-def write_file(dest: Path, write: Callable[[BinaryIO], object], root: Path | None = None) -> None:
-    """Write a file whole or not at all, and never through a link. Every folder from `root` (the trusted tree the
-    file belongs in: the references store, the script's folder; by default the folder above `dest`'s) down to
-    `dest`'s must be a real folder (a symlink or a junction to somewhere else is refused: `OSError`), the bytes go
-    to a new file with its own name beside `dest` (made exclusively, so it can't be a link someone planted), and
-    that is moved over `dest`. A link at `dest` is replaced, not followed. A failed write leaves no temporary file."""
-    folder = real_folder(dest.parent, dest.parent.parent if root is None else root)
+def _same_folder(path: Path | str, folder: Path) -> bool:
+    """Is `path`'s real folder still the checked `folder`?"""
+    return os.path.normcase(os.path.dirname(os.path.realpath(path))) == os.path.normcase(str(folder))
+
+
+def _write_by_path(dest: Path, write: Callable[[BinaryIO], object], root: Path) -> None:
+    """The fallback for Windows. The folders are checked, then the temporary file is written, and its real folder is
+    resolved again before it is moved: when it is no longer the checked one the file is deleted and the write is
+    refused; the destination's folder is looked at once more after the move. This narrows the window in which a
+    folder can be swapped for a link, but can't close it: between a check and the next call there is still a moment
+    (Windows offers no way to hold a folder open and have a file made and moved through it)."""
+    folder = real_folder(dest.parent, root)
     dest = folder / dest.name
+    _after_check(folder)
     fd, name = tempfile.mkstemp(dir=folder, prefix=dest.name + ".", suffix=".part")
+    swapped = OSError(errno.EPERM, f"{folder} changed into a link to another folder while the file was written; "
+                                   "nothing is written through it")
     try:
         with os.fdopen(fd, "wb") as out:
             write(out)
+        if not _same_folder(name, folder):
+            raise swapped
         os.replace(name, dest)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(name)
         raise
+    if not _same_folder(dest, folder):  # (too late to undo; said, so that nobody trusts the file)
+        raise swapped
+
+
+def _open_folder(parent_fd: int, part: str, step: Path) -> int:
+    """`part` of the folder `parent_fd`, made when it isn't there, opened without following a link (the handle is
+    what the rest goes through)."""
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(part, 0o777, dir_fd=parent_fd)
+    try:
+        return os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR) and stat.S_ISLNK(os.stat(part, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+            raise OSError(errno.EPERM, f"{step} is a link to another folder; nothing is written through it") from None
+        raise
+
+
+def _write_anchored(dest: Path, write: Callable[[BinaryIO], object], root: Path) -> None:
+    """POSIX: from `root` (trusted, opened as it is) down, each folder is made and opened with `dir_fd` and
+    `O_NOFOLLOW`, the temporary file is made in the last one with `O_EXCL | O_NOFOLLOW`, and moved with
+    `os.replace(src_dir_fd, dst_dir_fd)`: no name is resolved by path after it was checked, so a folder swapped for a
+    link in the meantime changes nothing (the file lands in the folder that was checked, wherever it is by then)."""
+    root = Path(os.path.abspath(root))
+    try:
+        parts = Path(os.path.abspath(dest.parent)).relative_to(root).parts
+    except ValueError:
+        raise OSError(errno.EPERM, f"{dest.parent} is outside {root}; nothing is written there") from None
+    root.mkdir(parents=True, exist_ok=True)
+    opened = [os.open(root, os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        here = root
+        for part in parts:
+            here = here / part
+            opened.append(_open_folder(opened[-1], part, here))
+        folder_fd = opened[-1]
+        _after_check(here)
+        name = f"{dest.name}.{secrets.token_hex(8)}.part"
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder_fd)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                write(out)
+            os.replace(name, dest.name, src_dir_fd=folder_fd, dst_dir_fd=folder_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(name, dir_fd=folder_fd)
+            raise
+    finally:
+        for held in opened:
+            os.close(held)
+
+
+def write_file(dest: Path, write: Callable[[BinaryIO], object], root: Path | None = None) -> None:
+    """Write a file whole or not at all, and never through a link. Every folder from `root` (the trusted tree the
+    file belongs in: the references store, the script's folder; by default the folder above `dest`'s) down to
+    `dest`'s must be a real folder (a symlink or a junction to somewhere else is refused: `OSError`), the bytes go
+    to a new file with its own name beside `dest` (made exclusively, so it can't be a link someone planted), and
+    that is moved over `dest`. A link at `dest` is replaced, not followed. A failed write leaves no temporary file.
+
+    The threat: a second process of the same user that swaps a folder for a link between the check and the write.
+    This is a local tool writing into the user's own folders (`~/.tapwright`, the folders beside their scripts), so
+    that takes a hostile process running as the user at that very moment; a script file alone can't do it. Still it
+    is closed as far as the system allows: on POSIX with directory handles (nothing is resolved by path after the
+    check, `_write_anchored`), on Windows by looking again before and after the move (`_write_by_path`), which narrows
+    the window and can't close it."""
+    root = dest.parent.parent if root is None else root
+    (_write_anchored if ANCHORED else _write_by_path)(dest, write, root)
 
 
 def save(path: Path, image: Image.Image, root: Path | None = None) -> None:

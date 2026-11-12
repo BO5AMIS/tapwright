@@ -322,3 +322,71 @@ def test_a_reference_is_copied_from_the_file_it_was_given_and_not_the_stores_of_
     assert copied == 1 and compare.load(folder / "home.png").size == (48, 48)
     compare.copy_to_script(["home"], "com.example.app", tmp_path / "other.json")  # without a source: the store's
     assert compare.load(tmp_path / "other.references" / "home.png").size == (32, 32)
+
+
+# ---- a folder swapped after it was checked (review of PR #3, round 3, P1) ----
+def swap_for_link(folder: Path, elsewhere: Path) -> None:
+    """What a second hostile process would do: the checked folder moves aside and a link to `elsewhere` takes its name."""
+    folder.rename(folder.with_name(folder.name + ".moved"))
+    either_link("symlink" if os.name != "nt" else "junction", folder, elsewhere)
+
+
+def test_a_folder_swapped_for_a_link_after_the_check_is_refused_by_path(tmp_path, monkeypatch):
+    """The fallback (Windows has no directory handles): the temp file's real folder is looked at again before it is moved."""
+    monkeypatch.setattr(compare, "ANCHORED", False)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    monkeypatch.setattr(compare, "_after_check", lambda checked: swap_for_link(checked, elsewhere))
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []  # the temporary file is deleted, and nothing was moved over a name there
+    assert not (folder.with_name(folder.name + ".moved") / "home.png").exists()
+
+
+def test_a_folder_swapped_for_a_link_after_the_move_is_refused_by_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "ANCHORED", False)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    real_replace = os.replace
+
+    def replace_then_swap(src, dst, *a, **k):
+        real_replace(src, dst, *a, **k)
+        swap_for_link(folder, elsewhere)
+    monkeypatch.setattr(os, "replace", replace_then_swap)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.skipif(not compare.ANCHORED, reason="directory file descriptors (dir_fd) are not available on this system "
+                                                  "(Windows); the by-path fallback is tested above")
+def test_a_folder_swapped_for_a_link_after_the_check_is_written_in_the_folder_that_was_checked(tmp_path, monkeypatch):
+    """With directory file descriptors nothing is looked up by path after the walk: the swap changes nothing."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    folder = root / "flow.references"
+    monkeypatch.setattr(compare, "_after_check", lambda checked: swap_for_link(checked, elsewhere))
+    compare.write_file(folder / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+    assert (folder.with_name(folder.name + ".moved") / "home.png").read_bytes() == b"x"
+    assert sorted(p.name for p in folder.with_name(folder.name + ".moved").iterdir()) == ["home.png"]
+
+
+@pytest.mark.skipif(not compare.ANCHORED, reason="directory file descriptors (dir_fd) are not available on this system "
+                                                  "(Windows); the by-path fallback is tested above")
+def test_the_anchored_walk_makes_nothing_behind_a_link_and_leaves_no_temporary_file(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    root.mkdir()
+    link(root / "linked", elsewhere, directory=True)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(root / "linked" / "deeper" / "home.png", lambda f: f.write(b"x"), root=root)
+    assert list(elsewhere.iterdir()) == []
+    compare.write_file(root / "a" / "b" / "home.png", lambda f: f.write(b"x"), root=root)
+    assert [p.name for p in (root / "a" / "b").iterdir()] == ["home.png"]
