@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from . import compare, ui
+from . import shot as shotlib
 from .control import Refused
 
 MAX_STEPS = 50
@@ -52,6 +53,10 @@ def check_compare_step(step: dict, n: int, script: bool) -> None:
                                     "(save a reference with compare_screen on its own, outside run)")
     compare.check_params(step, f"step {n}: ")
     _no_refs(step.get("ignore"), n, script)
+    width = step.get("width")
+    if width is not None and (not isinstance(width, int) or isinstance(width, bool) or not shotlib.MIN_WIDTH <= width <= shotlib.MAX_WIDTH):
+        raise Refused("bad_params", f"step {n}: compare_screen's width is a whole number of px from {shotlib.MIN_WIDTH} to {shotlib.MAX_WIDTH}, "
+                                    f"not {width!r}")
 
 
 def _no_refs(ignore: object, n: int, script: bool) -> None:
@@ -76,6 +81,9 @@ def check_expect(expect: object, n: int, script: bool = False) -> None:
         _no_refs(expect.get("ignore"), n, script)
     elif "threshold" in expect or "ignore" in expect:
         raise Refused("bad_params", f"step {n}: expect's threshold and ignore go with matches")
+    if not given and any(k in expect for k in ("gone", "timeout")):
+        raise Refused("bad_params", f"step {n}: expect's gone and timeout go with text, id or label; matches is "
+                                    "checked once, as the step ends")
     if "gone" in expect and not isinstance(expect["gone"], bool):
         raise Refused("bad_params", f"step {n}: expect's gone must be true or false")
     if "value" in expect:

@@ -10,6 +10,7 @@ JPEG noise from counting as a change), a histogram for the count, and a grid of 
 from __future__ import annotations
 
 import io
+import os
 import re
 import shutil
 from pathlib import Path
@@ -30,6 +31,8 @@ PAINT = (128, 128, 128)  # what an ignored rect and the status bar are painted w
 FADE, TINT, OUTLINE = 0.6, 0.55, 2  # the picture: towards white; red over a change; a region's outline in px
 RED, WHITE = (255, 0, 0), (255, 255, 255)
 JPEG_QUALITY = 80
+MAX_PIXELS = 4000 * 4000  # a reference larger than this is no screen (the largest is 1320x2868 at full width)
+MAX_POINTS = 100_000  # an ignored rect's numbers, in points, beyond any screen
 _TABLE = [0] * CUT + [255] * (256 - CUT)
 
 
@@ -64,19 +67,24 @@ class Result:
         return buf.getvalue()
 
 
-def shown(percent: float, changed: int = 1) -> str:
-    """A share as an answer says it: two decimals at most, `0%` only when nothing changed."""
+def shown(percent: float, changed: int = 1, threshold: float | None = None) -> str:
+    """A share as an answer says it: two decimals at most, `0%` only when nothing changed. Next to a pass bar it
+    never reads as the bar itself when it is above it (0.504% against 0.5% says 0.504%)."""
     value = round(percent, 2)
     if changed and value == 0:
         value = 0.01  # a changed pixel is never reported as none
+    if threshold is not None and percent > threshold and value <= threshold:
+        value = round(percent, 3) if round(percent, 3) > threshold else percent
     return f"{value:g}%"
 
 
 def paint(image: Image.Image, boxes: list[tuple[float, float, float, float]]) -> None:
-    """Fill rects (x, y, width, height in pixels) with the neutral colour, in place."""
+    """Fill rects (x, y, width, height in pixels) with the neutral colour, in place. A rect is cut to the picture
+    first, so one far larger than the screen paints all of it."""
     draw = ImageDraw.Draw(image)
     for x, y, w, h in boxes:
-        x0, y0, x1, y1 = round(x), round(y), round(x + w), round(y + h)
+        x0, y0 = max(0, round(x)), max(0, round(y))
+        x1, y1 = min(image.width, round(x + w)), min(image.height, round(y + h))
         if x1 > x0 and y1 > y0:
             draw.rectangle([x0, y0, x1 - 1, y1 - 1], fill=PAINT)
 
@@ -136,19 +144,29 @@ def fit(png: bytes, width: int) -> Image.Image:
 
 
 def load(path: Path) -> Image.Image:
-    """A saved reference as an RGB picture; `bad_params` when the file isn't a picture."""
+    """A saved reference as an RGB picture; `bad_params` when the file isn't a picture, or is far larger than any
+    phone screen (a script's references come from anyone, so a huge one is refused before it is decoded)."""
+    unreadable = Refused("bad_params", f"the reference file {path} can't be read as a picture; save the reference "
+                                       "again with update: true.")
     try:
         with Image.open(path) as img:
+            if img.width * img.height > MAX_PIXELS:
+                raise Refused("bad_params", f"the reference file {path} is {img.width}x{img.height} px, larger than "
+                                            "any screen; save the reference again with update: true.")
             return img.convert("RGB")
-    except (OSError, UnidentifiedImageError):
-        raise Refused("bad_params", f"the reference file {path} can't be read as a picture; save the reference "
-                                    "again with update: true.") from None
+    except Refused:
+        raise
+    except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
+        raise unreadable from None
 
 
 def save(path: Path, image: Image.Image) -> None:
-    """Write a reference as PNG (lossless: a reference must not drift)."""
+    """Write a reference as PNG (lossless: a reference must not drift), whole or not at all: to a file beside it,
+    then moved over it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(path, "PNG")
+    part = path.with_name(path.name + ".part")
+    image.save(part, "PNG")
+    os.replace(part, path)
 
 
 # ---- the words ----
@@ -192,7 +210,7 @@ def failure(name: str, result: Result, threshold: float, scale: float) -> str:
     if len(boxes) > MAX_LINES:
         places += f" (+{len(boxes) - MAX_LINES} more regions)"
     n = len(boxes)
-    return (f'{shown(result.percent, result.changed)} changed from the reference "{name}" (threshold {threshold:g}%), '
+    return (f'{shown(result.percent, result.changed, threshold)} changed from the reference "{name}" (threshold {threshold:g}%), '
             f"in {n} region{'s' if n != 1 else ''} (points): {places}.")
 
 
@@ -214,7 +232,7 @@ def check_ignore(ignore: object, label: str = "") -> None:
         if not isinstance(entry, dict):
             raise Refused("bad_params", f"{label}each ignore entry must be an object, not {entry!r}")
         if any(entry.get(k) is not None for k in ("width", "height")):
-            if not all(_number(entry.get(k)) for k in ("x", "y", "width", "height")) \
+            if not all(_number(entry.get(k)) and abs(entry[k]) <= MAX_POINTS for k in ("x", "y", "width", "height")) \
                     or entry["width"] <= 0 or entry["height"] <= 0:
                 raise Refused("bad_params", f"{label}an ignored rect needs x, y, width and height as numbers in "
                                             "points, the last two above 0")
@@ -296,8 +314,8 @@ def copy_to_script(names: list[str], bundle: str | None, script: Path) -> tuple[
     """Copy the stored references of `names` next to a script. (the folder, how many were copied)"""
     folder, count = script_references(script), 0
     for name in dict.fromkeys(names):
-        source = reference_path(bundle, name) if bundle else None
-        if source is not None and source.is_file():
+        source = reference_path(bundle or "unknown", name)  # the folder _compare saved it in
+        if source.is_file():
             folder.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, folder / f"{name}.png")
             count += 1

@@ -1011,7 +1011,7 @@ class Daemon:
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((self._bundle(), args["name"]))
+        rec.setdefault("references", []).append((getattr(self, "_compared_in", None) or self._bundle(), args["name"]))
         last = rec["steps"][-1] if rec["steps"] else None
         if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
@@ -1132,12 +1132,18 @@ class Daemon:
             # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
             wanted = _reference_names(rec["steps"])
             bundles = {name: bundle for bundle, name in rec.get("references", ()) if name in wanted}
-            copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1] for name, bundle in bundles.items())
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
+            try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
+                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1]  # (small files: a few ms)
+                             for name, bundle in bundles.items())
+            except OSError as e:
+                copied = 0
+                note.append(f"the reference pictures couldn't be copied to {folder}: {e.strerror or e}; copy them from "
+                            f"{compare.references_dir()} by hand, or replay with --update-references.")
             pictures = f", and {copied} reference picture{'s' if copied != 1 else ''} to {folder}" if copied else ""
             return _answer([f"Saved {len(rec['steps'])} steps to {path}{pictures}."], note)
         raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
@@ -2092,9 +2098,14 @@ class Daemon:
         await self._read(lambda: self._silent_read(view))
         bundle = self._bundle()
         if given is not None and bundle not in given:
-            app = getattr(self.session, "app", None)
-            raise Refused("not_allowed", _outside(bundle, app[0] if app else None, ", ".join(given.values())))
-        folder = bundle or "unknown"
+            # The read may have caught SpringBoard under a notification banner: asked as a touch asks (with its
+            # retries), and the reference is kept under the given app that is in front, not SpringBoard's name.
+            front = await self._front(given)
+            if front not in given:
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
+                                                      ", ".join(given.values())))
+            bundle = front
+        folder = self._compared_in = bundle or "unknown"  # (record copies the reference from this folder)
         rects, notes = compare.ignored(view.items, ignore or [])
         found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
         if found is None and check and not keep:
@@ -2121,7 +2132,7 @@ class Daemon:
         if screen[1] > screen[0]:  # the clock and the battery are the phone's, not the app's
             painted.append((0, 0, after.width, STATUS_BAR * scale))
         result = await asyncio.to_thread(compare.compare, before, after, painted)
-        share = compare.shown(result.percent, result.changed)
+        share = compare.shown(result.percent, result.changed, threshold)
         if result.percent <= threshold:
             return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
                             result.percent)
