@@ -9,12 +9,14 @@ milliseconds: the largest channel of the difference, a cut at 0.1 of 255 (Taplin
 JPEG noise from counting as a change), a histogram for the count, and a grid of 16 px cells that the Python code joins."""
 from __future__ import annotations
 
+import contextlib
+import errno
 import io
 import os
 import re
-import shutil
+import tempfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import BinaryIO, Callable, NamedTuple
 
 from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 
@@ -136,10 +138,18 @@ def _regions(mask: Image.Image) -> list[Region]:
 
 
 def fit(png: bytes, width: int) -> Image.Image:
-    """A screenshot as an RGB picture `width` px wide."""
-    img = Image.open(io.BytesIO(png)).convert("RGB")
+    """A screenshot as an RGB picture `width` px wide. `bad_params` for a picture larger than any screen, or one that
+    would be scaled to such a size (a very tall, narrow one), before anything is decoded or allocated."""
+    img = Image.open(io.BytesIO(png))
+    if img.width * img.height > MAX_PIXELS:
+        raise Refused("bad_params", f"the screenshot is {img.width}x{img.height} px, larger than any screen")
+    height = max(1, round(img.height * width / img.width))
+    if img.width != width and width * height > MAX_PIXELS:
+        raise Refused("bad_params", f"the screenshot ({img.width}x{img.height} px) would be {width}x{height} px at "
+                                    f"width {width}, larger than any screen")
+    img = img.convert("RGB")
     if img.width != width:
-        img = img.resize((width, max(1, round(img.height * width / img.width))), Image.LANCZOS)
+        img = img.resize((width, height), Image.LANCZOS)
     return img
 
 
@@ -160,13 +170,30 @@ def load(path: Path) -> Image.Image:
         raise unreadable from None
 
 
+def write_file(dest: Path, write: Callable[[BinaryIO], object]) -> None:
+    """Write a file whole or not at all, and never through a link. The folder must be a real folder (a symlink or a
+    junction to somewhere else is refused: `OSError`), the bytes go to a new file with its own name beside `dest`
+    (made exclusively, so it can't be a link someone planted), and that is moved over `dest`. A link at `dest` is
+    replaced, not followed. A failed write leaves no temporary file."""
+    folder = dest.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    if os.path.normcase(os.path.realpath(folder)) != os.path.normcase(os.path.join(os.path.realpath(folder.parent),
+                                                                                    folder.name)):
+        raise OSError(errno.EPERM, f"{folder} is a link to another folder; nothing is written through it")
+    fd, name = tempfile.mkstemp(dir=folder, prefix=dest.name + ".", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            write(out)
+        os.replace(name, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
+
+
 def save(path: Path, image: Image.Image) -> None:
-    """Write a reference as PNG (lossless: a reference must not drift), whole or not at all: to a file beside it,
-    then moved over it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    part = path.with_name(path.name + ".part")
-    image.save(part, "PNG")
-    os.replace(part, path)
+    """Write a reference as PNG (lossless: a reference must not drift), whole or not at all (see `write_file`)."""
+    write_file(path, lambda out: image.save(out, "PNG"))
 
 
 # ---- the words ----
@@ -316,7 +343,7 @@ def copy_to_script(names: list[str], bundle: str | None, script: Path) -> tuple[
     for name in dict.fromkeys(names):
         source = reference_path(bundle or "unknown", name)  # the folder _compare saved it in
         if source.is_file():
-            folder.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, folder / f"{name}.png")
+            data = source.read_bytes()
+            write_file(folder / f"{name}.png", lambda out: out.write(data))
             count += 1
     return folder, count

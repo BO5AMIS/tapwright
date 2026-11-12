@@ -1,6 +1,8 @@
 """The picture diff of `compare_screen` (AGENT-TOOLS §14): synthetic pictures, no phone."""
 import io
+import os
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -161,3 +163,96 @@ def test_references_live_in_the_store_per_app_and_a_scripts_folder_comes_first(t
     with pytest.raises(Refused) as e:
         compare.load(folder / "bad.png")
     assert e.value.code == "bad_params"
+
+
+# ---- sizes (review of PR #3: a skinny picture must not be resized into billions of pixels) ----
+def png_of(size, mode="RGB", colour=WHITE) -> bytes:
+    buf = io.BytesIO()
+    Image.new(mode, size, colour if mode == "RGB" else 0).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def watch_resize(monkeypatch) -> list[tuple[int, int]]:
+    """Every size a picture is resized to; one beyond MAX_PIXELS fails the test, before any memory is spent."""
+    seen: list[tuple[int, int]] = []
+    real = Image.Image.resize
+
+    def resize(self, size, *args, **kwargs):
+        seen.append(tuple(size))
+        assert size[0] * size[1] <= compare.MAX_PIXELS, f"asked to allocate {size[0]}x{size[1]}"
+        return real(self, size, *args, **kwargs)
+    monkeypatch.setattr(Image.Image, "resize", resize)
+    return seen
+
+
+def test_a_skinny_screenshot_is_refused_before_it_is_resized(monkeypatch):
+    seen = watch_resize(monkeypatch)
+    with pytest.raises(Refused) as e:
+        compare.fit(png_of((1, 100_000)), 600)  # 100,000 px in the file; 600 x 60,000,000 once scaled
+    assert e.value.code == "bad_params" and "600" in str(e.value) and seen == []
+    assert compare.fit(png_of((600, 1304)), 600).size == (600, 1304)  # a real screen is untouched
+    assert compare.fit(png_of((1320, 2868)), 600).size == (600, 1304)
+
+
+def test_a_screenshot_larger_than_any_screen_is_refused_before_it_is_decoded(monkeypatch):
+    def decoded(self, *args, **kwargs):
+        raise AssertionError("decoded")
+    monkeypatch.setattr(Image.Image, "convert", decoded)
+    with pytest.raises(Refused) as e:
+        compare.fit(png_of((5000, 5000), mode="1"), 600)  # a few hundred bytes of PNG, 25 Mpx of picture
+    assert e.value.code == "bad_params"
+
+
+# ---- files (review of PR #3: no write may follow a link out of its folder) ----
+def link(path: Path, target: Path, directory: bool = False) -> None:
+    try:
+        os.symlink(target, path, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("this system doesn't let the tests make symlinks")
+
+
+def test_a_reference_is_written_beside_its_name_and_never_through_a_link(tmp_path):
+    outside = tmp_path / "important.txt"
+    outside.write_text("keep")
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    link(folder / "home.png", outside)
+    link(folder / "home.png.part", outside)
+    compare.save(folder / "home.png", screen(size=(32, 32)))
+    assert outside.read_text() == "keep"
+    assert not (folder / "home.png").is_symlink() and compare.load(folder / "home.png").size == (32, 32)
+    assert sorted(p.name for p in folder.iterdir()) == ["home.png", "home.png.part"]  # and no temporary file is left
+
+
+def test_a_failed_save_leaves_no_temporary_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        compare.save(tmp_path / "refs" / "home.png", screen(size=(32, 32)))
+    assert list((tmp_path / "refs").iterdir()) == []
+
+
+def test_a_folder_that_is_a_link_is_not_written_to(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link(tmp_path / "flow.references", elsewhere, directory=True)
+    with pytest.raises(OSError, match="link"):
+        compare.save(tmp_path / "flow.references" / "home.png", screen(size=(32, 32)))
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    with pytest.raises(OSError, match="link"):
+        compare.copy_to_script(["home"], "com.example.app", tmp_path / "flow.json")
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(tmp_path / "flow.references" / "x.png", lambda f: f.write(b"x"))
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_copying_a_reference_next_to_a_script_replaces_a_link_and_never_follows_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    outside = tmp_path / "important.txt"
+    outside.write_text("keep")
+    folder = tmp_path / "flow.references"
+    folder.mkdir()
+    link(folder / "home.png", outside)
+    assert compare.copy_to_script(["home"], "com.example.app", tmp_path / "flow.json") == (folder, 1)
+    assert outside.read_text() == "keep" and compare.load(folder / "home.png").size == (32, 32)

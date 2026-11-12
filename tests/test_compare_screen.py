@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import os
 
 import pytest
 from PIL import Image
@@ -9,7 +10,7 @@ from PIL import Image
 from tapwright import batch, cli, client, compare
 from tapwright.actionlog import ActionLog
 from tapwright.control import Refused
-from tapwright.daemon import Scope
+from tapwright.daemon import _COMPARED, Scope
 from fakes import FakeSession, button, el
 from test_daemon import finish, make, started
 
@@ -540,3 +541,220 @@ def test_replay_takes_update_references_and_a_junit_message_ends_with_the_diff(t
     assert cli.main() == 0 and seen[0].update_references is True
     monkeypatch.setattr("sys.argv", ["tapwright", "replay", "x.json", "--apps", "a"])
     assert cli.main() == 0 and seen[1].update_references is False
+
+
+# ---- the review of PR #3 ----
+def link(path, target, directory=False):
+    try:
+        os.symlink(target, path, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("this system doesn't let the tests make symlinks")
+
+
+def test_a_reference_wider_than_any_screen_is_refused_before_the_screen_is_resized(tmp_path, monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        folder = tmp_path / "flow.references"
+        folder.mkdir()
+        Image.new("RGB", (100_000, 1)).save(folder / "home.png")  # 100,000 px: under the size limit, far too wide
+        script = write_script(tmp_path, "flow", [{"tool": "compare_screen", "name": "home"}])
+        seen = []
+        real = Image.Image.resize
+
+        def resize(self, size, *args, **kwargs):
+            seen.append(tuple(size))
+            assert size[0] * size[1] <= compare.MAX_PIXELS, f"asked to allocate {size[0]}x{size[1]}"
+            return real(self, size, *args, **kwargs)
+        monkeypatch.setattr(Image.Image, "resize", resize)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(script)})
+        assert e.value.code == "bad_params" and "100000 px wide" in str(e.value), str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_failed_check_replaces_a_link_at_its_picture_and_never_writes_through_it(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, (BLOCK, (0, 0, 0)))
+        outside = tmp_path / "important.txt"
+        outside.write_text("keep")
+        (tmp_path / "flow.diff").mkdir()
+        link(tmp_path / "flow.diff" / "home.png", outside)
+        script = write_script(tmp_path, "flow", [{"tool": "compare_screen", "name": "home", "threshold": 0}])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(script)})
+        assert outside.read_text() == "keep"
+        assert "(diff:" in str(e.value) and Image.open(tmp_path / "flow.diff" / "home.png").size == (600, 1200)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_diff_folder_that_is_a_link_gets_no_picture(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, (BLOCK, (0, 0, 0)))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        link(tmp_path / "flow.diff", elsewhere, directory=True)
+        script = write_script(tmp_path, "flow", [{"tool": "compare_screen", "name": "home"}])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(script)})
+        assert e.value.code == "expect_failed" and "(diff:" not in str(e.value)
+        assert list(elsewhere.iterdir()) == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_update_references_never_writes_through_a_link(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        outside = tmp_path / "important.txt"
+        outside.write_text("keep")
+        folder = tmp_path / "flow.references"
+        folder.mkdir()
+        link(folder / "home.png.part", outside)
+        link(folder / "home.png", outside)
+        script = write_script(tmp_path, "flow", [{"tool": "compare_screen", "name": "home"}])
+        r = await d.run_tool("a", "replay", {"path": str(script), "update_references": True})
+        assert r["text"].startswith("Ran 1 of 1 steps") and outside.read_text() == "keep"
+        assert Image.open(folder / "home.png").size == (600, 1200)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        link(tmp_path / "other.references", elsewhere, directory=True)
+        script = write_script(tmp_path, "other", [{"tool": "compare_screen", "name": "home"}])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(script), "update_references": True})
+        assert "link" in str(e.value) and list(elsewhere.iterdir()) == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_run_while_recording_keeps_its_visual_checks_and_their_references(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # the reference, saved before recording
+        path = tmp_path / "flows" / "flow.json"
+        await d.run_tool("a", "record", {"start": True, "name": "flow"})
+        r = await d.run_tool("a", "run", {"steps": [
+            {"tool": "tap", "target": {"id": "lab-save"},
+             "expect": {"matches": "home", "threshold": 2, "ignore": [{"ref": "e2"}]}},
+            {"tool": "compare_screen", "name": "home", "threshold": 1}]})
+        assert r["text"].startswith("Ran 2 of 2 steps")
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        folder = tmp_path / "flows" / "flow.references"
+        assert r["text"].startswith(f"Saved 2 steps to {path}, and 1 reference picture to {folder}"), r["text"]
+        data = json.loads(path.read_text("utf-8"))
+        assert data["steps"] == [
+            {"tool": "tap", "target": {"id": "lab-save"},
+             "expect": {"matches": "home", "threshold": 2, "ignore": [{"id": "clock"}]}},
+            {"tool": "compare_screen", "name": "home", "threshold": 1}]
+        assert [p.name for p in folder.iterdir()] == ["home.png"]
+        data["fresh"] = False
+        path.write_text(json.dumps(data), "utf-8")
+        r = await d.run_tool("a", "replay", {"path": str(path)})  # the checks are really made
+        assert r["text"].startswith("Ran 2 of 2 steps")
+        show(d, (BLOCK, (0, 0, 0)))
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(path)})
+        # the first check (threshold 2) holds with the block, the second step's compare_screen (threshold 1) doesn't
+        assert e.value.code == "expect_failed" and "stopped at step 2" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_check_that_did_not_hold_in_a_recorded_run_is_not_saved(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, (BLOCK, (0, 0, 0)))
+        await d.run_tool("a", "record", {"start": True, "name": "flow"})
+        with pytest.raises(Refused):
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "lab-save"}},
+                                                    {"tool": "compare_screen", "name": "home"}]})
+        path = tmp_path / "flow.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert json.loads(path.read_text("utf-8"))["steps"] == [{"tool": "tap", "target": {"id": "lab-save"}}]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recorded_width_is_a_whole_number_the_script_loader_accepts(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "wide"})
+        await d.run_tool("a", "compare_screen", {"name": "first", "width": 300.0})
+        path = tmp_path / "wide.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        step = json.loads(path.read_text("utf-8"))["steps"][0]
+        assert step["width"] == 300 and isinstance(step["width"], int)
+        assert batch.load_script(str(path))["steps"] == [step]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_cant_compare_one_name_in_two_apps(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "two"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        d.session.app = ("Other", "com.example.other")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "home"})
+        assert e.value.code == "bad_params" and "home" in str(e.value) and "com.example.app" in str(e.value)
+        await d.run_tool("a", "compare_screen", {"name": "elsewhere"})  # another name is fine
+        d.session.app = ("Example", "com.example.app")
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # and the same name in the same app again
+        path = tmp_path / "two.json"
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert [s["name"] for s in json.loads(path.read_text("utf-8"))["steps"]] == ["home", "elsewhere", "home"]
+        assert sorted(p.name for p in (tmp_path / "two.references").iterdir()) == ["elsewhere.png", "home.png"], r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_bundle_a_recording_copies_from_is_its_own_calls_not_the_daemons(tmp_path, monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        loop, other, real_fit = asyncio.get_running_loop(), {"done": False}, compare.fit
+
+        async def theirs():
+            _COMPARED.set(None)  # (a task started from this worker thread inherits its context; another client's call doesn't)
+            d.session.app = ("Other", "com.example.other")
+            await d.run_tool("b", "compare_screen", {"name": "theirs"})
+            d.session.app = ("Example", "com.example.app")
+
+        def fit(png, width):
+            if not other["done"]:  # in the middle of a's comparison (the picture is being scaled), b compares elsewhere
+                other["done"] = True
+                asyncio.run_coroutine_threadsafe(theirs(), loop).result(timeout=20)
+            return real_fit(png, width)
+        monkeypatch.setattr(compare, "fit", fit)
+        await d.run_tool("a", "record", {"start": True, "name": "mine"})
+        await d.run_tool("a", "compare_screen", {"name": "mine"})
+        path = tmp_path / "mine.json"
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert r["text"] == f"Saved 1 steps to {path}, and 1 reference picture to {tmp_path / 'mine.references'}.", r["text"]
+        assert not hasattr(d, "_compared_in")
+        await finish(stop, task)
+    run(go)
