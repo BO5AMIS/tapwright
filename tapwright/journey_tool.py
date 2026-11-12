@@ -229,10 +229,9 @@ class JourneyTools:
             written = await asyncio.to_thread(journey_report.write, jr, reached, why, elapsed)
         except OSError as e:
             raise Refused("internal", f"couldn't write the report to {jr.folder}: {e.strerror or e}") from None
-        summary = "\n".join([journey.summary_line(jr, reached, elapsed), journey.findings_line(jr, written["folder"])])
-        lines = [summary]
-        if why:
-            lines.insert(1, f"Why: {why}")
+        first, second = journey.summary_line(jr, reached, elapsed), journey.findings_line(jr, written["folder"])
+        summary = "\n".join([first, second])
+        lines = [first, *([f"Why: {why}"] if why else []), second]
         if spec is not None:
             try:
                 lines.append(await asyncio.to_thread(journey_export.export, spec, written["folder"], summary))

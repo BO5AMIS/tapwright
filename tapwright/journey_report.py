@@ -8,7 +8,7 @@ import io
 import json
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 from . import filmstrip, journey as jr
 
@@ -59,7 +59,7 @@ def _same(a: Image.Image, b: Image.Image) -> bool:
         return False
     small = (24, 48)
     diff = ImageChops.difference(a.convert("L").resize(small), b.convert("L").resize(small))
-    return sum(diff.getdata()) / (small[0] * small[1]) < SAME_PICTURE
+    return ImageStat.Stat(diff).mean[0] < SAME_PICTURE
 
 
 def _encode(images: list[Image.Image], durations: list[int], colours: int) -> bytes:

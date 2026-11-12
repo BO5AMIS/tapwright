@@ -146,7 +146,7 @@ class Element:
         parts.append(self.role)
         if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
             parts.append("(icon only)")
-            parts.append(f"(VoiceOver: {json.dumps(clip(self.text), ensure_ascii=False)})")
+            parts.append(f"(VoiceOver: {clip(self.text)})")
         elif self.text:
             parts.append(clip(self.text))
         if self.identifier and not eyes:  # a user sees no ids

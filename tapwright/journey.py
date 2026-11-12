@@ -67,15 +67,17 @@ def signature(text: str) -> frozenset[tuple[str, str]]:
 
 def title_of(text: str) -> str:
     """A name for a screen from its answer: the first header, else the first text, else the app's name."""
-    first_text = ""
+    plain = first_text = ""
     for line in text.splitlines():
         m = _ELEMENT.match(line)
         if m and m.group(2) and m.group(2).startswith('"'):
             if m.group(1) == "header":
                 return m.group(2).strip('"')
+            if m.group(1) == "text":
+                plain = plain or m.group(2).strip('"')
             first_text = first_text or m.group(2).strip('"')
-    if first_text:
-        return first_text
+    if plain or first_text:
+        return plain or first_text
     app = re.search(r"^App: (.+?) \(", text, re.M)
     return app.group(1) if app else "screen"
 
