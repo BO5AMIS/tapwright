@@ -112,6 +112,8 @@ with no element.
 | get rid of a keyboard that covers what you need | nothing: a touch on something it covers closes it first. If the answer says it stayed up, `type_text` into the field with `submit: true` |
 | leave the user a test they can rerun | `record` with `start: true`, do the flow, then `record` with `stop: true` and a `path`. `replay` runs it; people run it in CI with `tapwright replay FILE --junit out.xml` |
 | check the screen's accessibility | `audit`. Report each issue it lists with its element and fix; they are real findings for the developer |
+| catch a screen that looks different from before | `compare_screen` with a `name`: the first call saves the reference, later ones answer `Matches` or `Differs` and where. `ignore` what always changes (a clock, a timestamp). In a `run` or a recording, `"expect": {"matches": "<name>"}` makes it a check |
+| see an animation or a loading state | `filmstrip` (with `tap` to start it), not several `look`s |
 | leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |

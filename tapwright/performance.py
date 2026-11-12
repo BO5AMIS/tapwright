@@ -18,7 +18,8 @@ MEASURED = "Measured {seconds:.1f} s."
 MEMORY = "Memory {avg:.0f} MB (peak {peak:.0f})."
 CPU = "CPU {avg:.0f}% (peak {peak:.0f}%)."
 FRAMES = "Frames {fps:.0f} fps (lowest {low:.0f}); {drops} {drop} {rule}."
-# The plan's rule is a frame over 50 ms (DROP_RULE_TIMED), which needs frame times. graphics gives one frame rate a
+# Agreed with Tapline: Tapline's `drops over 50 ms` stays Tapline's; Tapwright counts slow seconds, and `drops` in
+# `under` counts those. The plan's rule is a frame over 50 ms (DROP_RULE_TIMED), which needs frame times. graphics gives one frame rate a
 # second, so a drop is a second under 45 fps (DROP_RULE_SAMPLED), and the answer says which rule it used.
 DROP_RULE_TIMED = f"over {DROP_MS} ms"
 DROP_RULE_SAMPLED = f"under {DROP_FPS:.0f} fps"
@@ -113,7 +114,7 @@ def answer_lines(r: Reading) -> list[str]:
     if r.cpu_avg is not None and r.cpu_peak is not None:
         numbers.append(CPU.format(avg=r.cpu_avg, peak=r.cpu_peak))
     if r.fps_avg is not None and r.fps_min is not None and r.drops is not None:
-        numbers.append(FRAMES.format(fps=r.fps_avg, low=r.fps_min, drops=r.drops, drop="drop" if r.drops == 1 else "drops",
+        numbers.append(FRAMES.format(fps=r.fps_avg, low=r.fps_min, drops=r.drops, drop="second" if r.drops == 1 else "seconds",
                                      rule=DROP_RULE))
     elif r.still:
         numbers.append(FRAMES_STILL)

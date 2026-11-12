@@ -27,9 +27,9 @@ def test_the_sums_are_averages_peaks_and_seconds_under_45_fps():
     assert (r.fps_avg, r.fps_min, r.drops) == (57.0, 41.0, 3)
     assert performance.answer_lines(r) == [
         "Measured 3.0 s.",
-        "Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 drops under 45 fps."]
+        "Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 seconds under 45 fps."]
     one = performance.summarize(Measurement(fps=[44.0, 60.0]), 1.0)
-    assert "1 drop under 45 fps" in performance.answer_lines(one)[1]
+    assert "1 second under 45 fps" in performance.answer_lines(one)[1]
 
 
 def test_the_launch_line_and_what_could_not_be_measured():
@@ -95,7 +95,7 @@ def test_seconds_measures_the_app_in_front_and_samples_only_between_start_and_st
         r = await d.run_tool("a", "performance", {"seconds": 3})
         assert r["text"].splitlines() == [
             "Measured 3.0 s.",
-            "Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 drops under 45 fps."]
+            "Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 seconds under 45 fps."]
         assert r["image"] is None
         assert d.session.device.metered == [("start", "com.example.app"), ("stop", "com.example.app")]
         await d.run_tool("a", "performance", {})  # the default is 3 s

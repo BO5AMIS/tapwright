@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.0, "the Regression Update" (unreleased)
+
+A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
+Tapline.
+
+**Visual checks**
+- `compare_screen`: the first call for a `name` saves the screen as a reference picture; later calls answer
+  `Matches` or `Differs`, with how much changed and where (each region named by the elements it touches), and on a
+  difference a picture with the changes in red. `threshold` is the percent that may change and still match
+  (default 0.5); `ignore` paints out elements or areas that always change. The status bar is never compared.
+- In `run` and scripts it is a check: `expect: {"matches": "home"}` on a step, or a `compare_screen` step. A screen
+  that differs stops the batch as `expect_failed`, naming where it changed.
+- `record` folds a `compare_screen` after an action into that step, and saves the reference pictures next to the
+  script in `<script>.references/`, so a script and its pictures travel together.
+- `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it.
+
+**Watching motion**
+- `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
+  stream; `tap` taps first and films what it sets off.
+
+## 1.1.1 (2026-11-12)
+
+- A touch that had to close the keyboard first failed with an internal error while a layer was open in front
+  (an AutoFill menu, a sheet). Found by an app's release-candidate pass on the phone.
+
 ## 1.1.0, "the Autopilot Update" (2026-11-12)
 
 Agents get more done per call, a session becomes a test you keep, and every touch that matters asks you
