@@ -1341,6 +1341,7 @@ class Daemon:
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
                 raise Refused("unsupported", ocr.INSTALL)
+            view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
             if args.get("ocr"):
                 return await self._with_ocr(view, answer)

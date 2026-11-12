@@ -102,13 +102,17 @@ def wda_app() -> Path:
     """The unsigned WebDriverAgent runner app, downloaded once and verified."""
     repo, tag, sha256, folder = wda_source()
     target = HOME / "wda" / folder / "WebDriverAgentRunner-Runner.app"
-    if target.exists():
+    done = target.parent / ".verified"  # written last: a folder without it was cut short, and is made again
+    if target.exists() and done.exists() and done.read_text(encoding="utf-8").strip() == sha256:
         return target
     data = _release_file(repo, tag, "WebDriverAgentRunner-Runner.zip")
     if hashlib.sha256(data).hexdigest() != sha256:
         raise RuntimeError(f"the WebDriverAgent {tag} download doesn't match its pinned SHA-256")
+    if target.exists():
+        shutil.rmtree(target)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(target.parent)
+    done.write_text(sha256, encoding="utf-8")
     return target
 
 
