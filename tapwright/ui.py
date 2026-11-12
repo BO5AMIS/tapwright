@@ -103,6 +103,7 @@ class Element:
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
+    no_trait: bool = False  # an Other listed for its label alone (see _no_trait): VoiceOver gets no control from it
 
     @property
     def x(self) -> float:
@@ -331,6 +332,81 @@ def _kind(node: ET.Element) -> str:
     return _text(node.get("type") or node.tag).removeprefix("XCUIElementType")
 
 
+# React Native on iOS gives accessibilityRole radio and checkbox no accessibility trait, only the role's words after
+# the label ("Daily, radio button, checked"), so XCUITest types such a view `Other`.
+_RN_ROLES = {"radio button": "radio", "checkbox": "checkbox"}
+_RN_STATES = {"checked": True, "selected": True, "unchecked": False, "not checked": False, "unselected": False,
+              "not selected": False}
+
+
+class _NoTrait(NamedTuple):
+    role: str
+    label: str
+    value: str
+    checked: bool | None
+
+
+def _squash(text: str) -> str:
+    """The letters and digits only, in lower case: "Name, Email" and "name\nemail" are the same text."""
+    return re.sub(r"\W+", "", text).casefold()
+
+
+def _text_below(node: ET.Element) -> list[str]:
+    """The text of the nearest descendants that carry any, in order: a view with text of its own stands for what is
+    under it, so a nested container isn't counted on top of its own children."""
+    found: list[str] = []
+    for child in node:
+        text = _text(child.get("label")) or _text(child.get("value"))
+        if text:
+            found.append(text)
+        else:
+            found.extend(_text_below(child))
+    return found
+
+
+def _made_of(text: str, pieces: list[str]) -> bool:
+    """Is `text` some of `pieces`, in order, joined? React Native gives a view the text of the labels under it, those
+    that are no controls of their own ("Welcome Log in" over a Welcome, an Email field and a Log in button). False
+    when there are no pieces, or something is left over (the role's words, "Daily, radio button")."""
+    rest, used = _squash(text), 0
+    for piece in map(_squash, pieces):
+        if piece and rest.startswith(piece):
+            rest, used = rest[len(piece):], used + 1
+    return used > 0 and not rest
+
+
+def _no_trait(node: ET.Element, kind: str, label: str, value: str, identifier: str) -> _NoTrait | None:
+    """An `Other` without an identifier that has a label or value, and isn't a container whose label only repeats its
+    children's text, is something VoiceOver can focus but XCUITest gives no type (React Native's radio and checkbox
+    options). Its role is `radio` or `checkbox` when the label or value carries those words (matched in any case,
+    split at commas), with its checked state from `checked`, `selected`, `unchecked` and `not checked`; the words
+    are left out of the text. Otherwise `other`. Role words always make it a control; without them a label that is
+    only its children's text (see _made_of) is a container. None for every other node: containers and anything with
+    an identifier stay as they were."""
+    text = label or value
+    if kind != "Other" or identifier or not text:
+        return None
+    role, checked = "other", None
+    kept: list[list[str]] = []
+    for whole in (label, value):
+        parts = [p.strip() for p in whole.split(",") if p.strip()]
+        for p in parts:
+            if p.casefold() in _RN_ROLES and role == "other":
+                role = _RN_ROLES[p.casefold()]
+        kept.append(parts)
+    if role == "other" and _made_of(text, _text_below(node)):
+        return None
+    if role != "other":
+        words = {*_RN_ROLES, *_RN_STATES}
+        for parts in kept:
+            for p in parts:
+                if p.casefold() in _RN_STATES and checked is None:
+                    checked = _RN_STATES[p.casefold()]
+        kept = [[p for p in parts if p.casefold() not in words] for parts in kept]
+        label, value = ", ".join(kept[0]), ", ".join(kept[1])
+    return _NoTrait(role, label, value, checked)
+
+
 def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
     """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError."""
     try:
@@ -452,6 +528,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         # WDA mirrors the label into name when there is no identifier
         identifier = "" if name == label else name
         role = ROLES.get(kind, kind.lower())
+        loose = _no_trait(node, kind, label, value, identifier)
+        if loose:
+            role, label, value = loose.role, loose.label, loose.value
         if kind in COVERING_BARS:
             inside += (number,)  # a bar's own contents and the bar itself aren't covered by it
             if visible:
@@ -469,7 +548,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         elif role == "scroll":
             worth = True
         else:
-            worth = (kind in INTERACTIVE or label or value or identifier) and not (kind in CONTAINERS and not identifier)
+            worth = loose is not None or ((kind in INTERACTIVE or label or value or identifier)
+                                          and not (kind in CONTAINERS and not identifier))
         # ...nor is a view of that window that reaches down into the keys (`inputView` on the phone, around the
         # keys but not above them in the tree); a bar that ends where the keys begin is the app's
         worth = worth and identifier not in IOS_NOISE and node not in keyboard_holders and not (
@@ -481,11 +561,13 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
-            checked = (value == "1") if role == "switch" else None
+            checked = loose.checked if loose else (value == "1") if role == "switch" else None
             candidate = Element("", role, label, identifier, value, rect, enabled,
-                                "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
-                                kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")),
-                                icon_only=icon_only_button(node, kind, label, rect, in_tab_bar))
+                                "Selected" in traits, checked, ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind,
+                                in_alert, False, name, kind == "SecureTextField",
+                                placeholder=_text(node.get("placeholderValue")),
+                                icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
+                                no_trait=loose is not None)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor
@@ -602,15 +684,19 @@ def _plain(node: ET.Element) -> Element | None:
     traits = {t.strip() for t in (node.get("traits") or "").split(",")}
     identifier = "" if name == label else name
     role = "header" if kind == "StaticText" and "Header" in traits else ROLES.get(kind, kind.lower())
-    worth = role == "scroll" or ((kind in INTERACTIVE or label or value or identifier)
-                                 and not (kind in CONTAINERS and not identifier))
+    loose = _no_trait(node, kind, label, value, identifier)
+    if loose:
+        role, label, value = loose.role, loose.label, loose.value
+    worth = role == "scroll" or loose is not None or ((kind in INTERACTIVE or label or value or identifier)
+                                                       and not (kind in CONTAINERS and not identifier))
     worth = worth and identifier not in IOS_NOISE
     if not worth or w <= 0 or h <= 0 or kind in ("Alert", "Keyboard"):
         return None
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
     return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
-                   (value == "1") if role == "switch" else None, ROLE_ACTIONS.get(role, ()), kind, False, False, name,
-                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")))
+                   loose.checked if loose else (value == "1") if role == "switch" else None,
+                   ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, False, name,
+                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")), no_trait=loose is not None)
 
 
 def _offscreen(node: ET.Element, out: list[Element], over: Element | None = None) -> None:

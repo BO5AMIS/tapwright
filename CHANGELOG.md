@@ -14,6 +14,9 @@ Small fixes from the first real-app runs. No new tools.
 - The skill and the agent guide say four things more: read every answer whole (never pipe a call through `head`,
   `grep` or `sed`), send known steps as one `run`, ask for the app's deep links and use them with `open_url`, and
   connect once as an MCP server (a wrapper that starts a new process for every call adds about 2 s to each call).
+- React Native radio and checkbox options are listed, with their checked state (`radio "Daily" checked=true`). iOS
+  gives them no accessibility trait, so they were typed `Other` and left out of `look` unless they had an id. `audit`
+  now flags such an element: no trait, so VoiceOver doesn't announce it as a control.
 
 ## 1.5.0, "the Real User Update" (unreleased)
 

@@ -2,6 +2,7 @@
 lines, in the format both tools share, plus `duplicate_id` from the tree."""
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 
@@ -102,6 +103,16 @@ def duplicates(items: list[ui.Element]) -> list[tuple[str, str]]:
     return found
 
 
+NO_TRAIT_FIX = 'give it accessibilityRole="button" (or a native control) with accessibilityState.'
+
+
+def no_trait(items: list[ui.Element]) -> list[tuple[str, str, str]]:
+    """(`trait`, element line, what) for every element listed for its label alone, as React Native's radio and checkbox
+    options are (an `Other` with no trait: VoiceOver can focus it but doesn't announce it as a control)."""
+    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {json.dumps(e.text or e.role, ensure_ascii=False)}'
+             " as a control") for e in items if e.no_trait]
+
+
 def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> list[tuple[str, str, str]]:
     """(type, element line, what) for each issue of the asked types, XCTest's first, then `duplicate_id`. Shared by
     `audit`'s report and `ux_check`."""
@@ -112,8 +123,10 @@ def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> li
             continue
         what = str(issue.get("compactDescription") or "").strip().rstrip(".") or WHAT[kind]
         rows.append((kind, element_of(issue.get("elementAttributes") or {}, items), what))
+    if "trait" in types:
+        rows += no_trait(items)
     if "duplicate_id" in types:
-        rows += [(kind, line, WHAT[kind]) for kind, line in duplicates(items)]
+        rows +=[(kind, line, WHAT[kind]) for kind, line in duplicates(items)]
     return rows
 
 
@@ -129,7 +142,7 @@ def report(screen: str, issues: list[dict], items: list[ui.Element], types: list
     counts = ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items(), key=lambda kv: TYPES.index(kv[0])))
     lines = [f"Audit of {screen}: {len(rows)} issue{'s' if len(rows) != 1 else ''} ({counts})."]
     for n, (kind, line, what) in enumerate(rows[:MAX_ISSUES], 1):
-        lines.append(f"{n}. {kind}: {line or 'the screen'}: {what}. Fix: {FIX[kind]}")
+        lines.append(f"{n}. {kind}: {line or 'the screen'}: {what}. Fix: {NO_TRAIT_FIX if what.startswith('no trait:') else FIX[kind]}")
     if len(rows) > MAX_ISSUES:
         lines.append(f"(+{len(rows) - MAX_ISSUES} more issues; pass types to narrow it.)")
     lines.append(tail)

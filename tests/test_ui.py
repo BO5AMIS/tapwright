@@ -393,3 +393,92 @@ def test_a_blank_touch_prefers_a_point_inside_a_scroll_view():
              el("e2", "scroll", "", rect=(0, 200, 430, 600)),
              el("e3", "text", "Kyoto", rect=(35, 370, 66, 28))]
     assert ui.blank_point(items, (430.0, 932.0), 50.0, 849.0) == (68.0, 384.0)
+
+
+# React Native gives accessibilityRole radio and checkbox no accessibility trait, so XCUITest types such a view
+# `Other`, and VoiceOver speaks the role's words after the label. These are the lines an agent should get for it.
+def _option(label: str, word: str, y: int, same_rect: bool = False) -> ET.Element:
+    text_rect = (16, y, 398, 44) if same_rect else (56, y + 10, 80, 24)
+    return node("Other", label, rect=(16, y, 398, 44), children=[node("StaticText", word, rect=text_rect)])
+
+
+def _radio_group(same_rect: bool = False) -> list[ui.Element]:
+    group = node("Application", rect=(0, 0, 430, 932), children=[
+        _option("Daily, radio button, checked", "Daily", 200, same_rect),
+        _option("Weekly, radio button", "Weekly", 250, same_rect),
+        _option("Monthly, radio button", "Monthly", 300, same_rect)])
+    return ui.elements(xml(group), SCREEN)
+
+
+def test_a_react_native_radio_option_is_listed_as_a_radio_with_its_state():
+    lines = [e.line() for e in _radio_group()]
+    assert lines == ['e1 radio "Daily" checked=true @16,200 398x44 [tap]', 'e2 text "Daily" @56,210 80x24',
+                     'e3 radio "Weekly" @16,250 398x44 [tap]', 'e4 text "Weekly" @56,260 80x24',
+                     'e5 radio "Monthly" @16,300 398x44 [tap]', 'e6 text "Monthly" @56,310 80x24']
+    daily = _radio_group()[0]
+    assert (daily.type, daily.actions, daily.checked, daily.no_trait) == ("Other", ("tap",), True, True)
+
+
+def test_a_react_native_checkbox_and_the_state_words():
+    def checkbox(label: str, value: str = "") -> ui.Element:
+        n = node("Other", label, value=value, rect=(16, 400, 398, 44),
+                 children=[node("StaticText", "Remember me", rect=(56, 410, 120, 24))])
+        return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[n])), SCREEN)[0]
+    assert checkbox("Remember me, checkbox, unchecked").line() == 'e1 checkbox "Remember me" checked=false @16,400 398x44 [tap]'
+    assert checkbox("Remember me, Checkbox, not checked").checked is False  # case doesn't matter
+    assert checkbox("Remember me, checkbox, checked").checked is True
+    assert checkbox("Remember me, checkbox, selected").checked is True
+    assert checkbox("Remember me, checkbox").checked is None  # no state said, none shown
+    assert checkbox("Remember me, checkbox").line() == 'e1 checkbox "Remember me" @16,400 398x44 [tap]'
+    e = checkbox("Remember me", value="CheckBox, checked")  # the words may come in the value
+    assert (e.role, e.label, e.value, e.checked) == ("checkbox", "Remember me", "", True)
+
+
+def test_an_other_with_a_label_and_no_role_words_is_listed_as_other():
+    [e] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Help", rect=(16, 100, 100, 44))])), SCREEN)
+    assert e.line() == 'e1 other "Help" @16,100 100x44 [tap]' and e.no_trait
+    # a label with children whose text it isn't made of is listed too
+    [e, _] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Plan: daily", rect=(16, 100, 300, 44),
+             children=[node("StaticText", "Daily", rect=(20, 110, 60, 24))])])), SCREEN)
+    assert e.role == "other"
+
+
+def test_a_container_whose_label_is_its_childrens_text_stays_out():
+    kids = [node("StaticText", "Name", rect=(20, 110, 60, 24)), node("StaticText", "Email", rect=(100, 110, 60, 24))]
+    for label in ("Name Email", "Name, Email", "name\nemail"):
+        items = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+            node("Other", label, rect=(16, 100, 300, 44), children=kids)])), SCREEN)
+        assert [e.line() for e in items] == ['e1 text "Name" @20,110 60x24', 'e2 text "Email" @100,110 60x24'], label
+    # also when the text sits a level down, in a view with no text of its own
+    deep = node("Other", "Name Email", rect=(16, 100, 300, 44), children=[node("Other", rect=(16, 100, 300, 44),
+                                                                              children=kids)])
+    assert [e.type for e in ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[deep])), SCREEN)] == [
+        "StaticText", "StaticText"]
+
+
+def test_an_other_with_an_identifier_keeps_its_line():
+    [e, _] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Daily, radio button", name="plan-daily", rect=(16, 200, 398, 44),
+             children=[node("StaticText", "Daily", rect=(56, 210, 80, 24))])])), SCREEN)
+    assert e.line() == 'e1 other "Daily, radio button" id=plan-daily @16,200 398x44' and not e.no_trait
+    [e] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", name="screen-root", rect=(16, 200, 398, 44))])), SCREEN)
+    assert e.line() == 'e1 other id=screen-root @16,200 398x44'
+
+
+@pytest.mark.parametrize("same_rect", [False, True])
+def test_a_label_target_picks_the_option_not_its_text(same_rect):
+    items = _radio_group(same_rect)
+    weekly = ui.resolve(items, ui.parse_target({"label": "Weekly"}))
+    assert isinstance(weekly, ui.Element) and (weekly.role, weekly.actions) == ("radio", ("tap",))
+    assert ui.resolve(items, ui.parse_target({"text": "Daily"})).role == "radio"
+    assert [e.role for e in items if e.label == "Weekly"] == (["radio"] if same_rect else ["radio", "text"])
+
+
+def test_an_option_scrolled_off_screen_is_still_a_target_that_is_off_screen():
+    group = node("Application", rect=(0, 0, 430, 932), children=[_option("Yearly, radio button", "Yearly", 1000)])
+    tree = ui.read(xml(group), SCREEN)
+    assert tree.items == [] and [(e.role, e.label, e.no_trait) for e in tree.offscreen] == [
+        ("radio", "Yearly", True), ("text", "Yearly", False)]
