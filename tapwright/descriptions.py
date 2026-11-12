@@ -163,6 +163,18 @@ SHARED = {
         'saved scripts. It starts the app fresh first unless the script says `"fresh": false`. The user can run '
         'the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`).'
     ),
+    'compare_screen': (
+        'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
+        'reference; later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on '
+        'a difference a picture with the changes in red. `threshold` is the percent that may change and still '
+        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. Keep the '
+        'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
+        '`compare_screen` step.'
+    ),
+    'filmstrip': (
+        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
+        'shots. `tap` first taps an element, then films what it sets off.'
+    ),
 }
 
 EXTRA = {
@@ -220,18 +232,6 @@ EXTRA = {
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app looks '
         'and works in landscape. Answers with the whole screen in its new size; a screen that only supports '
         'portrait stays as it is, and the answer says so.'
-    ),
-    'compare_screen': (
-        'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
-        'reference; later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on '
-        'a difference a picture with the changes in red. `threshold` is the percent that may change and still '
-        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. Keep the '
-        'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
-        '`compare_screen` step.'
-    ),
-    'filmstrip': (
-        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
-        'shots. `tap` first taps an element, then films what it sets off.'
     ),
 }
 
