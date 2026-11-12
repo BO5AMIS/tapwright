@@ -154,10 +154,34 @@ class FakeDevice:
         self.crash_unreadable = 0  # how many reports crash_reports says it passed over
         self.crash_too_big = 0  # how many it says were over the byte cap
         self.app_pids_calls = 0
+        self.starts: dict[int, float] = {}  # pid -> when its process started (epoch s); a pid not listed has no start time
+        self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
+        #                                                         that is not what `pids` says (a pid taken by another app)
+        self.proc_error: Exception | None = None  # the process list can't be read
 
     async def app_pids(self, bundle_id: str) -> list[int]:
         self.app_pids_calls += 1
         return list(self.pids.get(bundle_id, [1]))
+
+    async def app_processes(self, bundle_id: str):
+        from tapwright.device import Proc
+        self.app_pids_calls += 1
+        if self.proc_error is not None:
+            raise self.proc_error
+        return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def process_holder(self, pid: int):
+        """Who has that pid now (a Proc), or None when nobody does."""
+        from tapwright.device import Proc
+        if self.proc_error is not None:
+            raise self.proc_error
+        if pid in self.holders:
+            bundle, start = self.holders[pid]
+            return Proc(pid, start, bundle)
+        for bundle, pids in self.pids.items():
+            if pid in pids:
+                return Proc(pid, self.starts.get(pid), bundle)
+        return None
 
     def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None) -> None:
         """An entry the log stream of `pid` gives (os_trace level byte `raw`); `from_pid` is the pid the entry says

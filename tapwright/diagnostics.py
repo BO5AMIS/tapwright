@@ -72,11 +72,26 @@ class LogRing:
 
     def __init__(self, size: int = LOG_RING) -> None:
         self.entries: deque[LogEntry] = deque(maxlen=size)
+        self.added = 0  # how many entries were ever added: a mark for discard_since
 
     def add(self, entry: LogEntry) -> None:
         if len(entry.text) > LOG_TEXT_KEPT:
             entry = dataclasses.replace(entry, text=entry.text[:LOG_TEXT_KEPT])
         self.entries.append(entry)
+        self.added += 1
+
+    def discard_since(self, mark: int, from_at: int | None = None) -> int:
+        """Take back what was added after `mark` (the `added` count then): all of it, or only the entries at `from_at`
+        (epoch ms) or later. For lines whose process was found not to be the app's. How many were taken back."""
+        tail = min(self.added - mark, len(self.entries))
+        if tail <= 0:
+            return 0
+        kept = list(self.entries)
+        recent = kept[len(kept) - tail:]
+        keep = [e for e in recent if from_at is not None and e.at < from_at]
+        self.entries.clear()
+        self.entries.extend([*kept[:len(kept) - tail], *keep])
+        return tail - len(keep)
 
     def newest(self) -> tuple[int, frozenset[str]] | None:
         """(the newest entry's time, the texts of the entries at that time): where a stream that starts again for the

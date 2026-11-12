@@ -9,6 +9,7 @@ over:
     without mDNS. Whether iOS accepts that over a VPN is what `tapwright probe` measures.
 """
 import asyncio
+import dataclasses
 import json
 import os
 import posixpath
@@ -327,13 +328,27 @@ class Device:
         return len(pids)
 
     # ---- diagnostics (AGENT-TOOLS §15) ----
-    async def app_pids(self, bundle_id: str) -> list[int]:
-        """The pids of that app's running processes, from iOS's process list (empty: it isn't running)."""
+    async def processes(self) -> list["Proc"]:
+        """Every process iOS lists: its pid, its bundle id and when it started (a pid is reused, so a pid alone says
+        nothing about which process it is)."""
         from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
-            procs = await info.proclist()
-        return [p["pid"] for p in procs if p.get("bundleIdentifier") == bundle_id and isinstance(p.get("pid"), int)]
+            raw = await info.proclist()
+        return [Proc(p["pid"], _started_of(p), p.get("bundleIdentifier") or None)
+                for p in raw if isinstance(p.get("pid"), int)]
+
+    async def app_processes(self, bundle_id: str) -> list["Proc"]:
+        """That app's running processes, each with its start time (empty: it isn't running)."""
+        return [p for p in await self.processes() if p.bundle == bundle_id]
+
+    async def process_holder(self, pid: int) -> "Proc | None":
+        """Whatever process has that pid now, whoever's it is (None: nothing does)."""
+        return next((p for p in await self.processes() if p.pid == pid), None)
+
+    async def app_pids(self, bundle_id: str) -> list[int]:
+        """The pids of that app's running processes, from iOS's process list (empty: it isn't running)."""
+        return [p.pid for p in await self.app_processes(bundle_id)]
 
     async def app_log_stream(self, pid: int):
         """The unified log entries of one process, as they come: (epoch ms, os_trace level byte, text, pid). The
@@ -568,6 +583,33 @@ class Device:
         await self._stop_runner()
         if self.tunnel:
             await self.tunnel.aclose()
+
+
+START_SLACK = 1.0  # seconds two readings of one process's start time may differ
+
+
+@dataclasses.dataclass(frozen=True)
+class Proc:
+    """One process of the phone: the pid, when it started (epoch seconds; None when iOS didn't say) and its bundle id."""
+    pid: int
+    started: float | None = None
+    bundle: str | None = None
+
+    def same_life(self, other: "Proc") -> bool:
+        """Is `other` this very process (not another that got its pid later)? The pid and, when both start times are
+        known, the start time. When one isn't known the pid alone has to do."""
+        if self.pid != other.pid:
+            return False
+        return self.started is None or other.started is None or abs(self.started - other.started) <= START_SLACK
+
+
+def _started_of(proc: dict) -> float | None:
+    """The `startDate` of an entry of iOS's process list, as epoch seconds (None when it has none or can't be read)."""
+    when = proc.get("startDate")
+    try:
+        return float(when.timestamp()) if hasattr(when, "timestamp") else (float(when) if when is not None else None)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 CRASH_MAX_BYTES = CRASH_MAX_MB * 1024 * 1024  # no crash file is read beyond this (AGENT-TOOLS §15.2 words it in MB)

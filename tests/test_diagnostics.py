@@ -536,6 +536,72 @@ def test_a_stream_that_starts_again_for_the_same_process_does_not_repeat_what_th
     run(go)
 
 
+START = BASE / 1000 - 100  # when the app's process started (epoch s): 100 s before BASE
+
+
+def at(ms: int) -> int:
+    """An entry time `ms` after the process started."""
+    return int(START * 1000) + ms
+
+
+def test_a_reused_pid_is_not_read_as_the_app_and_what_it_logged_is_dropped():
+    """Codex, PR #4 (P1): the app's pid goes to another app before the next ownership poll."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        device.starts[42] = START
+        stop, task = await started(d)
+        await opened(d)
+        device.emit(42, at(5_000), "own line")
+        await settle(lambda: len(d._rings[APP].entries) == 1)
+        device.pids[APP] = []  # the app is gone ...
+        device.holders[42] = ("com.private.app", START + 200)  # ... and another app has its pid, from 200 s on
+        device.emit(42, at(250_000), "another app's private line")
+        await settle(lambda: 42 in device.stream_closed)
+        device.emit(42, at(260_000), "after the stream was closed")
+        await asyncio.sleep(0.15)
+        assert [e.text for e in d._rings[APP].entries] == ["own line"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_what_the_phone_replays_from_before_the_process_started_is_dropped():
+    async def go():
+        d = tuned(make())
+        device = d.session.device
+        device.starts[42] = START
+        device.replay[42] = [(at(-60_000), 0, "the previous owner of pid 42", 42), (at(-1_500), 0, "also before", 42),
+                             (at(5), 0, "mine", 42)]
+        stop, task = await started(d)
+        await opened(d)
+        await settle(lambda: len(d._rings[APP].entries) >= 1)
+        await asyncio.sleep(0.05)
+        assert [e.text for e in d._rings[APP].entries] == ["mine"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_stream_whose_owner_cannot_be_checked_is_closed_and_the_unchecked_lines_are_dropped():
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        device.starts[42] = START
+        stop, task = await started(d)
+        await opened(d)
+        device.emit(42, at(1_000), "checked line")
+        await settle(lambda: len(d._rings[APP].entries) == 1)
+        checks = device.app_pids_calls
+        await settle(lambda: device.app_pids_calls > checks + 1)  # a check has passed since that line
+        device.proc_error = RuntimeError("the process list can't be read")
+        device.emit(42, at(2_000), "line nobody can vouch for")
+        await settle(lambda: 42 in device.stream_closed)  # it does not stay open on a phone that can't say
+        await settle(lambda: [e.text for e in d._rings[APP].entries] == ["checked line"])  # the unchecked line is taken back
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_phone_without_a_log_service_is_tried_a_few_times_and_logs_says_so():
     async def go():
         d = tuned(make())

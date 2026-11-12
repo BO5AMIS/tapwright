@@ -29,8 +29,8 @@ from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
-                     PhoneNotFound)
+from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
+                     Unanswered, PhoneNotFound)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -598,7 +598,9 @@ NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls afte
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
 LOG_RETRY, LOG_IDLE, LOG_WARMUP = 2.0, 60.0, 0.5
 LOG_DRAIN = 1.0  # seconds a log stream may go on after its process is gone: the last lines (the crash's) are still on their way
-LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0  # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
+LOG_VERIFY_FAILS = 2  # checks of whose process a log stream is reading that may fail in a row before the stream is left
+LOG_START_SLACK_MS = 1000  # an entry this much before a process's start time still counts as its own (clocks, rounding)
+LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0 # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
 # looks for a report once the app is gone, seconds between them, later calls that look again
 CRASH_POLLS, CRASH_POLL, CRASH_LATE_TRIES = 3, 1.0, 3
 CRASH_CUT_CODES = ("not_connected", "not_answering", "reconnecting", "timeout")  # errors a crash can end a call with
@@ -648,6 +650,7 @@ class Daemon:
         self._rings: dict[str, diagnostics.LogRing] = {}
         self._log_tasks: dict[str, asyncio.Task] = {}
         self._log_pids: dict[str, int] = {}  # the process each task reads
+        self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
@@ -1136,13 +1139,33 @@ class Daemon:
         self._log_dead.pop(bundle, None)  # a new start is a new try
         self.ensure_logs(bundle)
 
-    async def _read_log(self, bundle: str, pid: int, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
+    async def _read_log(self, bundle: str, proc: Proc, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
         """One log stream of one process into the ring; `got[0]` counts the entries it gave. `after`: where an earlier
-        stream of the same process stopped (the phone replays what it logged just before, which the ring has)."""
-        async for at, raw, text, entry_pid in self.session.device.app_log_stream(pid):
-            if entry_pid == pid:
+        stream of the same process stopped (the phone replays what it logged just before, which the ring has). An
+        entry from before the process started is the previous owner of that pid's, and is dropped."""
+        floor = None if proc.started is None else int(proc.started * 1000) - LOG_START_SLACK_MS
+        async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
+            if entry_pid == proc.pid:
                 got[0] += 1
-                ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after)
+                if floor is None or at >= floor:
+                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after)
+
+    async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc, mark: int) -> None:
+        """After a stream of `proc` ended, once: were the lines added since `mark` (the last check that the process was
+        still the app's) the app's? When another process has the pid now, its lines (from its start on) are taken back;
+        when the phone can't say who has it, everything since the mark is, since nothing vouches for it."""
+        try:
+            now = await _wait_for(self.session.device.app_processes(bundle), 5)
+            if any(p.same_life(proc) for p in now):
+                return
+            holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            ring.discard_since(mark)
+            return
+        if holder is not None:  # gone, with nobody holding the pid, is an ordinary end: its last lines are its own
+            ring.discard_since(mark, None if holder.started is None else int(holder.started * 1000))
 
     async def _watch_logs(self, bundle: str) -> None:
         """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
@@ -1154,39 +1177,65 @@ class Daemon:
         ring, idle, told, fails = self._rings[bundle], 0.0, False, 0
         while True:
             try:
-                pids = await self.session.device.app_pids(bundle)
+                procs = await self.session.device.app_processes(bundle)
             except Exception as e:
                 if not told:
                     self.log(f"logs: couldn't find {bundle}'s process: {e}")
                     told = True
-                pids = []
-            if not pids:
+                procs = []
+            if not procs:
                 idle += self.log_retry
                 if idle > self.log_idle:
                     self._log_pids.pop(bundle, None)
                     return
                 await asyncio.sleep(self.log_retry)
                 continue
-            idle, pid = 0.0, pids[0]
-            self._log_pids[bundle] = pid
+            idle, proc = 0.0, procs[0]
+            self._log_pids[bundle] = proc.pid
+            prior = self._log_life.get(bundle)
+            if prior is not None and not prior[0].same_life(proc):
+                # an earlier reader may have taken lines of this process for the old one's (its pid came back): those
+                # are from this process's start on
+                if proc.started is not None:
+                    ring.discard_since(prior[1], int(proc.started * 1000))
+                elif proc.pid == prior[0].pid:
+                    ring.discard_since(prior[1])
+            mark = ring.added  # lines added after this are not yet vouched for as this process's
+            self._log_life[bundle] = (proc, mark)
             got: list[int] = [0]
             after = ring.newest()  # (a new process logs later than the old one, so this never drops its entries)
-            reader = asyncio.create_task(self._read_log(bundle, pid, ring, after, got), name=f"logs-stream-{bundle}")
+            reader = asyncio.create_task(self._read_log(bundle, proc, ring, after, got), name=f"logs-stream-{bundle}")
+            unchecked = 0
             try:
                 while not reader.done():
                     await asyncio.wait({reader}, timeout=self.log_check)
                     if reader.done():
                         break
                     try:
-                        now = await _wait_for(self.session.device.app_pids(bundle), 5)
+                        now = await _wait_for(self.session.device.app_processes(bundle), 5)
                     except Exception:
-                        continue  # the phone can't say now: the stream stays
-                    if pid not in now:  # the process is gone, or the app started again as another
-                        await asyncio.wait({reader}, timeout=self.log_drain)  # its last lines first
+                        unchecked += 1
+                        if unchecked >= LOG_VERIFY_FAILS:
+                            break  # the phone can't say whose the pid is: nothing more is read (and see _settle_life)
+                        continue
+                    unchecked = 0
+                    if any(p.same_life(proc) for p in now):
+                        mark = ring.added  # what came so far is vouched for
+                        self._log_life[bundle] = (proc, mark)
+                        continue
+                    # not this process any more: gone, or the pid is another process's now. Its last lines come first,
+                    # but only when nobody holds the pid, which is the one case they can't be someone else's
+                    try:
+                        holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
+                    except Exception:
                         break
+                    if holder is None:
+                        await asyncio.wait({reader}, timeout=self.log_drain)
+                    break
             finally:
                 reader.cancel()
                 await asyncio.wait({reader})
+            await self._settle_life(bundle, ring, proc, mark)
             error = reader.exception() if not reader.cancelled() else None
             if error is not None:
                 self.log(f"logs: the log stream of {bundle} ended: {error}")
@@ -1207,11 +1256,11 @@ class Daemon:
         self.ensure_logs(bundle)
         if bundle in self._log_tasks and self._connected.is_set():
             try:
-                pids = await asyncio.wait_for(self.session.device.app_pids(bundle), 5)
+                procs = await _wait_for(self.session.device.app_processes(bundle), 5)
             except Exception:
-                pids = []
-            current = self._log_pids.get(bundle)
-            if pids and current is not None and current not in pids:
+                procs = []
+            life = self._log_life.get(bundle)
+            if procs and life is not None and not any(p.same_life(life[0]) for p in procs):
                 self.restart_logs(bundle)
                 fresh = True
         if fresh and self.log_warmup:
