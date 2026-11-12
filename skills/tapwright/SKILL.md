@@ -175,6 +175,24 @@ run {"steps": [
   {"tool": "tap", "target": {"id": "tab-profile"}, "expect": {"matches": "profile"}}]}
 ```
 
+## 4b. Usability journeys, reports and test pictures
+
+To judge whether a real user can find and finish a feature, not only whether it works:
+
+- **Build personas for the app's own users and agree them with your user.** The guide and six examples are in
+  [references/personas.md](references/personas.md). A persona is guidance for you; nothing enforces it.
+- **Run the feature as a journey:** `journey` with `start: true`, a `goal`, a `persona` and its `conditions`. Tapwright
+  applies `language`, `region` and `text_size` by reopening the app for the journey (as `open_app` does) and `network`
+  through the `network` tool, and undoes them at the stop. Use only what a user sees: refs and visible text, no ids.
+- **Check each new screen with `ux_check`** and report its facts as findings. Add your own judgment from a screenshot,
+  and say it is judgment. If the user has house rules, `ux_check` lists the written ones for you to judge.
+- **Stress moments and the end:** `stress` tests leaving the app, a bad network, a double tap, rotating, relaunching.
+  `journey` with `stop: true` and `reached` writes the visual report and answers its summary; pictures stay in the
+  report folder. Offer `export` only if the user asks.
+- **Photo pickers:** ask your user first whether test pictures may be added to the phone's photo library, and whether
+  to remove them afterwards. Then `media` with `add` (paths) and `confirm: true`; `remove: true` deletes only those.
+  Without full access, `remove` names what to delete by hand.
+
 ## 5. Errors
 
 Every failure is `Error <code>: <message>`, and the message says what to do next.

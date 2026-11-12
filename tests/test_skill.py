@@ -10,7 +10,7 @@ from tapwright.errors import CODES
 
 REPO = Path(__file__).parent.parent
 SHIPPED, LISTED = skills.SOURCE, REPO / "skills" / "tapwright"
-FILES = ("SKILL.md", "references/setup.md", "agents/openai.yaml")
+FILES = ("SKILL.md", "references/setup.md", "references/personas.md", "agents/openai.yaml")
 
 
 def frontmatter(text: str) -> dict:

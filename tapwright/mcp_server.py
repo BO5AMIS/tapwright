@@ -21,7 +21,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import client, device, policy, repair, ui
+from . import client, device, policy, repair, ui, uxcheck
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -256,6 +256,18 @@ async def audit(types: list[str] | None = None) -> CallToolResult:
     return await _tool("audit", **({"types": types} if types else {}))
 
 
+@server.tool(annotations=READ_ONLY, description=describe("ux_check"), structured_output=False)
+async def ux_check() -> CallToolResult:
+    return await _tool("ux_check")
+
+
+@server.tool(description=describe("media"), structured_output=False)
+async def media(add: list[str] | None = None, remove: bool = False, confirm: bool = False) -> CallToolResult:
+    # relative paths are the agent's: where this server was started, not where the daemon runs
+    return await _tool("media", **({"add": [str(Path(p).expanduser().resolve()) for p in add]} if add else {}),
+                       **({"remove": True} if remove else {}), confirm=confirm)
+
+
 @server.tool(annotations=READ_ONLY, description=describe("logs"), structured_output=False)
 async def logs(since: int | None = None, level: Literal["error", "warning", "info"] = "info",
                grep: str | None = None, limit: int = 100) -> CallToolResult:
@@ -361,9 +373,10 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
 
 
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
-        rules: policy.Policy | None = None) -> None:
+        rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None) -> None:
     client.set_scope(apps, dedicated)
     client.set_policy(rules)
+    client.set_ux_rules(ux_rules)
     global SHOTS_DIR
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     if SHOTS_DIR is not None:
