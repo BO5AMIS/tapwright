@@ -200,6 +200,7 @@ class JourneyTools:
             raise Refused("unsupported", f"can't write reports to {base}: {e.strerror or e}") from None
         jr = journey.Journey(ask["goal"], ask["persona"], {**launch, **({"network": mode} if mode else {})}, ask["allow"],
                              ask["eyes"], self.control.clock(), now, folder, app=self._opened or self._bundle())
+        uxcheck.forget(client_id)  # the naming memory is this journey's alone
         self._journeys[client_id] = jr
         journey.running[client_id] = jr
         try:
@@ -260,6 +261,7 @@ class JourneyTools:
         self._house_rules(jr, reached)
         self._journeys.pop(client_id, None)
         journey.running.pop(client_id, None)
+        uxcheck.forget(client_id)
         try:
             written = await asyncio.to_thread(journey_report.write, jr, reached, why, elapsed)
         except OSError as e:

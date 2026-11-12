@@ -955,3 +955,25 @@ def test_h1_a_frame_is_kept_in_dedicated_mode_only_for_the_journeys_app(reports)
         assert len(jr.frames) == 2 and jr.left_out == 1
         await finish(stop, task)
     run(go)
+
+
+def test_m5_the_naming_memory_skips_a_withheld_look_and_is_scoped_to_the_journey(reports):
+    from tapwright import uxcheck
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        scope = Scope(("com.example.app",))
+        uxcheck.note_screen("a", HOME)  # left over from before the journey
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        assert len(uxcheck.screens_seen("a")) == 1  # (the start's own look), the old one is gone
+        before = list(uxcheck.screens_seen("a"))
+        d.session.app, d.session.foreground = ("Other", "com.other.app"), "com.other.app"
+        d.session.tree = list(OTHER)
+        with pytest.raises(Refused):
+            await d.run_tool("a", "look", {"screenshot": False}, scope=scope)
+        assert uxcheck.screens_seen("a") == before
+        await d.run_tool("a", "journey", {"stop": True, "reached": False}, scope=scope)
+        assert uxcheck.screens_seen("a") == []
+        await finish(stop, task)
+    run(go)

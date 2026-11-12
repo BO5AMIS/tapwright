@@ -2216,7 +2216,9 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
-            uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
+            given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
+            if given is None or (self.session.app or (None, None))[1] in given:
+                uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
             if args.get("ocr"):
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
