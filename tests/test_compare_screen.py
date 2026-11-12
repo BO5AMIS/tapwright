@@ -413,6 +413,35 @@ def test_a_compare_with_nothing_before_it_is_a_step_of_its_own(tmp_path):
     run(go)
 
 
+def test_a_check_after_a_performance_step_is_a_step_of_its_own_and_the_script_replays(tmp_path):
+    """Codex, PR #4: a performance step takes only `expect.under`, so a screen check or a wait_for folded into it made a
+    script that replay refused before running."""
+    from tapwright.performance import Measurement
+
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        d.session.device.measurement = Measurement(memory_mb=[100.0])
+        d.session.tree = [SAVE, CLOCK, el("e3", "text", "Ready", rect=(10, 500, 100, 20))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "record", {"start": True, "name": "perf"})
+        await d.run_tool("a", "performance", {"seconds": 0.5})
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        await d.run_tool("a", "performance", {"seconds": 0.5})
+        await d.run_tool("a", "wait_for", {"text": "Ready", "look": False})
+        path = tmp_path / "perf.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        steps = json.loads(path.read_text("utf-8"))["steps"]
+        assert steps == [{"tool": "performance", "seconds": 0.5}, {"tool": "compare_screen", "name": "home"},
+                         {"tool": "performance", "seconds": 0.5}, {"tool": "wait_for", "text": "Ready"}]
+        batch.check_steps(steps, script=True)  # what a replay does first
+        r = await d.run_tool("a", "replay", {"path": str(path)})
+        assert r["text"].startswith("Ran 4 of 4 steps"), r["text"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_record_cant_save_an_ignored_ref_that_has_no_id_label_or_text(tmp_path):
     async def go():
         d = make()

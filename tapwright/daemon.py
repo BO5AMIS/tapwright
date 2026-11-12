@@ -1418,6 +1418,10 @@ class Daemon:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
         rec = self._recording[client_id]
         kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
+        if rec["steps"] and kind is not None and rec["steps"][-1]["tool"] == "performance":
+            # a performance step takes only `expect.under` (§15.3): the wait is a step of its own
+            self._record_step(client_id, "wait_for", args, None)
+            return
         if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
             return
         expect: dict = {kind: args[kind]}
@@ -1468,7 +1472,7 @@ class Daemon:
             if (folder, args["name"], digest) not in rec.setdefault("references", []):
                 rec["references"].append((folder, args["name"], digest))
         last = rec["steps"][-1] if fold and rec["steps"] else None
-        if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
+        if last is not None and last["tool"] not in ("compare_screen", "performance") and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
             return
         step = {"tool": "compare_screen", "name": args["name"], **extra}
