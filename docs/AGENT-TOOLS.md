@@ -997,7 +997,7 @@ Shared values:
 - `network` (Tapwright: a tool; Tapline: a built-in `app_command`), `{ mode: "offline" | "3g" | "lossy" | "normal" }`.
   - `offline`: no request gets through. `3g`: about 400 ms more latency and 750 kbit/s. `lossy`: about 1 in 5 requests
     fails, the rest a little slower. `normal`: as before. Tapwright uses Apple's nearest profiles (3G; Very Bad
-    Network for `lossy`), so its numbers differ from these.
+    Network for `lossy`), so its numbers differ from these. A policy whose `block` list holds `network` (§11.1) refuses it in both tools (`normal` is always allowed): `Error not_allowed: blocked: the safety policy blocks network here.` (for one app: `… blocks network for <app>.`); Tapwright's condition also ends 30 minutes after it was set.
   - The answer is one line, `Network: 3g (Tapwright, whole phone).` / `Network: 3g (Tapline).`, and while a condition
     is on every answer's header carries the same line.
   - It returns to `normal` by itself when the session ends or the tool loses the phone or the app, so the phone is never
