@@ -2258,6 +2258,91 @@ def test_close_app_by_name():
     run(go)
 
 
+def test_close_app_ends_the_app_through_ios_first_then_tells_webdriveragent():
+    """1.5.1: WebDriverAgent's terminate waits for the app to finish quitting (median 46 s on a real app); iOS's own
+    process control doesn't. The answer is the same, and one log line says which way it went."""
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == ["com.example.app"]
+        assert d.session.closed == ["com.example.app"]  # WebDriverAgent's bookkeeping matches
+        said = [line for line in logs if "com.example.app" in line and "process control" in line]
+        assert len(said) == 1 and re.search(r"in \d+\.\d s", said[0])
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_without_a_tunnel_uses_webdriveragent_alone():
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.device.rsd = None
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == [] and d.session.closed == ["com.example.app"]
+        assert len([line for line in logs if "WebDriverAgent" in line and "com.example.app" in line]) == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_falls_back_to_webdriveragent_when_the_kill_raises():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_error = DeviceError("process control refused")
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == ["com.example.app"] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_falls_back_to_webdriveragent_when_the_kill_times_out(monkeypatch):
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_KILL_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_hangs = True
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == [] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_with_tapwright_close_wda_never_asks_ios(monkeypatch):
+    async def go():
+        monkeypatch.setenv("TAPWRIGHT_CLOSE", "wda")
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == [] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_slow_webdriveragent_terminate_after_the_kill_does_not_hold_the_answer(monkeypatch):
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.terminate_hangs = True
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert asyncio.get_running_loop().time() - began < 1.0
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == ["com.example.app"]
+        assert any("process control" in line for line in logs)
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_app_names_are_read_at_connect():
     async def go():
         d = make()
