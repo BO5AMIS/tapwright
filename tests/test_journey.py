@@ -700,58 +700,130 @@ def report_folder(tmp_path):
     return folder
 
 
+OK = {"to": "pr", "repo": "o/r", "pr": 310, "confirm": True}
+
+
 def test_export_checks_its_argument():
-    assert journey_export.check({"to": "pr", "repo": "o/r", "pr": 310}) == {"to": "pr", "repo": "o/r", "pr": 310}
-    assert journey_export.check({"to": "issue", "repo": "o/r"}) == {"to": "issue", "repo": "o/r", "pr": None}
-    for bad in ("pr", {"to": "gist", "repo": "o/r"}, {"to": "pr", "repo": "o/r"}, {"to": "pr", "repo": "nope", "pr": 1},
-                {"to": "pr", "repo": "o/r", "pr": "1"}, {"to": "issue", "repo": "o/r", "pr": 3},
-                {"to": "pr", "repo": "o/r", "pr": 1, "x": 1}, {"to": "pr", "repo": "o/r; rm", "pr": 1}):
+    assert journey_export.check(OK) == {"to": "pr", "repo": "o/r", "pr": 310, "public": False, "fork": False}
+    assert journey_export.check({"to": "issue", "repo": "o/r", "confirm": True, "public": True}) == {
+        "to": "issue", "repo": "o/r", "pr": None, "public": True, "fork": False}
+    assert journey_export.check({**OK, "fork": True})["fork"] is True
+    for bad in ("pr", {"to": "gist", "repo": "o/r", "confirm": True}, {"to": "pr", "repo": "o/r", "confirm": True},
+                {**OK, "repo": "nope"}, {**OK, "pr": "1"}, {"to": "issue", "repo": "o/r", "pr": 3, "confirm": True},
+                {**OK, "x": 1}, {**OK, "repo": "o/r; rm"}, {**OK, "public": "yes"},
+                {"to": "issue", "repo": "o/r", "confirm": True, "fork": True}):
         with pytest.raises(Refused) as e:
             journey_export.check(bad)
         assert e.value.code == "bad_params", bad
 
 
-def test_export_to_a_pr_commits_the_files_to_its_branch_and_comments(monkeypatch, report_folder):
-    gh = FakeGh({"pr view": json.dumps({"headRefName": "feature/x", "headRepository": {"name": "r"},
-                                        "headRepositoryOwner": {"login": "fork"}})})
+def test_m2_export_needs_the_agent_to_say_its_user_asked():
+    for args in ({"to": "pr", "repo": "o/r", "pr": 1}, {"to": "pr", "repo": "o/r", "pr": 1, "confirm": False}):
+        with pytest.raises(Refused) as e:
+            journey_export.check(args)
+        assert e.value.code == "bad_params" and str(e.value) == journey_export.NEED_CONFIRM and "Ask your user" in str(e.value)
+
+
+def pr_replies(owner="o", visibility="PRIVATE"):
+    return {"pr view": json.dumps({"headRefName": "feature/x", "headRepository": {"name": "r"},
+                                   "headRepositoryOwner": {"login": owner}}),
+            "repo view": json.dumps({"visibility": visibility}),
+            f"api repos/{owner}/r/git/ref/heads/feature/x": json.dumps({"object": {"sha": "h1"}}),
+            f"api repos/{owner}/r/git/commits/h1": json.dumps({"tree": {"sha": "t1"}}),
+            f"api --method POST repos/{owner}/r/git/blobs": json.dumps({"sha": "b1"}),
+            f"api --method POST repos/{owner}/r/git/trees": json.dumps({"sha": "t2"}),
+            f"api --method POST repos/{owner}/r/git/commits": json.dumps({"sha": "c2"})}
+
+
+def test_export_to_a_pr_makes_one_commit_of_the_report_files_and_comments(monkeypatch, report_folder):
+    gh = FakeGh(pr_replies())
     monkeypatch.setattr(journey_export, "run_gh", gh)
-    line = journey_export.export({"to": "pr", "repo": "o/r", "pr": 310}, report_folder, "Journey \"g\": reached.\nFindings: none.")
-    puts = [(a, s) for a, s in gh.calls if a[:3] == ["api", "--method", "PUT"]]
-    paths = sorted(a[3] for a, _ in puts)
-    assert paths == sorted(f"repos/fork/r/contents/.tapwright/reports/{report_folder.name}/{n}" for n in (
-        "report.md", "report.html", "journey.gif", "filmstrip.jpg", "screens/001.jpg", "findings/finding-1.jpg"))
-    body = json.loads(puts[0][1])
-    assert body["branch"] == "feature/x" and base64.b64decode(body["content"]) and "message" in body
+    spec = journey_export.check(OK)
+    line = journey_export.export(spec, report_folder, "Journey \"g\": reached.\nFindings: none.")
+    blobs = [a for a, _ in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/blobs"]]
+    assert len(blobs) == 5  # report.md, report.html, journey.gif, filmstrip.jpg, finding-1.jpg: no screenshot
+    trees = [json.loads(s) for a, s in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/trees"]]
+    base = f".tapwright/reports/{report_folder.name}"
+    assert len(trees) == 1 and trees[0]["base_tree"] == "t1"
+    assert sorted(e["path"] for e in trees[0]["tree"]) == sorted(f"{base}/{n}" for n in (
+        "report.md", "report.html", "journey.gif", "filmstrip.jpg", "findings/finding-1.jpg"))
+    commits = [json.loads(s) for a, s in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/commits"]]
+    assert len(commits) == 1 and commits[0]["parents"] == ["h1"] and commits[0]["tree"] == "t2"
+    patch = [(a, json.loads(s)) for a, s in gh.calls if a[:3] == ["api", "--method", "PATCH"]]
+    assert patch == [(["api", "--method", "PATCH", "repos/o/r/git/refs/heads/feature/x", "--input", "-"],
+                      {"sha": "c2", "force": False})]
+    assert not [a for a, _ in gh.calls if a[:3] == ["api", "--method", "PUT"]]  # never a commit per file
     comment = [(a, s) for a, s in gh.calls if a[:2] == ["pr", "comment"]]
     assert len(comment) == 1 and comment[0][0][2:] == ["310", "--repo", "o/r", "--body-file", "-"]
-    assert f"https://github.com/fork/r/raw/feature/x/.tapwright/reports/{report_folder.name}/journey.gif" in comment[0][1]
-    assert comment[0][1].startswith('Journey "g": reached.')
-    assert "PR #310" in line and "fork/r" in line
+    assert f"https://github.com/o/r/raw/feature/x/{base}/journey.gif" in comment[0][1]
+    assert "PR #310" in line and "o/r" in line
 
 
-def test_export_to_an_issue_pushes_pictures_to_qa_reports_and_links_them(monkeypatch, report_folder):
+def test_m2_a_public_repository_is_refused_unless_public_is_given(monkeypatch, report_folder):
+    gh = FakeGh(pr_replies(visibility="PUBLIC"))
+    monkeypatch.setattr(journey_export, "run_gh", gh)
+    with pytest.raises(Refused) as e:
+        journey_export.export(journey_export.check(OK), report_folder, "s")
+    assert e.value.code == "not_allowed" and "public repository" in str(e.value) and "public: true" in str(e.value)
+    assert not [a for a, _ in gh.calls if "POST" in a or "PATCH" in a]
+    journey_export.export(journey_export.check({**OK, "public": True}), report_folder, "s")
+    assert [a for a, _ in gh.calls if a[:3] == ["api", "--method", "PATCH"]]
+    # a visibility gh can't tell is not taken as private
+    monkeypatch.setattr(journey_export, "run_gh", FakeGh({**pr_replies(), "repo view": "{}"}))
+    with pytest.raises(Refused) as e:
+        journey_export.export(journey_export.check(OK), report_folder, "s")
+    assert "public or private" in str(e.value)
+
+
+def test_m2_a_pr_from_a_fork_is_refused_unless_fork_is_given_and_says_where_it_would_write(monkeypatch, report_folder):
+    gh = FakeGh(pr_replies(owner="fork"))
+    monkeypatch.setattr(journey_export, "run_gh", gh)
+    with pytest.raises(Refused) as e:
+        journey_export.export(journey_export.check(OK), report_folder, "s")
+    assert e.value.code == "not_allowed" and "written to fork/r" in str(e.value) and "fork: true" in str(e.value)
+    assert not [a for a, _ in gh.calls if "POST" in a or "PATCH" in a]
+    line = journey_export.export(journey_export.check({**OK, "fork": True}), report_folder, "s")
+    assert "fork/r branch feature/x" in line
+    views = [a[2] for a, _ in gh.calls if a[:2] == ["repo", "view"]]
+    assert "fork/r" in views and "o/r" in views  # both are checked for visibility
+
+
+def test_export_to_an_issue_pushes_pictures_to_qa_reports_in_one_commit_and_links_them(monkeypatch, report_folder):
     gh = FakeGh({"api repos/o/r/branches/qa-reports": Refused("unsupported", "gh api failed: Not Found"),
+                 "repo view": json.dumps({"visibility": "PRIVATE"}),
                  "api repos/o/r/git/ref/heads/main": json.dumps({"object": {"sha": "abc123"}}),
+                 "api repos/o/r/git/ref/heads/qa-reports": json.dumps({"object": {"sha": "abc123"}}),
+                 "api repos/o/r/git/commits/abc123": json.dumps({"tree": {"sha": "t1"}}),
+                 "api --method POST repos/o/r/git/blobs": json.dumps({"sha": "b1"}),
+                 "api --method POST repos/o/r/git/trees": json.dumps({"sha": "t2"}),
+                 "api --method POST repos/o/r/git/commits": json.dumps({"sha": "c2"}),
                  "api repos/o/r": json.dumps({"default_branch": "main"}),
                  "issue create": "https://github.com/o/r/issues/7\n"})
     monkeypatch.setattr(journey_export, "run_gh", gh)
-    line = journey_export.export({"to": "issue", "repo": "o/r"}, report_folder, "Journey \"g\": reached.\nFindings: none.")
-    created = [a for a, _ in gh.calls if a[:3] == ["api", "--method", "POST"]]
+    line = journey_export.export(journey_export.check({"to": "issue", "repo": "o/r", "confirm": True}), report_folder,
+                                 "Journey \"g\": reached.\nFindings: none.")
+    created = [a for a, _ in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/refs"]]
     assert created == [["api", "--method", "POST", "repos/o/r/git/refs", "-f", "ref=refs/heads/qa-reports", "-f", "sha=abc123"]]
-    puts = [(a, s) for a, s in gh.calls if a[:3] == ["api", "--method", "PUT"]]
-    names = sorted(a[3].split(report_folder.name + "/")[1] for a, _ in puts)
-    assert names == ["filmstrip.jpg", "findings/finding-1.jpg", "journey.gif", "report.md", "screens/001.jpg"]  # no html
-    assert all(json.loads(s)["branch"] == "qa-reports" for _, s in puts)
+    tree = [json.loads(s) for a, s in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/trees"]][0]["tree"]
+    assert sorted(e["path"].split(report_folder.name + "/")[1] for e in tree) == [
+        "filmstrip.jpg", "findings/finding-1.jpg", "journey.gif", "report.html", "report.md"]  # no screenshots
+    assert [a[3] for a, _ in gh.calls if a[:3] == ["api", "--method", "PATCH"]] == ["repos/o/r/git/refs/heads/qa-reports"]
     issue = [(a, s) for a, s in gh.calls if a[:2] == ["issue", "create"]]
     assert len(issue) == 1 and f"/raw/qa-reports/reports/{report_folder.name}/journey.gif" in issue[0][1]
     assert line.endswith("https://github.com/o/r/issues/7") and "qa-reports" in line
 
 
 def test_export_does_not_make_the_branch_when_it_is_there(monkeypatch, report_folder):
-    gh = FakeGh({"api repos/o/r/branches/qa-reports": "{}", "api repos/o/r": json.dumps({"default_branch": "main"})})
+    gh = FakeGh({"api repos/o/r/branches/qa-reports": "{}", "repo view": json.dumps({"visibility": "PRIVATE"}),
+                 "api repos/o/r/git/ref/heads/qa-reports": json.dumps({"object": {"sha": "a"}}),
+                 "api repos/o/r/git/commits/a": json.dumps({"tree": {"sha": "t"}}),
+                 "api --method POST repos/o/r/git/blobs": json.dumps({"sha": "b"}),
+                 "api --method POST repos/o/r/git/trees": json.dumps({"sha": "t2"}),
+                 "api --method POST repos/o/r/git/commits": json.dumps({"sha": "c"}),
+                 "api repos/o/r": json.dumps({"default_branch": "main"})})
     monkeypatch.setattr(journey_export, "run_gh", gh)
-    journey_export.export({"to": "issue", "repo": "o/r"}, report_folder, "s")
-    assert not [a for a, _ in gh.calls if "POST" in a]
+    journey_export.export(journey_export.check({"to": "issue", "repo": "o/r", "confirm": True}), report_folder, "s")
+    assert not [a for a, _ in gh.calls if a[:4] == ["api", "--method", "POST", "repos/o/r/git/refs"]]
 
 
 def test_gh_missing_or_failing_is_unsupported_and_never_called_for_real(monkeypatch):
@@ -764,13 +836,16 @@ def test_gh_missing_or_failing_is_unsupported_and_never_called_for_real(monkeypa
 
     class Done:
         returncode, stdout, stderr = 1, "", "HTTP 404: Not Found\nsecond line"
-    monkeypatch.setattr(journey_export.shutil, "which", lambda name: "/usr/bin/gh")
+    asked = []
+    monkeypatch.setattr(journey_export.shutil, "which", lambda name: asked.append(name) or "/usr/bin/gh")
     monkeypatch.setattr(journey_export.subprocess, "run", lambda *a, **k: Done())
     with pytest.raises(Refused) as e:
         journey_export.run_gh(["pr", "view", "1"])
     assert "second line" in str(e.value)
     Done.returncode, Done.stdout = 0, "ok"
     assert journey_export.run_gh(["x"]) == "ok"
+    # on Windows only gh.exe is looked for: a .cmd shim would pass a goal's text through cmd.exe
+    assert asked[-1] == ("gh.exe" if journey_export.os.name == "nt" else "gh")
 
 
 def test_stop_without_export_never_touches_gh_and_a_failed_export_is_a_note(monkeypatch, reports):
@@ -788,9 +863,14 @@ def test_stop_without_export_never_touches_gh_and_a_failed_export_is_a_note(monk
             raise Refused("unsupported", "gh pr view failed: no such PR")
         monkeypatch.setattr(journey_export, "run_gh", failing)
         r = await d.run_tool("a", "journey", {"stop": True, "reached": True,
-                                              "export": {"to": "pr", "repo": "o/r", "pr": 3}})
+                                              "export": {"to": "pr", "repo": "o/r", "pr": 3, "confirm": True}})
         assert "Note: export failed, the report is still on this computer: gh pr view failed: no such PR" in r["text"]
         assert "Report: " in r["text"]
+        # no confirm: refused before the journey is stopped
+        await d.run_tool("a", "journey", {"start": True, "goal": "g3"})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stop": True, "reached": True, "export": {"to": "pr", "repo": "o/r", "pr": 3}})
+        assert e.value.code == "bad_params" and "a" in d._journeys
         await finish(stop, task)
     run(go)
 
@@ -799,14 +879,48 @@ def test_stop_exports_through_gh_when_asked(monkeypatch, reports):
     async def go():
         d = daemon()
         stop, task = await started(d)
-        gh = FakeGh({"pr view": json.dumps({"headRefName": "b", "headRepository": {"name": "r"},
-                                            "headRepositoryOwner": {"login": "o"}})})
+        gh = FakeGh(pr_replies())
         monkeypatch.setattr(journey_export, "run_gh", gh)
         await d.run_tool("a", "journey", {"start": True, "goal": "g"})
         r = await d.run_tool("a", "journey", {"stop": True, "reached": True,
-                                              "export": {"to": "pr", "repo": "o/r", "pr": 3}})
-        assert any("Exported: the report is committed to o/r branch b" in line for line in r["text"].splitlines())
+                                              "export": {"to": "pr", "repo": "o/r", "pr": 3, "confirm": True}})
+        assert any("Exported: the report is committed to o/r branch feature/x" in line for line in r["text"].splitlines())
         assert [a for a, _ in gh.calls if a[:2] == ["pr", "comment"]]
+        await finish(stop, task)
+    run(go)
+
+
+def test_m9_stop_never_loses_its_answer(monkeypatch, reports):
+    from tapwright import uxcheck
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        rules = uxcheck.Rules((), 0, False)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, ux_rules=rules)
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        jr = d._journeys["a"]
+        jr.findings.extend({"severity": "low", "what": f"f{i}", "basis": "b"} for i in range(journey.MAX_FINDINGS))
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": True}, ux_rules=rules)  # the rule can't be filed
+        assert "reached in 1 tap" in r["text"] and d._journeys == {}
+        # a report that can't be written, and an export that fails in a way gh never reports, are notes
+        await d.run_tool("a", "journey", {"start": True, "goal": "g2"})
+
+        def full_disk(*a):
+            raise OSError(28, "No space left")
+        monkeypatch.setattr(journey_report, "write", full_disk)
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": False})
+        assert r["text"].startswith('Journey "g2"') and "Note: couldn't write the report to" in r["text"]
+        assert d._journeys == {}
+        monkeypatch.undo()
+        await d.run_tool("a", "journey", {"start": True, "goal": "g3"})
+
+        def odd(*a, **k):
+            raise ValueError("odd")
+        monkeypatch.setattr(journey_export, "run_gh", odd)
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": True,
+                                              "export": {"to": "pr", "repo": "o/r", "pr": 3, "confirm": True}})
+        assert "reached" in r["text"] and "Note: export failed" in r["text"] and d._journeys == {}
         await finish(stop, task)
     run(go)
 

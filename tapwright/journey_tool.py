@@ -262,20 +262,23 @@ class JourneyTools:
         self._journeys.pop(client_id, None)
         journey.running.pop(client_id, None)
         uxcheck.forget(client_id)
-        try:
+        written = None
+        try:  # the journey is over now: nothing below may lose the answer
             written = await asyncio.to_thread(journey_report.write, jr, reached, why, elapsed)
-        except OSError as e:
-            raise Refused("internal", f"couldn't write the report to {jr.folder}: {e.strerror or e}") from None
-        first, second = journey.summary_line(jr, reached, elapsed), journey.findings_line(jr, written["folder"])
+        except Exception as e:  # noqa: BLE001 - OSError, or text the files can't hold
+            notes.append(f"couldn't write the report to {jr.folder}: {getattr(e, 'strerror', None) or e}")
+        first, second = journey.summary_line(jr, reached, elapsed), journey.findings_line(jr, jr.folder)
         summary = "\n".join([first, second])
         lines = [first, *([f"Why: {why}"] if why else []), second]
-        if spec is not None:
+        if spec is not None and written is not None:
             try:
                 lines.append(await asyncio.to_thread(journey_export.export, spec, written["folder"], summary))
             except Refused as e:
                 notes.append(f"export failed, the report is still on this computer: {e}")
+            except Exception as e:  # noqa: BLE001
+                notes.append(f"export failed, the report is still on this computer: {e}")
         pictures = []
-        for path in written["key"]:
+        for path in (written["key"] if written else []):
             try:
                 data, size = journey_report.key_picture(path)
                 pictures.append((data, size))
@@ -299,8 +302,11 @@ class JourneyTools:
             limit = rules.max_taps_to_goal
             if reached and jr.taps > limit:
                 said = f"reached the goal in {journey.plural(jr.taps, 'tap')}, more than the {limit} the rule allows"
-                jr.add_finding({"severity": "high", "kind": "max_taps_to_goal", "what": said,
-                                "basis": f"house rule: max_taps_to_goal {limit}"})
+                try:
+                    jr.add_finding({"severity": "high", "kind": "max_taps_to_goal", "what": said,
+                                    "basis": f"house rule: max_taps_to_goal {limit}"})
+                except Refused:  # (the journey keeps at most 100 findings: the rule is still said, never raised)
+                    said += " (not filed as a finding: the journey already holds the most it keeps)"
                 lines.append(f"- max_taps_to_goal: {limit}: **broken**, {said}.")
             elif reached:
                 lines.append(f"- max_taps_to_goal: {limit}: kept, reached in {journey.plural(jr.taps, 'tap')}.")
