@@ -311,3 +311,14 @@ def test_a_root_that_is_itself_a_link_is_trusted_and_real_folders_below_it_are_w
     link(tmp_path / "home", real, directory=True)  # (~/.tapwright may well be a link the owner made)
     compare.save(tmp_path / "home" / "refs" / "app" / "home.png", screen(size=(32, 32)), root=tmp_path / "home")
     assert compare.load(real / "refs" / "app" / "home.png").size == (32, 32)
+
+
+def test_a_reference_is_copied_from_the_file_it_was_given_and_not_the_stores_of_that_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)))
+    own = tmp_path / "old.references" / "home.png"
+    compare.save(own, screen(size=(48, 48)))
+    folder, copied = compare.copy_to_script(["home"], "com.example.app", tmp_path / "new.json", {"home": own})
+    assert copied == 1 and compare.load(folder / "home.png").size == (48, 48)
+    compare.copy_to_script(["home"], "com.example.app", tmp_path / "other.json")  # without a source: the store's
+    assert compare.load(tmp_path / "other.references" / "home.png").size == (32, 32)

@@ -774,3 +774,51 @@ def test_a_references_folder_that_is_a_link_gets_no_reference_saved(tmp_path):
         assert "link" in str(e.value) and list(elsewhere.iterdir()) == []
         await finish(stop, task)
     run(go)
+
+
+def test_recording_a_replay_copies_the_reference_the_replay_compared_with(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # the store's "home": a white screen
+        show(d, (BLOCK, (0, 0, 0)))
+        shot = Image.new("RGB", (800, 1600), (255, 255, 255))
+        shot.paste((0, 0, 0), BLOCK)
+        buf = io.BytesIO()
+        shot.save(buf, "PNG")
+        mine = compare.fit(buf.getvalue(), 600)
+        compare.save(tmp_path / "old.references" / "home.png", mine)  # old.json's own "home": the screen with the block
+        compare.save(tmp_path / "old.references" / "second.png", mine)  # and one the store has no copy of
+        old = write_script(tmp_path, "old", [{"tool": "compare_screen", "name": "home"},
+                                             {"tool": "wait", "seconds": 0.1, "expect": {"matches": "second"}}])
+        await d.run_tool("a", "record", {"start": True, "name": "new"})
+        r = await d.run_tool("a", "replay", {"path": str(old)})  # the checks hold against the script's own pictures
+        assert r["text"].startswith("Ran 2 of 2 steps"), r["text"]
+        new = tmp_path / "new.json"
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(new)})
+        folder = tmp_path / "new.references"
+        assert r["text"].startswith(f"Saved 2 steps to {new}, and 2 reference pictures to {folder}"), r["text"]
+        assert sorted(p.name for p in folder.iterdir()) == ["home.png", "second.png"]
+        assert (folder / "home.png").read_bytes() == (tmp_path / "old.references" / "home.png").read_bytes()
+        assert (folder / "home.png").read_bytes() != stored(tmp_path, "home").read_bytes()  # not the store's
+        r = await d.run_tool("a", "replay", {"path": str(new)})  # and the new script's checks hold on their own
+        assert r["text"].startswith("Ran 2 of 2 steps"), r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_recording_a_replay_that_updates_its_references_copies_the_ones_it_made(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d, (BLOCK, (0, 0, 0)))
+        old = write_script(tmp_path, "old", [{"tool": "compare_screen", "name": "home"}])
+        await d.run_tool("a", "record", {"start": True, "name": "new"})
+        await d.run_tool("a", "replay", {"path": str(old), "update_references": True})
+        new = tmp_path / "new.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(new)})
+        made = tmp_path / "old.references" / "home.png"
+        assert made.is_file() and (tmp_path / "new.references" / "home.png").read_bytes() == made.read_bytes()
+        await finish(stop, task)
+    run(go)

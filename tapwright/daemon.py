@@ -71,9 +71,10 @@ NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or v
 _POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwright_policy", default=safety.DEFAULT)
 # Set to a list by run_tool; a touch a person's OK let through puts True in it, and the answer then ends with NOTE_ALLOWED
 _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright_granted", default=[])
-# Set to a list by the recording branch of run_tool; a compare_screen call puts the folder (bundle id) it compared in
-# there, for `_record_compare`. Per call, so another client's comparison can't change it.
-_COMPARED: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("tapwright_compared", default=None)
+# Set to a list by the recording branch of run_tool; a compare_screen call puts what it found there (the folder, the
+# bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
+# change it.
+_COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
@@ -385,6 +386,7 @@ class Compared:
     image: bytes | None = None
     percent: float | None = None
     folder: str | None = None  # the references folder (bundle id) it was compared in
+    source: pathlib.Path | None = None  # the reference file it was compared with, or saved: a script's own, or the store's
 
 
 def _reference_names(steps: list[dict]) -> set[str]:
@@ -931,14 +933,15 @@ class Daemon:
             return answer
         if name == "compare_screen" and client_id in self._recording:
             ignore = self._recorded_ignore(client_id, args)  # before the call: a ref that can't be saved is refused first
-            compared: list[str] = []
+            compared: list[Compared] = []
             token = _COMPARED.set(compared)
             try:
                 answer = await self._run_tool_inner(client_id, name, args, scope)
             finally:
                 _COMPARED.reset(token)
             # a step of a run stays the step the agent wrote; a call of its own is folded into the action before it
-            self._record_compare(client_id, args, ignore, compared[0] if compared else None, fold=BATCH.get() is None)
+            self._record_compare(client_id, args, ignore, compared[0].folder if compared else None,
+                                 compared[0].source if compared else None, fold=BATCH.get() is None)
             return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
@@ -1012,14 +1015,16 @@ class Daemon:
         return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
 
     def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
+                        source: pathlib.Path | None,
                         fold: bool = True) -> None:
         """While recording: a `compare_screen` right after an action becomes that step's `expect.matches` (beside the
         text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name` and
-        the `folder` (bundle id) it was compared in are remembered, so `stop` can copy the reference next to the
-        script (§14.3). A script keeps one picture per name: the same name in another app is refused."""
+        the `folder` (bundle id) it was compared in and the `source` file it was compared with (a replayed script's
+        own reference, say, not the store's of the same name) are remembered, so `stop` can copy that reference next
+        to the script (§14.3). A script keeps one picture per name: the same name in another app is refused."""
         rec = self._recording[client_id]
         folder = folder or self._bundle() or "unknown"
-        for bundle, seen in rec.get("references", ()):
+        for bundle, seen, _ in rec.get("references", ()):
             if seen == args["name"] and bundle != folder:
                 raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
                                             f"keeps one picture for each name; give the one in {folder} another name")
@@ -1028,7 +1033,7 @@ class Daemon:
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((folder, args["name"]))
+        rec.setdefault("references", []).append((folder, args["name"], source))
         last = rec["steps"][-1] if fold and rec["steps"] else None
         if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
@@ -1148,14 +1153,15 @@ class Daemon:
             del self._recording[client_id]
             # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
             wanted = _reference_names(rec["steps"])
-            bundles = {name: bundle for bundle, name in rec.get("references", ()) if name in wanted}
+            bundles = {name: bundle for bundle, name, _ in rec.get("references", ()) if name in wanted}
+            sources = {name: source for _, name, source in rec.get("references", ()) if name in wanted and source}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
             try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
-                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1]  # (small files: a few ms)
+                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path), sources)[1]  # (small files)
                              for name, bundle in bundles.items())
             except OSError as e:
                 copied = 0
@@ -1239,7 +1245,7 @@ class Daemon:
             notes.extend(done.notes)
         if recording and done.reason is None and client_id in self._recording:
             self._record_compare(client_id, {"name": expect["matches"], "threshold": expect.get("threshold")}, kept,
-                                 done.folder, fold=fold)
+                                 done.folder, done.source, fold=fold)
         return done.reason
 
     async def _expect_element(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
@@ -2096,7 +2102,7 @@ class Daemon:
             done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
                                        threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
             if (held := _COMPARED.get()) is not None:
-                held.append(done.folder or "unknown")
+                held.append(done)
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
@@ -2158,7 +2164,7 @@ class Daemon:
             except OSError as e:
                 raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
             return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes,
-                            folder=folder)
+                            folder=folder, source=dest)
         if before.size != after.size:
             raise Refused("bad_params", f'the reference "{name}" is {before.width}x{before.height} px and this screen is '
                                         f"{after.width}x{after.height}; take it at the same width, or update: true.")
@@ -2171,17 +2177,17 @@ class Daemon:
         share = compare.shown(result.percent, result.changed, threshold)
         if result.percent <= threshold:
             return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
-                            result.percent, folder)
+                            result.percent, folder, found)
         reason = compare.failure(name, result, threshold, scale)
         if check:
             if script is not None and (where := await asyncio.to_thread(self._write_diff, script["path"], name, result)):
                 reason += f" (diff: {where})"
-            return Compared("differs", [], notes, reason, None, result.percent, folder)
+            return Compared("differs", [], notes, reason, None, result.percent, folder, found)
         n = len(result.regions)
         lines = [f'Differs from the reference "{name}": {share} changed, in {n} region{"s" if n != 1 else ""} (points):',
                  *compare.region_lines(result.regions, scale, view.items)]
         image = await asyncio.to_thread(result.picture)
-        return Compared("differs", lines, notes, reason, image, result.percent, folder)
+        return Compared("differs", lines, notes, reason, image, result.percent, folder, found)
 
     @staticmethod
     def _write_diff(script: pathlib.Path, name: str, result: "compare.Result") -> str | None:

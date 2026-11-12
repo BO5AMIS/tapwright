@@ -355,11 +355,14 @@ def find(name: str, bundle: str, script: Path | None = None) -> Path | None:
     return stored if stored.is_file() else None
 
 
-def copy_to_script(names: list[str], bundle: str | None, script: Path) -> tuple[Path, int]:
-    """Copy the stored references of `names` next to a script. (the folder, how many were copied)"""
+def copy_to_script(names: list[str], bundle: str | None, script: Path,
+                   sources: dict[str, Path] | None = None) -> tuple[Path, int]:
+    """Copy the references of `names` next to a script. (the folder, how many were copied) A name in `sources` is
+    copied from that file (the one a check was made against: a replayed script's own, say); any other from the
+    store's folder for `bundle`, where _compare saved it."""
     folder, count = script_references(script), 0
     for name in dict.fromkeys(names):
-        source = reference_path(bundle or "unknown", name)  # the folder _compare saved it in
+        source = (sources or {}).get(name) or reference_path(bundle or "unknown", name)
         if source.is_file():
             data = source.read_bytes()
             write_file(folder / f"{name}.png", lambda out: out.write(data), script.parent)
