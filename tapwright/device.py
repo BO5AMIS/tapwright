@@ -56,6 +56,9 @@ PROMPT_RETRY = 300.0  # seconds after which a start is tried anyway, in case the
 PROMPT_PAUSES = (0.0, 30.0, 60.0, 120.0, 300.0)
 
 
+PASSCODE_WORDS = "asking for its passcode"  # in PasscodeNeeded's message; needs.py reads the daemon's detail by it
+
+
 class PasscodeNeeded(PhoneLocked):
     """iOS shows "Enter iPhone Passcode for "XCTest" / Enable UI Automation" and starts no UI test until a person
     types the passcode. It asks on a first run, and again now and then unless Settings > Developer > Enable UI
@@ -63,7 +66,7 @@ class PasscodeNeeded(PhoneLocked):
     all the daemon said was "reconnecting"). The phone isn't locked, but the cure is the same: its owner."""
 
     def __init__(self):
-        super().__init__("the phone is asking for its passcode to allow UI automation: enter it on the phone "
+        super().__init__(f"the phone is {PASSCODE_WORDS} to allow UI automation: enter it on the phone "
                          "(Settings > Developer > Enable UI Automation stops it asking)")
 
 

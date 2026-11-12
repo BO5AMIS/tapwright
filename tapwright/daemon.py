@@ -21,7 +21,8 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, ocr, params, performance, ui)
+from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
+               performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -674,6 +675,7 @@ class Daemon:
         # {agent: (the app, when, the person generation then)}: see _recheck_later and _check_again
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
+        self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
@@ -1002,10 +1004,20 @@ class Daemon:
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
         try:
-            return await self._run_tool_policed(client_id, name, args, scope)
+            answer = await self._run_tool_policed(client_id, name, args, scope)
+            return self._first_answer(client_id, answer) if outer else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+
+    def _first_answer(self, client_id: str, answer: dict) -> dict:
+        """The first answer an agent gets carries what only the phone's owner can clear (needs.py), as Note: lines. (A
+        refusal says its own: `locked` already names the passcode or the unlock.)"""
+        if client_id in self._greeted:
+            return answer
+        self._greeted.add(client_id)
+        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail) if item not in answer["text"]]
+        return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
