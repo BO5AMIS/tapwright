@@ -598,7 +598,8 @@ NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls afte
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
 LOG_RETRY, LOG_IDLE, LOG_WARMUP = 2.0, 60.0, 0.5
 LOG_DRAIN = 1.0  # seconds a log stream may go on after its process is gone: the last lines (the crash's) are still on their way
-LOG_VERIFY_FAILS = 2  # checks of whose process a log stream is reading that may fail in a row before the stream is left
+CRASH_LOOKUP = 15.0  # seconds each step of the optional crash check (the apps' executable names, the report search) may take
+LOG_VERIFY_FAILS = 2 # checks of whose process a log stream is reading that may fail in a row before the stream is left
 LOG_START_SLACK_MS = 1000  # an entry this much before a process's start time still counts as its own (clocks, rounding)
 LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0 # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
 # looks for a report once the app is gone, seconds between them, later calls that look again
@@ -653,6 +654,7 @@ class Daemon:
         self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
+        self.crash_lookup = CRASH_LOOKUP
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
         self._opened: str | None = None  # the app open_app last started: the app under test
@@ -1359,14 +1361,15 @@ class Daemon:
         """The newest report of that app, not yet told of, from `since` on; looked for `polls` times, as a report
         reaches the phone's folder a moment after the app has gone. None when there is none."""
         try:
-            exe = await self._executable(bundle)
+            # the whole lookup is optional and bounded, the installed-apps read as well as the report search
+            exe = await _wait_for(self._executable(bundle), self.crash_lookup)
         except Exception:
             return None
         if not exe:
             return None
         for n in range(polls):
             try:
-                found = await asyncio.wait_for(self.session.device.crash_reports(exe, 3, bundle), 15)
+                found = await _wait_for(self.session.device.crash_reports(exe, 3, bundle), self.crash_lookup)
             except Exception:
                 return None
             for report in found.reports:
@@ -1664,6 +1667,8 @@ class Daemon:
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the newest time each ring had then, on the phone's own clock
+            if i == 1:
+                await self._log_boundary(scope)  # the app's log is read, with the phone's replay, before the first mark
             marks = {b: r.latest() for b, r in self._rings.items()}
             if clock() - began > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
@@ -1716,6 +1721,23 @@ class Daemon:
         if failed:
             raise Refused(failed[0], answer["text"])
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
+
+    async def _log_boundary(self, scope: "Scope | None") -> None:
+        """Before a batch's first step: start reading the app's log if it isn't read, and wait for the phone's replay of
+        what the app logged before. Without that the ring is empty at the step's start, and the replay, arriving after,
+        would be shown as logged `since step 1`. Nothing when no app under test is known yet (a ring made later by
+        open_app has only the new process's lines)."""
+        try:
+            given = await self._given(scope) if scope is not None else None
+            bundle, _ = self._diag_app(given)
+        except Refused:
+            return
+        task = self._log_tasks.get(bundle)
+        if (task is None or task.done()) and bundle not in self._log_dead:
+            try:
+                await asyncio.wait_for(self._refresh_logs(bundle), 8)
+            except Exception:
+                pass
 
     async def _failure_logs(self, scope: "Scope | None", step: int, marks: dict[str, int | None]) -> list[str]:
         """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in
@@ -1992,7 +2014,11 @@ class Daemon:
                 raise Refused("not_allowed", _outside(bundle, named, names, alert))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
-            return {"text": f"{first}Note: {_outside(bundle, named, names, alert)}", "image": None, "image_size": None}
+            # what a stopped batch says of the given app itself (its logs since the step, its crash note) was made for
+            # that app alone, in personal mode, and stays when its screen is gone (CLI replay reads it)
+            app_only = diagnostics.junit_output(answer["text"])
+            text = f"{first}Note: {_outside(bundle, named, names, alert)}" + (f"\n{app_only}" if app_only else "")
+            return {"text": text, "image": None, "image_size": None}
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
@@ -2530,6 +2556,11 @@ class Daemon:
         launch = bool(args.get("launch"))
         seconds = float(args.get("seconds", performance.SECONDS_DEFAULT))
         meter, opened, unsettled = self.session.device.meter(bundle), None, False
+        crashes: list[str] = []  # the crash notes of the calls inside: their report is taken, the outer check won't find it
+
+        def keep_crash(answer: dict) -> None:
+            crashes.extend(ln[len("Note: "):] for ln in answer["text"].splitlines()
+                           if ln.startswith(CRASH_NOTE) and ln[len("Note: "):] not in crashes)
         token = _NESTED.set(True)
         try:
             # The meter starts before a launch closes the app: a phone that can't sample answers `unsupported` with the
@@ -2540,18 +2571,19 @@ class Daemon:
                 raise Refused("unsupported", f"the phone can't sample the app: {e}") from None
             try:
                 if launch:
-                    await self.run_tool(client_id, "close_app", {"app": bundle}, scope)
+                    keep_crash(await self.run_tool(client_id, "close_app", {"app": bundle}, scope))
                 # the window begins here: what the instruments gave while they were set up, and the app that was
                 # running before a launch, are dropped (the instruments stay ready)
                 await meter.begin_window(fresh=launch)
                 began = clock()
                 if launch:
                     answer = await self.run_tool(client_id, "open_app", {"app": bundle}, scope)
+                    keep_crash(answer)
                     opened = clock() - began
                     unsettled = NOTE_CAPPED.split("{cap")[0] in answer["text"]
                 else:
                     if args.get("tap") is not None:
-                        await self.run_tool(client_id, "tap", {"target": args["tap"], "look": False}, scope)
+                        keep_crash(await self.run_tool(client_id, "tap", {"target": args["tap"], "look": False}, scope))
                     await self.control.sleep(max(0.0, seconds - (clock() - began)))
             finally:
                 found = await meter.stop()
@@ -2563,7 +2595,7 @@ class Daemon:
         self._performed[client_id] = reading
         self._measured = {k: round(v, 2) if isinstance(v, float) else v for k, v in dataclasses.asdict(reading).items()
                           if v is not None and v is not False}
-        return _answer(performance.answer_lines(reading), notes)
+        return _answer(performance.answer_lines(reading), [*notes, *crashes])
 
     async def _filmstrip_logged(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
         """`filmstrip` as one tool call, with its line in the action log (its tap is logged as a tap, as usual)."""

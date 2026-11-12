@@ -536,6 +536,81 @@ def test_a_stream_that_starts_again_for_the_same_process_does_not_repeat_what_th
     run(go)
 
 
+def test_personal_mode_keeps_the_apps_logs_and_crash_note_when_the_crash_leaves_the_home_screen_in_front():
+    """CodeRabbit, PR #4: _withheld cut a stopped run to its first line once the app's screen was gone, taking the
+    app-scoped logs and crash note (which the CLI replay needs for its junit and crash pull) with it."""
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        d.session.app = ("Home screen", SPRINGBOARD)  # the crash left the home screen in front
+        message = ("Ran 0 of 1 steps; stopped at step 1 (tap e1): its action ran, but text \"x\" didn't appear.\n"
+                   "Screen 400x800 pt @3x · 1 elements\ne2 button \"OK\" id=ok-button @10,100 100x40\n"
+                   "Logs (since step 1):\n12:00:01.123 error fatal: lost the database\n"
+                   f"{NOTE}")
+        kept = await d._withheld("a", "run", {"text": message, "image": None}, {APP: "Example (com.example.app)"}, "Example")
+        lines = kept["text"].splitlines()
+        assert "Logs (since step 1):" in lines and "12:00:01.123 error fatal: lost the database" in lines
+        assert lines[-1] == NOTE or NOTE in lines
+        assert "outside_apps" in kept["text"] and "ok-button" not in kept["text"]  # the home screen's list is still not shown
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_batch_that_starts_before_log_collection_does_not_report_the_replay_as_since_the_step():
+    """CodeRabbit, PR #4: with no ring at the step's start the boundary was epoch zero, so the phone's replay of what
+    the app logged before the batch was labelled `since step 1`."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)  # in front, and logs never asked for
+        stop, task = await started(d)
+        assert APP not in d._rings
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        assert e.value.code == "expect_failed" and "an old error" not in str(e.value) and "Logs (since" not in str(e.value)
+        assert [x.text for x in d._rings[APP].entries] == ["an old error from before the batch"]  # (it is in the ring)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_executable_lookup_of_the_crash_check_has_the_same_deadline_as_the_report_search():
+    """CodeRabbit, PR #4: only crash_reports was bounded, so an installation proxy that never answered held the answer."""
+    async def go():
+        d = tuned(make())
+        d.crash_lookup = 0.05
+
+        async def never():
+            await asyncio.sleep(3600)
+        stop, task = await started(d)
+        d.session.apps = never  # (after start-up, which lists the apps itself)
+        d._executables.clear()
+        began = asyncio.get_running_loop().time()
+        assert await d._find_crash(APP, 1) is None
+        assert asyncio.get_running_loop().time() - began < 1.0
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_crash_found_by_the_tap_inside_performance_is_in_its_answer():
+    """CodeRabbit, PR #4: the nested tap consumed the report and its note was thrown away, so the outer check had none."""
+    from tapwright.performance import Measurement
+
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.device.measurement = Measurement(memory_mb=[100.0])
+        die(d, FakeReport())
+        r = await d.run_tool("a", "performance", {"seconds": 1, "tap": {"ref": "e1"}})
+        assert r["text"].splitlines()[-1] == NOTE and r["text"].count("the app crashed") == 1
+        await finish(stop, task)
+    run(go)
+
+
 START = BASE / 1000 - 100  # when the app's process started (epoch s): 100 s before BASE
 
 
