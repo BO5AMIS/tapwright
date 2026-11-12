@@ -155,21 +155,28 @@ def fit(png: bytes, width: int) -> Image.Image:
     return img
 
 
-def load(path: Path) -> Image.Image:
-    """A saved reference as an RGB picture; `bad_params` when the file isn't a picture, or is far larger than any
-    phone screen (a script's references come from anyone, so a huge one is refused before it is decoded)."""
+def read(path: Path) -> tuple[Image.Image, bytes]:
+    """A saved reference as an RGB picture, and the exact bytes it was decoded from (the file is read once, so the
+    two can't differ); `bad_params` when the file isn't a picture, or is far larger than any phone screen (a script's
+    references come from anyone, so a huge one is refused before it is decoded)."""
     unreadable = Refused("bad_params", f"the reference file {path} can't be read as a picture; save the reference "
                                        "again with update: true.")
     try:
-        with Image.open(path) as img:
+        data = path.read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > MAX_PIXELS:
                 raise Refused("bad_params", f"the reference file {path} is {img.width}x{img.height} px, larger than "
                                             "any screen; save the reference again with update: true.")
-            return img.convert("RGB")
+            return img.convert("RGB"), data
     except Refused:
         raise
     except (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
         raise unreadable from None
+
+
+def load(path: Path) -> Image.Image:
+    """A saved reference as an RGB picture (see `read`)."""
+    return read(path)[0]
 
 
 # Directory file descriptors (POSIX): the walk, the temporary file and the move all go through a folder that is held
@@ -301,9 +308,18 @@ def write_file(dest: Path, write: Callable[[BinaryIO], object], root: Path | Non
     (_write_anchored if ANCHORED else _write_by_path)(dest, write, root)
 
 
-def save(path: Path, image: Image.Image, root: Path | None = None) -> None:
-    """Write a reference as PNG (lossless: a reference must not drift), whole or not at all (see `write_file`)."""
-    write_file(path, lambda out: image.save(out, "PNG"), root)
+def encode(image: Image.Image) -> bytes:
+    """A reference's PNG bytes (lossless: a reference must not drift)."""
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    return out.getvalue()
+
+
+def save(path: Path, image: Image.Image, root: Path | None = None) -> bytes:
+    """Write a reference as PNG, whole or not at all (see `write_file`). The bytes that were written."""
+    data = encode(image)
+    write_file(path, lambda out: out.write(data), root)
+    return data
 
 
 # ---- the words ----
@@ -445,6 +461,16 @@ def find(name: str, bundle: str, script: Path | None = None) -> Path | None:
             return own
     stored = reference_path(bundle, name)
     return stored if stored.is_file() else None
+
+
+def export_to_script(pictures: dict[str, bytes], script: Path) -> tuple[Path, int]:
+    """Write the pictures (name -> the exact PNG bytes a recording's checks used) next to a script. (the folder, how
+    many were written) Nothing is read from the store or from any file: what a check used is what is exported, whoever
+    rewrote the reference since."""
+    folder = script_references(script)
+    for name, data in pictures.items():
+        write_file(folder / f"{name}.png", lambda out, data=data: out.write(data), script.parent)
+    return folder, len(pictures)
 
 
 def copy_to_script(names: list[str], bundle: str | None, script: Path,

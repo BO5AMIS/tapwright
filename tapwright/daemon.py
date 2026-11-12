@@ -77,8 +77,8 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 # change it.
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 # While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
-# source, digest), so `_compare` can refuse a save that would change one before it writes anything.
-_BASELINES: contextvars.ContextVar[list[tuple[str, str, pathlib.Path | None, str | None]] | None] = \
+# digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+_BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
     contextvars.ContextVar("tapwright_baselines", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
@@ -391,18 +391,15 @@ class Compared:
     image: bytes | None = None
     percent: float | None = None
     folder: str | None = None  # the references folder (bundle id) it was compared in
-    source: pathlib.Path | None = None  # the reference file it was compared with, or saved: a script's own, or the store's
+    # the exact bytes the check used: those it read from the reference it compared with, or wrote as the one it saved.
+    # A recording keeps these, never the path, so a later write to the file by anyone changes nothing it exports.
+    picture: bytes | None = None
 
 
-def _picture_digest(path: pathlib.Path | None) -> str | None:
-    """The hash of a reference file's content, as it is now (None when there is no file, or it can't be read): two
-    checks of one name in a recording are the same baseline only when this is the same."""
-    if path is None:
-        return None
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+def _picture_digest(data: bytes | None) -> str | None:
+    """The hash of the bytes a check used (None when it used none): two checks of one name in a recording are the same
+    baseline only when this is the same."""
+    return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
 def _reference_names(steps: list[dict]) -> set[str]:
@@ -974,7 +971,7 @@ class Daemon:
                 _COMPARED.reset(token)
             # a step of a run stays the step the agent wrote; a call of its own is folded into the action before it
             self._record_compare(client_id, args, ignore, compared[0].folder if compared else None,
-                                 compared[0].source if compared else None, fold=BATCH.get() is None)
+                                 compared[0].picture if compared else None, fold=BATCH.get() is None)
             return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
@@ -1048,24 +1045,25 @@ class Daemon:
         return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
 
     def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
-                        source: pathlib.Path | None,
+                        picture: bytes | None,
                         fold: bool = True) -> None:
         """While recording: a `compare_screen` right after an action becomes that step's `expect.matches` (beside the
-        text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name` and
-        the `folder` (bundle id) it was compared in and the `source` file it was compared with (a replayed script's
-        own reference, say, not the store's of the same name) are remembered, so `stop` can copy that reference next
-        to the script (§14.3). A script keeps one picture per name: the same name in another app is refused, and so is
-        the same name against another picture (the content of the file, as it is now) in the same app."""
+        text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name`, the
+        `folder` (bundle id) it was compared in and the `picture` (the exact bytes the check used: read from the
+        reference it was compared with, or written as the one it saved) are remembered, so `stop` writes those very
+        bytes next to the script (§14.3), whatever anyone writes to the store or the script's folder in between. A
+        script keeps one picture per name: the same name in another app is refused, and so is the same name against
+        other bytes in the same app."""
         rec = self._recording[client_id]
         folder = folder or self._bundle() or "unknown"
-        digest = _picture_digest(source)
-        for bundle, seen, _, before in rec.get("references", ()):
+        digest = _picture_digest(picture)
+        for bundle, seen, before in rec.get("references", ()):
             if seen != args["name"]:
                 continue
             if bundle != folder:
                 raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
                                             f"keeps one picture for each name; give the one in {folder} another name")
-            if digest is not None and before is not None and digest != before:
+            if digest is not None and digest != before:
                 raise Refused("bad_params", f'record: "{args["name"]}" was already compared against another picture in '
                                             "this recording; give this check another name.")
         extra: dict = {}
@@ -1073,7 +1071,12 @@ class Daemon:
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((folder, args["name"], source, digest))
+        if digest is not None:
+            # Bounded: a name has one picture in a recording (the guard above refuses any other), so `pictures` holds at
+            # most one PNG per name and `references` one entry per (app, name, picture), however many checks are made.
+            rec.setdefault("pictures", {}).setdefault(args["name"], picture)
+            if (folder, args["name"], digest) not in rec.setdefault("references", []):
+                rec["references"].append((folder, args["name"], digest))
         last = rec["steps"][-1] if fold and rec["steps"] else None
         if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
@@ -1191,18 +1194,17 @@ class Daemon:
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
-            # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
+            # the references the steps use travel with the script (§14.3): the exact bytes the checks used, never read
+            # from the store again (another client may have rewritten it since)
             wanted = _reference_names(rec["steps"])
-            bundles = {name: bundle for bundle, name, _, _ in rec.get("references", ()) if name in wanted}
-            sources = {name: source for _, name, source, _ in rec.get("references", ()) if name in wanted and source}
+            kept = {name: data for name, data in rec.get("pictures", {}).items() if name in wanted}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
             try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
-                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path), sources)[1]  # (small files)
-                             for name, bundle in bundles.items())
+                copied = compare.export_to_script(kept, pathlib.Path(path))[1]
             except OSError as e:
                 copied = 0
                 note.append(f"the reference pictures couldn't be copied to {folder}: {e.strerror or e}; copy them from "
@@ -1285,7 +1287,7 @@ class Daemon:
             notes.extend(done.notes)
         if recording and done.reason is None and client_id in self._recording:
             self._record_compare(client_id, {"name": expect["matches"], "threshold": expect.get("threshold")}, kept,
-                                 done.folder, done.source, fold=fold)
+                                 done.folder, done.picture, fold=fold)
         return done.reason
 
     async def _expect_element(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
@@ -2189,7 +2191,7 @@ class Daemon:
         png = await self._read(self.session.screenshot_png)
         if given is not None:  # the picture is saved or compared only if a given app was still in front for it
             await self._still_given(given)
-        before = await asyncio.to_thread(compare.load, found) if found is not None else None
+        before, before_bytes = await asyncio.to_thread(compare.read, found) if found is not None else (None, None)
         size = width or (before.width if before is not None and check else shotlib.DEFAULT_WIDTH)
         if not shotlib.MIN_WIDTH <= size <= shotlib.MAX_WIDTH:  # a reference's own width is a script's, not ours
             raise Refused("bad_params", f'the reference "{name}" is {size} px wide, and a screen picture is '
@@ -2201,11 +2203,11 @@ class Daemon:
             trusted = script["path"].parent if keep else compare.references_dir()  # nothing below it may be a link
             await asyncio.to_thread(self._refuse_changed_baseline, name, folder, after)  # before anything is written
             try:
-                await asyncio.to_thread(compare.save, dest, after, trusted)
+                written = await asyncio.to_thread(compare.save, dest, after, trusted)
             except OSError as e:
                 raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
             return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes,
-                            folder=folder, source=dest)
+                            folder=folder, picture=written)
         if before.size != after.size:
             raise Refused("bad_params", f'the reference "{name}" is {before.width}x{before.height} px and this screen is '
                                         f"{after.width}x{after.height}; take it at the same width, or update: true.")
@@ -2218,17 +2220,17 @@ class Daemon:
         share = compare.shown(result.percent, result.changed, threshold)
         if result.percent <= threshold:
             return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
-                            result.percent, folder, found)
+                            result.percent, folder, before_bytes)
         reason = compare.failure(name, result, threshold, scale)
         if check:
             if script is not None and (where := await asyncio.to_thread(self._write_diff, script["path"], name, result)):
                 reason += f" (diff: {where})"
-            return Compared("differs", [], notes, reason, None, result.percent, folder, found)
+            return Compared("differs", [], notes, reason, None, result.percent, folder, before_bytes)
         n = len(result.regions)
         lines = [f'Differs from the reference "{name}": {share} changed, in {n} region{"s" if n != 1 else ""} (points):',
                  *compare.region_lines(result.regions, scale, view.items)]
         image = await asyncio.to_thread(result.picture)
-        return Compared("differs", lines, notes, reason, image, result.percent, folder, found)
+        return Compared("differs", lines, notes, reason, image, result.percent, folder, before_bytes)
 
     @staticmethod
     def _refuse_changed_baseline(name: str, folder: str, picture: "Image.Image") -> None:
@@ -2240,16 +2242,14 @@ class Daemon:
             return
         # the same name in another app is refused here too, before the save (it was refused only after, so a replay
         # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
-        other = next((bundle for bundle, was, _, _ in seen if was == name and bundle != folder), None)
+        other = next((bundle for bundle, was, _ in seen if was == name and bundle != folder), None)
         if other is not None:
             raise Refused("bad_params", f'this recording already compares "{name}" in {other}, and a script keeps one '
                                         f"picture for each name; give the one in {folder} another name")
-        wanted = [digest for bundle, was, _, digest in seen if was == name and bundle == folder and digest is not None]
+        wanted = [digest for bundle, was, digest in seen if was == name and bundle == folder]
         if not wanted:
             return
-        out = io.BytesIO()
-        picture.save(out, "PNG")  # the bytes compare.save would write
-        if hashlib.sha256(out.getvalue()).hexdigest() not in wanted:
+        if hashlib.sha256(compare.encode(picture)).hexdigest() not in wanted:  # (the bytes compare.save would write)
             raise Refused("bad_params", f'record: "{name}" was already compared against another picture in this '
                                         "recording; give this check another name.")
 

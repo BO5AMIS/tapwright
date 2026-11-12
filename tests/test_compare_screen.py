@@ -940,7 +940,7 @@ def test_the_same_name_in_another_app_is_refused_before_its_picture_is_saved(tmp
     first = tmp_path / "home.png"
     Image.new("RGB", (4, 4), (255, 0, 0)).save(first)
     before = first.read_bytes()
-    token = daemon_module._BASELINES.set([("com.example.a", "home", first, None)])
+    token = daemon_module._BASELINES.set([("com.example.a", "home", "0" * 64)])
     try:
         with pytest.raises(Refused) as e:
             daemon_module.Daemon._refuse_changed_baseline("home", "com.example.b", Image.new("RGB", (4, 4), (0, 0, 255)))
@@ -1074,5 +1074,26 @@ def test_checks_queued_behind_a_recordings_restart_use_the_new_recording(tmp_pat
         path = tmp_path / "new.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(path)})
         assert (tmp_path / "new.references" / "home.png").read_bytes() == a_bytes
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_exports_the_bytes_its_check_used_even_if_another_client_rewrites_the_store(tmp_path):
+    """Codex's case (PR #3 cycle 8): client "a" records a check of "home" (picture A); client "b", which is not
+    recording, saves "home" again as picture B in the same app's store; then "a" stops. No overlap is needed: the
+    recording kept the bytes its check used, so the export is A's own, and b's save is allowed."""
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)  # picture A
+        await d.run_tool("a", "record", {"start": True, "name": "mine"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # saves A as the store's "home"
+        a_bytes = stored(tmp_path, "home").read_bytes()
+        show(d, (BLOCK, (0, 0, 0)))  # picture B
+        await d.run_tool("b", "compare_screen", {"name": "home", "update": True})  # b isn't recording: allowed
+        assert stored(tmp_path, "home").read_bytes() != a_bytes  # the store now holds B
+        path = tmp_path / "mine.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert (tmp_path / "mine.references" / "home.png").read_bytes() == a_bytes  # the export is A's, not the store's
         await finish(stop, task)
     run(go)
