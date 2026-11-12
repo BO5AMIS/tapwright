@@ -977,3 +977,36 @@ def test_m5_the_naming_memory_skips_a_withheld_look_and_is_scoped_to_the_journey
         assert uxcheck.screens_seen("a") == []
         await finish(stop, task)
     run(go)
+
+
+def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_re_police_before_the_second_touch(reports):
+    class Swapping(DescribingSession):
+        swap: list | None = None
+
+        async def tap(self, target, hold_ms=60):
+            done = await super().tap(target, hold_ms)
+            if self.swap is not None:
+                self.tree, self.swap = self.swap, None
+            return done
+
+    async def go():
+        session = Swapping()
+        session.tree = [button("e1", "Buy now", "buy"), el("e2", "text", "Today")]
+        d = make(session)
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        session.tap_points.clear()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"text": "Buy now"}})
+        assert e.value.code == "not_allowed" and "double_tap on an element the safety policy holds" in str(e.value)
+        assert session.tap_points == []
+        # a harmless button; the first touch brings a "Delete" under the finger: the second touch is not sent
+        session.tree = [button("e1", "Log meal", "log"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
+        session.swap = [button("e1", "Delete all", "del"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
+        session.tap_points.clear()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 60, "y": 120}})
+        assert "safety policy holds" in str(e.value) and "Delete all" in str(e.value)
+        assert len(session.tap_points) == 1
+        await finish(stop, task)
+    run(go)

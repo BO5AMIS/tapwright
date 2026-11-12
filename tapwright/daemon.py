@@ -3587,6 +3587,9 @@ class Daemon(journey_tool.JourneyTools):
             return ""
         kind, word = hit
         what = f"{element.role} {ui.clip(element.text)}"
+        if _DOUBLE.get():  # two touches under one check would act twice on what the policy holds back
+            raise Refused("not_allowed", f'double_tap on an element the safety policy holds: {what} (policy word '
+                                         f'"{word}"). Do one tap instead; a person\'s OK is for a single touch.')
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
@@ -3691,6 +3694,14 @@ class Daemon(journey_tool.JourneyTools):
         done = await self.session.tap(target, hold_ms=hold_ms)
         if _DOUBLE.get():
             await asyncio.sleep(DOUBLE_TAP_GAP)
+            # what is there now: the first touch may have put another screen under the finger (read again, police again)
+            items = (await self.session.refresh()).items
+            if target.kind == "point":
+                under = self._element_at((target.x, target.y), items)
+            else:
+                found = ui.resolve(items, target)
+                under = self._element_at(found, items) if isinstance(found, tuple) else found
+            self._police("tap", {}, under)
             await self.session.tap(target, hold_ms=hold_ms)
         return done
 
