@@ -36,7 +36,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import store
+from . import diagnostics, store
 from .repair import Phone, run_fixes
 
 
@@ -506,7 +506,13 @@ def replay(a) -> int:
         except client.DaemonError as e:
             print(f"{f}: Error {e.code}: {e}")
             kind = "error" if e.code in START_CODES and not str(e).startswith("Ran ") else "failed"
-            results.append((f, kind, f"{e.code}: {e}", time.monotonic() - began))
+            message = f"{e.code}: {e}"
+            if str(e).startswith("Ran ") and diagnostics.CRASHED in str(e):
+                # the app crashed: its report is pulled next to the script and named (AGENT-TOOLS §15.4)
+                if saved := pull_crash_beside(path):
+                    message += "\n" + diagnostics.FAILURE_CRASH_FILE.format(path=saved)
+                    print(f"{f}: {diagnostics.FAILURE_CRASH_FILE.format(path=saved)}")
+            results.append((f, kind, message, time.monotonic() - began))
             continue
         print(f"{f}: {answer.get('text', '')}")
         results.append((f, "ok", "", time.monotonic() - began))
@@ -514,6 +520,26 @@ def replay(a) -> int:
         write_junit(a.junit, results)
     kinds = {r[1] for r in results}
     return 2 if "error" in kinds else 1 if "failed" in kinds else 0
+
+
+def pull_crash_beside(script: str) -> str | None:
+    """The app's newest crash report (the daemon's `crash` with pull), copied to
+    `<script dir>/<script name>.diff/<script name>.crash.ips`; its path, or None when there is none to copy."""
+    import re
+    import shutil
+    from . import client
+    try:
+        text = client.call("crash", {"pull": True}, "cli-replay", timeout=60.0).get("text", "")
+        saved = re.search(r"^Saved: (.+)$", text, re.M)
+        if saved is None:
+            return None
+        path = Path(script)
+        target = path.parent / f"{path.stem}.diff" / f"{path.stem}.crash.ips"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(saved.group(1), target)
+        return str(target)
+    except (client.DaemonError, OSError):
+        return None
 
 
 def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
@@ -529,6 +555,8 @@ def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
         if kind != "ok":
             node = ET.SubElement(case, "failure" if kind == "failed" else "error", message=message.splitlines()[0])
             node.text = message
+            if output := diagnostics.junit_output(message):  # the app's log lines and crash, for whoever reads the report
+                ET.SubElement(case, "system-out").text = output
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
 
