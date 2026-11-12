@@ -254,17 +254,14 @@ def test_a_phone_without_the_profile_is_unsupported_and_leaves_no_condition():
     run(go)
 
 
-def test_the_condition_ends_when_the_link_drops():
+def test_the_condition_ends_when_the_tunnel_goes():
+    """(A WebDriverAgent hiccup keeps it: test_review_14.) The device reports a new tunnel through on_network_end."""
     async def go():
         d = make()
         stop, task = await started(d)
         await d.run_tool("a", "network", {"mode": "3g"})
         d.lost(ConnectionLost("gone"))
-        assert d.session.device.network_calls[-1] == ("drop",)
-        for _ in range(300):
-            if d.state == "live" and d._attempts > 1:
-                break
-            await __import__("asyncio").sleep(0.01)
+        d.session.device.on_network_end("the phone's connection was rebuilt")
         assert "Network:" not in (await d.run_tool("a", "look", {"screenshot": False}))["text"]
         await finish(stop, task)
     run(go)

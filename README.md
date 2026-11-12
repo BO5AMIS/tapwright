@@ -127,7 +127,7 @@ repository too.
 
 | Tool | What it does |
 |---|---|
-| `apps`, `open_app`, `close_app` | the apps you installed (TestFlight and development builds included); open one by bundle id or name, or close it; `open_app` can open it in another `language`, `region` or `text_size` (for that launch only, nothing in Settings changes) |
+| `apps`, `open_app`, `close_app` | the apps you installed (TestFlight and development builds included); open one by bundle id or name, or close it; `open_app` can open it in another `language`, `region` or `text_size` (for that launch only, nothing in Settings changes); with those arguments the app is closed first, so a launch that fails leaves it closed |
 | `look` | the screen: every visible element (role, text, id, position in points, what you can do with it) and a screenshot; `ocr: true` also reads the text in the picture that no element carries (games, canvases, web views), as refs `o1`, `o2` a touch can take (`pip install "tapwright[ocr]"`, about 300 MB, runs on the computer's CPU, about 1.5 s) |
 | `tap`, `long_press`, `toggle` | by element `{id}` (`testID`/accessibility identifier), `{label}`, `{text}`, `{ref}` from the last list, or `{x, y}` |
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
@@ -136,7 +136,7 @@ repository too.
 | `alert` | accept, dismiss or read system alerts (permission prompts) |
 | `press_button` | home, volume |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
-| `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session. Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
+| `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). A safety policy with `network` in its `block` list refuses it (`normal` always works). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
 | `open_url` | deep links |
 | `viewer` | opens the live view in a browser on this computer, for you (the agent never gets the link: its key could approve a held-back touch) |
 | `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once |

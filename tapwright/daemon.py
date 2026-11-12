@@ -563,6 +563,7 @@ FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notifica
 FRONT_WATCH = 0.15  # s between front-app questions while a filmstrip films in personal mode
 NETWORK_IDLE = 600.0  # s without a call from the agent that set a network condition before it is cleared
 NETWORK_CHECK = 30.0  # s between those checks
+NETWORK_MAX = 1800.0  # s a condition may last from the moment it was set, whatever its agent does (30 min)
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
 # whatever row lies under it. It is in no app's tree, so a row half under it looked reachable: a tap on Settings'
@@ -712,7 +713,11 @@ class Daemon:
         # the phone isn't left slow after that agent's session ends (the daemon itself may live on for others)
         self._network_by: str | None = None
         self._network_seen = 0.0
+        self._network_set_at = 0.0  # when it was set (the hard cap NETWORK_MAX counts from here)
         self._network_watch: asyncio.Task | None = None
+        self._network_notes: dict[str, str] = {}  # {agent: why its condition ended}, told in its next answer
+        # the device reports a condition that ended by itself or with its tunnel (L6)
+        self.session.device.on_network_end = self._network_over
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -778,15 +783,19 @@ class Daemon:
             self._announced = message
 
     # ---- network conditions (AGENT-TOOLS §16.4) ----
-    def _drop_network(self) -> None:
-        """The condition is over: the link dropped, so the connection that held it goes with it."""
-        if self._network is not None:
-            self.log(f"network: {self._network} ended with the connection")
+    def _network_over(self, why: str) -> None:
+        """The condition is over without the daemon asking: its connection died, or the tunnel went (the device
+        calls this). The agent that set it is told in its next answer."""
+        if self._network is None:
+            return
+        self.log(f"network: {self._network} ended: {why}")
+        self._tell_network_setter(f"the network condition ended: {why}.")
         self._network = None
         self._stop_network_watch()
-        drop = getattr(self.session.device, "drop_network", None)
-        if drop is not None:
-            drop()
+
+    def _tell_network_setter(self, text: str) -> None:
+        if self._network_by is not None:
+            self._network_notes[self._network_by] = text
 
     async def _clear_network(self) -> None:
         """Back to normal, politely (the phone's condition ends when the connection that holds it closes)."""
@@ -811,7 +820,16 @@ class Daemon:
         most likely ended, and the phone shouldn't stay slow for whoever uses it next (AGENT-TOOLS §16.4)."""
         while self._network is not None:
             await asyncio.sleep(NETWORK_CHECK)
-            if self._network is not None and time.monotonic() - self._network_seen > NETWORK_IDLE:
+            if self._network is None:
+                return
+            now = time.monotonic()
+            if now - self._network_set_at > NETWORK_MAX:
+                # the hard cap: an agent that keeps calling can't keep the owner's phone slow for good
+                self.log(f"network: {self._network} cleared, it had been on for {NETWORK_MAX:g} s")
+                self._tell_network_setter(f"the network condition ended after {NETWORK_MAX / 60:g} min; set it again "
+                                          "if the test needs it.")
+                await self._clear_network()
+            elif now - self._network_seen > NETWORK_IDLE:
                 self.log(f"network: {self._network} cleared, its agent {self._network_by} has been quiet "
                          f"{NETWORK_IDLE:g} s")
                 await self._clear_network()
@@ -828,6 +846,14 @@ class Daemon:
             self.log("network: normal")
             self._announce("agent", "network", label="normal")
             return _answer([network.line(mode)], notes)
+        # The owner's decision (2026-11-12): `network` is open to every agent, personal mode included, within the
+        # limits above (idle clear, NETWORK_MAX); a policy can shut it off by holding the word `network` in `block`.
+        blocked = _POLICY.get().blocks_tool("network", self._app_bundle())
+        if blocked == "global":
+            raise Refused("not_allowed", "blocked: the safety policy blocks network here.")
+        if blocked == "app":
+            app = (self.session.app or (None, None))[0] or self._app_bundle()
+            raise Refused("not_allowed", f"blocked: the safety policy blocks network for {app}.")
         if device.rsd is None:
             raise self._not_connected()
         if mode in network.BREAKING and str(getattr(device, "via", "") or "").lower() != "usb":
@@ -836,12 +862,16 @@ class Daemon:
                                          "or use 3g.")
         try:
             profile = await device.set_network(mode)
-        except ConnectionLost:
-            raise
+        except ConnectionLost as e:
+            self.lost(e)
+            raise Refused("reconnecting", "the connection dropped while setting the network; wait a few seconds, "
+                                          "then look and set it again") from None
         except DeviceError as e:
             raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
         self._network = mode
         self._network_by, self._network_seen = client_id, time.monotonic()
+        self._network_set_at = self._network_seen
+        self._network_notes.pop(client_id, None)
         if self._network_watch is None:
             self._network_watch = asyncio.create_task(self._watch_network(), name="network-watch")
         self.log(f"network: {mode} ({profile})")
@@ -860,7 +890,9 @@ class Daemon:
             self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
-        self._drop_network()  # the phone is never left in a condition by a link that has dropped
+        # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
+        # mends without a new tunnel, and the condition lives on the instruments connection, not on WebDriverAgent.
+        # The hold reports its own death (Device._hold_died), and a new tunnel ends it (Device.connect).
         self._lost.set()
 
     def _not_connected(self) -> Refused:
@@ -1109,6 +1141,8 @@ class Daemon:
             answer = await self._run_tool_policed(client_id, name, args, scope)
             if outer:
                 answer = self._with_network(name, answer)
+                if (ended := self._network_notes.pop(client_id, None)) is not None and name != "network":
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
             return self._first_answer(client_id, answer) if outer else answer
         finally:
             if ptoken is not None:
@@ -1134,7 +1168,9 @@ class Daemon:
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
-            return self._session_report(client_id, args)
+            if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
+                raise Refused("not_allowed", NO_APPS)
+            return await self._session_report(client_id, args)
         known = self._hunt_known(client_id, name, args)
         if name == "filmstrip":
             return await self._filmstrip_logged(client_id, args, scope)
@@ -1201,14 +1237,19 @@ class Daemon:
             return None
         return True
 
-    def _session_report(self, client_id: str, args: dict) -> dict:
+    async def _session_report(self, client_id: str, args: dict) -> dict:
         """`session_report` (AGENT-TOOLS §16.1): where this agent's calls went, from the action log."""
         since = args.get("since")
-        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0):
+        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0
+                                  or not math.isfinite(since)):
             raise Refused("bad_params", "since is a time in epoch milliseconds, like 1762950000000.")
+        if since is not None:
+            since = report.to_epoch_ms(since)
         if self.actions.folder is None:
             return _answer(["The call log is off (tapwright serve --no-log), so there is nothing to report."])
-        entries = report.read_entries(self.actions.folder)
+        # the log is read in a worker thread (many files), and only the day files the window can reach
+        entries = await asyncio.to_thread(report.read_entries, self.actions.folder,
+                                          int(since) if since is not None else None)
         start = int(since) if since is not None else report.client_start(entries, client_id)
         return _answer([report.build(entries, client_id, start)])
 
@@ -1217,12 +1258,12 @@ class Daemon:
                     known_off: bool | None = None) -> None:
         """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
         its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
-        told = self._announced or {}
+        read = name in READ_KINDS
+        told = {} if read else (self._announced or {})  # a read carries nothing of the action before it
         message = str(error) if error is not None else ""
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
         said = answer["text"] if answer is not None else message
-        read = name in READ_KINDS
         self.actions.write({
             "source": "tapwright", "by": "agent", "client": client, "tool": name, "kind": "read" if read else None,
             "target": actionlog.target_of(args.get("target")),
@@ -1231,7 +1272,8 @@ class Daemon:
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "answer_chars": len(said) if isinstance(said, str) else None,
             "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
-            "confirmed": True if self._granted_now else None,
+            "confirmed": True if self._granted_now and not read else None,
+            "screenshot": True if name == "look" and args.get("screenshot") is True else None,
             "to": args.get("to") if name == "scroll" else None,
             "labels": True if name == "look" and args.get("labels") else None,
             "ocr": True if name == "look" and args.get("ocr") else None,
@@ -1721,6 +1763,7 @@ class Daemon:
         failed: tuple[str, str] | None = None
         done = 0
         marks: dict[str, int | None] = {}
+        set_here = False
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the newest time each ring had then, on the phone's own clock
@@ -1732,6 +1775,8 @@ class Daemon:
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
+                if step["tool"] == "network":  # a condition this script set, until a step sets it back to normal
+                    set_here = step.get("mode") != "normal"
                 lines = answer["text"].splitlines()
                 step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
                                for line in lines if line.startswith("Note: ")]
@@ -1760,6 +1805,11 @@ class Daemon:
                                            f"{why}")
                 break
             done += 1
+        if failed and set_here and self._network is not None:
+            # a script that stops before its own `normal` step would leave the phone slow until the idle clear; one
+            # that finishes decides for itself
+            await self._clear_network()
+            step_notes.append("Note: the network condition this script set was cleared because it stopped at a failing step.")
         first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
         if args.get("look", True):
             view.unlooked = 0  # the block covers the batch: one call, not "N actions ago"
@@ -2217,6 +2267,9 @@ class Daemon:
         except Refused as e:
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
+            if e.code == "ambiguous" and self._other_app_shown():
+                head = str(e).split("\nCandidates:", 1)[0]
+                raise Refused("ambiguous", f'{head}\nLook again, then add "index" (0-based) or use a ref.') from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
                 said = str(e)
@@ -3259,10 +3312,18 @@ class Daemon:
         named = self._front_line(front) if front is not None else "a sheet or menu"
         return f"; {named} is still open: tap its close control."
 
+    def _other_app_shown(self) -> bool:
+        """Personal mode only: is the app of the last read not one of the given apps? Then its labels are not shown
+        (another app may have come to the front since the check before the call)."""
+        given = _GIVEN.get()
+        return given is not None and self._app_bundle() not in given
+
     def _closest(self, view, target: ui.Target | None, message: str) -> str:
         """The `Closest:` line of a `not_found` for an id, label or text (AGENT-TOOLS §16.2), or "". An `index` past
         the matches already has them: it adds nothing."""
         if target is None or target.point is not None or target.ref is not None or "out of range" in message:
+            return ""
+        if self._other_app_shown():
             return ""
         hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
         off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
@@ -3278,11 +3339,14 @@ class Daemon:
             return False
         s = self.session
         try:
-            hit = ui.resolve(getattr(s, "offscreen", []), dataclasses.replace(target, index=0))
-        except Refused:
-            return False  # not off screen either: the action says not_found
-        if not isinstance(hit, ui.Element):
-            return False
+            # the element _scroll_to will bring on screen: the same lookup, `index` counted through both lists
+            hit = self._anywhere(view, target)
+        except Refused as e:
+            if e.code == "not_found":
+                return False  # not off screen either: the action says not_found
+            raise
+        if not isinstance(hit, ui.Element) or any(hit is e for e in view.items):
+            return False  # (on screen already: the action touches it where it is)
         said = ""
         if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
             said = self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
