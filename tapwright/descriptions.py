@@ -203,6 +203,23 @@ EXTRA = {
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
+    'logs': (
+        "The app's own log: what it wrote to the phone's unified log (os_log, NSLog, print; React Native's console in "
+        'a release build). `since` (epoch ms: only newer entries), `level` (`error`, `warning` or `info`, default '
+        '`info`: that level and above), `grep` (a plain substring, ignoring case), `limit` (1-500, default 100: the '
+        'newest). Answers one line per entry, oldest first, `HH:MM:SS.mmm <level> <text>` (text is cut at 300 '
+        'characters, saying how much is missing), then `Latest: <epoch ms>` to pass back as `since`. Only the app\'s '
+        "own process is read, never another's; it is kept from when the app is opened or `logs` is first used, the last "
+        '2000 entries. iOS has no warning level: `error` is an error or fault, `warning` a plain line that says warn, '
+        'error, exception, fatal or failed.'
+    ),
+    'crash': (
+        "The app's crash reports on the phone since the session began, and only the app's own: the time, the "
+        "exception type and reason, the crashed thread's top 8 frames with the app's own frames marked `*`, and the "
+        "report's file name. `all: true` shows the last 5, not only the newest. `pull: true` copies the full `.ips` "
+        'into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash report for <app> since the '
+        "session began.` Frames show the report's own symbols; full symbols need the app's dSYM files."
+    ),
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '
         'a clean run.'
