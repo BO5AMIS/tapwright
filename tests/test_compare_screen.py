@@ -929,3 +929,50 @@ def test_a_recording_allows_one_name_compared_twice_against_the_same_picture(tmp
         assert [s["name"] for s in json.loads(path.read_text("utf-8"))["steps"]] == ["home", "home", "home"]
         await finish(stop, task)
     run(go)
+
+
+def test_the_same_name_in_another_app_is_refused_before_its_picture_is_saved(tmp_path):
+    """A replay with update_references compares "home" in app A, then in app B: the second is refused before it
+    writes, so A's picture stays the baseline on disk (Codex, PR #3 cycle 5)."""
+    from PIL import Image
+    from tapwright import daemon as daemon_module
+    from tapwright.control import Refused
+    first = tmp_path / "home.png"
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(first)
+    before = first.read_bytes()
+    token = daemon_module._BASELINES.set([("com.example.a", "home", first, None)])
+    try:
+        with pytest.raises(Refused) as e:
+            daemon_module.Daemon._refuse_changed_baseline("home", "com.example.b", Image.new("RGB", (4, 4), (0, 0, 255)))
+        assert e.value.code == "bad_params" and "already compares \"home\" in com.example.a" in str(e.value)
+        daemon_module.Daemon._refuse_changed_baseline("other", "com.example.b", Image.new("RGB", (4, 4), (0, 0, 255)))
+    finally:
+        daemon_module._BASELINES.reset(token)
+    assert first.read_bytes() == before
+
+
+def test_a_replay_updating_one_name_in_two_apps_keeps_the_first_apps_picture(tmp_path):
+    """Codex's case (PR #3 cycle 5): while recording, a replay with update_references compares "home" in app A, then
+    in app B. B's check is refused before it writes, so the script's own reference and what `record stop` exports
+    stay A's picture, byte for byte."""
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)  # picture A
+        flow = write_script(tmp_path, "flow", [{"tool": "compare_screen", "name": "home"}])
+        await d.run_tool("a", "record", {"start": True, "name": "new"})
+        await d.run_tool("a", "replay", {"path": str(flow), "update_references": True})
+        own = tmp_path / "flow.references" / "home.png"
+        original = own.read_bytes()
+        d.session.app = ("Other", "com.example.other")
+        show(d, (BLOCK, (0, 0, 0)))  # picture B, in another app
+        with pytest.raises(Refused):
+            await d.run_tool("a", "replay", {"path": str(flow), "update_references": True})
+        assert own.read_bytes() == original  # refused before anything was written
+        d.session.app = ("Example", "com.example.app")
+        path = tmp_path / "new.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert (tmp_path / "new.references" / "home.png").read_bytes() == original
+        assert own.read_bytes() == original
+        await finish(stop, task)
+    run(go)

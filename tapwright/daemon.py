@@ -2226,6 +2226,12 @@ class Daemon:
         seen = _BASELINES.get()
         if not seen:
             return
+        # the same name in another app is refused here too, before the save (it was refused only after, so a replay
+        # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
+        other = next((bundle for bundle, was, _, _ in seen if was == name and bundle != folder), None)
+        if other is not None:
+            raise Refused("bad_params", f'this recording already compares "{name}" in {other}, and a script keeps one '
+                                        f"picture for each name; give the one in {folder} another name")
         wanted = [digest for bundle, was, _, digest in seen if was == name and bundle == folder and digest is not None]
         if not wanted:
             return
