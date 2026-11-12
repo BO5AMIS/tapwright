@@ -203,6 +203,19 @@ EXTRA = {
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
+    'performance': (
+        "Measures the app in front: memory and CPU of its own process, and the screen's frame rate. "
+        "`launch: true` closes the app and starts it cold, and times it to the first settled screen "
+        "(`Opened in 1.42 s (to the first settled screen).`); otherwise it measures `seconds` (0.5-30, default 3), "
+        "around a `tap` (a target, tapped through the same checks as `tap`) if you give one. Answers "
+        "`Measured 3.0 s.` then `Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps (lowest 41); 3 drops "
+        "under 45 fps.`; what couldn't be measured is left out and named last: `Not measured here: frames.` A drop "
+        "is a second under 45 fps (the phone gives a frame rate once a second, not frame times). It costs no image. "
+        "In `run` and scripts, a `performance` step may carry `expect: {\"under\": {\"launch_s\": 2.0, "
+        "\"memory_mb\": 300, \"cpu_percent\": 60, \"fps_min\": 45, \"drops\": 0}}`: memory is its peak, CPU its "
+        "average; a limit that isn't kept stops the run (`expect_failed: opened in 2.6 s, over 2.0 s`). "
+        "`js_heap_mb` and `busy_ms` are Tapline's and are ignored here with a note."
+    ),
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '
         'a clean run.'

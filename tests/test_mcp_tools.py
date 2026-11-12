@@ -25,6 +25,7 @@ EXPECTED = {
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
     "audit": {"types"},
+    "performance": {"launch", "seconds", "tap"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot"},
     "record": {"start", "stop", "name", "path"},
     "replay": {"name", "path", "look", "screenshot"},
