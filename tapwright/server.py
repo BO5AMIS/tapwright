@@ -387,10 +387,13 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
     """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
     import uvicorn
 
-    from .client import healthy, viewer_url
+    from .client import healthy
 
+    # Nothing here prints the live view's link with its key: an app around the terminal that hides keys in what it
+    # shows (T3 Code shows ?token=SECRET) opened that hidden copy as a browser tab each time a daemon started, and the
+    # tab could only fail (2026-11-12). `tapwright view` opens the real link.
     def running(found: dict) -> int:
-        print(f"already running: {viewer_url(found)}", flush=True)
+        print(f"already running on port {found.get('port')}; open the live view with `tapwright view`", flush=True)
         if new_token:
             print("the running daemon keeps its token; stop it first (tapwright serve --stop) to get a new one",
                   flush=True)
@@ -436,7 +439,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,
                                     "started": int(time.time())})
             log.info("listening on http://127.0.0.1:%d", actual)
-            print(f"Tapwright live view: http://127.0.0.1:{actual}/?token={token}", flush=True)
+            print(f"Tapwright is serving on port {actual}; open the live view with `tapwright view`", flush=True)
             serving = asyncio.create_task(server.serve(sockets=[sock]))
             helpers = [asyncio.create_task(daemon.supervise(stop))]
             if not keep_alive:

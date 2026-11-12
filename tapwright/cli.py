@@ -504,7 +504,9 @@ def view() -> int:
     except client.DaemonError as e:
         print(f"couldn't start the live view: {e}")
         return 1
-    print(f"Tapwright live view: {url}")
+    # The link carries the key, and is never printed: an app around the terminal that hides keys in what it shows
+    # (T3 Code shows ?token=SECRET) opened that hidden copy as a tab, which can only fail (2026-11-12).
+    print(f"Tapwright live view: opening {url.split('?', 1)[0]} in your browser (the key is in the link, not shown)")
     webbrowser.open(url)
     return 0
 

@@ -412,3 +412,16 @@ def test_a_link_without_a_valid_key_says_how_to_open_the_live_view():
         assert r.status_code == 401
         assert "This link has no valid key" in r.text and "tapwright view" in r.text and "viewer" in r.text
         assert "SECRET" not in r.text and TOKEN not in r.text
+
+
+def test_the_live_views_key_is_never_printed():
+    """An app around the terminal hid the key as ?token=SECRET in what it showed, and opened that copy as a browser
+    tab each time a daemon started (2026-11-12). No print in serve or view may carry the link with its key."""
+    import inspect
+    import re
+
+    from tapwright import cli, server
+    for module in (server, cli):
+        for line in inspect.getsource(module).splitlines():
+            if re.search(r"\bprint\(", line):
+                assert "token" not in line and "viewer_url(" not in line and "{url}" not in line, line
