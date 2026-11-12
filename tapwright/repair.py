@@ -92,6 +92,8 @@ class WdaFacts:
     profile: Expiry | None  # the profile in ~/.tapwright/signing
     profile_has_phone: bool
     certificate: Expiry | None
+    installed_build: str | None = None  # the runner build setup installed (its cache folder name), when recorded
+    wanted_build: str | None = None  # the build this Tapwright uses (store.wda_source)
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,9 @@ def decide_wda(f: WdaFacts, now: datetime) -> WdaDecision:
         return WdaDecision("setup", f"the certificate expired on {f.certificate.date()}; " + SETUP_AGAIN)
     if not f.installed:
         return WdaDecision("reinstall", "WebDriverAgent isn't on the phone")
+    if f.wanted_build and f.installed_build != f.wanted_build:
+        was = f"build {f.installed_build}" if f.installed_build else "the build an older Tapwright installed"
+        return WdaDecision("reinstall", f"the phone has {was}; this Tapwright uses {f.wanted_build} (a faster tap)")
     signed = _aware(f.installed_expiry) if f.installed_expiry else f.profile.when  # setup signs with the profile it holds
     if signed - now > timedelta(days=REINSTALL_DAYS):
         return WdaDecision("ok", f"signed until {signed:%Y-%m-%d}")
@@ -127,9 +132,14 @@ def decide_wda(f: WdaFacts, now: datetime) -> WdaDecision:
 
 
 def record_install(profile: Expiry | None) -> None:
-    """Remember which profile the WebDriverAgent on the phone was signed with."""
+    """Remember which profile the WebDriverAgent on the phone was signed with, and which build it is."""
     if profile:
-        store.save_state(wda_profile_expires=profile.when.isoformat())
+        store.save_state(wda_profile_expires=profile.when.isoformat(), wda_build=store.wda_source()[3])
+
+
+def builds() -> dict[str, str | None]:
+    """installed_build and wanted_build for WdaFacts."""
+    return {"installed_build": store.load_state().get("wda_build"), "wanted_build": store.wda_source()[3]}
 
 
 def recorded_install_expiry() -> datetime | None:
@@ -185,7 +195,8 @@ async def run_fixes(phone: Phone, report, now: datetime | None = None) -> int:
     try:
         profile = profile_expiry()
         facts = WdaFacts(installed=await phone.wda_installed(), installed_expiry=recorded_install_expiry(),
-                         profile=profile, profile_has_phone=profile_includes_phone(), certificate=certificate_expiry())
+                         profile=profile, profile_has_phone=profile_includes_phone(), certificate=certificate_expiry(),
+                         **builds())
         decision = decide_wda(facts, now)
         if decision.verdict == "ok":
             report("ok", f"WebDriverAgent: {decision.reason}")

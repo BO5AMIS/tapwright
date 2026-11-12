@@ -158,3 +158,11 @@ def test_a_phone_that_raises_is_reported_not_raised(local):
 def test_no_pairing_found_is_a_note_not_a_problem(local):
     left, said = fix(FakePhone(found=None, saved=4444))
     assert left == 0 and any(k == "note" and "saved port is 4444" in m for k, m in said)
+
+
+def test_a_runner_from_an_older_tapwright_is_installed_again():
+    """1.1 uses its own runner build: one installed by 1.0 (no build recorded) or another build is replaced."""
+    assert repair.decide_wda(facts(installed_build=None, wanted_build="fork-tw-16.15.3.1"), NOW).verdict == "reinstall"
+    assert repair.decide_wda(facts(installed_build="16.15.3", wanted_build="fork-tw-16.15.3.1"), NOW).verdict == "reinstall"
+    same = repair.decide_wda(facts(installed_build="fork-tw-16.15.3.1", wanted_build="fork-tw-16.15.3.1"), NOW)
+    assert same.verdict == "ok"

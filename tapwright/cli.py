@@ -113,7 +113,7 @@ async def wda_current(lockdown, runner_id: str) -> bool:
         return False
     facts = repair.WdaFacts(installed=await wda_on_phone(lockdown, runner_id),
                             installed_expiry=repair.recorded_install_expiry(), profile=repair.profile_expiry(),
-                            profile_has_phone=True, certificate=repair.certificate_expiry())
+                            profile_has_phone=True, certificate=repair.certificate_expiry(), **repair.builds())
     return repair.decide_wda(facts, repair.now_utc()).verdict == "ok"
 
 
