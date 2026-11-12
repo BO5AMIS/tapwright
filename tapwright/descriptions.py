@@ -121,6 +121,12 @@ SHARED = {
         'and what changed, or `timeout`.'
     ),
     'apps': 'List the apps you can drive, with the current one marked and the ids `open_app` takes.',
+    'session_report': (
+        "Where this session's calls went: calls per tool, failures by code, and waste to cut, each with the call "
+        'numbers: looks right after an answer that already had the changes, retries after `not_found`, scroll hunts, '
+        'and runs of actions that could have been one `run`. `since` (epoch ms) narrows it. Read it after a long '
+        'session, and before writing the next one.'
+    ),
     'open_app': (
         'Drive this app from now on. `app` is an id or a name (names match ignoring case). Several matches give '
         '`ambiguous` with their `apps` lines.'

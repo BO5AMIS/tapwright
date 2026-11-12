@@ -22,7 +22,7 @@ from typing import NamedTuple
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
-               performance, ui)
+               performance, report, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -46,7 +46,10 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait"})
+# AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "apps"})  # (compare_screen writes its own line: _log_compare)
+READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -559,7 +562,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash")
+READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash", "session_report")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -680,6 +683,7 @@ class Daemon:
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
+        self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
@@ -1024,12 +1028,39 @@ class Daemon:
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
+            return self._session_report(client_id, args)
+        known = self._hunt_known(client_id, name, args)
+        if name == "filmstrip":
+            return await self._filmstrip_logged(client_id, args, scope)
+        if name in LOGGED:
+            started, self._announced, self._granted_now = time.monotonic(), None, False
+            aimed = self._aim_for_recording(client_id, name, args)
+            try:
+                result = await self._run_tool_inner(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            self._record_step(client_id, name, args, aimed)
+            return result
+        if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
+            started = time.monotonic()
+            try:
+                result = await self._policed_other(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            return result
+        return await self._policed_other(client_id, name, args, scope)
+
+    async def _policed_other(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        """The tools whose log line is written by the caller (reads, and the batch tools)."""
         if name in BATCH_TOOLS:
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
-        if name == "filmstrip":
-            return await self._filmstrip_logged(client_id, args, scope)
         if name == "wait_for" and client_id in self._recording:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
@@ -1039,32 +1070,68 @@ class Daemon:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_compare(client_id, args, ignore)
             return answer
-        if name in LOGGED:
-            started, self._announced, self._granted_now = time.monotonic(), None, False
-            aimed = self._aim_for_recording(client_id, name, args)
-            try:
-                result = await self._run_tool_inner(client_id, name, args, scope)
-            except Refused as e:
-                self._log_action(name, args, started, e)
-                raise
-            self._log_action(name, args, started, None)
-            self._record_step(client_id, name, args, aimed)
-            return result
         return await self._run_tool_inner(client_id, name, args, scope)
 
+    def _hunt_known(self, client_id: str, name: str, args: dict) -> bool | None:
+        """AGENT-TOOLS §16.1: was this action's target already in the tree's off-screen list before the agent's run
+        of scrolls began? (A scroll hunt is exact then, and `session_report` says so without `(maybe)`.) A scroll
+        starts a run and keeps the off-screen list as it was; looks leave it; any other call ends it, and the
+        action that ends it is the one asked. True only; None when there is nothing to say."""
+        if name == "look":
+            return None
+        if name == "scroll":
+            if client_id not in self._hunts:
+                self._hunts[client_id] = list(getattr(self.session, "offscreen", []))
+            return None
+        off = self._hunts.pop(client_id, None)
+        raw = args.get("target")
+        if not off or not isinstance(raw, dict):
+            return None
+        try:
+            target = ui.parse_target(raw)
+            if target.point is not None or target.ref is not None:
+                return None
+            ui.resolve(off, dataclasses.replace(target, index=0))
+        except Refused:
+            return None
+        return True
+
+    def _session_report(self, client_id: str, args: dict) -> dict:
+        """`session_report` (AGENT-TOOLS §16.1): where this agent's calls went, from the action log."""
+        since = args.get("since")
+        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0):
+            raise Refused("bad_params", "since is a time in epoch milliseconds, like 1762950000000.")
+        if self.actions.folder is None:
+            return _answer(["The call log is off (tapwright serve --no-log), so there is nothing to report."])
+        entries = report.read_entries(self.actions.folder)
+        start = int(since) if since is not None else report.client_start(entries, client_id)
+        return _answer([report.build(entries, client_id, start)])
+
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
-                    frames: int | None = None) -> None:
-        """The agent's action, one line in the action log. Typed text only as its length (AGENT-TOOLS §12)."""
+                    frames: int | None = None, *, client: str | None = None, answer: dict | None = None,
+                    known_off: bool | None = None) -> None:
+        """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
+        its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
         told = self._announced or {}
         message = str(error) if error is not None else ""
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
+        said = answer["text"] if answer is not None else message
+        read = name in READ_KINDS
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
+            "source": "tapwright", "by": "agent", "client": client, "tool": name, "kind": "read" if read else None,
+            "target": actionlog.target_of(args.get("target")),
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
-            "batch": BATCH.get(), "confirmed": True if self._granted_now else None,
+            "answer_chars": len(said) if isinstance(said, str) else None,
+            "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
+            "confirmed": True if self._granted_now else None,
+            "to": args.get("to") if name == "scroll" else None,
+            "labels": True if name == "look" and args.get("labels") else None,
+            "ocr": True if name == "look" and args.get("ocr") else None,
+            "listed": True if not read and error is None and isinstance(said, str) and "Settled in " in said else None,
+            "known_off": known_off,
             "measured": self._measured if name == "performance" and error is None else None,
             "count": self._diag_count if name in DIAG_TOOLS and error is None else None})  # counts only, never the text
 
@@ -1271,8 +1338,8 @@ class Daemon:
                 found = await asyncio.wait_for(self.session.device.crash_reports(exe, 3, bundle), 15)
             except Exception:
                 return None
-            for report in found.reports:
-                info = diagnostics.describe_crash(report, exe)
+            for crash in found.reports:
+                info = diagnostics.describe_crash(crash, exe)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
                     return info
@@ -1915,7 +1982,7 @@ class Daemon:
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":
-            return await self._compare_screen(view, args, notes)
+            return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
@@ -2450,12 +2517,13 @@ class Daemon:
         try:
             result = await self._run_tool_inner(client_id, "filmstrip", args, scope)
         except Refused as e:
-            self._log_action("filmstrip", logged, started, e)
+            self._log_action("filmstrip", logged, started, e, client=client_id)
             raise
         finally:
             _FILM_SCOPE.reset(token)
         made = re.match(r"Filmstrip: (\d+) frames", result["text"])
-        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None)
+        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None,
+                         client=client_id, answer=result)
         return result
 
     async def _watch_front(self, given: dict[str, str], client_id: str, away: list) -> None:
@@ -2547,7 +2615,7 @@ class Daemon:
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
 
-    async def _compare_screen(self, view, args: dict, notes: list) -> dict:
+    async def _compare_screen(self, view, args: dict, notes: list, client: str | None = None) -> dict:
         """AGENT-TOOLS §14.1: the screen against the reference picture called `name`, or saved as it. Inside `run`
         or a script it is a check (§14.2): it never saves, and a difference stops the batch as `expect_failed`."""
         started, check = time.monotonic(), BATCH.get() is not None
@@ -2564,15 +2632,18 @@ class Daemon:
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
-            self._log_compare(args["name"], started, e, done)
+            self._log_compare(args["name"], started, e, done, client)
             raise
-        self._log_compare(args["name"], started, None, done)
-        return _answer(done.lines, [*done.notes, *notes], done.image)
+        answer = _answer(done.lines, [*done.notes, *notes], done.image)
+        self._log_compare(args["name"], started, None, done, client, answer)
+        return answer
 
-    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None") -> None:
+    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None",
+                     client: str | None = None, answer: dict | None = None) -> None:
         """The action log's line for a picture check: the name and the share that changed, never the picture."""
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": "compare_screen", "name": name,
+            "source": "tapwright", "by": "agent", "client": client, "tool": "compare_screen", "kind": "read", "name": name,
+            "answer_chars": len(answer["text"]) if answer is not None else len(str(error)) if error is not None else None,
             "percent": round(done.percent, 2) if done is not None and done.percent is not None else None,
             "ok": error is None, "code": error.code if error is not None else None,
             "ms": round((time.monotonic() - started) * 1000), "app": self._bundle(), "batch": BATCH.get()})

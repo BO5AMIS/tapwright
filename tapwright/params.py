@@ -29,6 +29,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "filmstrip": ("frames", "interval_ms", "frame_width", "tap"),
     "compare_screen": ("name", "update", "width", "threshold", "ignore"),
     "apps": (),
+    "session_report": ("since",),
     "open_app": ("app", *_SHOT),
     "close_app": ("app",),
     "alert": ("action", *_SHOT),

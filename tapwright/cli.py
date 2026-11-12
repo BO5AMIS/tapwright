@@ -16,6 +16,9 @@
                      browser, the agent tools and an HTTP API. Agent tools start it by
                      themselves; it stops after 30 minutes unused (--keep-alive: never)
   tapwright view     open the live view in your browser (starts the daemon if needed)
+  tapwright report [--since TIME] [--client ID]
+                     where an agent's calls went, from the action log: calls per tool, failures,
+                     and waste to cut (the agent tool session_report answers the same)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      [--policy FILE | --no-policy]
@@ -538,6 +541,23 @@ def install(a) -> int:
 START_CODES = ("bad_params", "not_connected", "reconnecting", "not_allowed", "unsupported", "internal")
 
 
+def report(a) -> int:
+    """`tapwright report`: the same answer as the `session_report` tool, built from the action log files."""
+    from . import actionlog, report as reporting
+    entries = reporting.read_entries(actionlog.default_folder())
+    if not entries:
+        print("tapwright report: the action log has no calls yet (it is off with serve --no-log).")
+        return 1
+    client = a.client or reporting.last_client(entries)
+    try:
+        since = reporting.parse_since(a.since, round(time.time() * 1000)) if a.since else reporting.client_start(entries, client)
+    except ValueError as e:
+        print(f"tapwright report: {e}")
+        return 2
+    print(reporting.build(entries, client, since))
+    return 0
+
+
 def replay(a) -> int:
     """`tapwright replay FILE…`: each script through the daemon's `replay` tool, its answer printed. Exit 0 when every
     script held, 1 when one stopped at a step, 2 when one couldn't start (no phone, no app, a bad file)."""
@@ -670,6 +690,10 @@ def main() -> int:
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
     sub.add_parser("view")
+    p = sub.add_parser("report", help="where an agent's calls went, from the action log (no phone needed)")
+    p.add_argument("--since", metavar="TIME",
+                   help="epoch ms, an ISO time or how long ago (30m, 2h, 1d); default: the start of the agent's session")
+    p.add_argument("--client", metavar="ID", help="one agent's client id; default: the agent that called last")
     p = sub.add_parser("replay", help="run scripts saved with record (or written by hand) on the phone, with no agent")
     p.add_argument("files", nargs="+", metavar="FILE")
     p.add_argument("--junit", metavar="OUT", help="also write the results as JUnit XML, one test case per script")
@@ -727,6 +751,8 @@ def main() -> int:
         return 0
     if a.cmd == "view":
         return view()
+    if a.cmd == "report":
+        return report(a)
     if a.cmd == "replay":
         return replay(a)
     if a.cmd == "skill":

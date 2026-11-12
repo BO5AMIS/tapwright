@@ -294,6 +294,11 @@ async def apps() -> CallToolResult:
     return await _tool("apps")
 
 
+@server.tool(annotations=READ_ONLY, description=describe("session_report"), structured_output=False)
+async def session_report(since: int | None = None) -> CallToolResult:
+    return await _tool("session_report", **({"since": since} if since is not None else {}))
+
+
 @server.tool(description=describe("open_app"), structured_output=False)
 async def open_app(app: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
     return await _tool("open_app", app=app, look=look, screenshot=screenshot)

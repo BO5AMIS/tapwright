@@ -17,6 +17,7 @@ EXPECTED = {
     "wait": {"seconds", "look", "screenshot"},
     "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot"},
     "apps": set(),
+    "session_report": {"since"},
     "open_app": {"app", "look", "screenshot"},
     "viewer": set(),
     "close_app": {"app"},
@@ -50,11 +51,12 @@ DEFAULTS = {
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
     "logs": {"since": None, "level": "info", "grep": None, "limit": 100},
     "crash": {"all": False, "pull": False},
+    "session_report": {"since": None},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
     "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
     "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
-READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for", "logs"}  # (crash can pull a file: no hint)
+READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for", "logs", "session_report"}  # (crash can pull a file: no hint)
 
 
 def listed() -> dict:
