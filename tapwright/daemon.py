@@ -15,6 +15,7 @@ import pathlib
 import re
 import secrets
 import time
+import unicodedata
 import traceback
 from contextlib import nullcontext
 from typing import NamedTuple
@@ -78,13 +79,19 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 # While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
 # digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _name_key(name: str) -> str:
+    """What a file system may make of a reference name: Windows and macOS ignore case (`home.png`, `HOME.png`), and
+    macOS also treats a name's Unicode forms as one (NFC and NFD Hangul or accents). Names with one key are one file."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def _refuse_case_only(seen: str, name: str) -> None:
-    """Two reference names that differ only in case are one file on Windows and macOS (`home.png`, `HOME.png`): a
-    recording that compared one refuses the other, so a later picture can't replace an earlier check's (Codex, PR #3
-    cycle 9)."""
+    """A recording that compared one name refuses another with the same key (_name_key), so a later picture can't
+    replace an earlier check's (Codex, PR #3 cycles 9 and 10)."""
     if seen != name:
         raise Refused("bad_params", f'record: "{name}" differs from "{seen}", already compared in this recording, only in '
-                                    "case, and on Windows and macOS they are one file; give this check another name.")
+                                    "case or in Unicode form, and on Windows or macOS they are one file; give this check "
+                                    "another name.")
 
 
 _BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
@@ -1067,7 +1074,7 @@ class Daemon:
         folder = folder or self._bundle() or "unknown"
         digest = _picture_digest(picture)
         for bundle, seen, before in rec.get("references", ()):
-            if seen.casefold() != args["name"].casefold():
+            if _name_key(seen) != _name_key(args["name"]):
                 continue
             _refuse_case_only(seen, args["name"])
             if bundle != folder:
@@ -2253,7 +2260,7 @@ class Daemon:
         # the same name in another app is refused here too, before the save (it was refused only after, so a replay
         # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
         for _, was, _ in seen:
-            if was.casefold() == name.casefold():
+            if _name_key(was) == _name_key(name):
                 _refuse_case_only(was, name)
         other = next((bundle for bundle, was, _ in seen if was == name and bundle != folder), None)
         if other is not None:
