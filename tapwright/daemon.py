@@ -78,6 +78,15 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 # While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
 # digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _refuse_case_only(seen: str, name: str) -> None:
+    """Two reference names that differ only in case are one file on Windows and macOS (`home.png`, `HOME.png`): a
+    recording that compared one refuses the other, so a later picture can't replace an earlier check's (Codex, PR #3
+    cycle 9)."""
+    if seen != name:
+        raise Refused("bad_params", f'record: "{name}" differs from "{seen}", already compared in this recording, only in '
+                                    "case, and on Windows and macOS they are one file; give this check another name.")
+
+
 _BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
     contextvars.ContextVar("tapwright_baselines", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
@@ -1058,8 +1067,9 @@ class Daemon:
         folder = folder or self._bundle() or "unknown"
         digest = _picture_digest(picture)
         for bundle, seen, before in rec.get("references", ()):
-            if seen != args["name"]:
+            if seen.casefold() != args["name"].casefold():
                 continue
+            _refuse_case_only(seen, args["name"])
             if bundle != folder:
                 raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
                                             f"keeps one picture for each name; give the one in {folder} another name")
@@ -2242,6 +2252,9 @@ class Daemon:
             return
         # the same name in another app is refused here too, before the save (it was refused only after, so a replay
         # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
+        for _, was, _ in seen:
+            if was.casefold() == name.casefold():
+                _refuse_case_only(was, name)
         other = next((bundle for bundle, was, _ in seen if was == name and bundle != folder), None)
         if other is not None:
             raise Refused("bad_params", f'this recording already compares "{name}" in {other}, and a script keeps one '

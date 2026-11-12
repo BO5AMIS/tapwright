@@ -1097,3 +1097,25 @@ def test_a_recording_exports_the_bytes_its_check_used_even_if_another_client_rew
         assert (tmp_path / "mine.references" / "home.png").read_bytes() == a_bytes  # the export is A's, not the store's
         await finish(stop, task)
     run(go)
+
+
+def test_a_recording_refuses_a_name_that_differs_only_in_case(tmp_path):
+    """`home.png` and `HOME.png` are one file on Windows and macOS: a recording that compared "home" refuses "HOME",
+    before anything is written, and exports home's own picture (Codex, PR #3 cycle 9)."""
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)  # picture A
+        await d.run_tool("a", "record", {"start": True, "name": "cased"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        kept = stored(tmp_path, "home").read_bytes()
+        show(d, (BLOCK, (0, 0, 0)))  # picture B
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "HOME", "update": True})
+        assert e.value.code == "bad_params" and "only in case" in str(e.value)
+        path = tmp_path / "cased.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert (tmp_path / "cased.references" / "home.png").read_bytes() == kept
+        assert stored(tmp_path, "home").read_bytes() == kept
+        await finish(stop, task)
+    run(go)
