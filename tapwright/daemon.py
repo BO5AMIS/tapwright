@@ -8,6 +8,7 @@ import itertools
 import io
 import json
 import dataclasses
+import hashlib
 import math
 import os
 import pathlib
@@ -387,6 +388,17 @@ class Compared:
     percent: float | None = None
     folder: str | None = None  # the references folder (bundle id) it was compared in
     source: pathlib.Path | None = None  # the reference file it was compared with, or saved: a script's own, or the store's
+
+
+def _picture_digest(path: pathlib.Path | None) -> str | None:
+    """The hash of a reference file's content, as it is now (None when there is no file, or it can't be read): two
+    checks of one name in a recording are the same baseline only when this is the same."""
+    if path is None:
+        return None
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _reference_names(steps: list[dict]) -> set[str]:
@@ -1021,19 +1033,26 @@ class Daemon:
         text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name` and
         the `folder` (bundle id) it was compared in and the `source` file it was compared with (a replayed script's
         own reference, say, not the store's of the same name) are remembered, so `stop` can copy that reference next
-        to the script (§14.3). A script keeps one picture per name: the same name in another app is refused."""
+        to the script (§14.3). A script keeps one picture per name: the same name in another app is refused, and so is
+        the same name against another picture (the content of the file, as it is now) in the same app."""
         rec = self._recording[client_id]
         folder = folder or self._bundle() or "unknown"
-        for bundle, seen, _ in rec.get("references", ()):
-            if seen == args["name"] and bundle != folder:
+        digest = _picture_digest(source)
+        for bundle, seen, _, before in rec.get("references", ()):
+            if seen != args["name"]:
+                continue
+            if bundle != folder:
                 raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
                                             f"keeps one picture for each name; give the one in {folder} another name")
+            if digest is not None and before is not None and digest != before:
+                raise Refused("bad_params", f'record: "{args["name"]}" was already compared against another picture in '
+                                            "this recording; give this check another name.")
         extra: dict = {}
         if args.get("threshold") not in (None, compare.DEFAULT_THRESHOLD):  # (the default isn't written down)
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((folder, args["name"], source))
+        rec.setdefault("references", []).append((folder, args["name"], source, digest))
         last = rec["steps"][-1] if fold and rec["steps"] else None
         if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
@@ -1153,8 +1172,8 @@ class Daemon:
             del self._recording[client_id]
             # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
             wanted = _reference_names(rec["steps"])
-            bundles = {name: bundle for bundle, name, _ in rec.get("references", ()) if name in wanted}
-            sources = {name: source for _, name, source in rec.get("references", ()) if name in wanted and source}
+            bundles = {name: bundle for bundle, name, _, _ in rec.get("references", ()) if name in wanted}
+            sources = {name: source for _, name, source, _ in rec.get("references", ()) if name in wanted and source}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "

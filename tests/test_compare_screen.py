@@ -822,3 +822,75 @@ def test_recording_a_replay_that_updates_its_references_copies_the_ones_it_made(
         assert made.is_file() and (tmp_path / "new.references" / "home.png").read_bytes() == made.read_bytes()
         await finish(stop, task)
     run(go)
+
+
+def _own_picture(tmp_path, folder, name, *paints):
+    """A script's own reference, `name` in `folder`.references: the white screen with the paints, as the replay sees it."""
+    shot = Image.new("RGB", (800, 1600), (255, 255, 255))
+    for box, colour in paints:
+        shot.paste(colour, box)
+    buf = io.BytesIO()
+    shot.save(buf, "PNG")
+    compare.save(tmp_path / f"{folder}.references" / f"{name}.png", compare.fit(buf.getvalue(), 600))
+
+
+def test_a_recording_refuses_one_name_compared_against_two_different_pictures(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        _own_picture(tmp_path, "first", "home")
+        _own_picture(tmp_path, "second", "home", (BLOCK, (0, 0, 0)))  # the same name, another picture, in the same app
+        first = write_script(tmp_path, "first", [{"tool": "compare_screen", "name": "home"}])
+        second = write_script(tmp_path, "second", [{"tool": "compare_screen", "name": "home"}])
+        await d.run_tool("a", "record", {"start": True, "name": "both"})
+        r = await d.run_tool("a", "replay", {"path": str(first)})
+        assert r["text"].startswith("Ran 1 of 1 steps"), r["text"]
+        show(d, (BLOCK, (0, 0, 0)))
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "replay", {"path": str(second)})
+        assert e.value.code == "bad_params"
+        assert 'record: "home" was already compared against another picture in this recording; give this check another name.' \
+            in str(e.value)
+        path = tmp_path / "both.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert len(json.loads(path.read_text("utf-8"))["steps"]) == 1  # the second check was not recorded
+        assert (tmp_path / "both.references" / "home.png").read_bytes() == (tmp_path / "first.references" / "home.png").read_bytes()
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_refuses_a_reference_updated_between_two_checks_of_its_name(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "moved"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # the store's "home": a white screen
+        show(d, (BLOCK, (0, 0, 0)))
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "home", "update": True})  # now another picture
+        assert e.value.code == "bad_params"
+        assert str(e.value) == 'record: "home" was already compared against another picture in this recording; give this check another name.'
+        await d.run_tool("a", "compare_screen", {"name": "home-2"})  # another name is fine
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_allows_one_name_compared_twice_against_the_same_picture(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "same"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # the same file, unchanged
+        _own_picture(tmp_path, "copy", "home")  # another file with the same picture: not a conflict either
+        copy = write_script(tmp_path, "copy", [{"tool": "compare_screen", "name": "home"}])
+        r = await d.run_tool("a", "replay", {"path": str(copy)})
+        assert r["text"].startswith("Ran 1 of 1 steps"), r["text"]
+        path = tmp_path / "same.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert [s["name"] for s in json.loads(path.read_text("utf-8"))["steps"]] == ["home", "home", "home"]
+        await finish(stop, task)
+    run(go)
