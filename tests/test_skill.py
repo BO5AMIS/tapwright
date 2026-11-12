@@ -107,7 +107,7 @@ def test_the_personas_guide_is_tool_neutral_and_has_the_six_examples():
     text = (SHIPPED / "references/personas.md").read_text(encoding="utf-8")
     for word in ("Tapwright", "Tapline", "open_app", "app_command"):
         assert word not in text, word
-    assert "pass these as `conditions` on `journey { start }`; each tool applies them its own way" in text
+    assert "pass these as `conditions` on `journey { start }`; each tool applies them its own way" in " ".join(text.split())
     for persona in ("First-timer", "Busy regular", "Older user with large text", "Right-to-left speaker",
                     "Poor connection", "One-handed on a big phone"):
         assert f"**{persona}.**" in text, persona
