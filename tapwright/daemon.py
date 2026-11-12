@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, batch, changes, compare, filmstrip as filmlib, ocr, ui
+from . import actionlog, audit, batch, changes, compare, filmstrip as filmlib, ocr, performance, ui
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -44,7 +44,7 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate"})
+                    "close_app", "alert", "press_button", "rotate", "performance"})
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -54,6 +54,7 @@ OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
+NO_APP_TO_MEASURE = "no app is in front to measure; open_app the app first."
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
 # The script a replay is running (§14.3): {"path": Path, "update": bool}. Checks look for references in the script's own
@@ -71,6 +72,10 @@ NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or v
 _POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwright_policy", default=safety.DEFAULT)
 # Set to a list by run_tool; a touch a person's OK let through puts True in it, and the answer then ends with NOTE_ALLOWED
 _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright_granted", default=[])
+# The scope (personal mode's app list) of the call being run, for a tool that makes calls of its own (`performance`)
+_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
+# True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
+_NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
@@ -340,6 +345,17 @@ def _checked(name: str, args: dict) -> dict:
         compare.check_params(args)
     if args.get("dry_run") and name not in DRY_TOOLS:
         raise Refused("bad_params", f"dry_run is for {', '.join(DRY_TOOLS)}, not {name}")
+    if name == "performance":
+        if "launch" in args and not isinstance(args["launch"], bool):
+            raise Refused("bad_params", f"launch must be true or false, not {args['launch']!r}")
+        if args.get("launch") and (args.get("seconds") is not None or args.get("tap") is not None):
+            raise Refused("bad_params", "launch measures until the screen settles; leave seconds and tap out")
+        seconds = args.get("seconds")
+        if seconds is not None and not performance.SECONDS_MIN <= checked["seconds"] <= performance.SECONDS_MAX:
+            raise Refused("bad_params", f"seconds must be from {performance.SECONDS_MIN:g} to "
+                                        f"{performance.SECONDS_MAX:g}, not {seconds!r}")
+        if args.get("tap") is not None:
+            ui.parse_target(args["tap"])  # bad_params, with an example of a target
     if name == "wait":
         seconds = args.get("seconds")  # required (REQUIRED); a bool is a number to Python, a string isn't one to us
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not WAIT_MIN <= seconds <= WAIT_MAX:
@@ -502,7 +518,7 @@ _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("ta
 _GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar("tapwright_given", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
+SPECIAL = ("wait", "wait_for", "performance")  # sleep before they answer, so they don't hold the phone's queue meanwhile
 REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
@@ -593,6 +609,8 @@ class Daemon:
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll,
                           "alert": self._alert, "swipe": self._swipe}
+        self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
+        self._measured: dict | None = None  # the last reading's numbers, for the action log
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -955,7 +973,8 @@ class Daemon:
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
-            "batch": BATCH.get(), "confirmed": True if self._granted_now else None})
+            "batch": BATCH.get(), "confirmed": True if self._granted_now else None,
+            "measured": self._measured if name == "performance" and error is None else None})
 
     def _bundle(self) -> str | None:
         """The bundle id of the app in front at the last read, for the log and a recording."""
@@ -966,9 +985,11 @@ class Daemon:
     def _aim_for_recording(self, client_id: str, name: str, args: dict) -> dict | None:
         """While this agent records: the target its step will be saved with, worked out before the call (a ref names
         an element of the list the agent has now)."""
-        if client_id not in self._recording or name not in batch.STEP_TOOLS:
+        if client_id not in self._recording or name not in batch.STEP_TOOLS or _NESTED.get():
             return None
         items = self.control.client(client_id).items
+        if name == "performance":  # its `tap` is saved by id, label or text like a target
+            return batch.recorded_target(args.get("tap"), items)
         if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
             field = None
             try:
@@ -1024,17 +1045,18 @@ class Daemon:
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
         """An action that succeeded while this agent records becomes a step of its script."""
         rec = self._recording.get(client_id)
-        if rec is None or name not in batch.STEP_TOOLS:
+        if rec is None or name not in batch.STEP_TOOLS or _NESTED.get():
             return
-        step = {"tool": name, **{k: v for k, v in args.items() if k not in ("target", "look", "screenshot")}}
+        key = "tap" if name == "performance" else "target"  # the argument that aims at an element
+        step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
         if name == "type_text" and rec.pop("next_secure", False):
             # a password is never written to a file (safety review M4): the user puts a test password in the script
             step["text"] = ""
             step["secure"] = True
             rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
         if aimed is not None:
-            step["target"] = aimed
-        elif "target" in args:
+            step[key] = aimed
+        elif args.get(key) is not None:
             return  # a target that can't be saved (a ref gone stale): leave the step out rather than guess
         rec["steps"].append(step)
         rec["app"] = rec["app"] or self._bundle()
@@ -1173,8 +1195,14 @@ class Daemon:
                 if args.get("trace"):
                     traced.append(f"  {i}. {lines[0] if lines else step['tool']} ({clock() - t0:.1f} s)")
                 seen_notes: list[str] = []
-                missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes)
-                          if "expect" in step else None)
+                if step["tool"] == "performance" and "expect" in step:  # limits, not a screen (PLAN-1.3 item 3)
+                    under = step["expect"]["under"]
+                    seen_notes += performance.ignored(under)
+                    over = performance.failures(self._performed[client_id], under)
+                    missed = f"{'; '.join(over)}." if over else None
+                else:
+                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes)
+                              if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {e}")
@@ -1182,8 +1210,9 @@ class Daemon:
             finally:
                 BATCH.reset(token)
             if missed is not None:
+                why = missed if step["tool"] == "performance" else f"its action ran, but {missed}"
                 failed = ("expect_failed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
-                                           f"its action ran, but {missed}")
+                                           f"{why}")
                 break
             done += 1
         first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
@@ -1250,7 +1279,7 @@ class Daemon:
 
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
-        grant_token = _GRANTED.set(granted)
+        grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
@@ -1275,6 +1304,7 @@ class Daemon:
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
         finally:
             _GRANTED.reset(grant_token)
+            _SCOPE.reset(scope_token)
 
     async def _batch_within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """`run`, `record` and `replay` in personal mode: like every tool, nothing without an app list, and the one
@@ -1394,7 +1424,8 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip", "compare_screen"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip", "compare_screen",
+                                                                       "performance"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -1410,7 +1441,7 @@ class Daemon:
             _GIVEN.reset(given_token)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
-        if name == "filmstrip":  # asked of the phone before and after filming (_filmstrip): the last read is no guide
+        if name in ("filmstrip", "performance"):  # asked of the phone before and after filming (_filmstrip): the last read is no guide
             return answer
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
@@ -1470,6 +1501,8 @@ class Daemon:
             return await self._wait_for(view, args, notes, shot)
         if name == "audit":
             return await self._audit(view, args, notes)
+        if name == "performance":
+            return await self._performance(client_id, args, notes)
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":
@@ -1947,6 +1980,47 @@ class Daemon:
         name = app[0] if app else "the screen"
         text = audit.report(f'"{name}"', issues, view.items, types)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    async def _performance(self, client_id: str, args: dict, notes: list) -> dict:
+        """PLAN-1.3 item 3: memory, CPU and frames of the app in front while the call runs (`seconds`, around an optional
+        `tap`), or from a cold start to the first settled screen (`launch`). The app's own process only. The taps and
+        the close and open go through the ordinary tools, so personal mode and the safety policy apply to them."""
+        if self.state == "locked":
+            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+        scope, clock = _SCOPE.get(), self.control.clock
+        bundle = await self._read(self.session.foreground_bundle_id) or self._bundle()
+        if bundle in (None, SPRINGBOARD):
+            raise Refused("not_found", NO_APP_TO_MEASURE)
+        launch = bool(args.get("launch"))
+        seconds = float(args.get("seconds", performance.SECONDS_DEFAULT))
+        meter, opened, unsettled = self.session.device.meter(bundle), None, False
+        token = _NESTED.set(True)
+        try:
+            if launch:
+                await self.run_tool(client_id, "close_app", {"app": bundle}, scope)
+            try:
+                await meter.start()
+            except DeviceError as e:
+                raise Refused("unsupported", f"the phone can't sample the app: {e}") from None
+            began = clock()
+            try:
+                if launch:
+                    answer = await self.run_tool(client_id, "open_app", {"app": bundle}, scope)
+                    opened = clock() - began
+                    unsettled = NOTE_CAPPED.split("{cap")[0] in answer["text"]
+                else:
+                    if args.get("tap") is not None:
+                        await self.run_tool(client_id, "tap", {"target": args["tap"], "look": False}, scope)
+                    await self.control.sleep(max(0.0, seconds - (clock() - began)))
+            finally:
+                found = await meter.stop()
+        finally:
+            _NESTED.reset(token)
+        reading = performance.summarize(found, clock() - began, opened, unsettled)
+        self._performed[client_id] = reading
+        self._measured = {k: round(v, 2) if isinstance(v, float) else v for k, v in dataclasses.asdict(reading).items()
+                          if v is not None and v is not False}
+        return _answer(performance.answer_lines(reading), notes)
 
     async def _filmstrip_logged(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
         """`filmstrip` as one tool call, with its line in the action log (its tap is logged as a tap, as usual)."""

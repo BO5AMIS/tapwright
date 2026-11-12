@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import compare, ui
+from . import compare, performance, ui
 from . import shot as shotlib
 from .control import Refused
 
@@ -13,7 +13,7 @@ MAX_STEPS = 50
 BATCH_LIMIT = 120.0  # seconds a whole batch may take
 EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
-              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen")
+              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance")
 EXPECT_KINDS = ("text", "id", "label")
 FORMAT, VERSION = "agent-tools-script", 1
 
@@ -32,14 +32,14 @@ def check_steps(steps: object, *, script: bool = False) -> list[dict]:
         if step["tool"] not in STEP_TOOLS:
             raise Refused("bad_params", f"step {n}: {step['tool']!r} can't be a step; a step is one of "
                                         f"{', '.join(STEP_TOOLS)}")
-        target = step.get("target")
+        target = step.get("tap") if step["tool"] == "performance" else step.get("target")
         if script and isinstance(target, dict) and "ref" in target:
             raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "
                                         "element's id, label or text")
         if step["tool"] == "compare_screen":
             check_compare_step(step, n, script)
         if "expect" in step:
-            check_expect(step["expect"], n, script)
+            check_expect(step["expect"], n, script, step["tool"])
     return steps
 
 
@@ -65,9 +65,18 @@ def _no_refs(ignore: object, n: int, script: bool) -> None:
                                     "the element's id, label or text")
 
 
-def check_expect(expect: object, n: int, script: bool = False) -> None:
+def check_expect(expect: object, n: int, script: bool = False, tool: str = "") -> None:
     if not isinstance(expect, dict):
         raise Refused("bad_params", f"step {n}: expect must be an object, like {{\"text\": \"Saved\"}}")
+    if "under" in expect or tool == "performance":
+        # a performance step is checked against limits, and only a performance step has them
+        if tool != "performance" or set(expect) != {"under"}:
+            raise Refused("bad_params", f"step {n}: {performance.UNDER_ONLY}")
+        try:
+            performance.check_under(expect["under"])
+        except ValueError as e:
+            raise Refused("bad_params", f"step {n}: {e}") from None
+        return
     given = [k for k in EXPECT_KINDS if expect.get(k) is not None]
     matches = expect.get("matches") is not None
     if len(given) > 1 or (not given and not matches):
@@ -101,7 +110,7 @@ def args_of(step: dict) -> dict:
     """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
     (the batch answers once)."""
     args = {k: v for k, v in step.items() if k not in ("tool", "expect", "route", "secure", "look", "screenshot")}
-    if step["tool"] != "close_app":
+    if step["tool"] not in ("close_app", "performance"):  # (a measurement has no list to show)
         args["look"] = False
     return args
 
@@ -125,6 +134,7 @@ def summary(step: dict) -> str:
     extra = {"scroll": step.get("to") or step.get("direction") or "down", "wait": step.get("seconds"),
              "open_app": step.get("app"), "close_app": step.get("app"), "open_url": step.get("url"),
              "alert": step.get("action"), "press_button": step.get("name"), "rotate": step.get("to"),
+             "performance": "launch" if step.get("launch") else step.get("seconds"),
              "compare_screen": json.dumps(step["name"], ensure_ascii=False) if isinstance(step.get("name"), str) else None,
              "wait_for": next((json.dumps(step[k], ensure_ascii=False) for k in EXPECT_KINDS if step.get(k)), None)}
     shown = extra.get(tool)

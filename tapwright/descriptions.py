@@ -175,6 +175,12 @@ SHARED = {
         'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
         'shots. `tap` first taps an element, then films what it sets off.'
     ),
+    'performance': (
+        "How the app performs: `launch: true` measures opening it; otherwise it measures for `seconds` (default 3), "
+        "after tapping `tap` if given. Answers the time and the memory, CPU and frames the tool can measure (fps and "
+        "drops over 50 ms), and names what it couldn't. In `run` and scripts, `expect: {\"under\": {\"launch_s\": 2, "
+        "\"drops\": 0}}` on a `performance` step makes it a check."
+    ),
 }
 
 EXTRA = {
@@ -216,6 +222,13 @@ EXTRA = {
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
+    'performance': (
+        "measures the app in front: `launch: true` closes it and starts it cold (seconds are 0.5-30, not used "
+        "then). Memory and CPU are the app's own process (`under` holds memory to its peak and CPU to its average, "
+        "`cpu_percent` and `fps_min` also work); frames are the phone's frame rate once a second, so a drop is a "
+        "second under 45 fps, and `drops` in `under` counts those. `js_heap_mb` and `busy_ms` are Tapline's and are "
+        "ignored with a note."
+    ),
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '
         'a clean run.'
