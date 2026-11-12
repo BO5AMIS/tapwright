@@ -17,15 +17,22 @@ Tapline.
   its visual checks too (`expect.matches` and `compare_screen` steps). A script keeps one picture for each name, so a
   recording that compares one name in two apps is refused.
 - `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
-  check writes its picture to `<script>.diff/`, and the JUnit failure names it. References and pictures are written
-  whole or not at all, and never through a link: a symlinked folder is refused, a symlinked file is replaced. A picture
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it. A picture
   far larger than any screen, or one a script's reference would stretch to such a size, is refused before it is
-  resized.
+  resized. A recording refuses an update that would change a picture it already compared, before anything is written.
+- The safe write covers the reference pictures (the store's and a script's `.references/` folder) and a script's
+  `.diff/` folder, and nothing else: they are written whole or not at all, and never through a link (a symlinked
+  folder is refused, a symlinked file is replaced). On Linux and macOS every folder is held open while the file is
+  written. On Windows the folders are checked again before and after the move, which narrows the window for a folder
+  swapped for a link, but can't close it: a process running as the same user that swaps a folder at that very moment
+  can still get a write through.
 
 **Watching motion**
 - `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
   stream. With `tap`, frame 1 is taken before the tap and the other frames follow it, so the strip shows what the tap
-  sets off.
+  sets off. A filmstrip is composed in memory. With `tapwright mcp --screenshots DIR`, filmstrips and the picture
+  `compare_screen` returns for a difference are saved to that folder by the ordinary screenshot writer, which is
+  outside the safe write above.
 
 ## 1.1.1 (2026-11-12)
 
