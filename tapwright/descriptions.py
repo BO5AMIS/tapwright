@@ -181,6 +181,16 @@ SHARED = {
         "drops over 50 ms), and names what it couldn't. In `run` and scripts, `expect: {\"under\": {\"launch_s\": 2, "
         "\"drops\": 0}}` on a `performance` step makes it a check."
     ),
+    'logs': (
+        "The app's recent log: one line per entry with its time and level (`error`, `warning`, `info`). `level` keeps "
+        'that level and above, `grep` keeps lines containing a text, `limit` caps the count (default 100, newest), and '
+        '`since` (epoch ms) returns only newer lines; each result ends with `Latest:`, a timestamp to reuse. Read it '
+        'when something fails: the cause is often there.'
+    ),
+    'crash': (
+        "The app's newest crash (`all: true`: the last 5): when, the error, and the top frames with the app's own "
+        'marked `*`. An answer whose call made the app stop already says `Note: the app crashed: …`.'
+    ),
 }
 
 EXTRA = {
@@ -222,6 +232,18 @@ EXTRA = {
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
+    'logs': (
+        "reads the app's own entries in the phone's unified log (os_log, NSLog, print; React Native's console in a "
+        "release build), from the app's process only, never another's, and keeps the last 2000 from when the app is "
+        'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a plain '
+        'line that says warn, error, exception, fatal or failed.'
+    ),
+    'crash': (
+        "reads the app's crash reports on the phone since the session began, and only the app's own. `pull: true` "
+        'copies the full `.ips` into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash '
+        "report for <app> since the session began.` Frames show the report's own symbols; full symbols need the "
+        "app's dSYM files."
+    ),
     'performance': (
         "measures the app in front: `launch: true` closes it and starts it cold (seconds are 0.5-30, not used "
         "then). Memory and CPU are the app's own process (`under` holds memory to its peak and CPU to its average, "

@@ -25,6 +25,8 @@ EXPECTED = {
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
     "audit": {"types"},
+    "logs": {"since", "level", "grep", "limit"},
+    "crash": {"all", "pull"},
     "performance": {"launch", "seconds", "tap"},
     "filmstrip": {"frames", "interval_ms", "frame_width", "tap"},
     "compare_screen": {"name", "update", "width", "threshold", "ignore"},
@@ -46,11 +48,13 @@ DEFAULTS = {
                "dry_run": False},
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False, "dry_run": False},
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
+    "logs": {"since": None, "level": "info", "grep": None, "limit": 100},
+    "crash": {"all": False, "pull": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
     "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
     "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
-READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for"}
+READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for", "logs"}  # (crash can pull a file: no hint)
 
 
 def listed() -> dict:

@@ -79,6 +79,30 @@ class FakeVideo:
         pass
 
 
+@dataclasses.dataclass
+class FakeFrame:
+    image_name: str | None
+    symbol: str | None = None
+    symbol_offset: int | None = None
+    image_offset: int | None = None
+
+
+class FakeReport:
+    """A parsed crash report, with the fields of pycrashreport's UserModeCrashReport that Tapwright reads."""
+
+    def __init__(self, name="Example", when=None, kind="EXC_BAD_ACCESS (SIGSEGV)", subtype="KERN_INVALID_ADDRESS at 0x0",
+                 frames=None, filename="/Example-2026-11-12-101010.ips", info=None) -> None:
+        import datetime
+        self.name, self.timestamp = name, when or datetime.datetime.now()
+        self.exception_type, self.exception_subtype, self.filename = kind, subtype, filename
+        self.application_specific_information = info
+        app = "/private/var/containers/Bundle/Application/X/Example.app/Example"
+        self.frames = frames if frames is not None else [
+            FakeFrame("/usr/lib/system/libsystem_kernel.dylib", "__pthread_kill", 8),
+            FakeFrame(app, "-[HomeController crash]", 40), FakeFrame(app, "main", 12),
+            FakeFrame("/System/Library/Frameworks/UIKitCore.framework/UIKitCore", "UIApplicationMain", 340)]
+
+
 class FakeMeter:
     """device.AppMeter's interface: start(), then stop() gives the Measurement a test set on the device."""
 
@@ -105,6 +129,36 @@ class FakeDevice:
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
         self.opened = 0  # how often the MJPEG stream was asked for
+        # bundle id -> the pids of its running processes; an app not listed here is running (as pid 1)
+        self.pids: dict[str, list[int]] = {}
+        self.streams: dict[int, asyncio.Queue] = {}  # pid -> entries its log stream will give (see emit)
+        self.streamed: list[int] = []  # the pids a log stream was asked for
+        self.crashes: dict[str, list] = {}  # executable -> reports, newest first
+        self.crash_files: dict[str, bytes] = {}  # path on the phone -> the whole report
+        self.crash_asks = 0
+        self.app_pids_calls = 0
+
+    async def app_pids(self, bundle_id: str) -> list[int]:
+        self.app_pids_calls += 1
+        return list(self.pids.get(bundle_id, [1]))
+
+    def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None) -> None:
+        """An entry the log stream of `pid` gives (os_trace level byte `raw`); `from_pid` is the pid the entry says
+        it comes from (another process's, to prove it is dropped)."""
+        self.streams.setdefault(pid, asyncio.Queue()).put_nowait((at, raw, text, pid if from_pid is None else from_pid))
+
+    async def app_log_stream(self, pid: int):
+        self.streamed.append(pid)
+        queue = self.streams.setdefault(pid, asyncio.Queue())
+        while True:
+            yield await queue.get()
+
+    async def crash_reports(self, executable: str, count: int) -> list:
+        self.crash_asks += 1
+        return list(self.crashes.get(executable, []))[:count]
+
+    async def crash_file(self, filename: str) -> bytes:
+        return self.crash_files[filename]
 
     async def open_stream(self):
         self.opened += 1
@@ -150,7 +204,8 @@ class FakeSession:
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
         self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
         self.app: tuple[str, str] | None = ("Example", "com.example.app")
-        self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
+        self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7",
+                          "executable": "Example"}]
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)

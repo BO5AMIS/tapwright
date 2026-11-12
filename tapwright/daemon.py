@@ -8,6 +8,7 @@ import itertools
 import io
 import json
 import dataclasses
+import datetime
 import math
 import os
 import pathlib
@@ -20,7 +21,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, batch, changes, compare, filmstrip as filmlib, ocr, performance, ui
+from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, ocr, performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -44,7 +45,7 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash"})
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -367,6 +368,47 @@ def _checked(name: str, args: dict) -> dict:
     return checked
 
 
+CRASH_NOTE = "Note: " + diagnostics.CRASHED  # how both crash notes begin, as a note line
+
+
+def _without_crash_note(message: str) -> tuple[str, list[str]]:
+    """An error's message without its crash-note lines, and those lines."""
+    lines = message.split("\n")
+    return "\n".join(ln for ln in lines if not ln.startswith(CRASH_NOTE)), [ln for ln in lines if ln.startswith(CRASH_NOTE)]
+
+
+def _checked_diag(name: str, args: dict) -> dict:
+    """`logs` and `crash` arguments, cleaned: nulls left out, numbers whole, or Refused(bad_params)."""
+    given = {k: v for k, v in args.items() if v is not None}
+    out: dict = {}
+    if name == "logs":
+        since = given.get("since")
+        if since is not None:
+            if isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0:
+                raise Refused("bad_params", f"since must be an epoch time in milliseconds, not {since!r}")
+            out["since"] = int(since)
+        level = given.get("level", "info")
+        if level not in diagnostics.LOG_LEVELS:
+            raise Refused("bad_params", f"level must be error, warning or info, not {level!r}")
+        out["level"] = level
+        grep = given.get("grep")
+        if grep is not None and not isinstance(grep, str):
+            raise Refused("bad_params", f"grep must be a text, not {grep!r}")
+        out["grep"] = grep or None
+        limit = given.get("limit", diagnostics.LOG_DEFAULT_LIMIT)
+        if (isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit != int(limit)
+                or not 1 <= limit <= diagnostics.LOG_MAX_LIMIT):
+            raise Refused("bad_params", f"limit must be a whole number from 1 to {diagnostics.LOG_MAX_LIMIT}, "
+                                        f"not {limit!r}")
+        out["limit"] = int(limit)
+    else:
+        for key in ("all", "pull"):
+            if key in given and not isinstance(given[key], bool):
+                raise Refused("bad_params", f"{key} must be true or false, not {given[key]!r}")
+            out[key] = bool(given.get(key, False))
+    return out
+
+
 class DryRun(Refused):
     """A dry run's whole answer (`Would tap ...`), raised where the touch would go out. It is a Refused so the
     controller counts nothing as done: no new screen generation, so the agent's refs stay good."""
@@ -510,7 +552,14 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen")
+READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash")
+DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
+NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
+# seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
+LOG_RETRY, LOG_IDLE, LOG_WARMUP = 2.0, 60.0, 0.5
+# looks for a report once the app is gone, seconds between them, later calls that look again
+CRASH_POLLS, CRASH_POLL, CRASH_LATE_TRIES = 3, 1.0, 3
+CRASH_CUT_CODES = ("not_connected", "not_answering", "reconnecting", "timeout")  # errors a crash can end a call with
 # The scope of the filmstrip call being run: its tap goes through run_tool with it, like any other touch
 _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_film_scope", default=None)
 # Personal mode's given apps for the call being run (set by _within): a picture tool checks the front app again after
@@ -550,6 +599,21 @@ class Daemon:
         self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
         self._batch_ids = itertools.count(1)
+        # diagnostics (AGENT-TOOLS §15): the app's log in a ring per bundle id, read by a task per app
+        self._rings: dict[str, diagnostics.LogRing] = {}
+        self._log_tasks: dict[str, asyncio.Task] = {}
+        self._log_pids: dict[str, int] = {}  # the process each task reads
+        self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
+        self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
+        self._opened: str | None = None  # the app open_app last started: the app under test
+        self._executables: dict[str, str] = {}  # bundle id -> the name of its process, from the installed apps
+        self._wall = datetime.datetime.now  # the phone's reports carry local time without a zone
+        self._epoch_ms = lambda: int(time.time() * 1000)
+        self._began_wall = self._crash_since = self._wall()  # the session began; the last answer without news of a crash
+        self._crash_seen: set[str] = set()  # reports an answer has told of
+        self._left_front: str | None = None  # the app a touch found gone from the front and opened again
+        self._crash_pending: dict | None = None  # the app stopped, but its report hasn't reached the phone's folder yet
+        self._diag_count: int | None = None  # the entries or reports the last logs / crash call showed, for the action log
         # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
         # streams at now (None until connected)
         self.pace_tick, self.pace_quiet = pace_tick, pace_quiet
@@ -776,10 +840,11 @@ class Daemon:
         try:
             await self._supervise(stop)
         finally:
-            for helper in (pacer, watch):
+            for helper in (pacer, watch, *self._log_tasks.values()):
                 if helper is not None:
                     helper.cancel()
                     await asyncio.gather(helper, return_exceptions=True)
+            self._log_tasks.clear()
 
     async def _watch_loop(self, stop: asyncio.Event) -> None:
         """Say in the log when this process's event loop was held up. The tunnel to the phone is a TCP/IP stack
@@ -974,12 +1039,208 @@ class Daemon:
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "batch": BATCH.get(), "confirmed": True if self._granted_now else None,
-            "measured": self._measured if name == "performance" and error is None else None})
+            "measured": self._measured if name == "performance" and error is None else None,
+            "count": self._diag_count if name in DIAG_TOOLS and error is None else None})  # counts only, never the text
 
     def _bundle(self) -> str | None:
         """The bundle id of the app in front at the last read, for the log and a recording."""
         app = getattr(self.session, "app", None)
         return app[1] if isinstance(app, tuple) and len(app) == 2 else None
+
+    # ---- diagnostics (AGENT-TOOLS §15) ----
+    def ensure_logs(self, bundle: str) -> None:
+        """Start reading that app's log, if it isn't being read: it goes into the app's ring."""
+        task = self._log_tasks.get(bundle)
+        if task is None or task.done():
+            self._rings.setdefault(bundle, diagnostics.LogRing())
+            self._log_tasks[bundle] = asyncio.create_task(self._watch_logs(bundle), name=f"logs-{bundle}")
+
+    async def _watch_logs(self, bundle: str) -> None:
+        """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
+        asked for the app's pid alone, and checked again here). When the process is gone, look for a new one (the app
+        started again) until `log_idle` seconds have gone by; `ensure_logs` starts the task again when it is needed."""
+        ring, idle, told = self._rings[bundle], 0.0, False
+        while True:
+            try:
+                pids = await self.session.device.app_pids(bundle)
+            except Exception as e:
+                if not told:
+                    self.log(f"logs: couldn't find {bundle}'s process: {e}")
+                    told = True
+                pids = []
+            if not pids:
+                idle += self.log_retry
+                if idle > self.log_idle:
+                    self._log_pids.pop(bundle, None)
+                    return
+                await asyncio.sleep(self.log_retry)
+                continue
+            idle, pid = 0.0, pids[0]
+            self._log_pids[bundle] = pid
+            try:
+                async for at, raw, text, entry_pid in self.session.device.app_log_stream(pid):
+                    if entry_pid == pid:
+                        ring.add(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text))
+            except Exception as e:
+                self.log(f"logs: the log stream of {bundle} ended: {e}")
+            await asyncio.sleep(self.log_retry)
+
+    async def _refresh_logs(self, bundle: str) -> None:
+        """Before `logs` answers: read the app's log if it isn't being read, and again if the app started anew (its
+        old process's stream says nothing more)."""
+        fresh = bundle not in self._log_tasks or self._log_tasks[bundle].done()
+        self.ensure_logs(bundle)
+        if self._connected.is_set():
+            try:
+                pids = await asyncio.wait_for(self.session.device.app_pids(bundle), 5)
+            except Exception:
+                pids = []
+            current = self._log_pids.get(bundle)
+            if pids and current is not None and current not in pids:
+                self._log_tasks[bundle].cancel()
+                await asyncio.gather(self._log_tasks[bundle], return_exceptions=True)
+                self._log_pids.pop(bundle, None)
+                self.ensure_logs(bundle)
+                fresh = True
+        if fresh and self.log_warmup:
+            await asyncio.sleep(self.log_warmup)  # the phone replays what the app logged just before
+
+    def _diag_app(self, given: dict[str, str] | None) -> tuple[str, str]:
+        """(bundle id, how to show it) of the app `logs` and `crash` speak of: the app in front at the last read, else
+        the one open_app started, else the only one given. In personal mode only a given app: never another's."""
+        front = self._bundle()
+        candidates = [b for b in (front if front != SPRINGBOARD else None, self._opened) if b]
+        if given is not None and len(given) == 1:
+            candidates.append(next(iter(given)))
+        for bundle in candidates:
+            if given is None or bundle in given:
+                name = self.session.app_names.get(bundle)
+                return bundle, f"{name} ({bundle})" if name else bundle
+        if given is not None and front and front != SPRINGBOARD:
+            raise Refused("not_allowed", _outside(front, self.session.app_names.get(front), ", ".join(given.values())))
+        raise Refused("not_found", diagnostics.LOGS_NO_APP)
+
+    async def _diag_tool(self, name: str, args: dict, given: dict[str, str] | None) -> dict:
+        """`logs` or `crash`. `given`: the apps of a personal-mode agent (None: a dedicated device)."""
+        args = _checked_diag(name, args)
+        bundle, shown = self._diag_app(given)
+        self._diag_count = None
+        if name == "logs":
+            await self._refresh_logs(bundle)
+            text, self._diag_count = diagnostics.logs_answer(self._rings.get(bundle), args.get("since"),
+                                                             args["level"], args["grep"], args["limit"])
+            return {"text": text, "image": None, "image_size": None}
+        return await self._crash(bundle, shown, args)
+
+    async def _executable(self, bundle: str) -> str | None:
+        """The name of the app's process (its executable), from the installed apps: crash reports are named after it."""
+        if not self._executables.get(bundle):
+            for a in await self.session.apps():
+                self._executables[a["bundle_id"]] = a.get("executable") or ""
+        return self._executables.get(bundle) or None
+
+    async def _crash(self, bundle: str, shown: str, args: dict) -> dict:
+        await self.wait_connected()
+        exe = await self._executable(bundle)
+        if not exe:
+            raise Refused("unsupported", diagnostics.CRASH_NO_EXECUTABLE.format(app=shown))
+        reports = await self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT)
+        infos = [diagnostics.describe_crash(r, exe) for r in reports]
+        if not args["all"]:  # the newest, and only one since the session began
+            infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:1]
+        self._diag_count = len(infos)
+        if not infos:
+            return _answer([(diagnostics.NONE_AT_ALL if args["all"] else diagnostics.NONE_SINCE).format(app=shown)])
+        lines: list[str] = []
+        for info in infos:
+            lines += ["" if lines else None, *diagnostics.crash_lines(info, shown)]
+            if args["pull"]:
+                lines.append(diagnostics.SAVED.format(path=await self._pull_crash(bundle, info)))
+        return _answer([ln for ln in lines if ln is not None])
+
+    async def _pull_crash(self, bundle: str, info: "diagnostics.CrashInfo") -> str:
+        """Copy the whole report from the phone into ~/.tapwright/crashes/<bundle id>/; its path."""
+        data = await self.session.device.crash_file(info.remote)
+        path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        except OSError as e:
+            raise Refused("internal", f"couldn't save the crash report to {path.parent}: {e.strerror or e}") from None
+        return str(path)
+
+    async def _find_crash(self, bundle: str, polls: int, since: datetime.datetime | None = None):
+        """The newest report of that app, not yet told of, from `since` on; looked for `polls` times, as a report
+        reaches the phone's folder a moment after the app has gone. None when there is none."""
+        try:
+            exe = await self._executable(bundle)
+        except Exception:
+            return None
+        if not exe:
+            return None
+        for n in range(polls):
+            try:
+                reports = await asyncio.wait_for(self.session.device.crash_reports(exe, 3), 15)
+            except Exception:
+                return None
+            for report in reports:
+                info = diagnostics.describe_crash(report, exe)
+                if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
+                    self._crash_seen.add(info.filename)
+                    return info
+            if n + 1 < polls:
+                await asyncio.sleep(self.crash_poll)
+        return None
+
+    async def _crash_note(self, scope: "Scope | None", name: str, before: str | None, error: Refused | None,
+                          pid_before: int | None) -> str | None:
+        """_crash_check, which never fails a call: a note is a nicety."""
+        try:
+            return await self._crash_check(scope, name, before, error, pid_before)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.log(f"crash check: {e}")
+            return None
+
+    async def _crash_check(self, scope: "Scope | None", name: str, before: str | None, error: Refused | None,
+                           pid_before: int | None) -> str | None:
+        """The note for an answer when the app under test stopped: it was in front (`before`) and is no longer running,
+        and a crash report of it has come. Cheap: the phone is asked only when the app left the front (or the call
+        ended in an error a crash causes), and then once whether it still runs. A crash whose report hasn't come yet is
+        looked for again on the next calls (CRASH_LATE_TRIES), and told once, with its time."""
+        pending = self._crash_pending
+        if pending is not None and name not in DIAG_TOOLS:
+            info = await self._find_crash(pending["bundle"], 1, pending["since"])
+            pending["tries"] += 1
+            if info is not None or pending["tries"] >= CRASH_LATE_TRIES:
+                self._crash_pending = None
+            if info is not None:
+                return diagnostics.note_of(info, late=True)
+        if name in NO_CRASH_CHECK:
+            return None
+        target = self._opened if name == "open_app" else before
+        left, self._left_front = self._left_front, None  # a touch found the home screen where the app was (_taken_away)
+        if not target or target == SPRINGBOARD:
+            return None
+        cut = error is not None and error.code in CRASH_CUT_CODES
+        if self._bundle() == target and not cut and left != target:
+            return None
+        if scope is not None and target not in await self._given(scope):
+            return None
+        try:
+            pids = await asyncio.wait_for(self.session.device.app_pids(target), 5)
+        except Exception:
+            return None  # the phone can't say
+        pid = None if name == "open_app" else pid_before  # the process the call began with, if it was read
+        if pids and (pid is None or pid in pids):
+            return None  # it runs: it left the front, or froze
+        info = await self._find_crash(target, self.crash_polls)
+        if info is not None:
+            return diagnostics.note_of(info)
+        if self._crash_pending is None:
+            self._crash_pending = {"bundle": target, "tries": 0, "since": self._crash_since}
+        return None
 
     # ---- batches and scripts (AGENT-TOOLS §9) ----
     def _aim_for_recording(self, client_id: str, name: str, args: dict) -> dict | None:
@@ -1182,7 +1443,9 @@ class Daemon:
         step_notes = list(notes or [])
         failed: tuple[str, str] | None = None
         done = 0
+        step_ms = self._epoch_ms()
         for i, step in enumerate(steps, 1):
+            step_ms = self._epoch_ms()  # when this step began: a failure shows the log from here
             if clock() - began > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
@@ -1191,7 +1454,8 @@ class Daemon:
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
                 lines = answer["text"].splitlines()
-                step_notes += [f"Note (step {i}): {line[6:]}" for line in lines if line.startswith("Note: ")]
+                step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
+                               for line in lines if line.startswith("Note: ")]
                 if args.get("trace"):
                     traced.append(f"  {i}. {lines[0] if lines else step['tool']} ({clock() - t0:.1f} s)")
                 seen_notes: list[str] = []
@@ -1205,7 +1469,9 @@ class Daemon:
                               if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
-                failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {e}")
+                message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
+                step_notes += crash
+                failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {message}")
                 break
             finally:
                 BATCH.reset(token)
@@ -1223,10 +1489,22 @@ class Daemon:
         else:
             view.unlooked += 1
             answer = _answer([first, *traced])
-        answer["text"] = "\n".join([answer["text"], *step_notes])
+        # a failure adds the app's log from the failed step on, after the change block (AGENT-TOOLS §15.4)
+        logs = await self._failure_logs(scope, i, step_ms) if failed else []
+        answer["text"] = "\n".join([answer["text"], *logs, *step_notes])
         if failed:
             raise Refused(failed[0], answer["text"])
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
+
+    async def _failure_logs(self, scope: "Scope | None", step: int, since: int) -> list[str]:
+        """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in
+        personal mode), when there are any."""
+        try:
+            given = await self._given(scope) if scope is not None else None
+            bundle, _ = self._diag_app(given)
+        except Refused:
+            return []
+        return diagnostics.failure_logs(self._rings.get(bundle), step, since)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
                       notes: list[str] | None = None) -> str | None:
@@ -1280,16 +1558,30 @@ class Daemon:
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
+        before = self._bundle()  # the app under test when the call began (see _crash_check), and its process if read
+        pid_before = self._log_pids.get(before) if before else None
         try:
             # The stream is held open for the length of every tool call; the pump's own linger keeps
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
-                if scope is None:
-                    answer = await self._run_tool(client_id, name, args)
-                else:
-                    answer = await self._within(scope, client_id, name, args)
+                try:
+                    if scope is None:
+                        answer = await self._run_tool(client_id, name, args)
+                    else:
+                        answer = await self._within(scope, client_id, name, args)
+                except Refused as e:
+                    # a call the crash cut short ends in an error too: it carries the note as well
+                    note = await self._crash_note(scope, name, before, e, pid_before)
+                    if note is None or e.code == "dry_run":
+                        raise
+                    raise Refused(e.code, f"{e}\nNote: {note}") from None
+                note = await self._crash_note(scope, name, before, None, pid_before)
+                if note is not None:
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
+                elif self._crash_pending is None and name not in DIAG_TOOLS:
+                    self._crash_since = self._wall()
                 if granted:  # a person's OK let a touch through: the answer ends with it
                     self._granted_now = True
                     answer = {**answer, "text": f"{answer['text']}\nNote: {NOTE_ALLOWED}"}
@@ -1434,6 +1726,8 @@ class Daemon:
             if front not in given and front != PROMPT_FRONT:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names,
                                                       alert=getattr(self.session, "last_alert", None) is not None))
+        if name in DIAG_TOOLS:  # the answer is of one given app only, so it needs no screen check below
+            return await self._diag_tool(name, args, given)
         given_token = _GIVEN.set(given)
         try:
             answer = await self._run_tool(client_id, name, args)
@@ -1475,6 +1769,8 @@ class Daemon:
         missing = [k for k in REQUIRED.get(name, ()) if args.get(k) is None]
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
+        if name in DIAG_TOOLS:  # a dedicated device; personal mode answers these in _within
+            return await self._diag_tool(name, args, None)
         args = self._ocr_target(client_id, args)
         if "index" in args and isinstance(args.get("target"), dict) and "index" not in args["target"]:
             # `index` belongs inside `target`; a first-time agent put it beside it and got an ambiguous error back
@@ -1779,6 +2075,7 @@ class Daemon:
                 await self._read(lambda: self._silent_read(view))
             if view.alert_now is not None:
                 return None
+        self._left_front = bundle  # (if it was a crash that took the app, the answer's crash note is looked for)
         await self.control.agent(lambda: s.launch(bundle))
         self.log(f"the agent's touch near the top left {bundle} for {front}: opened {bundle} again")
         if front == SPRINGBOARD:
@@ -1901,6 +2198,9 @@ class Daemon:
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        self._opened = bundle_id
+        self._crash_since = self._wall()  # a new start: an earlier crash is old news
+        self.ensure_logs(bundle_id)
         return f"Opened {shown}."
 
     async def _close_app(self, view, a: dict) -> str:
