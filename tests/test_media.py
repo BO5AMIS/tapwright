@@ -17,12 +17,15 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "HOME", tmp_path / "home")
 
 
+HEADERS = {".jpg": bytes([0xFF, 0xD8, 0xFF, 0xE0]), ".png": bytes([0x89]) + b"PNG", ".heic": bytes(4) + b"ftypheic"}
+
+
 @pytest.fixture
 def pictures(tmp_path):
     out = []
     for name in ("food.jpg", "label.PNG", "scan.heic"):
         path = tmp_path / name
-        path.write_bytes(b"picture " + name.encode())
+        path.write_bytes(HEADERS[path.suffix.lower()] + b"picture " + name.encode())
         out.append(str(path))
     return out
 
@@ -323,3 +326,38 @@ def test_the_mcp_client_waits_longer_for_media_and_for_a_stop_with_export():
     assert mcp_server._timeout("media", {"add": ["x.jpg"]}) > 150
     assert mcp_server._timeout("journey", {"stop": True}) == 120.0
     assert mcp_server._timeout("journey", {"stop": True, "export": {"to": "issue"}}) >= 600
+
+
+def test_the_pictures_are_checked_by_their_first_bytes_and_a_link_or_network_path_is_refused(tmp_path, pictures):
+    fake = tmp_path / "fake.png"
+    fake.write_bytes(b"MZ not a picture")
+    link = tmp_path / "link.jpg"
+    try:
+        link.symlink_to(pictures[0])
+    except (OSError, NotImplementedError):
+        link = None  # (no permission to make a link here)
+    cases = [([str(fake)], "isn't a png picture"), (["\\\\host\\share\\a.jpg"], "network path"),
+             (["//host/share/a.jpg"], "network path")]
+    if link is not None:
+        cases.append(([str(link)], "a link isn't followed"))
+    for add, message in cases:
+        with pytest.raises(ValueError) as e:
+            media.read_pictures(add)
+        assert message in str(e.value), (add, str(e.value))
+    assert [name for name, _ in media.read_pictures(pictures)] == ["food.jpg", "label.PNG", "scan.heic"]
+
+
+def test_pictures_a_short_answer_did_make_stay_recorded(pictures):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+
+        async def short(pics):
+            d.session.calls.append("short")
+            return ["ONLY/L0/001"]
+        d.session.photos_add = short
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "internal"
+        assert [x["id"] for x in media.load()["a"]] == ["ONLY/L0/001"]
+        await finish(stop, task)
+    run(go)

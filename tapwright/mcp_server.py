@@ -7,6 +7,7 @@ may be watching or driving in its live view at the same time.
 """
 import asyncio
 import base64
+import io
 import logging
 import os
 import re
@@ -176,7 +177,19 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
         except OSError as e:  # the user chose file mode: no inline picture instead, but the answer stays
             text += f"\nNote: no screenshot: couldn't save to {SHOTS_DIR}: {e.strerror or e}"
         image = None
-    return _result(text, image, more=answer.get("images") or None)
+    more = answer.get("images") or None
+    if more and SHOTS_DIR is not None:  # the journey's second picture goes to the folder too, never inline
+        try:
+            from PIL import Image
+            for extra in more:
+                data = base64.b64decode(extra)
+                with Image.open(io.BytesIO(data)) as shown:
+                    size = shown.size
+                text += "\n" + save_screenshot(SHOTS_DIR, f"{tool}_more", data, size)
+        except Exception as e:  # noqa: BLE001
+            text += f"\nNote: no second screenshot: couldn't save to {SHOTS_DIR}: {getattr(e, 'strerror', None) or e}"
+        more = None
+    return _result(text, image, more=more)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)

@@ -503,3 +503,12 @@ def test_an_empty_input_shows_its_placeholder_and_typing_into_it_says_so():
     assert changes._was(empty, typed) == ['placeholder "Alex Morgan"']
     assert changes._was(typed, empty) == ['"abc"']  # cleared again: the placeholder is back on the line
     assert "value=" not in empty.line() and "placeholder=" not in typed.line()
+
+
+def test_a_gone_element_has_no_id_in_a_users_eyes():
+    old = [el("e2", role="image", identifier="logo", y=50)]
+    token = ui.USERS_EYES.set(True)
+    try:
+        assert changes.diff(old, []) == ["- image"]
+    finally:
+        ui.USERS_EYES.reset(token)

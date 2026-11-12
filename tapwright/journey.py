@@ -156,6 +156,7 @@ class Journey:
     network_set: bool = False  # the journey put the phone's network in a condition (to undo at stop)
     launched_with: dict = field(default_factory=dict)  # the language/region/text size the app was launched with
     left_out: int = 0  # pictures not kept because another app was in front (H1)
+    over_cap: int = 0  # pictures not kept because the report holds at most MAX_FRAMES
     muted: int = 0  # >0 while the tool makes calls of its own (stress moments, conditions): not measured
 
     @property

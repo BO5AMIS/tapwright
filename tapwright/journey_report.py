@@ -14,6 +14,7 @@ from . import filmstrip, journey as jr
 
 GIF_WIDTH = 360
 GIF_MAX_BYTES = 3_000_000
+GIF_MAX_FRAMES = 60  # the GIF shows at most this many pictures (sampled over the path); the folder keeps them all
 GIF_FRAME_MS = 800
 GIF_HOLD_MS = (1200, 1600)  # the first and the last picture stay longer
 SAME_PICTURE = 2.0  # mean grey difference (0-255) under which two frames are one still stretch
@@ -76,6 +77,9 @@ def make_gif(frames: list[jr.Frame], out: Path, width: int = GIF_WIDTH, max_byte
     colours, then drops every other picture (never the first or the last). Returns the file's size, 0 with no frames."""
     if not frames:
         return 0
+    if len(frames) > GIF_MAX_FRAMES:  # spread over the path, the first and the last kept (memory: one RGB picture each)
+        step = (len(frames) - 1) / (GIF_MAX_FRAMES - 1)
+        frames = [frames[round(i * step)] for i in range(GIF_MAX_FRAMES)]
     images = [_gif_frame(f, width) for f in frames]
     # a ring marks a touch, so a frame with one is never merged into the one before it
     merged: list[tuple[Image.Image, int]] = []
@@ -186,6 +190,8 @@ def model(j: jr.Journey, reached: bool, why: str | None, elapsed: float, picture
     notes = list(j.notes)
     if j.left_out:
         notes.append(f"{jr.plural(j.left_out, 'frame')} left out: another app was in front.")
+    if j.over_cap:
+        notes.append(f"{jr.plural(j.over_cap, 'picture')} not kept: a report holds at most {jr.MAX_FRAMES}.")
     if j.shortcuts:
         notes.append("Shortcuts used: " + "; ".join(j.shortcuts))
     return {"title": f'Journey: {j.goal}', "facts": facts, "numbers": numbers, "path": path, "findings": findings,

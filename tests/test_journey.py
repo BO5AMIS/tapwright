@@ -1144,3 +1144,35 @@ def test_m4_in_a_users_eyes_text_does_not_reach_an_icon_only_button_by_its_voice
         assert r["text"].startswith("Tapped e2")
         await finish(stop, task)
     run(go)
+
+
+def test_lows_the_gif_samples_a_long_path_and_the_report_says_when_the_frame_cap_stopped_pictures(tmp_path, monkeypatch):
+    frames = []
+    for i in range(12):
+        p = tmp_path / f"{i}.jpg"
+        noisy(p, i)
+        frames.append(journey.Frame(p, "x", None, (400.0, 800.0), 1))
+    monkeypatch.setattr(journey_report, "GIF_MAX_FRAMES", 5)
+    journey_report.make_gif(frames, tmp_path / "s.gif")
+    assert Image.open(tmp_path / "s.gif").n_frames <= 5
+    j = new_journey(tmp_path)
+    j.over_cap = 3
+    assert "3 pictures not kept: a report holds at most 200." in journey_report.model(j, True, None, 1.0, {}, tmp_path)["notes"]
+
+
+def test_lows_a_cancelled_start_leaves_no_journey_and_no_folder(reports):
+    import asyncio
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+
+        async def cancelled(*a, **k):
+            raise asyncio.CancelledError
+        d._calls_of_its_own = cancelled
+        with pytest.raises(asyncio.CancelledError):
+            await d.run_tool("a", "journey", {"start": True, "goal": "g", "conditions": {"network": "3g"}})
+        assert d._journeys == {} and "a" not in journey.running
+        assert not reports.exists() or not list(reports.iterdir())
+        await finish(stop, task)
+    run(go)

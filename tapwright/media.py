@@ -36,9 +36,13 @@ def read_pictures(paths: list[str]) -> list[tuple[str, bytes]]:
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError(f"add holds paths of pictures, not {raw!r}")
+        if raw.strip().startswith(("\\\\", "//")):  # a network path would make this computer connect to that host
+            raise ValueError(f"{raw}: pictures must be on this computer, not on a network path")
         path = Path(raw).expanduser()
         if path.suffix.lower() not in EXTENSIONS:
             raise ValueError(f"{path.name}: only jpeg, png and heic pictures can be added")
+        if path.is_symlink():
+            raise ValueError(f"{path.name}: a link isn't followed; give the picture's own path")
         try:
             size = path.stat().st_size
         except OSError:
@@ -51,10 +55,22 @@ def read_pictures(paths: list[str]) -> list[tuple[str, bytes]]:
         if total > MAX_TOTAL:
             raise ValueError(f"{path.name}: the pictures together are over the {MAX_TOTAL // 1048576} MB limit for one call")
         try:
-            out.append((path.name, path.read_bytes()))
+            data = path.read_bytes()
         except OSError as e:
             raise ValueError(f"{raw}: can't be read ({e.strerror or e})") from None
+        if not looks_like(path.suffix.lower(), data):
+            raise ValueError(f"{path.name}: the file isn't a {path.suffix.lstrip('.').lower()} picture (its first bytes say otherwise)")
+        out.append((path.name, data))
     return out
+
+
+def looks_like(suffix: str, data: bytes) -> bool:
+    """Do the file's first bytes fit its extension: jpeg FF D8 FF, png 89 'PNG', heic an 'ftyp' box."""
+    if suffix in (".jpg", ".jpeg"):
+        return data[:3] == b"\xff\xd8\xff"
+    if suffix == ".png":
+        return data[:4] == b"\x89PNG"
+    return data[4:8] == b"ftyp"
 
 
 # ---- the ledger: what this daemon added, per client ----

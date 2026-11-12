@@ -94,7 +94,10 @@ class JourneyTools:
         """A picture of the settled screen for the report: the live stream's newest frame, else a screenshot. Never an
         error: a picture that can't be had is a gap in the report. Left out (and counted) while another app is in front."""
         d = _d()
-        if len(jr.frames) >= journey.MAX_FRAMES or jr.current is None:
+        if jr.current is None:
+            return
+        if len(jr.frames) >= journey.MAX_FRAMES:
+            jr.over_cap += 1
             return
         if not await self._journey_front_ok(jr, scope, text):
             jr.left_out += 1
@@ -211,7 +214,7 @@ class JourneyTools:
                 await self._calls_of_its_own(client_id, jr, scope, "open_app", {"app": jr.app, "look": False, **launch})
                 jr.launched_with = dict(launch)
             looked = await self._calls_of_its_own(client_id, jr, scope, "look", {"screenshot": False})
-        except Exception:
+        except BaseException:  # (a cancelled start too: no journey left registered, no empty folder)
             await self._journey_undo(client_id, jr, scope, [])
             self._journeys.pop(client_id, None)
             journey.running.pop(client_id, None)

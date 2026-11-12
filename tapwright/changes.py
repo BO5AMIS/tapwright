@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, replace
 
-from .ui import Element, clip
+from .ui import USERS_EYES, Element, clip
 
 NO_CHANGE = "No visible change."
 SAME_SCREEN = "Same screen. Changes:"
@@ -166,7 +166,7 @@ def _gone(e: Element) -> str:
     """`- <role> "<text>"`, else `<role> id=<id>`, else the role alone: no ref, no position."""
     if e.text:
         return f"- {e.role} {clip(e.text)}"
-    return f"- {e.role} id={e.identifier}" if e.identifier else f"- {e.role}"
+    return f"- {e.role} id={e.identifier}" if e.identifier and not USERS_EYES.get() else f"- {e.role}"
 
 
 def _frame_moved(old: Element, new: Element) -> bool:
