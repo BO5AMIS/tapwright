@@ -74,12 +74,26 @@ class LogRing:
     def __init__(self, size: int = LOG_RING) -> None:
         self.entries: deque[LogEntry] = deque(maxlen=size)
         self.added = 0  # how many entries were ever added: a mark for discard_since
+        self.unvouched = 0  # how many of the newest entries aren't yet shown to be of the app's own process: no answer has them
 
-    def add(self, entry: LogEntry) -> None:
+    def add(self, entry: LogEntry, vouched: bool = True) -> None:
+        """`vouched=False`: the entry's process isn't yet shown to be the app's (a pid can be reused by another app), so
+        it is kept but not shown by any answer until vouch() says it is the app's."""
         if len(entry.text) > LOG_TEXT_KEPT:
             entry = dataclasses.replace(entry, text=entry.text[:LOG_TEXT_KEPT])
         self.entries.append(entry)
         self.added += 1
+        if not vouched or self.unvouched:
+            self.unvouched = min(self.unvouched + 1, len(self.entries))
+
+    def vouch(self, upto: int) -> None:
+        """The process was shown to be the app's when `added` was `upto`: what was added until then is shown."""
+        self.unvouched = min(self.unvouched, max(0, self.added - upto))
+
+    def shown(self) -> list[LogEntry]:
+        """The entries an answer may use: all but the newest `unvouched`."""
+        kept = list(self.entries)
+        return kept[:len(kept) - self.unvouched] if self.unvouched else kept
 
     def discard_since(self, mark: int, from_at: int | None = None) -> int:
         """Take back what was added after `mark` (the `added` count then): all of it, or only the entries at `from_at`
@@ -92,6 +106,7 @@ class LogRing:
         keep = [e for e in recent if from_at is not None and e.at < from_at]
         self.entries.clear()
         self.entries.extend([*kept[:len(kept) - tail], *keep])
+        self.unvouched = min(self.unvouched, len(keep))
         return tail - len(keep)
 
     def newest(self) -> tuple[int, frozenset[str]] | None:
@@ -102,23 +117,25 @@ class LogRing:
         at = self.entries[-1].at
         return at, frozenset(e.text[:LOG_TEXT_KEPT] for e in self.entries if e.at == at)
 
-    def add_unseen(self, entry: LogEntry, after: tuple[int, frozenset[str]] | None) -> bool:
+    def add_unseen(self, entry: LogEntry, after: tuple[int, frozenset[str]] | None, vouched: bool = True) -> bool:
         """Add `entry` unless `after` (from newest()) says it is already here: older than the newest entry, or the
         same time and text as one. True when it was added."""
         if after is not None and (entry.at < after[0] or (entry.at == after[0] and entry.text[:LOG_TEXT_KEPT] in after[1])):
             return False
-        self.add(entry)
+        self.add(entry, vouched)
         return True
 
-    def latest(self) -> int | None:
-        return self.entries[-1].at if self.entries else None
+    def latest(self, shown: bool = False) -> int | None:
+        """The newest entry's time (`shown`: of the entries an answer may use)."""
+        entries = self.shown() if shown else self.entries
+        return entries[-1].at if entries else None
 
     def select(self, since: int | None = None, level: str = "info", grep: str | None = None,
                limit: int = LOG_DEFAULT_LIMIT) -> list[LogEntry]:
         """The newest `limit` entries newer than `since`, at `level` or above, containing `grep`; oldest first."""
         floor = LOG_LEVELS.index(level)
         needle = grep.casefold() if grep else None
-        found = [e for e in self.entries if (since is None or e.at > since) and LOG_LEVELS.index(e.level) >= floor
+        found = [e for e in self.shown() if (since is None or e.at > since) and LOG_LEVELS.index(e.level) >= floor
                  and (needle is None or needle in e.text.casefold())]
         return found[-limit:]
 
@@ -152,7 +169,7 @@ def no_entries(since: int | None, level: str, grep: str | None) -> str:
 def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str | None, limit: int) -> tuple[str, int]:
     """(the answer's text, the number of entry lines) for a `logs` call."""
     entries = ring.select(since, level, grep, limit) if ring is not None else []
-    latest = (ring.latest() if ring is not None else None) or since or 0
+    latest = (ring.latest(shown=True) if ring is not None else None) or since or 0
     lines = [line_of(e) for e in entries] or [no_entries(since, level, grep)]
     return "\n".join([*lines, LATEST.format(ms=latest)]), len(entries)
 

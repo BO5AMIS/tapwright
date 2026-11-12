@@ -912,3 +912,104 @@ def test_a_failure_without_diagnostics_has_no_system_out_and_pulls_nothing(tmp_p
     assert cli.replay(a) == 1 and calls == ["replay"]
     assert ET.parse(out).getroot().find("testcase[@name='plain']/system-out") is None
     assert not (tmp_path / "plain.diff").exists()
+
+
+def test_a_line_of_a_process_that_is_not_proven_the_apps_is_in_no_logs_answer():
+    """Codex, PR #4 cycle 2: the app's pid went to another app, whose line was in the ring before the watcher's next
+    check, and `logs` answered with it. Lines count only once the phone's own list has shown the process is the app's."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0  # the watcher does not look again: only logs' own check stands between the line and the answer
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]  # proven: it is shown
+        device.pids[APP] = []  # pid 42 goes to another app, which logs at once
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        shown = (await d.run_tool("a", "logs", {}))["text"]
+        assert "secret" not in shown and "the app's own line" in shown and f"Latest: {BASE + 1}" in shown
+        device.holders.clear()  # the app has its pid again, but the phone can't be asked whose the process is
+        device.pids[APP] = [42]
+        device.emit(42, BASE + 3, "not yet proven")
+        await settle(lambda: len(ring.entries) == 3)
+        device.proc_error = RuntimeError("no process list")
+        assert "not yet proven" not in (await d.run_tool("a", "logs", {}))["text"]
+        device.proc_error = None
+        assert "not yet proven" in (await d.run_tool("a", "logs", {}))["text"]  # asked and answered: shown
+        await finish(stop, task)
+    run(go)
+
+
+def slow_down(d: Daemon, seconds: float) -> None:
+    """The next tap takes `seconds` of real time (the batch's own clock is a fake one, so a step would be over at once)."""
+    session = d.session
+    real = session.tap
+
+    async def tap(target, hold_ms=60):
+        await asyncio.sleep(seconds)
+        return await real(target, hold_ms)
+    session.tap = tap
+
+
+def test_a_replay_that_arrives_during_the_step_is_not_shown_as_since_the_step():
+    """Codex and CodeRabbit, PR #4: the replay of the phone's older lines came after the step began, the ring had no
+    boundary, and they were shown from epoch zero as `since step 1`. The boundary is the phone's clock then."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.replay_delay = 0.2  # the stream gives its replay after the warm-up ended, while the step runs
+        device.phone_ms = BASE
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)  # in front, and logs never asked for
+        stop, task = await started(d)
+        slow_down(d, 0.45)
+        asyncio.get_running_loop().call_later(0.35, device.emit, 42, BASE + 10, "a failure during the step", 0x10)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert e.value.code == "expect_failed" and "an old error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text  # what happened in the step is shown
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_with_no_boundary_and_no_phone_clock_shows_no_logs():
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = None  # the clock can't be read
+        device.replay_delay = 0.2
+        slow_down(d, 0.45)
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        assert "Logs (since" not in str(e.value) and "an old error" not in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_unvouched_entry_is_kept_but_in_no_answer_until_it_is_vouched_for():
+    ring = LogRing()
+    ring.add(LogEntry(BASE, "info", "proven"))
+    mark = ring.added
+    ring.add(LogEntry(BASE + 1, "error", "unproven"), vouched=False)
+    ring.add(LogEntry(BASE + 2, "error", "unproven too"))  # (after an unproven one, it is no more proven than that)
+    assert [e.text for e in ring.select()] == ["proven"] and ring.latest(shown=True) == BASE and ring.latest() == BASE + 2
+    assert diagnostics.logs_answer(ring, None, "info", None, 10)[0].endswith(f"Latest: {BASE}")
+    ring.vouch(mark)  # vouching for what was added before `mark` changes nothing about what came after
+    assert [e.text for e in ring.select()] == ["proven"]
+    ring.vouch(ring.added)
+    assert [e.text for e in ring.select()] == ["proven", "unproven", "unproven too"]
+    ring.add(LogEntry(BASE + 3, "info", "x"), vouched=False)
+    ring.discard_since(ring.added - 1)
+    assert ring.unvouched == 0 and len(ring.entries) == 3

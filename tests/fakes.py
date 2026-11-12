@@ -157,6 +157,8 @@ class FakeDevice:
         self.stream_error: Exception | None = None  # app_log_stream raises this when asked
         self.stream_closed: list[int] = []  # the pids whose log streams have ended
         self.replay: dict[int, list] = {}  # pid -> entries every new stream of it gives first (the phone's replay)
+        self.replay_delay = 0.0  # seconds a new stream takes before it gives its replay (a slow phone)
+        self.phone_ms: int | None = 0  # the phone's clock, epoch ms (None: it can't be read)
         self.crash_error: Exception | None = None  # crash_reports / crash_file raise this
         self.crash_unreadable = 0  # how many reports crash_reports says it passed over
         self.crash_too_big = 0  # how many it says were over the byte cap
@@ -176,6 +178,9 @@ class FakeDevice:
         if self.proc_error is not None:
             raise self.proc_error
         return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def phone_time_ms(self) -> int | None:
+        return self.phone_ms
 
     async def process_holder(self, pid: int):
         """Who has that pid now (a Proc), or None when nobody does."""
@@ -203,6 +208,8 @@ class FakeDevice:
             raise self.stream_error
         queue = self.streams.setdefault(pid, asyncio.Queue())
         try:
+            if self.replay_delay:
+                await asyncio.sleep(self.replay_delay)
             for entry in self.replay.get(pid, []):
                 yield entry
             while True:

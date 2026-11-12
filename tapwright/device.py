@@ -343,6 +343,11 @@ class Device:
         """That app's running processes, each with its start time (empty: it isn't running)."""
         return [p for p in await self.processes() if p.bundle == bundle_id]
 
+    async def phone_time_ms(self) -> int | None:
+        """The phone's own clock now, epoch ms: the log entries' times are on it, not on this computer's."""
+        value = await self.rsd.get_value(key="TimeIntervalSince1970")
+        return int(float(value) * 1000) if value is not None else None
+
     async def process_holder(self, pid: int) -> "Proc | None":
         """Whatever process has that pid now, whoever's it is (None: nothing does)."""
         return next((p for p in await self.processes() if p.pid == pid), None)

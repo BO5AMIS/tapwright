@@ -1150,7 +1150,8 @@ class Daemon:
             if entry_pid == proc.pid:
                 got[0] += 1
                 if floor is None or at >= floor:
-                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after)
+                    # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
+                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
 
     async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc, mark: int) -> None:
         """After a stream of `proc` ended, once: were the lines added since `mark` (the last check that the process was
@@ -1213,6 +1214,7 @@ class Daemon:
                     await asyncio.wait({reader}, timeout=self.log_check)
                     if reader.done():
                         break
+                    asked = ring.added  # (what came before the question is what its answer vouches for)
                     try:
                         now = await _wait_for(self.session.device.app_processes(bundle), 5)
                     except Exception:
@@ -1222,7 +1224,8 @@ class Daemon:
                         continue
                     unchecked = 0
                     if any(p.same_life(proc) for p in now):
-                        mark = ring.added  # what came so far is vouched for
+                        mark = asked  # what came before the question is vouched for
+                        ring.vouch(asked)
                         self._log_life[bundle] = (proc, mark)
                         continue
                     # not this process any more: gone, or the pid is another process's now. Its last lines come first,
@@ -1267,6 +1270,32 @@ class Daemon:
                 fresh = True
         if fresh and self.log_warmup:
             await asyncio.sleep(self.log_warmup)  # the phone replays what the app logged just before
+        await self._vouch_logs(bundle)
+
+    async def _vouch_logs(self, bundle: str) -> None:
+        """Lines of a stream are shown by no answer until the phone's process list has shown that the process read is
+        the app's, after they were read: a pid can go to another app between the watcher's looks. Asked now, so that an
+        answer is as good as the phone's word at that moment, and a list that can't be had vouches for nothing."""
+        ring, life = self._rings.get(bundle), self._log_life.get(bundle)
+        if ring is None or life is None or not ring.unvouched or not self._connected.is_set():
+            return
+        asked = ring.added
+        try:
+            procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+        except Exception:
+            return
+        if not any(p.same_life(life[0]) for p in procs):
+            if procs:  # the app is another process now: restart_logs reads that one
+                return
+            try:  # gone: when nobody holds its pid, what it logged last (a crash's lines) is its own; else it is not shown
+                holder = await _wait_for(self.session.device.process_holder(life[0].pid), 5)
+            except Exception:
+                return
+            if holder is not None:
+                return
+        ring.vouch(asked)
+        if self._log_life.get(bundle) is life:
+            self._log_life[bundle] = (life[0], max(life[1], asked))
 
     def _diag_app(self, given: dict[str, str] | None) -> tuple[str, str]:
         """(bundle id, how to show it) of the app `logs` and `crash` speak of: the app in front at the last read, else
@@ -1670,6 +1699,7 @@ class Daemon:
             if i == 1:
                 await self._log_boundary(scope)  # the app's log is read, with the phone's replay, before the first mark
             marks = {b: r.latest() for b, r in self._rings.items()}
+            await self._clock_mark(scope, marks)
             if clock() - began > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
@@ -1739,6 +1769,24 @@ class Daemon:
             except Exception:
                 pass
 
+    async def _clock_mark(self, scope: "Scope | None", marks: dict[str, int | None]) -> None:
+        """The app's ring has no entry yet, so no boundary for a step: the phone's own clock now is the boundary (log
+        times are on it), whatever its stream still has to replay. When the clock can't be read the app stays without
+        one, and a failure shows none of its log (an unknown start is not epoch zero)."""
+        try:
+            given = await self._given(scope) if scope is not None else None
+            bundle, _ = self._diag_app(given)
+        except Refused:
+            return
+        if marks.get(bundle) is not None:
+            return
+        try:
+            marks[bundle] = await _wait_for(self.session.device.phone_time_ms(), 3)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            marks[bundle] = None
+
     async def _failure_logs(self, scope: "Scope | None", step: int, marks: dict[str, int | None]) -> list[str]:
         """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in
         personal mode), when there are any. `marks`: the newest log time of each ring when the step began (the phone's
@@ -1753,7 +1801,9 @@ class Daemon:
         except Exception:
             pass
         mark = marks.get(bundle)
-        return diagnostics.failure_logs(self._rings.get(bundle), step, 0 if mark is None else mark + 1)
+        if mark is None:  # where the step began on the phone's clock isn't known: what is older can't be told from what isn't
+            return []
+        return diagnostics.failure_logs(self._rings.get(bundle), step, mark + 1)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
                       notes: list[str] | None = None, fold: bool = False) -> str | None:
