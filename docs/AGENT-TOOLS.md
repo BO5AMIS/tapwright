@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -451,7 +451,7 @@ text items.
 | `rotate` (`portrait`, `landscape_left`, `landscape_right`) | Tapwright | turning the phone is outside the app. Both tools follow a turn, whoever makes it |
 | `swipe` (`x0, y0, x1, y1, seconds`) | both (Tapline since v1.6) | Tapwright makes a real drag. Tapline drags through React Native's own touch system (a pan view, a sheet's swipe to close); a gesture that react-native-gesture-handler or a native view handles (sliders, maps), or a drag along a native scroll view, answers `no_action` there and its message names what can make it |
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
-| `compare_screen`, `filmstrip` | Tapline now; Tapwright in part 2 | both are image work. Tapwright's 22 fps stream suits `filmstrip`; part 2's planned `watch` becomes `filmstrip` |
+| `compare_screen`, `filmstrip` | both (Tapwright since v1.9) | image work: §14 |
 | `record`, `replay` | both (v1.8) | scripts by id, label or text work for both (§9.4) |
 | `logs`, `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
 
@@ -519,10 +519,10 @@ checking `covered` costs (`hittable`, §4).
 
 A step is one tool call written as an object: `{"tool": "<name>", ...its parameters, "expect": {...}}`.
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
-`wait_for`, and where the tool has them `alert`, `press_button`, `rotate`, `open_app`, `close_app`,
-`app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, and where the tool has them
-`inspect` and `check_layout`. A step's own `look` and
+`wait_for`, `compare_screen` (a check, §14.2), and where the tool has them `alert`, `press_button`, `rotate`,
+`open_app`, `close_app`, `app_command`. Not
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, and where the
+tool has them `inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
 Targets are resolved when the step runs, against the screen as it is then. Refs (`{ref}`) are allowed in
@@ -535,6 +535,11 @@ Optional on every step. One of `text`, `id`, `label` (same matching as `wait_for
 - `gone: true`: it must not be on screen;
 - `value`: with `id` or `label`, the element's value must equal it (a switch: `"on"` or `"off"`; `"true"` and `"false"` also work, as its line shows `checked=`);
 - `timeout`: seconds, 0.5–30, default **2**.
+
+Or (v1.9) `matches`: the name of a reference picture; the screen must match it within `threshold` (percent,
+default 0.5, with optional `ignore`), as `compare_screen` checks it (§14). It may stand alone or beside `text`, `id`
+or `label`; then both must hold. It is checked once, after the step settles and after any text, id or label
+expectation held.
 
 After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout. It
 matches as `wait_for` does: exact text first, then part of a text. Tapline looks through the app's whole list, off
@@ -607,6 +612,8 @@ A script is a saved batch:
 - **CLI, no agent:** `tapwright replay FILE…` / `tapline replay FILE…` run scripts in order; each prints the
   `run` answer. Exit code 0 if all held, 1 if one stopped, 2 if a script couldn't start (no phone, no app,
   bad file). `--junit out.xml` writes one test case per script (the stop message as the failure).
+- (v1.9) A script may carry reference pictures in `<script name>.references/` beside it, and `record` folds a
+  `compare_screen` into the step before it (§14.2, §14.3).
 
 ## 10. Accessibility audit: `audit`
 
@@ -751,3 +758,79 @@ all tokens fall by 11%):
 
 **Guard.** The 16:00 cold-agent run and the A-charter run decide whether the rules stay. If any misread is
 traced to a rule, that rule is rolled back: rule 4 first, then rule 3.
+
+## 14. Visual checks (v1.9)
+
+### 14.1 `compare_screen`
+
+Parameters:
+- `name` (required): `^[A-Za-z0-9][\w.-]{0,60}$`, as script names.
+- `update`: save the screen as the reference again.
+- `width`: px, as `look`'s. A reference is compared only at the size it was saved at.
+- `threshold`: the share of the screen, in percent (0–100, default **0.5**), that may change and still match.
+- `ignore`: a list of targets painted out on both pictures before comparing: `{id}`, `{label}`, `{text}`, `{ref}`,
+  or `{x, y, width, height}` in points. Targets are resolved again on each compare, so a masked clock moves with
+  its element. A target that isn't on the screen is skipped, with a note.
+
+Rules:
+- The system's bars are never compared. (Tapline's pictures are the app's window and have none; Tapwright
+  paints out the status bar.)
+- A pixel counts as changed by each tool's own colour tolerance (pictures are compressed; Tapline's is 0.1 of
+  the largest channel). Regions are joined neighbouring cells.
+- **References belong to the tool that saved them**: Tapline's are the app's window (`.jpg`), Tapwright's the
+  whole screen (`.png`, in `~/.tapwright/references/<bundle id>/<name>.png`). Each tool reads only its own.
+
+Answers:
+- First call, or `update: true`: `Saved the reference "<name>" (600x1304 px).`
+- No changed pixel, or within the threshold: `Matches the reference "<name>": 0.12% changed.` (0 changed:
+  `0% changed`.) No picture.
+- Above the threshold, `isError` false (it is a finding, not a failure of the call):
+  ```
+  Differs from the reference "checkout": 3.4% changed, in 2 regions (points):
+  - @16,329 193x48: button "Save" id=lab-save
+  - @16,620 398x44
+  ```
+  Each region names up to two of the smallest named elements it touches, as element lines without the ref. At
+  most 8 region lines, then `(+N more regions)`. Then the picture: the screen now, faded, with the changed pixels
+  in red.
+- A reference of another size: `Error bad_params: the reference "<name>" is 600x1304 px and this screen is
+  600x1200; take it at the same width, or update: true.`
+- Personal mode (Tapwright): as `look`; only a given app's screen is compared or saved.
+- It is a read: no policy, no dry run. The action log has `compare_screen` with the name and the percentage,
+  never the picture.
+
+### 14.2 In `run` and scripts
+
+- A `compare_screen` step is allowed in `run` and scripts. There it never saves (`update` is `bad_params`), and
+  it holds as `expect: {"matches": …}` does: a match within `threshold` holds; anything else stops the batch as
+  `expect_failed`:
+  `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (compare_screen "home"): 3.4% changed from the
+  reference "home" (threshold 0.5%), in 2 regions (points): @16,329 193x48, @16,620 398x44.`
+  For `matches` on an action step the reason begins `its action ran, but`, as for other expectations.
+- A missing reference: `… stopped at step 4 (compare_screen "home"): no reference "home" yet; save one with
+  compare_screen { name: "home" }.`
+- `record` folds a `compare_screen` called right after an action into that step's `expect: {"matches": "<name>"}`
+  (with `threshold` and `ignore` when given), like `wait_for` today. Otherwise it is a step of its own. `ignore`
+  refs are saved as the element's id, label or text; a ref with none of them can't be saved (`bad_params` at record
+  time, naming the element).
+
+### 14.3 References travel with a script
+
+- `record`'s `stop` copies each reference the steps use into `<script dir>/<script name>.references/`. The answer
+  adds `, and 2 reference pictures to <folder>`.
+- `matches` and `compare_screen` steps in a replay look first in `<script dir>/<script name>.references/`, then in
+  the tool's own store. Both tools can share the folder (`<name>.jpg` Tapline, `<name>.png` Tapwright).
+- CLI: `tapwright replay` / `tapline replay` take `--update-references`: the checks save into the script's
+  references folder instead of comparing; exit 0 when every step ran. A failed check writes its picture to
+  `<script dir>/<script name>.diff/<name>.<ext>`, and the JUnit failure message ends with `(diff: <path>)`.
+
+### 14.4 `filmstrip`
+
+Tapline's since 1.0; Tapwright adds it with the same parameters: `frames` (2–12, default 6), `interval_ms`
+(100–2000, default 250), `frame_width` (80–400 px, default 200), `tap` (a target to tap first; the touch goes
+through the policy, §11, and `dry_run` isn't offered).
+- Answer: `Filmstrip: <n> frames about <ms> ms apart, numbered in order, left to right and top to bottom; frame 1
+  is just before the tap, the rest follow it.` (the last clause only with `tap`), then the picture. Tapline adds
+  `Each capture takes a few hundred ms on a phone, so very quick animations fall between frames.`; Tapwright takes
+  its frames from the live stream and doesn't.
+- Personal mode (Tapwright): as `look`.
