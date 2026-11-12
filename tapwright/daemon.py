@@ -1316,6 +1316,10 @@ class Daemon:
         if missing:
             raise Refused("bad_params", f"{name} needs {', '.join(missing)}")
         args = self._ocr_target(client_id, args)
+        if "index" in args and isinstance(args.get("target"), dict) and "index" not in args["target"]:
+            # `index` belongs inside `target`; a first-time agent put it beside it and got an ambiguous error back
+            # with no hint (2026-11-12). Taken where it was meant to go.
+            args = {**{k: v for k, v in args.items() if k != "index"}, "target": {**args["target"], "index": args["index"]}}
         args = _checked(name, args)
         shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose

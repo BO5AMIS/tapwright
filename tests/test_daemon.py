@@ -5202,3 +5202,15 @@ def test_an_ios_alert_over_everything_is_named_as_one_in_personal_mode():
         assert "Ask the user to answer it on the phone" in str(e.value)
         await finish(stop, task)
     run(go)
+
+
+def test_an_index_given_beside_the_target_is_taken_as_the_targets():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "button", "Duplicate", "dup-1", rect=(10, 100, 100, 40)),
+                         el("e2", "button", "Duplicate", "dup-2", rect=(200, 100, 100, 40))])
+        r = await d.run_tool("a", "tap", {"target": {"label": "Duplicate"}, "index": 1, "look": False})
+        assert r["text"].startswith('Tapped e2 button "Duplicate" id=dup-2')
+        await finish(stop, task)
+    run(go)
