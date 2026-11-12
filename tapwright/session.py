@@ -745,9 +745,14 @@ class Session:
         self.app_names = {a["bundle_id"]: a["name"] for a in apps if a["name"]}
         return apps
 
-    async def launch(self, bundle_id: str) -> str:
+    async def launch(self, bundle_id: str, arguments: list[str] | None = None) -> str:
+        """Launch the app (or bring it to the front). `arguments` are launch arguments for the app, e.g. Apple's
+        -AppleLanguages (launch.py); WebDriverAgent applies them only to a launch, so the caller closes a running app first."""
         self.typed_into = None
-        await self._call("POST", "/session/{sid}/wda/apps/launch", {"bundleId": bundle_id}, timeout=60)
+        body: dict = {"bundleId": bundle_id}
+        if arguments:
+            body["arguments"] = arguments
+        await self._call("POST", "/session/{sid}/wda/apps/launch", body, timeout=60)
         return f"launched {bundle_id}"
 
     async def terminate(self, bundle_id: str) -> str:

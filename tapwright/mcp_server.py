@@ -295,8 +295,11 @@ async def apps() -> CallToolResult:
 
 
 @server.tool(description=describe("open_app"), structured_output=False)
-async def open_app(app: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("open_app", app=app, look=look, screenshot=screenshot)
+async def open_app(app: str, look: bool = True, screenshot: bool = False, language: str | None = None,
+                   region: str | None = None, text_size: str | None = None) -> CallToolResult:
+    # (language, region and text_size are sent only when given: AGENT-TOOLS §16.3)
+    given = {k: v for k, v in (("language", language), ("region", region), ("text_size", text_size)) if v is not None}
+    return await _tool("open_app", app=app, look=look, screenshot=screenshot, **given)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("viewer"), structured_output=False)
@@ -315,6 +318,11 @@ async def viewer() -> CallToolResult:
                        "it carries a key. If the user doesn't see it, they can run `tapwright view` on this computer.")
     return _result("No browser could be opened here. Ask the user to run `tapwright view` on the computer the phone is "
                    "connected to; it opens the live view.")
+
+
+@server.tool(description=describe("network"), structured_output=False)
+async def network(mode: Literal["offline", "3g", "lossy", "normal"]) -> CallToolResult:
+    return await _tool("network", mode=mode)
 
 
 @server.tool(description=describe("close_app"), structured_output=False)

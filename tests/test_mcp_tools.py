@@ -17,7 +17,8 @@ EXPECTED = {
     "wait": {"seconds", "look", "screenshot"},
     "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot"},
     "apps": set(),
-    "open_app": {"app", "look", "screenshot"},
+    "open_app": {"app", "look", "screenshot", "language", "region", "text_size"},
+    "network": {"mode"},
     "viewer": set(),
     "close_app": {"app"},
     "alert": {"action", "look", "screenshot"},
@@ -36,7 +37,7 @@ EXPECTED = {
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
-            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
+            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"], "network": ["mode"]}
 DEFAULTS = {
     "look": {"screenshot": True, "width": 600, "labels": False, "ocr": False},
     "tap": {"force": False, "look": True, "screenshot": False, "dry_run": False},
