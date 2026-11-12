@@ -26,6 +26,8 @@ EXPECTED = {
     "press_button": {"name", "look", "screenshot"},
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
+    "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
+                "mode", "target", "survives", "done", "finding"},
     "audit": {"types"},
     "ux_check": set(),
     "media": {"add", "remove", "confirm"},

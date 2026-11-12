@@ -61,11 +61,12 @@ def save_screenshot(directory: Path, tool: str, jpeg: bytes, size, now: datetime
     return f"Screenshot: {path} ({size[0]}x{size[1]})"
 
 
-def _result(text: str, image: str | None = None, is_error: bool = False) -> CallToolResult:
-    """One text item, plus the screenshot (base64 JPEG) when there is one."""
+def _result(text: str, image: str | None = None, is_error: bool = False,
+            more: list[str] | None = None) -> CallToolResult:
+    """One text item, plus the screenshot (base64 JPEG) when there is one, and `more` pictures (a journey's stop)."""
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=text)]
-    if image:
-        content.append(ImageContent(type="image", data=image, mime_type="image/jpeg"))
+    for picture in ([image] if image else []) + list(more or []):
+        content.append(ImageContent(type="image", data=picture, mime_type="image/jpeg"))
     return CallToolResult(content=content, is_error=is_error)
 
 
@@ -164,7 +165,7 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
         except OSError as e:  # the user chose file mode: no inline picture instead, but the answer stays
             text += f"\nNote: no screenshot: couldn't save to {SHOTS_DIR}: {e.strerror or e}"
         image = None
-    return _result(text, image)
+    return _result(text, image, more=answer.get("images") or None)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)
@@ -340,6 +341,22 @@ async def viewer() -> CallToolResult:
 @server.tool(description=describe("network"), structured_output=False)
 async def network(mode: Literal["offline", "3g", "lossy", "normal"]) -> CallToolResult:
     return await _tool("network", mode=mode)
+
+
+@server.tool(description=describe("journey"), structured_output=False)
+async def journey(start: bool = False, goal: str | None = None, persona: str | None = None,
+                  conditions: dict[str, str] | None = None, allow: list[Literal["open_url", "app_command"]] | None = None,
+                  eyes: Literal["user", "agent"] | None = None, stop: bool = False, reached: bool | None = None,
+                  why: str | None = None, export: dict[str, object] | None = None,
+                  stress: Literal["background", "network", "double_tap", "rotate", "relaunch"] | None = None,
+                  mode: Literal["offline", "3g", "lossy", "normal"] | None = None, target: Target | None = None,
+                  survives: dict[str, object] | None = None, done: bool = False,
+                  finding: dict[str, object] | None = None) -> CallToolResult:
+    given = {"goal": goal, "persona": persona, "conditions": conditions, "allow": allow, "eyes": eyes,
+             "reached": reached, "why": why, "export": export, "stress": stress, "mode": mode, "target": target,
+             "survives": survives, "finding": finding}
+    return await _tool("journey", **({"start": True} if start else {}), **({"stop": True} if stop else {}),
+                       **({"done": True} if done else {}), **{k: v for k, v in given.items() if v is not None})
 
 
 @server.tool(description=describe("close_app"), structured_output=False)

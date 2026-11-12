@@ -1,7 +1,6 @@
 """`ux_check` and the house rules (AGENT-TOOLS §17.3)."""
 import subprocess
 import sys
-import types
 
 import pytest
 from starlette.testclient import TestClient
@@ -270,10 +269,9 @@ def test_ux_check_is_a_read_in_personal_mode_and_refused_outside_the_given_apps(
 
 
 def test_findings_are_added_to_a_running_journey_when_there_is_one(monkeypatch):
+    from tapwright import journey as journey_module
     got = []
-    fake = types.ModuleType("tapwright.journey")
-    fake.add_finding = lambda client_id, finding: got.append((client_id, finding))
-    monkeypatch.setitem(sys.modules, "tapwright.journey", fake)
+    monkeypatch.setattr(journey_module, "add_finding", lambda client_id, finding: got.append((client_id, finding)))
 
     async def go():
         d = make()
