@@ -259,14 +259,21 @@ def test_crash_answers_the_newest_report_since_the_session_began(tmp_path, monke
         d.session.device.crash_files["/Example-new.ips"] = b'{"full": "report"}'
         r = await d.run_tool("a", "crash", {})
         assert r["text"].count("Crash of ") == 1 and "File: Example-new.ips" in r["text"] and "Saved:" not in r["text"]
+        # AGENT-TOOLS §15.2: the reports "since the session began, and only the app's own": `all` shows up to 5 of
+        # those, never one from before the session (Codex, PR #4)
         r = await d.run_tool("a", "crash", {"all": True})
-        assert r["text"].count("Crash of ") == 2 and "File: Example-old.ips" in r["text"]
+        assert r["text"].count("Crash of ") == 1 and "Example-old.ips" not in r["text"]
+        r = await d.run_tool("a", "crash", {"all": True, "pull": True})
+        assert "Example-old.ips" not in r["text"] and not (tmp_path / "crashes" / APP / "Example-old.ips").exists()
         r = await d.run_tool("a", "crash", {"pull": True})  # copies the whole report, and names it
         path = tmp_path / "crashes" / APP / "Example-new.ips"
         assert f"Saved: {path}" in r["text"] and path.read_bytes() == b'{"full": "report"}'
         d.session.device.crashes["Example"] = []
         r = await d.run_tool("a", "crash", {"all": True})
-        assert r["text"] == f"No crash report for {shown}."
+        assert r["text"] == f"No crash report for {shown} since the session began."
+        d.session.device.crashes["Example"] = [FakeReport(filename=f"/Example-{n}.ips") for n in range(7)]
+        r = await d.run_tool("a", "crash", {"all": True})  # the last 5 of this session
+        assert r["text"].count("Crash of ") == diagnostics.CRASH_RECENT == 5
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "crash", {"pull": "yes"})
         assert e.value.code == "bad_params"

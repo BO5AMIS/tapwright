@@ -1292,11 +1292,11 @@ class Daemon:
                                          self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT, bundle))
         infos = [diagnostics.describe_crash(r, exe) for r in search.reports]
         skipped = ([diagnostics.CRASH_UNREADABLE.format(n=search.unreadable)] if search.unreadable else [])
-        if not args["all"]:  # the newest, and only one since the session began
-            infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:1]
+        # AGENT-TOOLS §15.2: only reports since the session began; `all` is the last 5 of those, not the newest alone
+        infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:diagnostics.CRASH_RECENT if args["all"] else 1]
         self._diag_count = len(infos)
         if not infos:
-            return _answer([(diagnostics.NONE_AT_ALL if args["all"] else diagnostics.NONE_SINCE).format(app=shown)], skipped)
+            return _answer([diagnostics.NONE_SINCE.format(app=shown)], skipped)
         lines: list[str] = []
         for info in infos:
             lines += ["" if lines else None, *diagnostics.crash_lines(info, shown)]

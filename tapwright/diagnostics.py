@@ -41,7 +41,6 @@ CRASHED = "the app crashed"  # how both notes begin
 NOTE_CRASHED = CRASHED + ": {what}. logs and crash show more."
 NOTE_CRASHED_AT = CRASHED + " at {time}: {what}. logs and crash show more."  # a crash only known on a later call
 NONE_SINCE = "No crash report for {app} since the session began."
-NONE_AT_ALL = "No crash report for {app}."  # with all: true, which looks at the last 5 whenever they were
 CRASH_NO_EXECUTABLE = ("{app} has no executable name on record (only apps you installed have one), so its crash "
                        "reports can't be told from other apps'.")
 CRASH_UNREADABLE = "{n} crash report(s) of this app couldn't be read (half written, or a format this version doesn't know) and were skipped."
