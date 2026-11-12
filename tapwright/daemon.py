@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, batch, changes, filmstrip as filmlib, ocr, ui
+from . import actionlog, audit, batch, changes, compare, filmstrip as filmlib, ocr, ui
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -56,6 +56,9 @@ SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
+# The script a replay is running (§14.3): {"path": Path, "update": bool}. Checks look for references in the script's own
+# folder first, a failed check writes its picture beside the script, and with `update` they save there instead.
+SCRIPT = contextvars.ContextVar("script", default=None)
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
 STALE_AREA = 40.0  # points around a point target that must look as they did in the agent's last list (from PhoneUse)
 MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible change." is believed
@@ -333,6 +336,8 @@ def _checked(name: str, args: dict) -> dict:
         types = args["types"]
         if not isinstance(types, list) or not types or any(t not in audit.TYPES for t in types):
             raise Refused("bad_params", f"types must be a list of: {', '.join(audit.TYPES)}; not {types!r}")
+    if name == "compare_screen":
+        compare.check_params(args)
     if args.get("dry_run") and name not in DRY_TOOLS:
         raise Refused("bad_params", f"dry_run is for {', '.join(DRY_TOOLS)}, not {name}")
     if name == "wait":
@@ -364,6 +369,25 @@ class Confirm:
     until: float
     state: str = "pending"
     message: dict | None = None  # what viewers were sent, for one that connects while it is open
+
+
+@dataclasses.dataclass
+class Compared:
+    """What `Daemon._compare` found: `kind` is saved, matches, differs or missing; `lines` are the answer's;
+    `reason` is why a check didn't hold (None when it did, or when a reference was saved)."""
+    kind: str
+    lines: list[str]
+    notes: list[str]
+    reason: str | None = None
+    image: bytes | None = None
+    percent: float | None = None
+
+
+def _reference_names(steps: list[dict]) -> set[str]:
+    """The reference pictures a script's steps use: a compare_screen step's name, an expect's matches."""
+    names = {s["name"] for s in steps if s.get("tool") == "compare_screen" and isinstance(s.get("name"), str)}
+    return names | {s["expect"]["matches"] for s in steps if isinstance(s.get("expect"), dict)
+                    and isinstance(s["expect"].get("matches"), str)}
 
 
 def _brief(e: ui.Element) -> str:
@@ -469,7 +493,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip")
+READS = ("look", "apps", "audit", "filmstrip", "compare_screen")
 # The scope of the filmstrip call being run: its tap goes through run_tool with it, like any other touch
 _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_film_scope", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
@@ -478,7 +502,7 @@ SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold t
 REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
-            "open_url": ("url",)}
+            "open_url": ("url",), "compare_screen": ("name",)}
 
 
 async def _first(timeout: float, *events: asyncio.Event) -> None:
@@ -897,6 +921,11 @@ class Daemon:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
             return answer
+        if name == "compare_screen" and client_id in self._recording and BATCH.get() is None:
+            ignore = self._recorded_ignore(client_id, args)  # before the call: a ref that can't be saved is refused first
+            answer = await self._run_tool_inner(client_id, name, args, scope)
+            self._record_compare(client_id, args, ignore)
+            return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
             aimed = self._aim_for_recording(client_id, name, args)
@@ -953,7 +982,7 @@ class Daemon:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
         rec = self._recording[client_id]
         kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
-        if not rec["steps"] or kind is None or "expect" in rec["steps"][-1]:
+        if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
             return
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
@@ -961,6 +990,32 @@ class Daemon:
         if args.get("timeout") is not None:
             expect["timeout"] = min(max(float(args["timeout"]), batch.EXPECT_MIN), batch.EXPECT_MAX)
         rec["steps"][-1]["expect"] = expect
+
+    def _recorded_ignore(self, client_id: str, args: dict) -> list[dict] | None:
+        """While this agent records: the `ignore` list its step will be saved with, worked out before the call."""
+        if not isinstance(args.get("ignore"), list):
+            return None
+        return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
+
+    def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None) -> None:
+        """While recording: a `compare_screen` right after an action becomes that step's `expect.matches` (beside the
+        text, id or label already expected, if any); otherwise it is a step of its own. Its `name` is remembered, so
+        `stop` can copy the reference next to the script (§14.3)."""
+        rec = self._recording[client_id]
+        extra: dict = {}
+        if args.get("threshold") not in (None, compare.DEFAULT_THRESHOLD):  # (the default isn't written down)
+            extra["threshold"] = args["threshold"]
+        if ignore:
+            extra["ignore"] = ignore
+        rec.setdefault("references", []).append((self._bundle(), args["name"]))
+        last = rec["steps"][-1] if rec["steps"] else None
+        if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
+            last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
+            return
+        step = {"tool": "compare_screen", "name": args["name"], **extra}
+        if args.get("width") not in (None, shotlib.DEFAULT_WIDTH):
+            step["width"] = args["width"]
+        rec["steps"].append(step)
 
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
         """An action that succeeded while this agent records becomes a step of its script."""
@@ -982,9 +1037,11 @@ class Daemon:
 
     async def _batch_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         """`run`, `record` and `replay`."""
-        for key in ("trace", "look", "screenshot", "start", "stop", "dry_run"):
+        for key in ("trace", "look", "screenshot", "start", "stop", "dry_run", "update_references"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+        if args.get("update_references") and name != "replay":
+            raise Refused("bad_params", "update_references is for replay")
         if name == "record":
             return self._record(client_id, args)
         if name == "run":
@@ -999,7 +1056,16 @@ class Daemon:
             names = batch.saved()
             return _answer([f"Saved scripts: {', '.join(names)}." if names else
                             "No saved scripts yet: record one with record start: true, then stop: true."])
-        data = batch.load_script(batch.resolve(args.get("name"), args.get("path")))
+        path = batch.resolve(args.get("name"), args.get("path"))
+        data = batch.load_script(path)
+        token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
+        try:
+            return await self._replay(client_id, data, scope, args)
+        finally:
+            SCRIPT.reset(token)
+
+    async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
+        """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
         if data.get("fresh", True) and data.get("app"):
             # a known start: the app closed and opened again (Tapline reloads its JS instead)
             await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
@@ -1059,11 +1125,17 @@ class Daemon:
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
+            # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
+            wanted = _reference_names(rec["steps"])
+            bundles = {name: bundle for bundle, name in rec.get("references", ()) if name in wanted}
+            copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1] for name, bundle in bundles.items())
+            folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
-            return _answer([f"Saved {len(rec['steps'])} steps to {path}."], note)
+            pictures = f", and {copied} reference picture{'s' if copied != 1 else ''} to {folder}" if copied else ""
+            return _answer([f"Saved {len(rec['steps'])} steps to {path}{pictures}."], note)
         raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
                                     "path)")
 
@@ -1090,7 +1162,10 @@ class Daemon:
                 step_notes += [f"Note (step {i}): {line[6:]}" for line in lines if line.startswith("Note: ")]
                 if args.get("trace"):
                     traced.append(f"  {i}. {lines[0] if lines else step['tool']} ({clock() - t0:.1f} s)")
-                missed = await self._expect(client_id, view, scope, step["expect"]) if "expect" in step else None
+                seen_notes: list[str] = []
+                missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes)
+                          if "expect" in step else None)
+                step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {e}")
                 break
@@ -1114,8 +1189,26 @@ class Daemon:
             raise Refused(failed[0], answer["text"])
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
 
-    async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
-        """Wait up to the expectation's timeout for it to hold (§9.2). None when it did, else why not."""
+    async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
+                      notes: list[str] | None = None) -> str | None:
+        """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
+        for up to the timeout; `matches` is then checked once, on the screen as it is by then (§14.2). `notes`
+        collects what a picture check has to say (an ignored element that isn't there)."""
+        if any(expect.get(k) is not None for k in batch.EXPECT_KINDS):
+            missed = await self._expect_element(client_id, view, scope, expect)
+            if missed is not None:
+                return missed
+        if expect.get("matches") is None:
+            return None
+        given = await self._given(scope) if scope is not None else None
+        done = await self._compare(view, expect["matches"], threshold=expect.get("threshold"),
+                                   ignore=expect.get("ignore"), check=True, given=given)
+        if notes is not None:
+            notes.extend(done.notes)
+        return done.reason
+
+    async def _expect_element(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
+        """Wait up to the expectation's timeout for its text, id or label to hold. None when it did, else why not."""
         kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
         timeout = float(expect.get("timeout", batch.EXPECT_DEFAULT))
         if "value" not in expect:
@@ -1291,7 +1384,7 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip", "compare_screen"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -1365,6 +1458,8 @@ class Daemon:
             return await self._audit(view, args, notes)
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
+        if name == "compare_screen":
+            return await self._compare_screen(view, args, notes)
         if name == "look":
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
@@ -1912,6 +2007,103 @@ class Daemon:
         head = (f"Filmstrip: {count} frames about {spacing} ms apart, numbered in order, left to right and top to "
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
+
+    async def _compare_screen(self, view, args: dict, notes: list) -> dict:
+        """AGENT-TOOLS §14.1: the screen against the reference picture called `name`, or saved as it. Inside `run`
+        or a script it is a check (§14.2): it never saves, and a difference stops the batch as `expect_failed`."""
+        started, check = time.monotonic(), BATCH.get() is not None
+        done: Compared | None = None
+        try:
+            if check and args.get("update"):
+                raise Refused("bad_params", "a compare_screen step only checks and never saves; leave out update")
+            width = self._shot_args({"width": args["width"]}, default=True, custom=True)[0] \
+                if args.get("width") is not None else None
+            if self.state == "locked":
+                raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
+                                       threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
+            if check and done.reason is not None:
+                raise Refused("expect_failed", done.reason)
+        except Refused as e:
+            self._log_compare(args["name"], started, e, done)
+            raise
+        self._log_compare(args["name"], started, None, done)
+        return _answer(done.lines, [*done.notes, *notes], done.image)
+
+    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None") -> None:
+        """The action log's line for a picture check: the name and the share that changed, never the picture."""
+        self.actions.write({
+            "source": "tapwright", "by": "agent", "tool": "compare_screen", "name": name,
+            "percent": round(done.percent, 2) if done is not None and done.percent is not None else None,
+            "ok": error is None, "code": error.code if error is not None else None,
+            "ms": round((time.monotonic() - started) * 1000), "app": self._bundle(), "batch": BATCH.get()})
+
+    async def _compare(self, view, name: str, *, update: bool = False, width: int | None = None,
+                       threshold: float | None = None, ignore: list[dict] | None = None, check: bool = False,
+                       given: dict[str, str] | None = None) -> "Compared":
+        """The screen against a reference (§14): saves it when there is none (or `update`), else compares. `check`
+        is a batch's way (§14.2): no saving, a missing reference or a difference comes back as `reason`. In a
+        replay the script's own references folder comes first, and `--update-references` saves into it. `given`:
+        in personal mode only a given app's screen is compared or saved."""
+        script = SCRIPT.get()
+        keep = bool(script and script["update"])  # a replay that makes the script's references
+        threshold = compare.DEFAULT_THRESHOLD if threshold is None else float(threshold)
+        await self._settle_pending()
+        await self._read(lambda: self._silent_read(view))
+        bundle = self._bundle()
+        if given is not None and bundle not in given:
+            app = getattr(self.session, "app", None)
+            raise Refused("not_allowed", _outside(bundle, app[0] if app else None, ", ".join(given.values())))
+        folder = bundle or "unknown"
+        rects, notes = compare.ignored(view.items, ignore or [])
+        found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
+        if found is None and check and not keep:
+            return Compared("missing", [], notes, compare.missing(name))
+        png = await self._read(self.session.screenshot_png)
+        before = await asyncio.to_thread(compare.load, found) if found is not None else None
+        size = width or (before.width if before is not None and check else shotlib.DEFAULT_WIDTH)
+        after = await asyncio.to_thread(compare.fit, png, size)
+        if before is None:
+            dest = compare.script_references(script["path"]) / f"{name}.png" if keep else compare.reference_path(folder, name)
+            try:
+                await asyncio.to_thread(compare.save, dest, after)
+            except OSError as e:
+                raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
+            return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes)
+        if before.size != after.size:
+            raise Refused("bad_params", f'the reference "{name}" is {before.width}x{before.height} px and this screen is '
+                                        f"{after.width}x{after.height}; take it at the same width, or update: true.")
+        screen = self.session.screen
+        scale = after.width / screen[0]
+        painted = [(x * scale, y * scale, w * scale, h * scale) for x, y, w, h in rects]
+        if screen[1] > screen[0]:  # the clock and the battery are the phone's, not the app's
+            painted.append((0, 0, after.width, STATUS_BAR * scale))
+        result = await asyncio.to_thread(compare.compare, before, after, painted)
+        share = compare.shown(result.percent, result.changed)
+        if result.percent <= threshold:
+            return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
+                            result.percent)
+        reason = compare.failure(name, result, threshold, scale)
+        if check:
+            if script is not None and (where := await asyncio.to_thread(self._write_diff, script["path"], name, result)):
+                reason += f" (diff: {where})"
+            return Compared("differs", [], notes, reason, None, result.percent)
+        n = len(result.regions)
+        lines = [f'Differs from the reference "{name}": {share} changed, in {n} region{"s" if n != 1 else ""} (points):',
+                 *compare.region_lines(result.regions, scale, view.items)]
+        image = await asyncio.to_thread(result.picture)
+        return Compared("differs", lines, notes, reason, image, result.percent)
+
+    @staticmethod
+    def _write_diff(script: pathlib.Path, name: str, result: "compare.Result") -> str | None:
+        """A failed check's picture, next to the script (§14.3): its path, or None when it can't be written."""
+        path = compare.script_diffs(script) / f"{name}.png"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(result.picture("PNG"))
+        except OSError:
+            return None
+        return str(path)
 
     async def _wait_for(self, view, args: dict, notes: list, shot) -> dict:
         """Poll the fast tree (outside the phone's queue between reads) until the text, id or label is

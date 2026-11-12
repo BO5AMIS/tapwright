@@ -6,7 +6,7 @@ import json
 import re
 
 import pytest
-from fakes import FakeSession, button, el, image_bytes
+from fakes import FakeSession, button, image_bytes
 from PIL import Image
 
 from tapwright import batch, client, mcp_server

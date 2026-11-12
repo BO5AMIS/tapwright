@@ -263,6 +263,14 @@ async def filmstrip(frames: int = 6, interval_ms: int = 250, frame_width: int = 
                        **({"tap": tap} if tap is not None else {}))
 
 
+@server.tool(description=describe("compare_screen"), structured_output=False)
+async def compare_screen(name: str, update: bool = False, width: int = 600, threshold: float = 0.5,
+                         ignore: list[dict[str, object]] | None = None) -> CallToolResult:
+    # (not read-only by hint: the first call for a name, and `update`, write a reference picture)
+    return await _tool("compare_screen", name=name, update=update, width=width, threshold=threshold,
+                       **({"ignore": ignore} if ignore else {}))
+
+
 @server.tool(annotations=READ_ONLY, description=describe("apps"), structured_output=False)
 async def apps() -> CallToolResult:
     return await _tool("apps")

@@ -137,12 +137,12 @@ SHARED = {
         'Runs several steps in one call, in order, and answers once: `Ran 5 of 5 steps in 3.4 s.` then the '
         'changes since your last list. Each step is a tool call written as an object (`{"tool": "tap", "target": '
         '{"id": "save"}}`) with an optional `expect` checked after it: one of text, id or label, with gone, value '
-        '(a switch: "on"/"off", or "true"/"false") and timeout (default 2 s). It stops at the first step that '
-        "fails or whose expectation doesn't hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped "
-        'at step 4 (tap "Save"): its action ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as '
-        '`wait_for` does: exact text first, then part of a text. `dry_run: true` checks the steps and says what '
-        "step 1 would do. Use it to fill a form or walk a flow you're sure of; read the answer before the next "
-        'batch.'
+        '(a switch: "on"/"off", or "true"/"false") and timeout (default 2 s); or `matches` (a `compare_screen` '
+        "reference the screen must match). It stops at the first step that fails or whose expectation doesn't "
+        'hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): its action '
+        'ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as `wait_for` does: exact text first, '
+        'then part of a text. `dry_run: true` checks the steps and says what step 1 would do. Use it to fill a '
+        "form or walk a flow you're sure of; read the answer before the next batch."
     ),
     'audit': (
         'Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, '
@@ -150,14 +150,11 @@ SHARED = {
         'it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: '
         'run it on each new screen.'
     ),
-    'filmstrip': (
-        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate shots. '
-        '`tap` first taps an element, then films what it sets off.'
-    ),
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '
-        "right after an action becomes that step's `expect`. Targets are saved by id, else label, else text (with "
+        "right after an action becomes that step's `expect`, and a `compare_screen` its `expect.matches`; the "
+        'reference pictures are saved next to the script. Targets are saved by id, else label, else text (with '
         '`index` when it matched several); refs only last one run.'
     ),
     'replay': (
@@ -223,6 +220,18 @@ EXTRA = {
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app looks '
         'and works in landscape. Answers with the whole screen in its new size; a screen that only supports '
         'portrait stays as it is, and the answer says so.'
+    ),
+    'compare_screen': (
+        'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
+        'reference; later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on '
+        'a difference a picture with the changes in red. `threshold` is the percent that may change and still '
+        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. Keep the '
+        'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
+        '`compare_screen` step.'
+    ),
+    'filmstrip': (
+        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
+        'shots. `tap` first taps an element, then films what it sets off.'
     ),
 }
 
