@@ -121,12 +121,6 @@ SHARED = {
         'and what changed, or `timeout`.'
     ),
     'apps': 'List the apps you can drive, with the current one marked and the ids `open_app` takes.',
-    'session_report': (
-        "Where this session's calls went: calls per tool, failures by code, and waste to cut, each with the call "
-        'numbers: looks right after an answer that already had the changes, retries after `not_found`, scroll hunts, '
-        'and runs of actions that could have been one `run`. `since` (epoch ms) narrows it. Read it after a long '
-        'session, and before writing the next one.'
-    ),
     'open_app': (
         'Drive this app from now on. `app` is an id or a name (names match ignoring case). Several matches give '
         '`ambiguous` with their `apps` lines.'
@@ -197,6 +191,12 @@ SHARED = {
         '(fps and drops over 50 ms), and names what it couldn\'t. In `run` and scripts, `expect: {"under": '
         '{"launch_s": 2, "drops": 0}}` on a `performance` step makes it a check.'
     ),
+    'session_report': (
+        "Where this session's calls went: calls per tool, failures by code, and waste to cut, each with the call "
+        'numbers: looks right after an answer that already had the changes, retries after `not_found`, scroll '
+        'hunts, and runs of actions that could have been one `run`. `since` (epoch ms) narrows it. Read it after '
+        'a long session, and before writing the next one.'
+    ),
 }
 
 EXTRA = {
@@ -232,8 +232,8 @@ EXTRA = {
     'apps': 'the apps installed on the phone, with bundle ids.',
     'open_app': (
         'launches the app or brings it to the front, and answers the first screen. `language` (`ar`), `region` '
-        '(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone\'s default) open it as if the phone were '
-        'set that way, for this launch only and without Settings: a running app is reopened.'
+        "(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone's default) open it as if the phone "
+        'were set that way, for this launch only and without Settings: a running app is reopened.'
     ),
     'viewer': (
         "opens it in a browser on this computer and gives you no link (the link's key could approve a touch the "
@@ -261,8 +261,8 @@ EXTRA = {
     ),
     'network': (
         'Make the network bad on purpose, for the whole phone: `mode` `offline`, `3g`, `lossy`, or `normal` to '
-        'restore it. Every answer says the condition while it is on, and it goes back to normal by itself when the '
-        'session ends. Test what users on a bad connection see: errors, retries, loading states.'
+        'restore it. Every answer says the condition while it is on, and it goes back to normal by itself when '
+        'the session ends. Test what users on a bad connection see: errors, retries, loading states.'
     ),
     'logs': (
         "reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a "
