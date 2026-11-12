@@ -4539,6 +4539,20 @@ def test_a_touch_outside_the_focused_input_closes_the_keyboard_first(tool, args,
     run(go)
 
 
+def test_closing_the_keyboard_with_a_layer_open_keeps_away_from_what_it_hides():
+    """The JLD 1.1.0 RC pass (2026-11-12): with a layer in front, every touch that closed the keyboard first failed
+    with "'tuple' object has no attribute 'actions'": `behind` holds (element, layer) pairs."""
+    async def go():
+        d, stop, task = await keyboard_up()
+        hidden = button("e8", "Card", "card", rect=(40, 60, 40, 40))  # over the blank label's centre (60, 80)
+        d.session.behind = [(hidden, el("e9", "other", "", "autofill", rect=(0, 600, 430, 100)))]
+        r = await d.run_tool("a", "tap", {"target": {"id": "save"}})
+        assert r["text"].startswith("Tapped")
+        assert (60.0, 80.0) not in d.session.tap_points  # the blank touch went elsewhere, off the hidden card
+        await finish(stop, task)
+    run(go)
+
+
 def test_type_text_into_another_input_above_the_keyboard_leaves_the_keyboard_up():
     """Measured on the phone 2026-11-10: closing the keyboard between two fields made the second type_text take
     3.4 s against 1.7 s. A person filling a form taps the next field; so does the tool."""
