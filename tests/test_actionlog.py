@@ -72,10 +72,14 @@ def test_the_daemon_logs_agent_actions_and_never_the_typed_text(tmp_path):
             await d.run_tool("a", "tap", {"target": {"id": "nothing-here"}, "look": False})
         await finish(stop, task)
         got = lines(tmp_path)
-        assert [g["tool"] for g in got] == ["tap", "type_text", "tap"]  # the look is a read: not logged
-        assert got[0]["by"] == "agent" and got[0]["ok"] is True and got[0]["target"] == {"id": "save"}
-        assert got[1]["chars"] == 7 and "hunter2" not in json.dumps(got)
-        assert got[2]["ok"] is False and got[2]["code"] == "not_found" and isinstance(got[2]["ms"], int)
+        assert [g["tool"] for g in got] == ["look", "tap", "type_text", "tap"]  # the look is a read: logged as one (§16.1)
+        assert got[0]["kind"] == "read" and "kind" not in got[1]
+        assert got[1]["by"] == "agent" and got[1]["ok"] is True and got[1]["target"] == {"id": "save"}
+        assert got[2]["chars"] == 7 and "hunter2" not in json.dumps(got)
+        assert got[3]["ok"] is False and got[3]["code"] == "not_found" and isinstance(got[3]["ms"], int)
+        assert {g["client"] for g in got} == {"a"}
+        assert all(isinstance(g["answer_chars"], int) and g["answer_chars"] > 0 for g in got)
+        assert got[2]["chars"] != got[2]["answer_chars"]  # typed-text length and answer length are two fields
     run(go)
 
 
@@ -87,4 +91,35 @@ def test_the_daemon_logs_a_persons_input_from_the_live_view(tmp_path):
         await finish(stop, task)
         got = lines(tmp_path)
         assert got and got[-1]["by"] == "person" and got[-1]["source"] == "tapwright"
+    run(go)
+
+
+def test_every_read_is_logged_with_its_kind_and_size_but_no_text(tmp_path):
+    async def go():
+        d = make(actions=ActionLog(tmp_path))
+        stop, task = await started(d)
+        d.session.tree = [el("e1", "button", "Save", "save")]
+        await d.run_tool("a", "look", {"screenshot": False, "labels": True})
+        await d.run_tool("a", "apps", {})
+        await d.run_tool("a", "wait_for", {"text": "Save", "look": False})
+        await d.run_tool("a", "session_report", {})  # not logged itself
+        await finish(stop, task)
+        got = lines(tmp_path)
+        assert [g["tool"] for g in got] == ["look", "apps", "wait_for"]
+        assert all(g["kind"] == "read" and g["client"] == "a" and g["answer_chars"] > 0 for g in got)
+        assert got[0]["labels"] is True
+        assert "Save" not in json.dumps([{k: v for k, v in g.items() if k != "t"} for g in got])
+    run(go)
+
+
+def test_a_run_is_one_call_and_its_steps_say_which_run_they_belong_to(tmp_path):
+    async def go():
+        d = make(actions=ActionLog(tmp_path))
+        stop, task = await started(d)
+        d.session.tree = [el("e1", "button", "Save", "save")]
+        await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "save"}}]})
+        await finish(stop, task)
+        got = lines(tmp_path)
+        assert [g["tool"] for g in got if not g.get("batch")] == ["run"]
+        assert any(g["tool"] == "tap" and g.get("batch") for g in got)
     run(go)

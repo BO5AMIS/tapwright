@@ -21,8 +21,8 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, launch as launchlib, needs,
-               network, ocr, params, performance, ui)
+from . import (actionlog, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, launch as launchlib,
+               needs, network, ocr, params, performance, report, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -46,7 +46,10 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "network"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network"})
+# AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "apps"})  # (compare_screen writes its own line: _log_compare)
+READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -156,6 +159,8 @@ NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answer
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
+REACH_TOOLS = KEYBOARD_TOOLS  # AGENT-TOOLS §16.2: on a target in the tree but off screen they scroll to it first
+SCROLLED_THEN = "Scrolled to it, then "
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
 
@@ -567,7 +572,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash")
+READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash", "session_report")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -689,6 +694,9 @@ class Daemon:
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
+        self._scrolled_first: set[str] = set()  # agents whose action just scrolled to its target (§16.2): its first line says so
+        self._policed: tuple | None = None  # (tool, key) of a touch the policy checked before a scroll (§16.2)
+        self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
@@ -1092,12 +1100,39 @@ class Daemon:
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
+            return self._session_report(client_id, args)
+        known = self._hunt_known(client_id, name, args)
+        if name == "filmstrip":
+            return await self._filmstrip_logged(client_id, args, scope)
+        if name in LOGGED:
+            started, self._announced, self._granted_now = time.monotonic(), None, False
+            aimed = self._aim_for_recording(client_id, name, args)
+            try:
+                result = await self._run_tool_inner(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            self._record_step(client_id, name, args, aimed)
+            return result
+        if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
+            started = time.monotonic()
+            try:
+                result = await self._policed_other(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            return result
+        return await self._policed_other(client_id, name, args, scope)
+
+    async def _policed_other(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        """The tools whose log line is written by the caller (reads, and the batch tools)."""
         if name in BATCH_TOOLS:
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
-        if name == "filmstrip":
-            return await self._filmstrip_logged(client_id, args, scope)
         if name == "wait_for" and client_id in self._recording:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
@@ -1107,32 +1142,68 @@ class Daemon:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_compare(client_id, args, ignore)
             return answer
-        if name in LOGGED:
-            started, self._announced, self._granted_now = time.monotonic(), None, False
-            aimed = self._aim_for_recording(client_id, name, args)
-            try:
-                result = await self._run_tool_inner(client_id, name, args, scope)
-            except Refused as e:
-                self._log_action(name, args, started, e)
-                raise
-            self._log_action(name, args, started, None)
-            self._record_step(client_id, name, args, aimed)
-            return result
         return await self._run_tool_inner(client_id, name, args, scope)
 
+    def _hunt_known(self, client_id: str, name: str, args: dict) -> bool | None:
+        """AGENT-TOOLS §16.1: was this action's target already in the tree's off-screen list before the agent's run
+        of scrolls began? (A scroll hunt is exact then, and `session_report` says so without `(maybe)`.) A scroll
+        starts a run and keeps the off-screen list as it was; looks leave it; any other call ends it, and the
+        action that ends it is the one asked. True only; None when there is nothing to say."""
+        if name == "look":
+            return None
+        if name == "scroll":
+            if client_id not in self._hunts:
+                self._hunts[client_id] = list(getattr(self.session, "offscreen", []))
+            return None
+        off = self._hunts.pop(client_id, None)
+        raw = args.get("target")
+        if not off or not isinstance(raw, dict):
+            return None
+        try:
+            target = ui.parse_target(raw)
+            if target.point is not None or target.ref is not None:
+                return None
+            ui.resolve(off, dataclasses.replace(target, index=0))
+        except Refused:
+            return None
+        return True
+
+    def _session_report(self, client_id: str, args: dict) -> dict:
+        """`session_report` (AGENT-TOOLS §16.1): where this agent's calls went, from the action log."""
+        since = args.get("since")
+        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0):
+            raise Refused("bad_params", "since is a time in epoch milliseconds, like 1762950000000.")
+        if self.actions.folder is None:
+            return _answer(["The call log is off (tapwright serve --no-log), so there is nothing to report."])
+        entries = report.read_entries(self.actions.folder)
+        start = int(since) if since is not None else report.client_start(entries, client_id)
+        return _answer([report.build(entries, client_id, start)])
+
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
-                    frames: int | None = None) -> None:
-        """The agent's action, one line in the action log. Typed text only as its length (AGENT-TOOLS §12)."""
+                    frames: int | None = None, *, client: str | None = None, answer: dict | None = None,
+                    known_off: bool | None = None) -> None:
+        """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
+        its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
         told = self._announced or {}
         message = str(error) if error is not None else ""
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
+        said = answer["text"] if answer is not None else message
+        read = name in READ_KINDS
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
+            "source": "tapwright", "by": "agent", "client": client, "tool": name, "kind": "read" if read else None,
+            "target": actionlog.target_of(args.get("target")),
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
-            "batch": BATCH.get(), "confirmed": True if self._granted_now else None,
+            "answer_chars": len(said) if isinstance(said, str) else None,
+            "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
+            "confirmed": True if self._granted_now else None,
+            "to": args.get("to") if name == "scroll" else None,
+            "labels": True if name == "look" and args.get("labels") else None,
+            "ocr": True if name == "look" and args.get("ocr") else None,
+            "listed": True if not read and error is None and isinstance(said, str) and "Settled in " in said else None,
+            "known_off": known_off,
             "measured": self._measured if name == "performance" and error is None else None,
             "count": self._diag_count if name in DIAG_TOOLS and error is None else None})  # counts only, never the text
 
@@ -1339,8 +1410,8 @@ class Daemon:
                 found = await asyncio.wait_for(self.session.device.crash_reports(exe, 3, bundle), 15)
             except Exception:
                 return None
-            for report in found.reports:
-                info = diagnostics.describe_crash(report, exe)
+            for crash in found.reports:
+                info = diagnostics.describe_crash(crash, exe)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
                     return info
@@ -1944,6 +2015,28 @@ class Daemon:
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
+        self._scrolled_first.discard(client_id)
+        try:
+            answer = await self._run_tool_core(client_id, name, args)
+            if client_id in self._scrolled_first:  # the action scrolled to its target first (§16.2): the first line says so
+                return {**answer, "text": self._said_scrolled(answer["text"])}
+            return answer
+        finally:
+            self._scrolled_first.discard(client_id)
+            self._policed = None
+
+    @staticmethod
+    def _said_scrolled(text: str) -> str:
+        """`Tapped e41 button "Save" id=save.` as `Scrolled to it, then tapped e41 button "Save" id=save.`"""
+        first, _, rest = text.partition("\n")
+        word = first.split(" ", 1)[0]
+        if word in ("Tapped", "Long-pressed", "Toggled", "Typed"):
+            first = SCROLLED_THEN + first[0].lower() + first[1:]
+        else:  # (a toggle that was already as asked: `e5 switch "X" is already true.`)
+            first = "Scrolled to it. " + first
+        return first + ("\n" + rest if rest else "")
+
+    async def _run_tool_core(self, client_id: str, name: str, args: dict) -> dict:
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
             raise Refused("unsupported", f"no tool named {name!r}; the tools are "
                                          f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
@@ -1985,7 +2078,7 @@ class Daemon:
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":
-            return await self._compare_screen(view, args, notes)
+            return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
@@ -2049,7 +2142,8 @@ class Daemon:
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
-                        self._refuse_off_screen(target)
+                        if await self._reach(view, client_id, name, args, target, dry):
+                            box["scrolled"] = True
             # a person would close the keyboard before the touch
             box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, target))
             s.last_point = None
@@ -2088,6 +2182,8 @@ class Daemon:
         except DryRun as e:  # nothing was sent: the answer is what would have been
             return _answer([str(e)], notes)
         except Refused as e:
+            if e.code == "not_found" and (near := self._closest(view, target, str(e))):
+                raise Refused("not_found", f"{e}\n{near}") from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
                 said = str(e)
@@ -2161,7 +2257,8 @@ class Daemon:
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target,
+        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
+                                   drifted=to_target or bool(box.get("scrolled")),
                                    snap=landed[0] if landed is not None else None)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
@@ -2530,12 +2627,13 @@ class Daemon:
         try:
             result = await self._run_tool_inner(client_id, "filmstrip", args, scope)
         except Refused as e:
-            self._log_action("filmstrip", logged, started, e)
+            self._log_action("filmstrip", logged, started, e, client=client_id)
             raise
         finally:
             _FILM_SCOPE.reset(token)
         made = re.match(r"Filmstrip: (\d+) frames", result["text"])
-        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None)
+        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None,
+                         client=client_id, answer=result)
         return result
 
     async def _watch_front(self, given: dict[str, str], client_id: str, away: list) -> None:
@@ -2627,7 +2725,7 @@ class Daemon:
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
 
-    async def _compare_screen(self, view, args: dict, notes: list) -> dict:
+    async def _compare_screen(self, view, args: dict, notes: list, client: str | None = None) -> dict:
         """AGENT-TOOLS §14.1: the screen against the reference picture called `name`, or saved as it. Inside `run`
         or a script it is a check (§14.2): it never saves, and a difference stops the batch as `expect_failed`."""
         started, check = time.monotonic(), BATCH.get() is not None
@@ -2644,15 +2742,18 @@ class Daemon:
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
-            self._log_compare(args["name"], started, e, done)
+            self._log_compare(args["name"], started, e, done, client)
             raise
-        self._log_compare(args["name"], started, None, done)
-        return _answer(done.lines, [*done.notes, *notes], done.image)
+        answer = _answer(done.lines, [*done.notes, *notes], done.image)
+        self._log_compare(args["name"], started, None, done, client, answer)
+        return answer
 
-    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None") -> None:
+    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None",
+                     client: str | None = None, answer: dict | None = None) -> None:
         """The action log's line for a picture check: the name and the share that changed, never the picture."""
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": "compare_screen", "name": name,
+            "source": "tapwright", "by": "agent", "client": client, "tool": "compare_screen", "kind": "read", "name": name,
+            "answer_chars": len(answer["text"]) if answer is not None else len(str(error)) if error is not None else None,
             "percent": round(done.percent, 2) if done is not None and done.percent is not None else None,
             "ok": error is None, "code": error.code if error is not None else None,
             "ms": round((time.monotonic() - started) * 1000), "app": self._bundle(), "batch": BATCH.get()})
@@ -3125,6 +3226,70 @@ class Daemon:
         named = self._front_line(front) if front is not None else "a sheet or menu"
         return f"; {named} is still open: tap its close control."
 
+    def _closest(self, view, target: ui.Target | None, message: str) -> str:
+        """The `Closest:` line of a `not_found` for an id, label or text (AGENT-TOOLS §16.2), or "". An `index` past
+        the matches already has them: it adds nothing."""
+        if target is None or target.point is not None or target.ref is not None or "out of range" in message:
+            return ""
+        hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
+        off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
+        return closest.find(target, view.items, off, self.session.screen)
+
+    async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> bool:
+        """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
+        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
+        has its say on the target first. Returns whether it scrolled. Where no scroll can bring it on screen, or it
+        isn't in the tree at all (a lazy row), it is refused as before: `off_screen`, or `not_found` further on."""
+        if name not in REACH_TOOLS:
+            self._refuse_off_screen(target)
+            return False
+        s = self.session
+        try:
+            hit = ui.resolve(getattr(s, "offscreen", []), dataclasses.replace(target, index=0))
+        except Refused:
+            return False  # not off screen either: the action says not_found
+        if not isinstance(hit, ui.Element):
+            return False
+        said = ""
+        if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
+            said = self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
+            if _POLICY.get().check(self._app_bundle(), hit.label if hit.role == "input" else hit.text) is not None:
+                self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
+        shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
+        area = ui.scroll_holding(view.items, hit, s.screen)
+        why = ""
+        if area is None:
+            why = "it isn't inside a scroll view, so no scroll brings it on screen."
+        else:
+            view_rect = self._scroll_view_rect(area)
+            if view_rect[3] <= 0:
+                why = "the scroll view that holds it lies under the bars."
+        if why:
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; {why}")
+        if dry:
+            dx, dy = ui.scroll_move(hit.rect, view_rect)
+            x, y = hit.center[0] + dx, hit.center[1] + dy
+            verb = {"tap": "tap", "long_press": "long-press", "toggle": "toggle"}.get(name)
+            if verb is None:
+                n = len(args["text"])
+                self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
+            self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
+        done = await self._scroll_to(view, target)
+        if self._missing(view.items, target):
+            note = getattr(done, "note", "") or "it is as far into view as it gets."
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
+                                            f"scrolling didn't bring it on screen: {note}")
+        self._scrolled_first.add(client_id)
+        return True
+
+    def _scroll_view_rect(self, area: ui.Element) -> tuple[float, float, float, float]:
+        """The part of a scroll view between the bars: where its content is seen and dragged."""
+        s = self.session
+        top, bottom = s.last_insets
+        band = (SCROLL_TOP_INSET if top is None else top, s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+        x, y, w, h = area.rect
+        return x, max(y, band[0]), w, min(y + h, band[1]) - max(y, band[0])
+
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's
         edge): `off_screen`, not `not_found`. A touch can't reach it, so `force` doesn't either."""
@@ -3177,9 +3342,10 @@ class Daemon:
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
-        # the element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)
-        key = (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
-                                           or ("role", element.role, element.label, element.text)))
+        key = self._police_key(element)
+        if self._policed == (tool, key) and not a.get("dry_run"):
+            self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
+            return ""
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
@@ -3190,6 +3356,11 @@ class Daemon:
             _GRANTED.get().append(True)
             return ""
         raise Refused("not_allowed", self._ask(tool, a, key, element, word, what, now))
+
+    def _police_key(self, element: ui.Element) -> tuple[str, ...]:
+        """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)."""
+        return (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
+                                            or ("role", element.role, element.label, element.text)))
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float) -> str:
