@@ -976,3 +976,48 @@ def test_a_replay_updating_one_name_in_two_apps_keeps_the_first_apps_picture(tmp
         assert own.read_bytes() == original
         await finish(stop, task)
     run(go)
+
+
+def test_two_overlapping_checks_in_a_recording_cant_both_pass_the_guard(tmp_path, monkeypatch):
+    """Codex's interleaving (PR #3 cycle 6): two compare_screen calls with update: true overlap in one recording, with
+    pictures A then B. The first is held after its guard, inside its save; the second must not get past its own guard
+    meanwhile. A is saved and registered, B is refused, and the store and the export keep A, byte for byte."""
+    import threading
+    from tapwright import compare as compare_module
+
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)  # picture A
+        await d.run_tool("a", "record", {"start": True, "name": "both"})
+        real_save = compare_module.save
+        release = threading.Event()
+        calls: list[int] = []
+
+        def held_save(dest, image, *rest):  # the first save waits (in its thread) until the second call has had its go
+            calls.append(len(calls))
+            if len(calls) == 1:
+                release.wait(2.0)
+            return real_save(dest, image, *rest)
+        monkeypatch.setattr(compare_module, "save", held_save)
+        first = asyncio.create_task(d.run_tool("a", "compare_screen", {"name": "home", "update": True}))
+        for _ in range(100):  # until the first call is inside its save
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        show(d, (BLOCK, (0, 0, 0)))  # picture B for the second call
+        second = asyncio.create_task(d.run_tool("a", "compare_screen", {"name": "home", "update": True}))
+        await asyncio.sleep(0.2)  # the second call's chance to overtake
+        release.set()
+        done = await asyncio.gather(first, second, return_exceptions=True)
+        assert not isinstance(done[0], BaseException), done[0]
+        assert isinstance(done[1], Refused) and done[1].code == "bad_params", done[1]
+        kept = stored(tmp_path, "home")
+        from PIL import Image
+        with Image.open(kept) as img:  # the store holds A (white), not B (black)
+            assert img.convert("RGB").getpixel((img.width // 2, img.height // 2)) != (0, 0, 0)
+        path = tmp_path / "both.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert (tmp_path / "both.references" / "home.png").read_bytes() == kept.read_bytes()
+        await finish(stop, task)
+    run(go)

@@ -555,6 +555,9 @@ class Daemon:
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
+        # while a client records, its calls run one at a time: a check's guard, its save and its registration in the
+        # recording are one step, so two overlapping checks can't both pass the guard (Codex, PR #3 cycle 6)
+        self._record_locks: dict[str, asyncio.Lock] = {}
         self._batch_ids = itertools.count(1)
         # the stream's pace (see STILL_FPS): how often it's checked (None: never), and the frame rate the phone
         # streams at now (None until connected)
@@ -934,6 +937,9 @@ class Daemon:
         btoken = _BASELINES.set(self._recording[client_id].setdefault("references", [])) \
             if client_id in self._recording and _BASELINES.get() is None else None
         try:
+            if btoken is not None:  # the outer call of a recording client (a batch's steps are inside it)
+                async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+                    return await self._run_tool_policed(client_id, name, args, scope)
             return await self._run_tool_policed(client_id, name, args, scope)
         finally:
             if ptoken is not None:
