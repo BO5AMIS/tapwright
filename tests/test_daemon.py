@@ -1773,14 +1773,24 @@ def test_the_list_is_not_current_without_a_stream_to_say_so():
 
 def run_virtual(scenario):
     # asyncio.run takes loop_factory only from Python 3.12, and the package allows 3.10: the loop is run by hand
+    # The cleanup is asyncio.run's own: what is still pending is cancelled and awaited, then async generators and
+    # the default executor are shut down, whether the scenario passed or failed.
     loop = VirtualLoop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(scenario())
-        loop.run_until_complete(loop.shutdown_asyncgens())
     finally:
-        asyncio.set_event_loop(None)
-        loop.close()
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 def test_a_silent_change_before_the_action_is_not_reported_as_no_visible_change():
