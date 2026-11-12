@@ -83,7 +83,9 @@ def paint(image: Image.Image, boxes: list[tuple[float, float, float, float]]) ->
 
 def compare(before: Image.Image, after: Image.Image, painted: list[tuple[float, float, float, float]] = ()) -> Result:
     """Compare two RGB pictures of one size, with `painted` (pixel rects: ignored elements and the status bar)
-    filled on copies of both first. Pictures of another size are the caller's to refuse."""
+    filled on copies of both first. Pictures of another size are the caller's to refuse (`ValueError` here)."""
+    if before.size != after.size:
+        raise ValueError(f"the pictures differ in size ({before.width}x{before.height} and {after.width}x{after.height})")
     a, b = before.copy(), after.copy()
     if painted:
         paint(a, list(painted))
