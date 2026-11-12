@@ -175,21 +175,21 @@ SHARED = {
         'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
         'shots. `tap` first taps an element, then films what it sets off.'
     ),
-    'performance': (
-        "How the app performs: `launch: true` measures opening it; otherwise it measures for `seconds` (default 3), "
-        "after tapping `tap` if given. Answers the time and the memory, CPU and frames the tool can measure (fps and "
-        "drops over 50 ms), and names what it couldn't. In `run` and scripts, `expect: {\"under\": {\"launch_s\": 2, "
-        "\"drops\": 0}}` on a `performance` step makes it a check."
-    ),
     'logs': (
-        "The app's recent log: one line per entry with its time and level (`error`, `warning`, `info`). `level` keeps "
-        'that level and above, `grep` keeps lines containing a text, `limit` caps the count (default 100, newest), and '
-        '`since` (epoch ms) returns only newer lines; each result ends with `Latest:`, a timestamp to reuse. Read it '
-        'when something fails: the cause is often there.'
+        "The app's recent log: one line per entry with its time and level (`error`, `warning`, `info`). `level` "
+        'keeps that level and above, `grep` keeps lines containing a text, `limit` caps the count (default 100, '
+        'newest), and `since` (epoch ms) returns only newer lines; each result ends with `Latest:`, a timestamp '
+        'to reuse. Read it when something fails: the cause is often there.'
     ),
     'crash': (
         "The app's newest crash (`all: true`: the last 5): when, the error, and the top frames with the app's own "
         'marked `*`. An answer whose call made the app stop already says `Note: the app crashed: …`.'
+    ),
+    'performance': (
+        'How the app performs: `launch: true` measures opening it; otherwise it measures for `seconds` (default '
+        '3), after tapping `tap` if given. Answers the time and the memory, CPU and frames the tool can measure '
+        '(fps and drops over 50 ms), and names what it couldn\'t. In `run` and scripts, `expect: {"under": '
+        '{"launch_s": 2, "drops": 0}}` on a `performance` step makes it a check.'
     ),
 }
 
@@ -232,25 +232,6 @@ EXTRA = {
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
-    'logs': (
-        "reads the app's own entries in the phone's unified log (os_log, NSLog, print; React Native's console in a "
-        "release build), from the app's process only, never another's, and keeps the last 2000 from when the app is "
-        'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a plain '
-        'line that says warn, error, exception, fatal or failed.'
-    ),
-    'crash': (
-        "reads the app's crash reports on the phone since the session began, and only the app's own. `pull: true` "
-        'copies the full `.ips` into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash '
-        "report for <app> since the session began.` Frames show the report's own symbols; full symbols need the "
-        "app's dSYM files."
-    ),
-    'performance': (
-        "measures the app in front: `launch: true` closes it and starts it cold (seconds are 0.5-30, not used "
-        "then). Memory and CPU are the app's own process (`under` holds memory to its peak and CPU to its average, "
-        "`cpu_percent` and `fps_min` also work); frames are the phone's frame rate once a second, so a drop is a "
-        "second under 45 fps, and `drops` in `under` counts those. `js_heap_mb` and `busy_ms` are Tapline's and are "
-        "ignored with a note."
-    ),
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '
         'a clean run.'
@@ -267,6 +248,22 @@ EXTRA = {
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app looks '
         'and works in landscape. Answers with the whole screen in its new size; a screen that only supports '
         'portrait stays as it is, and the answer says so.'
+    ),
+    'logs': (
+        "reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a "
+        "release build), from the app's process only, never another's, keeping the last 2000 from when the app is "
+        'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a '
+        'plain line that says warn, error, exception, fatal or failed.'
+    ),
+    'crash': (
+        "reads the app's own crash reports on the phone since the session began. `pull: true` copies the full "
+        "`.ips` into `~/.tapwright/crashes/<bundle id>/` and names the file. Frames show the report's own "
+        "symbols; full symbols need the app's dSYM files."
+    ),
+    'performance': (
+        "`launch: true` closes the app and starts it cold. Memory and CPU are the app's own process (`under` "
+        "holds memory to its peak and CPU to its average); frames are the screen's rate once a second, so `drops` "
+        "counts seconds under 45 fps. `js_heap_mb` and `busy_ms` are Tapline's and are ignored with a note."
     ),
 }
 
