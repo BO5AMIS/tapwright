@@ -1164,7 +1164,7 @@ class Daemon(journey_tool.JourneyTools):
         finally:
             ui.USERS_EYES.reset(token)
         if not jr.muted:
-            await self._journey_after(client_id, jr, name, args, answer, self.control.clock() - began, outer)
+            await self._journey_after(client_id, jr, name, args, answer, self.control.clock() - began, outer, scope)
         return answer
 
     async def _run_tool_plain(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,

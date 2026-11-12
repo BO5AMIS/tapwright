@@ -909,3 +909,49 @@ def test_a_journey_within_the_rule_keeps_it_and_one_that_missed_its_goal_is_not_
         assert "House rules" not in (sorted(reports.iterdir())[-1] / "report.md").read_text("utf-8")
         await finish(stop, task)
     run(go)
+
+
+# ---- review fixes (W14) ----
+SPRINGBOARD = "com.apple.springboard"
+
+
+def test_h1_a_frame_is_kept_in_personal_mode_only_while_a_given_app_is_in_front(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        scope = Scope(("com.example.app",))
+        d.session.foreground = "com.example.app"
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        jr = d._journeys["a"]
+        assert len(jr.frames) == 1
+        d.session.tree = list(FOOD)
+        await d.run_tool("a", "tap", {"target": {"text": "Log meal"}}, scope=scope)
+        assert len(jr.frames) == 2 and jr.left_out == 0
+        # the tap opened Safari: the answer is withheld (outside_apps) and no picture is kept
+        d.session.app = ("Safari", "com.apple.mobilesafari")
+        d.session.tree = list(HOME)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Save"}}, scope=scope)
+        assert "outside_apps" in r["text"]
+        assert len(jr.frames) == 2 and jr.left_out == 1
+        await d.run_tool("a", "journey", {"stop": True, "reached": False}, scope=scope)
+        assert "1 frame left out: another app was in front." in (only_folder(reports) / "report.md").read_text("utf-8")
+        await finish(stop, task)
+    run(go)
+
+
+def test_h1_a_frame_is_kept_in_dedicated_mode_only_for_the_journeys_app(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        jr = d._journeys["a"]
+        assert jr.app == "com.example.app" and len(jr.frames) == 1
+        d.session.app, d.session.foreground = ("SpringBoard", SPRINGBOARD), SPRINGBOARD
+        await d.run_tool("a", "press_button", {"name": "home"})
+        assert len(jr.frames) == 1 and jr.left_out == 1
+        d.session.app, d.session.foreground = ("Example", "com.example.app"), "com.example.app"
+        await d.run_tool("a", "tap", {"target": {"text": "Log meal"}})
+        assert len(jr.frames) == 2 and jr.left_out == 1
+        await finish(stop, task)
+    run(go)

@@ -184,6 +184,8 @@ def model(j: jr.Journey, reached: bool, why: str | None, elapsed: float, picture
         findings.append({"n": n, "severity": f["severity"], "screen": f.get("screen") or "", "what": jr.finding_text(f),
                          "basis": f["basis"], "image": pictures.get(n)})
     notes = list(j.notes)
+    if j.left_out:
+        notes.append(f"{jr.plural(j.left_out, 'frame')} left out: another app was in front.")
     if j.shortcuts:
         notes.append("Shortcuts used: " + "; ".join(j.shortcuts))
     return {"title": f'Journey: {j.goal}', "facts": facts, "numbers": numbers, "path": path, "findings": findings,

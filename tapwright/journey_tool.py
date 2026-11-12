@@ -52,23 +52,52 @@ class JourneyTools:
         return args
 
     async def _journey_after(self, client_id: str, jr: journey.Journey, name: str, args: dict, answer: dict,
-                             seconds: float, outer: bool) -> None:
+                             seconds: float, outer: bool, scope=None) -> None:
         """Count a call that succeeded, and keep a picture of the screen after an action."""
         text = answer.get("text") or ""
         if name in _d().BATCH_TOOLS:
             entered = jr.see(text)  # (its steps counted themselves)
         else:
             entered = jr.note_call(name, args, text, seconds, None)
-        if entered:  # for naming drift across the journey's screens (§17.3)
+        if entered and await self._journey_front_ok(jr, scope, text):  # for naming drift across the journey's screens (§17.3)
             uxcheck.note_screen(client_id, self.control.client(client_id).items)
         if outer and name in _d().JOURNEY_FRAMES and jr.current is not None and (entered or name != "wait"):
-            await self._journey_frame(jr, name, text)
+            await self._journey_frame(jr, name, text, scope)
 
-    async def _journey_frame(self, jr: journey.Journey, name: str, text: str) -> None:
+    async def _journey_front_ok(self, jr: journey.Journey, scope, text: str) -> bool:
+        """May the screen now go into the report? Personal mode: only when the app in front is one the agent was given
+        (and never when the answer says `outside_apps`). Dedicated: only the journey's app, or iOS's prompt for it.
+        The app is the answer's own `App:` line, else the phone's foreground app, else the last read's."""
+        d = _d()
+        if "outside_apps" in text:
+            return False
+        shown = d.APP_LINE.search(text)
+        bundle = shown.group(2) if shown else None
+        if bundle is None:
+            try:
+                bundle = await self._read(self.session.foreground_bundle_id)
+            except Exception:  # noqa: BLE001 - the phone can't say: the last read does
+                bundle = None
+        if bundle is None:
+            bundle = (self.session.app or (None, None))[1]
+        if scope is not None:
+            return bundle in await self._given(scope)
+        if jr.app is None or bundle == jr.app:
+            return True
+        return bundle == d.SPRINGBOARD and await self._prompt_of_given(
+            {jr.app: jr.app}, self.control.client(self._journey_owner(jr)), read=False)
+
+    def _journey_owner(self, jr: journey.Journey) -> str:
+        return next((c for c, j in self._journeys.items() if j is jr), "")
+
+    async def _journey_frame(self, jr: journey.Journey, name: str, text: str, scope=None) -> None:
         """A picture of the settled screen for the report: the live stream's newest frame, else a screenshot. Never an
-        error: a picture that can't be had is a gap in the report."""
+        error: a picture that can't be had is a gap in the report. Left out (and counted) while another app is in front."""
         d = _d()
         if len(jr.frames) >= journey.MAX_FRAMES or jr.current is None:
+            return
+        if not await self._journey_front_ok(jr, scope, text):
+            jr.left_out += 1
             return
         try:
             frame = await self._newest_frame()
@@ -191,8 +220,8 @@ class JourneyTools:
                 pass
             raise
         jr.see(looked["text"])
-        await self._journey_frame(jr, "look", looked["text"])
-        who = jr.persona or "no persona"
+        await self._journey_frame(jr, "look", looked["text"], scope)
+        who =jr.persona or "no persona"
         eyes = "in a user's eyes" if jr.users_eyes else "in the agent's eyes"
         lines = [f'Journey started: "{jr.goal}" as {who}, {eyes}.']
         if launch and not jr.launched_with:
@@ -345,7 +374,7 @@ class JourneyTools:
         else:
             line += "."
         jr.stress.append(line)
-        await self._journey_frame(jr, "look", looked["text"])
+        await self._journey_frame(jr, "look", looked["text"], scope)
         return {**looked, "text": "\n".join([line, looked["text"]])}
 
     def _survives(self, client_id: str, jr: journey.Journey, survives: dict, text: str) -> tuple[bool, str]:
