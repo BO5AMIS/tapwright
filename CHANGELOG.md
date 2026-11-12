@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0, "the Autopilot Update" (unreleased)
+## 1.1.0, "the Autopilot Update" (2026-11-12)
 
 Agents get more done per call, a session becomes a test you keep, and every touch that matters asks you
 first. The interface is AGENT-TOOLS 1.8, shared with Tapline.
