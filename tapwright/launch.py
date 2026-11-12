@@ -64,3 +64,13 @@ def said(args: dict) -> str:
     if args.get("text_size"):
         parts.append(f"text size {args['text_size']}")
     return f" in {', '.join(parts)}" if parts else ""
+
+
+def undone(args: dict) -> str:
+    """` back to the phone's own language and text size` (the parts that were set), or an empty string: the end of
+    `open_app`'s first line when it launches again with none of what the last launch of that app was given."""
+    names = [name for key, name in (("language", "language"), ("region", "region"), ("text_size", "text size"))
+             if args.get(key)]
+    if not names:
+        return ""
+    return " back to the phone's own " + (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0])

@@ -666,6 +666,7 @@ class Daemon(journey_tool.JourneyTools):
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
         self._opened: str | None = None  # the app open_app last started: the app under test
+        self._launched_with: dict[str, dict] = {}  # app -> the language/region/text size its last launch was given
         self._executables: dict[str, str] = {}  # bundle id -> the name of its process, from the installed apps
         self._wall = datetime.datetime.now  # the phone's reports carry local time without a zone
         self._began_wall = self._crash_since = self._wall()  # the session began; the last answer without news of a crash
@@ -2646,8 +2647,9 @@ class Daemon(journey_tool.JourneyTools):
     async def _open_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"])
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
+        before = self._launched_with.get(bundle_id)  # the app may still be running with what its last launch was given
         try:
-            if extra:  # a running app is closed first, as close_app does (WebDriverAgent's terminate alone is slow)
+            if extra or before:  # a running app is closed first, as close_app does (WebDriverAgent's terminate alone is slow)
                 if (await self._end_app(bundle_id))[1]:
                     await self._tell_runner_closed(bundle_id)
                 else:
@@ -2657,16 +2659,23 @@ class Daemon(journey_tool.JourneyTools):
                         raise
                     except DeviceError:
                         pass  # not running
-                await self.session.launch(bundle_id, extra)
+                await self.session.launch(bundle_id, extra or None)
             else:
                 await self.session.launch(bundle_id)
         except ConnectionLost:
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        conditions = launchlib.check(a)
+        if conditions:
+            self._launched_with[bundle_id] = conditions
+        else:
+            self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
+        if before and not extra:  # the plain open after one with conditions: they are undone, which the answer says
+            return f"Opened {shown},{launchlib.undone(before)}."
         return f"Opened {shown}{launchlib.said(a)}."
 
     async def _close_app(self, view, a: dict) -> str:
@@ -2678,6 +2687,7 @@ class Daemon(journey_tool.JourneyTools):
         bundle_id, shown = await self._app(a["app"], partial=False)
         began = time.monotonic()
         way, found = await self._end_app(bundle_id)
+        self._launched_with.pop(bundle_id, None)  # (closed: the next open starts it as the phone sets it)
         if found:
             if not await self._tell_runner_closed(bundle_id):
                 way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left to finish"
