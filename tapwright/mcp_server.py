@@ -354,6 +354,14 @@ async def viewer() -> CallToolResult:
         return _error(e.code, str(e))
     # The link carries the key that can drive the phone and approve a touch the policy holds back: the agent never
     # gets it (safety review M2). The page opens in a browser on this computer, where the phone is.
+    # A live view already open in a browser is left as it is: each call used to open one more tab (2026-11-12, two
+    # dozen in an afternoon). A person who lost the tab runs `tapwright view`, which always opens one.
+    status = await asyncio.to_thread(client.healthy, info) or {}
+    pages = status.get("pages")
+    if isinstance(pages, int) and not isinstance(pages, bool) and pages > 0:
+        return _result(f"The live view is already open in a browser on this computer ({pages} page"
+                       f"{'s' if pages > 1 else ''} connected), so no new tab was opened. If the user can't find it, "
+                       "they can run `tapwright view` on this computer.")
     import webbrowser
     opened = await asyncio.to_thread(webbrowser.open, client.viewer_url(info))
     if opened:

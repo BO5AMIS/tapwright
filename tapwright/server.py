@@ -105,7 +105,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         return HTMLResponse(page, headers=PAGE_HEADERS)
 
     async def health(request):
-        return denied(request) or JSONResponse(daemon.status())
+        # `pages`: live-view pages connected now, so an agent's `viewer` can leave an open one be instead of opening
+        # another tab (2026-11-12: agents opened two dozen). Only here, not in the status the viewer protocol sends.
+        return denied(request) or JSONResponse({**daemon.status(), "pages": daemon.ws_clients})
 
     async def tool(request):
         problem = denied(request)

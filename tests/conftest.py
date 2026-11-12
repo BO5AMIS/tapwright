@@ -23,3 +23,17 @@ def _runner_build_current(monkeypatch):
     """The runner build is read from the real ~/.tapwright; tests see the installed build as the wanted one unless
     they say otherwise."""
     monkeypatch.setattr(repair, "builds", lambda: {"installed_build": "current", "wanted_build": "current"})
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch):
+    """No test opens a real browser tab. One test once called `viewer` without faking the browser, and every run of
+    the suite opened http://127.0.0.1:8417/?token=SECRET on the owner's screen (two dozen tabs, 2026-11-12). A test
+    that wants the browser fakes webbrowser.open itself, after this."""
+    import webbrowser
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a test tried to open a real browser tab; fake webbrowser.open in it")
+    monkeypatch.setattr(webbrowser, "open", refuse)
+    monkeypatch.setattr(webbrowser, "open_new", refuse)
+    monkeypatch.setattr(webbrowser, "open_new_tab", refuse)
