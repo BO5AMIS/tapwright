@@ -977,6 +977,10 @@ Shared values:
   |---|---|---|---|---|---|---|---|---|---|---|---|---|
   | scale | 0.82 | 0.88 | 0.94 | 1.0 | 1.12 | 1.24 | 1.35 | 1.65 | 1.94 | 2.35 | 2.76 | 3.12 |
 
+  And `system` (both): the phone's own setting. Tapwright: as with no `text_size`. Tapline: it clears the override,
+  `Text size: the phone's own (1.0×).` with the real scale. In Tapline a text size set by the agent also goes back to
+  the phone's own when the session ends.
+
 - **Tapwright:** `open_app` takes `language`, `region` and `text_size`. It (re)launches the app with Apple's launch
   arguments (`-AppleLanguages`, `-AppleLocale`, `-UIPreferredContentSizeCategoryName`), for that launch of that app
   only; nothing in Settings changes. A running app is closed first, and the answer's first line says what it opened
@@ -992,7 +996,8 @@ Shared values:
 
 - `network` (Tapwright: a tool; Tapline: a built-in `app_command`), `{ mode: "offline" | "3g" | "lossy" | "normal" }`.
   - `offline`: no request gets through. `3g`: about 400 ms more latency and 750 kbit/s. `lossy`: about 1 in 5 requests
-    fails, the rest a little slower. `normal`: as before.
+    fails, the rest a little slower. `normal`: as before. Tapwright uses Apple's nearest profiles (3G; Very Bad
+    Network for `lossy`), so its numbers differ from these.
   - The answer is one line, `Network: 3g (Tapwright, whole phone).` / `Network: 3g (Tapline).`, and while a condition
     is on every answer's header carries the same line.
   - It returns to `normal` by itself when the session ends or the tool loses the phone or the app, so the phone is never

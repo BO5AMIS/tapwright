@@ -232,8 +232,9 @@ EXTRA = {
     'apps': 'the apps installed on the phone, with bundle ids.',
     'open_app': (
         'launches the app or brings it to the front, and answers the first screen. `language` (`ar`), `region` '
-        "(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone's default) open it as if the phone "
-        'were set that way, for this launch only and without Settings: a running app is reopened.'
+        "(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone's default; `system` the phone's own) "
+        'open it as if the phone were set that way, for this launch only and without Settings: a running app is '
+        'reopened.'
     ),
     'viewer': (
         "opens it in a browser on this computer and gives you no link (the link's key could approve a touch the "

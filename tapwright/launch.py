@@ -19,6 +19,7 @@ LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")  # BCP 47, loosely: 
 REGION = re.compile(r"[A-Za-z]{2}")  # ISO 3166-1 alpha-2: QA
 DEFAULT_LANGUAGE = "en"  # the language a region alone is paired with (the phone's own isn't asked for)
 KEYS = ("language", "region", "text_size")
+SYSTEM = "system"  # text_size: the phone's own setting (shared with Tapline, AGENT-TOOLS §16.3)
 
 
 def check(args: dict) -> dict:
@@ -35,9 +36,11 @@ def check(args: dict) -> dict:
             raise Refused("bad_params", f"region must be an ISO 3166 country code like QA or GB, not {region!r}")
         out["region"] = region.strip().upper()
     if size is not None:
-        if not isinstance(size, str) or size.strip().lower() not in TEXT_SIZES:
-            raise Refused("bad_params", f"text_size must be one of {', '.join(TEXT_SIZES)}, not {size!r}")
-        out["text_size"] = size.strip().lower()
+        if not isinstance(size, str) or size.strip().lower() not in (*TEXT_SIZES, SYSTEM):
+            raise Refused("bad_params", f"text_size must be one of {', '.join(TEXT_SIZES)}, or {SYSTEM} (the phone's "
+                                        f"own), not {size!r}")
+        if size.strip().lower() != SYSTEM:  # `system` is the phone's own setting: as with no text_size (§16.3)
+            out["text_size"] = size.strip().lower()
     return out
 
 

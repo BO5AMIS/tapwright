@@ -561,6 +561,8 @@ PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own syst
 PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its prompt is answered
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 FRONT_WATCH = 0.15  # s between front-app questions while a filmstrip films in personal mode
+NETWORK_IDLE = 600.0  # s without a call from the agent that set a network condition before it is cleared
+NETWORK_CHECK = 30.0  # s between those checks
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
 # whatever row lies under it. It is in no app's tree, so a row half under it looked reachable: a tap on Settings'
@@ -706,6 +708,11 @@ class Daemon:
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
         self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
+        # who set it and when they last called: a condition whose agent has gone quiet for NETWORK_IDLE is cleared, so
+        # the phone isn't left slow after that agent's session ends (the daemon itself may live on for others)
+        self._network_by: str | None = None
+        self._network_seen = 0.0
+        self._network_watch: asyncio.Task | None = None
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -776,6 +783,7 @@ class Daemon:
         if self._network is not None:
             self.log(f"network: {self._network} ended with the connection")
         self._network = None
+        self._stop_network_watch()
         drop = getattr(self.session.device, "drop_network", None)
         if drop is not None:
             drop()
@@ -783,11 +791,32 @@ class Daemon:
     async def _clear_network(self) -> None:
         """Back to normal, politely (the phone's condition ends when the connection that holds it closes)."""
         self._network = None
+        self._stop_network_watch()
         clear = getattr(self.session.device, "clear_network", None)
         if clear is not None:
             await clear()
 
-    async def _network_tool(self, args: dict, notes: list) -> dict:
+    def _stop_network_watch(self) -> None:
+        watch, self._network_watch, self._network_by = self._network_watch, None, None
+        if watch is not None and watch is not asyncio.current_task():
+            watch.cancel()
+
+    def _network_seen_by(self, client_id: str) -> None:
+        """A call from the agent that set the condition: it is still there."""
+        if client_id == self._network_by:
+            self._network_seen = time.monotonic()
+
+    async def _watch_network(self) -> None:
+        """Clear the condition once the agent that set it has made no call for NETWORK_IDLE seconds: its session has
+        most likely ended, and the phone shouldn't stay slow for whoever uses it next (AGENT-TOOLS §16.4)."""
+        while self._network is not None:
+            await asyncio.sleep(NETWORK_CHECK)
+            if self._network is not None and time.monotonic() - self._network_seen > NETWORK_IDLE:
+                self.log(f"network: {self._network} cleared, its agent {self._network_by} has been quiet "
+                         f"{NETWORK_IDLE:g} s")
+                await self._clear_network()
+
+    async def _network_tool(self, client_id: str, args: dict, notes: list) -> dict:
         """`network`: put the whole phone's network in a bad condition, or back to normal. Over Wi-Fi, offline and
         lossy would cut Tapwright's own link, so they are `unsupported`."""
         mode = args["mode"]
@@ -812,6 +841,9 @@ class Daemon:
         except DeviceError as e:
             raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
         self._network = mode
+        self._network_by, self._network_seen = client_id, time.monotonic()
+        if self._network_watch is None:
+            self._network_watch = asyncio.create_task(self._watch_network(), name="network-watch")
         self.log(f"network: {mode} ({profile})")
         self._announce("agent", "network", label=mode)
         return _answer([network.line(mode)], notes)
@@ -1067,6 +1099,7 @@ class Daemon:
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
+        self._network_seen_by(client_id)
         outer = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
         if outer and name in params.ALLOWED:
             params.check(name, args)
@@ -2074,7 +2107,7 @@ class Daemon:
         if name == "performance":
             return await self._performance(client_id, args, notes)
         if name == "network":
-            return await self._network_tool(args, notes)
+            return await self._network_tool(client_id, args, notes)
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":

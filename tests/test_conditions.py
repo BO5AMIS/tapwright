@@ -1,10 +1,11 @@
 """AGENT-TOOLS §16.3 and §16.4: `open_app` with a language, region and text size, and `network` conditions."""
+import asyncio
 import json
 
 import pytest
 from test_daemon import finish, make, run, started
 
-from tapwright import launch, network, params
+from tapwright import daemon as daemon_module, launch, network, params
 from tapwright.control import Refused
 from tapwright.daemon import Scope
 from tapwright.device import ConnectionLost, DeviceError
@@ -312,3 +313,29 @@ def test_network_is_an_action_to_log_and_personal_mode_lets_it_through():
         assert r["text"] == "Network: 3g (Tapwright, whole phone)."
         await finish(stop, task)
     run(go)
+
+
+def test_a_condition_whose_agent_goes_quiet_is_cleared(monkeypatch):
+    """§16.4: the phone goes back to normal when the session ends. The daemon outlives an agent's session, so a
+    condition is cleared once the agent that set it has made no call for NETWORK_IDLE; other agents' calls don't count."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "NETWORK_IDLE", 0.2)
+        monkeypatch.setattr(daemon_module, "NETWORK_CHECK", 0.05)
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "network", {"mode": "3g"})
+        for _ in range(4):  # the setter keeps calling: it stays
+            await asyncio.sleep(0.1)
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert d._network == "3g"
+        for _ in range(5):  # only another agent calls: it goes
+            await asyncio.sleep(0.1)
+            await d.run_tool("b", "look", {"screenshot": False})
+        assert d._network is None and d.session.device.network_calls[-1] == ("clear",)
+        await finish(stop, task)
+    run(go)
+
+
+def test_text_size_system_is_the_phones_own():
+    assert launch.check({"text_size": "system"}) == {}
+    assert launch.check({"text_size": "SYSTEM", "language": "ar"}) == {"language": "ar"}
