@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -453,7 +453,8 @@ text items.
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
 | `compare_screen`, `filmstrip` | both (Tapwright since v1.9) | image work: §14 |
 | `record`, `replay` | both (v1.8) | scripts by id, label or text work for both (§9.4) |
-| `logs`, `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
+| `logs`, `crash`, `performance` | both (v1.10) | diagnostics: §15. What each tool reads differs, and the answers say so |
+| `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
 
 `dry_run` (§11.4) is a parameter of every touch tool (`tap`, `long_press`, `toggle`, `type_text`, `swipe`,
 `scroll`, `back`) and of `run` (v1.8).
@@ -519,10 +520,10 @@ checking `covered` costs (`hittable`, §4).
 
 A step is one tool call written as an object: `{"tool": "<name>", ...its parameters, "expect": {...}}`.
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
-`wait_for`, `compare_screen` (a check, §14.2), and where the tool has them `alert`, `press_button`, `rotate`,
-`open_app`, `close_app`, `app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, and where the
-tool has them `inspect` and `check_layout`. A step's own `look` and
+`wait_for`, `compare_screen` (a check, §14.2), `performance` (v1.10, §15.3), and where the tool has them `alert`,
+`press_button`, `rotate`, `open_app`, `close_app`, `app_command`. Not
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`,
+and where the tool has them `inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
 Targets are resolved when the step runs, against the screen as it is then. Refs (`{ref}`) are allowed in
@@ -540,6 +541,8 @@ Or (v1.9) `matches`: the name of a reference picture; the screen must match it w
 default 0.5, with optional `ignore`), as `compare_screen` checks it (§14). It may stand alone or beside `text`, `id`
 or `label`; then both must hold. It is checked once, after the step settles and after any text, id or label
 expectation held.
+
+Or (v1.10), on a `performance` step only, `under`: limits the measurement must keep (§15.3).
 
 After the step's action settles, the tool waits for the expectation like `wait_for` does, up to its timeout. It
 matches as `wait_for` does: exact text first, then part of a text. Tapline looks through the app's whole list, off
@@ -834,3 +837,81 @@ through the policy, §11, and `dry_run` isn't offered).
   `Each capture takes a few hundred ms on a phone, so very quick animations fall between frames.`; Tapwright takes
   its frames from the live stream and doesn't.
 - Personal mode (Tapwright): as `look`.
+
+## 15. Diagnostics (v1.10)
+
+A failure comes with its cause: the app's log, its crash, and how it performed.
+
+### 15.1 `logs`
+
+Parameters: `since` (epoch ms: only newer entries), `level` (`error`, `warning` or `info`, default `info`: that level
+and above), `grep` (a plain substring, case-insensitive), `limit` (1–500, default 100: the newest).
+
+Answer: one line per entry, oldest first, `HH:MM:SS.mmm <level> <text>`. Text is cut at 300 characters, saying how
+much is missing, as element text is (§3.3). The last line is `Latest: <epoch ms>`, to pass back as `since`. With
+no entries: `No log entries` plus what was asked (`at warning or above`, `matching "timeout"`, `since <time>`),
+then the `Latest:` line.
+
+- **Tapline:** its own ring of the app's console and network lines. `error` is `console.error`, an uncaught JS
+  error, or a failed request with status 500 and up. `warning` is `console.warn`, or a failed request below 500.
+  `info` is `console.log`, `info` and `debug`.
+- **Tapwright:** the app's own entries in the phone's unified log (os_log, NSLog, and React Native's console in a
+  release build), from the app's process only, never another process's. It keeps the last 2000 per app while it
+  runs, from when the app is opened or `logs` is first used. In personal mode only a given app's entries are read.
+- The action log records `logs` with the count of lines, never their text.
+
+### 15.2 Crashes
+
+**The note.** When the app under test stops during a call, the answer ends with one of:
+- `Note: the app crashed: <one line: the error or exception type, and where>. logs and crash show more.`
+- (Tapline, when the app went away without a JS error) `Note: the app disconnected during this call (it may have
+  crashed; Tapline can't read native crash reports, Tapwright's crash can).`
+
+**`crash`.** Parameters: `all` (the last 5, not only the newest), and (Tapwright) `pull`.
+- Answer per crash: the time, the error or exception type and reason, the crashed thread's top 8 frames with the
+  app's own frames marked `*`, and (Tapline) the component stack.
+- **Tapwright:** the app's crash reports on the phone since the session began, and only the app's own. `pull: true`
+  copies the full `.ips` into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash report
+  for <app> since the session began.`
+- **Tapline:** the newest fatal JS error since the app connected. The SDK catches it in React Native's global error
+  handler before the app dies, keeps it on the phone, and sends it on the next connection. In a development build
+  the stack is mapped to the app's files and lines, as `inspect` does. With none: `No JS crash since the app
+  connected. A native crash doesn't show here; Tapwright's crash reads those.`
+
+### 15.3 `performance`
+
+Parameters: `launch: true` (Tapwright: close the app and cold-start it; Tapline: a JavaScript reload in a
+development build), or `seconds` (0.5–30, default 3: measure while waiting), with optional `tap` (a target tapped
+first, through the policy, §11, as `filmstrip` does).
+
+Answer: a first line, then the numbers in one line, then what wasn't measured.
+- `Opened in 1.42 s (to the first settled screen).` (Tapwright) /
+  `Reloaded in 1.12 s (to the first settled screen; JavaScript only, not a cold start).` (Tapline, development
+  builds; release builds answer `unsupported`) / `Measured 3.0 s.`
+- Tapwright: `Memory 182 MB (peak 190). CPU 34% (peak 88%). Frames 57 fps; 3 drops over 50 ms.` (the process's
+  memory and CPU, and rendered frames).
+- Tapline: `JS heap 48 MB (peak 52). JS frames 57 fps; 3 drops over 50 ms; JS thread busy at most 180 ms.`, and in a
+  development build `Slowest renders: TripList 48 ms (3 times), DayCard 12 ms.`
+- Last line, when anything wasn't measured: `Not measured here: CPU, process memory.`
+
+**In `run` and scripts** a `performance` step is allowed (§9.1) and may carry `expect: {"under": {…}}`, with keys
+`launch_s`, `memory_mb` (process; Tapwright), `js_heap_mb` (Tapline), `cpu_percent` (Tapwright), `fps_min` (the lowest
+sample must be at least this), `drops`, `busy_ms` (Tapline). A key the tool doesn't measure is ignored with
+`Note: <key> isn't measured by <tool>; not checked.` Any other key is `bad_params`; `under` goes only on a
+`performance` step. A limit that isn't kept stops the batch: `Error expect_failed: … stopped at step 3 (performance
+launch): opened in 2.6 s, over 2.0 s; 4 drops, over 0.` `record` saves a `performance` call as a step, without
+`under`.
+
+### 15.4 Failures carry their diagnostics
+
+- When a step of `run` or `replay` fails, the answer adds, after the change block, `Logs (since step <n>):` and up
+  to 20 entries at warning or above since that step began, when there are any, and the crash note when the app
+  stopped.
+- CLI `--junit`: the same lines go into the test case's `<system-out>`. Tapwright also pulls a crash report next to
+  the script, as `<script dir>/<script name>.diff/<script name>.crash.ips`, and names it there. Tapline puts its
+  crash detail in `<system-out>` only.
+
+### 15.5 Not in 1.10
+
+Network capture, energy, disk and thermal numbers, and symbolicating native frames. Tapwright shows a crash
+report's own symbols; full symbols need the app's dSYM files.
