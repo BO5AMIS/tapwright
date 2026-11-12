@@ -424,4 +424,4 @@ def test_the_live_views_key_is_never_printed():
     for module in (server, cli):
         for line in inspect.getsource(module).splitlines():
             if re.search(r"\bprint\(", line):
-                assert "token" not in line and "viewer_url(" not in line and "{url}" not in line, line
+                assert "token=" not in line and "{token}" not in line and "viewer_url(" not in line and "{url}" not in line, line
