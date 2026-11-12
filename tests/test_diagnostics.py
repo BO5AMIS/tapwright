@@ -580,6 +580,37 @@ def test_the_meter_stops_its_sampling_when_start_is_cancelled(monkeypatch):
     run(go)
 
 
+def test_a_cancel_in_the_turn_the_meter_becomes_ready_is_not_lost(monkeypatch):
+    """Codex, PR #4: on Python 3.10 asyncio.wait_for returned normally when the inner wait and the cancel came in one
+    loop turn, so a cancelled `performance(launch=True)` went on to close and open the app."""
+    from tapwright import device as device_module
+    stopped = []
+
+    class Quiet:
+        rsd = None
+
+        def log(self, text):
+            pass
+
+    async def sampling(self):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            stopped.append("sampling closed")
+    monkeypatch.setattr(device_module.AppMeter, "_run", sampling)
+
+    async def go():
+        meter = device_module.AppMeter(Quiet(), APP)
+        starting = asyncio.create_task(meter.start())
+        await asyncio.sleep(0.05)
+        meter._ready.set()  # ready ...
+        starting.cancel()  # ... and cancelled in the same turn
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert stopped == ["sampling closed"] and meter._task is None
+    run(go)
+
+
 def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_report_is_told():
     async def go():
         d = tuned(make())

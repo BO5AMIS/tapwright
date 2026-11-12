@@ -16,7 +16,7 @@ import re
 import sys
 import time
 
-from . import store
+from . import aio, store
 from .diagnostics import CrashSearch, crash_pattern, only_mine
 
 WDA_PORT = 8100
@@ -585,7 +585,7 @@ class AppMeter:
         self._task = asyncio.create_task(self._run(), name="app-meter")
         try:
             try:
-                await asyncio.wait_for(self._ready.wait(), METER_START)
+                await aio.wait_for(self._ready.wait(), METER_START)  # (not asyncio.wait_for: on 3.10 it can drop a cancel)
             except asyncio.TimeoutError:
                 raise DeviceError("the phone's instruments service didn't start sampling in time") from None
             if self._failed is not None:

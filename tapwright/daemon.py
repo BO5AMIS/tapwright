@@ -23,7 +23,7 @@ from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, ocr, performance, ui)
+from . import (actionlog, aio, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, ocr, performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -109,22 +109,7 @@ NOTE_ALLOWED = "a person allowed this."
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
 
 
-_T = TypeVar("_T")
-
-
-async def _wait_for(awaitable: Awaitable[_T], seconds: float) -> _T:
-    """`asyncio.wait_for`, except that a cancel of the caller is never lost. Before Python 3.12, wait_for gives its
-    result and drops the cancel when the two come in the same loop turn, and a loop that waits for something again
-    then never ends (found in `_watch_logs`, which `supervise` cancels)."""
-    inner = asyncio.ensure_future(awaitable)
-    try:
-        done, _ = await asyncio.wait({inner}, timeout=seconds)
-        if not done:
-            raise asyncio.TimeoutError
-        return inner.result()
-    finally:
-        if not inner.done():
-            inner.cancel()
+_wait_for = aio.wait_for  # cancellation-safe, and it joins its child (aio.py)
 
 
 class Scope(NamedTuple):
