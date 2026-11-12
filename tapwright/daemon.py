@@ -85,7 +85,10 @@ SCOPE_FREE = ("open_app", "close_app", "open_url", "press_button")  # how an age
 APP_LINE = re.compile(r"^App: (.+) \(([^()\s]+)\)$", re.M)  # the header line of a full list: name, bundle id
 
 
-def _outside(bundle: str | None, name: str | None, given: str) -> str:
+def _outside(bundle: str | None, name: str | None, given: str, alert: bool = False) -> str:
+    if alert and bundle == SPRINGBOARD:  # SpringBoard is in front because iOS put up an alert of its own
+        return ("outside_apps: an iOS system alert is in front (not a prompt of one of your apps), so nothing of it "
+                "is shown or touched. Ask the user to answer it on the phone, then go back with open_app.")
     front = "the phone can't say which app" if not bundle else f"{name} ({bundle})" if name else bundle
     return (f"outside_apps: {front} is in front and isn't one of the apps you were given ({given}), so nothing of it is shown or "
             "touched. Go back with open_app.")
@@ -1225,7 +1228,8 @@ class Daemon:
             view = self.control.client(client_id)
             front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=True))
             if front not in given and front != PROMPT_FRONT:
-                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names,
+                                                      alert=getattr(self.session, "last_alert", None) is not None))
         answer = await self._run_tool(client_id, name, args)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
@@ -1239,11 +1243,12 @@ class Daemon:
         if (app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image"))
                 and not (app[1] == SPRINGBOARD
                          and await self._prompt_of_given(given, self.control.client(client_id), read=True))):
+            alert = "\nAlert: " in answer["text"]
             if name == "look":  # nothing was done, so there is nothing to report but the refusal
-                raise Refused("not_allowed", _outside(app[1], app[0], names))
+                raise Refused("not_allowed", _outside(app[1], app[0], names, alert))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
-            return {"text": f"{first}Note: {_outside(app[1], app[0], names)}", "image": None, "image_size": None}
+            return {"text": f"{first}Note: {_outside(app[1], app[0], names, alert)}", "image": None, "image_size": None}
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:

@@ -5171,3 +5171,24 @@ def test_a_tab_under_a_keyboard_that_stays_up_says_how_to_close_it():
                                      "type_text into the field with submit: true closes it (it presses return).")
         await finish(stop, task)
     run(go)
+
+
+def test_an_ios_alert_over_everything_is_named_as_one_in_personal_mode():
+    """An account-password prompt of iOS's own sat over the app; "Home screen is in front" read like the app had
+    quit (2026-11-12). With an alert up, the refusal says what it is and who answers it."""
+    async def go():
+        s = FakeSession()
+        s.app_names = {"com.example.app": "Example"}
+        d = make(s)
+        stop, task = await started(d)
+        mine = Scope(("com.example.app",))
+        s.foreground = "com.apple.springboard"
+        s.app = ("Home screen", "com.apple.springboard")
+        s.last_alert = ALERT
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=mine)
+        assert e.value.code == "not_allowed"
+        assert str(e.value).startswith("outside_apps: an iOS system alert is in front (not a prompt of one of your apps)")
+        assert "Ask the user to answer it on the phone" in str(e.value)
+        await finish(stop, task)
+    run(go)
