@@ -20,7 +20,7 @@
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      [--policy FILE | --no-policy]
                      connect an agent in one go: register the MCP server and install the skill
-  tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated) [--junit OUT]
+  tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated) [--junit OUT] [--update-references]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
 
@@ -495,14 +495,16 @@ def replay(a) -> int:
         path = str(Path(f).resolve()) if Path(f).exists() else str(batch.named(f))  # a file, else a saved name
         began = time.monotonic()
         try:
-            data = batch.load_script(path)
+            batch.load_script(path)  # a file that can't be read stops here, before the phone is asked
         except Refused as e:
             print(f"{f}: Error {e.code}: {e}")
             results.append((f, "error", str(e), 0.0))
             continue
         client.set_scope(apps, a.dedicated)
         try:
-            answer = client.call("replay", {"path": path}, "cli-replay", timeout=200.0)
+            # (a failed picture check writes its diff next to the script, and its message ends `(diff: <path>)`)
+            answer = client.call("replay", {"path": path, **({"update_references": True} if getattr(a, "update_references", False) else {})},
+                                 "cli-replay", timeout=200.0)
         except client.DaemonError as e:
             print(f"{f}: Error {e.code}: {e}")
             kind = "error" if e.code in START_CODES and not str(e).startswith("Ran ") else "failed"
@@ -615,6 +617,9 @@ def main() -> int:
                         "a script's own `app` doesn't widen this")
     p.add_argument("--dedicated", action="store_true",
                    help="the phone is kept for testing: let the scripts use any app (needed when --apps isn't given)")
+    p.add_argument("--update-references", action="store_true",
+                   help="picture checks (matches, compare_screen) save the screen into the script's "
+                        "<name>.references folder instead of comparing; exit 0 when every step ran")
     p = sub.add_parser("skill", help="the agent skill: how to test with Tapwright, for Claude Code, Codex and others")
     p.add_argument("action", choices=("install", "path"),
                    help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")

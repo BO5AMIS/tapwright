@@ -142,6 +142,9 @@ repository too.
 | `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`) |
 | `logs`, `crash` | the app's own log (level, grep, since) and its crash reports, read from the phone; a failed `run` step adds the log lines from that step, and a call the app crashed in ends with a note |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
+| `performance` | memory, CPU and frame rate of the app's own process while it waits, around a tap, or from a cold start to the first settled screen (`launch`); `run` and scripts can hold it to limits with `expect.under` |
+| `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
+| `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
 screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`
@@ -166,6 +169,12 @@ the script may use, or `--dedicated` on a phone kept for testing; the script's o
 it, and without either it refuses): it reopens the app, stops at the first step
 that fails and says which, and exits 0, 1 (a step failed) or 2 (it couldn't start). Tapline runs the
 same files inside your app.
+
+**Checks of how it looks, too.** `"expect": {"matches": "trip-saved"}` on a step (or a `compare_screen`
+step) holds when the screen matches the reference picture of that name. `record` keeps the pictures next to the
+script, in `sign-up.references/`, so they travel together. After an intended design change, `tapwright replay
+sign-up.json --apps com.example.app --update-references` saves the new look; a failed check writes its picture
+with the changes in red to `sign-up.diff/`.
 
 ## Live view
 

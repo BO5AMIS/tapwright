@@ -137,12 +137,12 @@ SHARED = {
         'Runs several steps in one call, in order, and answers once: `Ran 5 of 5 steps in 3.4 s.` then the '
         'changes since your last list. Each step is a tool call written as an object (`{"tool": "tap", "target": '
         '{"id": "save"}}`) with an optional `expect` checked after it: one of text, id or label, with gone, value '
-        '(a switch: "on"/"off", or "true"/"false") and timeout (default 2 s). It stops at the first step that '
-        "fails or whose expectation doesn't hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped "
-        'at step 4 (tap "Save"): its action ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as '
-        '`wait_for` does: exact text first, then part of a text. `dry_run: true` checks the steps and says what '
-        "step 1 would do. Use it to fill a form or walk a flow you're sure of; read the answer before the next "
-        'batch.'
+        '(a switch: "on"/"off", or "true"/"false") and timeout (default 2 s); or `matches` (a `compare_screen` '
+        "reference the screen must match). It stops at the first step that fails or whose expectation doesn't "
+        'hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): its action '
+        'ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as `wait_for` does: exact text first, '
+        'then part of a text. `dry_run: true` checks the steps and says what step 1 would do. Use it to fill a '
+        "form or walk a flow you're sure of; read the answer before the next batch."
     ),
     'audit': (
         'Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, '
@@ -153,7 +153,8 @@ SHARED = {
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '
-        "right after an action becomes that step's `expect`. Targets are saved by id, else label, else text (with "
+        "right after an action becomes that step's `expect`, and a `compare_screen` its `expect.matches`; the "
+        'reference pictures are saved next to the script. Targets are saved by id, else label, else text (with '
         '`index` when it matched several); refs only last one run.'
     ),
     'replay': (
@@ -161,6 +162,34 @@ SHARED = {
         "expectation doesn't hold. Give `name` (a saved script) or `path` (a script file); without either, lists "
         'saved scripts. It starts the app fresh first unless the script says `"fresh": false`. The user can run '
         'the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`).'
+    ),
+    'compare_screen': (
+        'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
+        'reference; later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on '
+        'a difference a picture with the changes in red. `threshold` is the percent that may change and still '
+        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. Keep the '
+        'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
+        '`compare_screen` step.'
+    ),
+    'filmstrip': (
+        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
+        'shots. `tap` first taps an element, then films what it sets off.'
+    ),
+    'performance': (
+        "How the app performs: `launch: true` measures opening it; otherwise it measures for `seconds` (default 3), "
+        "after tapping `tap` if given. Answers the time and the memory, CPU and frames the tool can measure (fps and "
+        "drops over 50 ms), and names what it couldn't. In `run` and scripts, `expect: {\"under\": {\"launch_s\": 2, "
+        "\"drops\": 0}}` on a `performance` step makes it a check."
+    ),
+    'logs': (
+        "The app's recent log: one line per entry with its time and level (`error`, `warning`, `info`). `level` keeps "
+        'that level and above, `grep` keeps lines containing a text, `limit` caps the count (default 100, newest), and '
+        '`since` (epoch ms) returns only newer lines; each result ends with `Latest:`, a timestamp to reuse. Read it '
+        'when something fails: the cause is often there.'
+    ),
+    'crash': (
+        "The app's newest crash (`all: true`: the last 5): when, the error, and the top frames with the app's own "
+        'marked `*`. An answer whose call made the app stop already says `Note: the app crashed: …`.'
     ),
 }
 
@@ -204,21 +233,23 @@ EXTRA = {
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
     'logs': (
-        "The app's own log: what it wrote to the phone's unified log (os_log, NSLog, print; React Native's console in "
-        'a release build). `since` (epoch ms: only newer entries), `level` (`error`, `warning` or `info`, default '
-        '`info`: that level and above), `grep` (a plain substring, ignoring case), `limit` (1-500, default 100: the '
-        'newest). Answers one line per entry, oldest first, `HH:MM:SS.mmm <level> <text>` (text is cut at 300 '
-        'characters, saying how much is missing), then `Latest: <epoch ms>` to pass back as `since`. Only the app\'s '
-        "own process is read, never another's; it is kept from when the app is opened or `logs` is first used, the last "
-        '2000 entries. iOS has no warning level: `error` is an error or fault, `warning` a plain line that says warn, '
-        'error, exception, fatal or failed.'
+        "reads the app's own entries in the phone's unified log (os_log, NSLog, print; React Native's console in a "
+        "release build), from the app's process only, never another's, and keeps the last 2000 from when the app is "
+        'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a plain '
+        'line that says warn, error, exception, fatal or failed.'
     ),
     'crash': (
-        "The app's crash reports on the phone since the session began, and only the app's own: the time, the "
-        "exception type and reason, the crashed thread's top 8 frames with the app's own frames marked `*`, and the "
-        "report's file name. `all: true` shows the last 5, not only the newest. `pull: true` copies the full `.ips` "
-        'into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash report for <app> since the '
-        "session began.` Frames show the report's own symbols; full symbols need the app's dSYM files."
+        "reads the app's crash reports on the phone since the session began, and only the app's own. `pull: true` "
+        'copies the full `.ips` into `~/.tapwright/crashes/<bundle id>/` and names the file. With none: `No crash '
+        "report for <app> since the session began.` Frames show the report's own symbols; full symbols need the "
+        "app's dSYM files."
+    ),
+    'performance': (
+        "measures the app in front: `launch: true` closes it and starts it cold (seconds are 0.5-30, not used "
+        "then). Memory and CPU are the app's own process (`under` holds memory to its peak and CPU to its average, "
+        "`cpu_percent` and `fps_min` also work); frames are the phone's frame rate once a second, so a drop is a "
+        "second under 45 fps, and `drops` in `under` counts those. `js_heap_mb` and `busy_ms` are Tapline's and are "
+        "ignored with a note."
     ),
     'close_app': (
         'Quit an app, so it starts fresh next time. `app` is a bundle id or name. Use it with `open_app` to start '

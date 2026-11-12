@@ -56,7 +56,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 10. A known sequence is one `run`: its `steps` are ordinary calls, each with an optional `expect`
     (`{"text": "Saved"}`) that must hold after it. It stops at the first that fails and says which.
     `record` saves what you do as a script that `replay` (or `tapwright replay FILE` in CI) runs
-    again. `audit` checks the screen's accessibility; report what it finds.
+    again. `audit` checks the screen's accessibility; report what it finds. `compare_screen` checks how a
+    screen looks against a saved reference (`"expect": {"matches": "<name>"}` in a step); `filmstrip` shows an
+    animation as one numbered picture.
 11. A tap on Buy, Delete, Send, Post, Sign out and the like answers
     `not_allowed: needs_confirmation`: the live view asks the person; repeat the same call once
     they allow it, or ask your user. Never look for another way. `dry_run: true` shows what a touch

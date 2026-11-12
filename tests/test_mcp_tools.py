@@ -27,11 +27,14 @@ EXPECTED = {
     "audit": {"types"},
     "logs": {"since", "level", "grep", "limit"},
     "crash": {"all", "pull"},
+    "performance": {"launch", "seconds", "tap"},
+    "filmstrip": {"frames", "interval_ms", "frame_width", "tap"},
+    "compare_screen": {"name", "update", "width", "threshold", "ignore"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot"},
     "record": {"start", "stop", "name", "path"},
     "replay": {"name", "path", "look", "screenshot"},
 }
-REQUIRED = {"run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
+REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
             "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
 DEFAULTS = {
@@ -48,6 +51,8 @@ DEFAULTS = {
     "logs": {"since": None, "level": "info", "grep": None, "limit": 100},
     "crash": {"all": False, "pull": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
+    "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
+    "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
 READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for", "logs"}  # (crash can pull a file: no hint)
 

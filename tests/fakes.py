@@ -103,8 +103,28 @@ class FakeReport:
             FakeFrame("/System/Library/Frameworks/UIKitCore.framework/UIKitCore", "UIApplicationMain", 340)]
 
 
+class FakeMeter:
+    """device.AppMeter's interface: start(), then stop() gives the Measurement a test set on the device."""
+
+    def __init__(self, device, bundle_id: str) -> None:
+        self.device, self.bundle_id = device, bundle_id
+
+    async def start(self) -> None:
+        self.device.metered.append(("start", self.bundle_id))
+        if self.device.meter_error is not None:
+            raise self.device.meter_error
+
+    async def stop(self):
+        self.device.metered.append(("stop", self.bundle_id))
+        return self.device.measurement
+
+
 class FakeDevice:
     def __init__(self) -> None:
+        from tapwright.performance import Measurement
+        self.measurement = Measurement()  # what a meter's stop() returns (tests set it)
+        self.metered: list = []  # ("start" | "stop", bundle id) in order
+        self.meter_error: Exception | None = None
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
@@ -147,6 +167,9 @@ class FakeDevice:
     async def kill_app(self, bundle_id: str) -> int:
         self.killed.append(bundle_id)
         return 1
+
+    def meter(self, bundle_id: str) -> FakeMeter:
+        return FakeMeter(self, bundle_id)
 
 
 def button(ref: str, label: str, identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
