@@ -651,9 +651,12 @@ Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy a
 ```
 - A word matches the touched element's own label or text, whole words, ignoring case (`Delete trip` matches
   `Delete`; `Deleted` doesn't). For a point target, the element under the point.
-- Touches checked: `tap`, `long_press`, `toggle`. Nothing is checked on `type_text`'s `submit` (the form's
-  button tap is what the policy checks), and not `alert` answers (permission prompts are what a new user
-  answers). testIDs and accessibility identifiers are never matched.
+- Touches checked: `tap`, `long_press`, `toggle`, a `swipe` that moves less than 10 pt (a touch where it
+  starts), and, where an app's own alert shows as `Alert:` (Tapwright), `alert` `accept` on a button with a
+  policy word ("Delete trip?" [Cancel] [Delete]). Nothing is checked on `type_text`'s `submit` (the form's
+  button tap is what the policy checks); a permission prompt's Allow carries no policy word. testIDs and
+  accessibility identifiers are never matched. A touch at a point is checked against what is under the point
+  now, read again when the agent's last list can't vouch for it.
 - Per-app lists replace the global ones for that app. `"confirm": []` turns confirmation off (a dedicated
   test device with test data).
 - `--no-policy` is the same as `{"confirm": [], "block": []}`.
@@ -672,9 +675,11 @@ Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy a
   (Enter = Don't allow by default, focus starts on Don't allow).
 - Viewer → server: `{"type": "confirm_answer", "id": "c7", "allow": true}`. Any viewer may answer; the
   first answer wins; the request expires after 120 s.
-- An allow lets exactly one matching call through within 120 s: the same tool on the same element. Its
-  answer ends `Note: a person allowed this.` A refusal or expiry: the retry answers needs_confirmation again,
-  with `They declined.` or `Nobody answered.` added.
+- An allow lets exactly one matching call through within 120 s: the same tool on the same element of the
+  same app. Its answer ends `Note: a person allowed this.` After an expiry the retry answers
+  needs_confirmation again, with `Nobody answered.` added. After a refusal, for 60 s the same touch asks no
+  one: it answers `needs_confirmation: … and they declined it just now. Don't ask again by repeating the call:
+  ask your user what they want.`; after that a retry asks again, with `They declined.` added.
 - The live view is the only place a request is answered, for both tools: a prompt on the phone could be
   pressed by an agent.
 
