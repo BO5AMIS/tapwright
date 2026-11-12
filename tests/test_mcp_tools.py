@@ -29,6 +29,8 @@ EXPECTED = {
     "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"},
     "audit": {"types"},
+    "ux_check": set(),
+    "media": {"add", "remove", "confirm"},
     "logs": {"since", "level", "grep", "limit"},
     "crash": {"all", "pull"},
     "performance": {"launch", "seconds", "tap"},
@@ -59,7 +61,7 @@ DEFAULTS = {
     "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
     "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
-READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for", "logs", "session_report"}  # (crash can pull a file: no hint)
+READ_ONLY = {"audit", "ux_check", "look", "apps", "viewer", "wait", "wait_for", "logs", "session_report"}  # (crash can pull a file: no hint)
 
 
 def listed() -> dict:

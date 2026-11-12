@@ -9,7 +9,7 @@ import datetime
 import json
 import logging
 
-from . import journey, journey_export, journey_report, launch as launchlib, network, ui
+from . import journey, journey_export, journey_report, launch as launchlib, network, ui, uxcheck
 from .control import Refused
 
 HIDDEN = "in a journey, ids and labels are hidden; use a ref or the visible text"
@@ -59,6 +59,8 @@ class JourneyTools:
             entered = jr.see(text)  # (its steps counted themselves)
         else:
             entered = jr.note_call(name, args, text, seconds, None)
+        if entered:  # for naming drift across the journey's screens (§17.3)
+            uxcheck.note_screen(client_id, self.control.client(client_id).items)
         if outer and name in _d().JOURNEY_FRAMES and jr.current is not None and (entered or name != "wait"):
             await self._journey_frame(jr, name, text)
 
@@ -170,6 +172,7 @@ class JourneyTools:
         jr = journey.Journey(ask["goal"], ask["persona"], {**launch, **({"network": mode} if mode else {})}, ask["allow"],
                              ask["eyes"], self.control.clock(), now, folder, app=self._opened or self._bundle())
         self._journeys[client_id] = jr
+        journey.running[client_id] = jr
         try:
             if mode not in (None, "normal"):
                 await self._calls_of_its_own(client_id, jr, scope, "network", {"mode": mode})
@@ -181,6 +184,7 @@ class JourneyTools:
         except Exception:
             await self._journey_undo(client_id, jr, scope, [])
             self._journeys.pop(client_id, None)
+            journey.running.pop(client_id, None)
             try:
                 folder.rmdir()
             except OSError:
@@ -224,7 +228,9 @@ class JourneyTools:
         notes: list[str] = []
         await self._journey_undo(client_id, jr, scope, notes)
         elapsed = jr.elapsed(self.control.clock())
+        self._house_rules(jr, reached)
         self._journeys.pop(client_id, None)
+        journey.running.pop(client_id, None)
         try:
             written = await asyncio.to_thread(journey_report.write, jr, reached, why, elapsed)
         except OSError as e:
@@ -249,6 +255,32 @@ class JourneyTools:
             import base64
             answer["images"] = [base64.b64encode(pictures[1][0]).decode()]
         return answer
+
+    def _house_rules(self, jr: journey.Journey, reached: bool) -> None:
+        """The user's house rules (uxcheck.rules_in_force) in the report, each named; `max_taps_to_goal` is checked here:
+        a journey that reached its goal in more taps breaks it, and that is a (high) finding. `way_back` shows the
+        screens ux_check found without a way back; the text rules are the agent's to judge."""
+        rules = uxcheck.rules_in_force()
+        if not rules:
+            return
+        lines = [f"- {t} (judged by the agent from the screens)" for t in rules.texts]
+        if rules.max_taps_to_goal is not None:
+            limit = rules.max_taps_to_goal
+            if reached and jr.taps > limit:
+                said = f"reached the goal in {journey.plural(jr.taps, 'tap')}, more than the {limit} the rule allows"
+                jr.add_finding({"severity": "high", "kind": "max_taps_to_goal", "what": said,
+                                "basis": f"house rule: max_taps_to_goal {limit}"})
+                lines.append(f"- max_taps_to_goal: {limit}: **broken**, {said}.")
+            elif reached:
+                lines.append(f"- max_taps_to_goal: {limit}: kept, reached in {journey.plural(jr.taps, 'tap')}.")
+            else:
+                lines.append(f"- max_taps_to_goal: {limit}: not applicable, the goal wasn't reached.")
+        if rules.way_back:
+            broken = sorted({f.get("screen_index") for f in jr.findings if f.get("kind") == "way_back"} - {None})
+            lines.append("- way_back: " + (f"**broken** on screen{'s' if len(broken) != 1 else ''} "
+                                           f"{', '.join(map(str, broken))}." if broken else
+                                           "no screen ux_check read broke it."))
+        jr.extra_sections.append(("House rules", lines))
 
     # ---- stress moments (§17.4) ----
     async def _journey_stress(self, client_id: str, jr: journey.Journey, args: dict, scope) -> dict:

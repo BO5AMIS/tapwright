@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,16 @@ SAME_SCREEN = 0.8  # share of elements alike for a return to a screen already se
 NEW_SCREEN = 0.5  # fewer alike than this: another screen
 MAX_FRAMES = 200
 MAX_FINDINGS = 100
+
+# The journeys that are running, by agent (the daemon puts them here and takes them out): what `add_finding` finds them by.
+running: "weakref.WeakValueDictionary[str, Journey]" = weakref.WeakValueDictionary()
+
+# How serious a ux_check finding is, by its kind (a house rule is always high): an agent can't use it or is lost (high),
+# something that makes the screen harder to use (medium), a matter of taste or polish (low).
+SEVERITY_OF_KIND = {"icon_only": "high", "dead_end": "high", "way_back": "high", "main_action": "medium",
+                    "reach": "medium", "clipped_text": "medium", "contrast": "medium", "hit_region": "medium",
+                    "choices": "low", "naming": "low"}
+_PLACE = re.compile(r" @(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?) (\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)")
 
 _ELEMENT = re.compile(r'^[eo]\d+ (\w+)(?: ("(?:[^"\\]|\\.)*"|\(icon only\)(?: \(VoiceOver: "(?:[^"\\]|\\.)*"\))?))?')
 
@@ -231,7 +242,7 @@ class Journey:
         if m and 1 <= int(m.group(1)) <= len(self.screens):
             return int(m.group(1))
         for s in self.screens:
-            if text.lower() and text.lower() in s.title.lower():
+            if text.lower() and (text.lower() in s.title.lower() or (s.title and s.title.lower() in text.lower())):
                 return s.index
         return None
 
@@ -247,10 +258,43 @@ class Journey:
         return {sev: sum(1 for f in self.findings if f["severity"] == sev) for sev in SEVERITIES}
 
 
+def add_finding(client: str, finding: dict) -> bool:
+    """File a `ux_check` finding in the journey `client` has running (docs/AGENT-TOOLS.md §17.3, §17.5). `finding` is
+    `{kind, element, what, basis, screen}`; its severity comes from its kind (a house rule is high) and the box round
+    the element from the `@x,y WxH` of its line. It goes on the journey's current screen (ux_check reads that one).
+    The same finding twice (the agent checked the screen again) is filed once. True when it was filed."""
+    jr = running.get(client)
+    if jr is None or not isinstance(finding, dict):
+        return False
+    kind, element = str(finding.get("kind") or ""), str(finding.get("element") or "")
+    what, basis = str(finding.get("what") or "").strip(), str(finding.get("basis") or "").strip()
+    if not what or not basis:
+        return False
+    here = jr.current.index if jr.current is not None else None
+    if any((f.get("kind"), f.get("element"), f["what"], f.get("screen_index")) == (kind or None, element or None, what, here)
+           for f in jr.findings):
+        return False
+    severity = "high" if basis.startswith("house rule") else SEVERITY_OF_KIND.get(kind, "medium")
+    raw: dict = {"severity": severity, "what": what, "basis": basis}
+    if kind:
+        raw["kind"] = kind
+    if element:
+        raw["element"] = element
+        if (m := _PLACE.search(element)) is not None:
+            raw["rect"] = tuple(float(v) for v in m.groups())
+    jr.add_finding(raw)
+    return True
+
+
+def finding_text(f: dict) -> str:
+    """What a finding says in the report: `kind: element: what` for a ux_check one, else `what`."""
+    return ": ".join(p for p in (f.get("kind"), f.get("element"), f["what"]) if p)
+
+
 def check_finding(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise Refused("bad_params", 'finding must be an object, like {"severity": "high", "what": "...", "basis": "..."}')
-    unknown = sorted(set(raw) - {"severity", "screen", "what", "basis", "rect"})
+    unknown = sorted(set(raw) - {"severity", "screen", "what", "basis", "rect", "kind", "element"})
     if unknown:
         raise Refused("bad_params", f"finding doesn't take {', '.join(unknown)}; it takes severity, screen, what, basis")
     if raw.get("severity") not in SEVERITIES:
@@ -262,6 +306,9 @@ def check_finding(raw: object) -> dict:
     if screen is not None and (isinstance(screen, bool) or not isinstance(screen, (str, int))):
         raise Refused("bad_params", "finding screen must be a screen's number or name")
     out = {"severity": raw["severity"], "what": raw["what"].strip(), "basis": raw["basis"].strip()}
+    for key in ("kind", "element"):  # from ux_check: what sort of finding, and the element's line
+        if isinstance(raw.get(key), str) and raw[key].strip():
+            out[key] = raw[key].strip()
     if raw.get("screen") is not None:
         out["screen"] = str(raw["screen"]).strip()
     rect = raw.get("rect")

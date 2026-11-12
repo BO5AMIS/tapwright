@@ -150,6 +150,12 @@ SHARED = {
         'it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: '
         'run it on each new screen.'
     ),
+    'ux_check': (
+        "Check the screen against usability basics: competing choices, one clear main action, thumb reach, icon-only buttons, cut-off text, contrast and target sizes, naming that changes between screens, and error or empty states that don't say what to do. Facts come first, each naming its element and basis; add your own judgment from the screenshot and say it is judgment. The user's house rules, when given, are checked too."
+    ),
+    'media': (
+        "Put test pictures in the phone's photo library for an app's photo picker (a food photo, a label): `add` with the pictures' paths and `confirm: true`; `remove: true` deletes only what was added. Ask your user first whether pictures may be added, and whether to remove them afterwards."
+    ),
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '

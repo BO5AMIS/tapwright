@@ -815,3 +815,97 @@ def test_the_mcp_result_carries_a_second_picture():
     from tapwright import mcp_server
     result = mcp_server._result("t", "AAAA", more=["BBBB"])
     assert [c.type for c in result.content] == ["text", "image", "image"]
+
+
+# ---- ux_check and the house rules (the merge with §17.3) ----
+UX = {"kind": "icon_only", "element": 'e2 button @340,20 44x44', "what": "an icon-only button with no label",
+      "basis": "best practice: label every control", "screen": '"Example" (Today)'}
+
+
+def test_a_ux_check_finding_goes_to_the_journey_the_agent_has_running(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        assert journey.add_finding("a", UX) is False  # no journey: nothing happens
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        assert journey.add_finding("b", UX) is False  # another agent's
+        assert journey.add_finding("a", UX) is True
+        assert journey.add_finding("a", UX) is False  # the same finding again is filed once
+        assert journey.add_finding("a", {**UX, "kind": "naming", "what": "Save here, Done there"}) is True
+        assert journey.add_finding("a", {**UX, "kind": "way_back", "basis": "house rule: way_back", "what": "none"}) is True
+        assert journey.add_finding("a", {"kind": "x"}) is False
+        got = d._journeys["a"].findings
+        assert [(f["kind"], f["severity"]) for f in got] == [("icon_only", "high"), ("naming", "low"), ("way_back", "high")]
+        assert got[0]["rect"] == (340.0, 20.0, 44.0, 44.0) and got[0]["screen"] == "1. Today"
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        assert r["text"].splitlines()[1].startswith("Findings: 2 high, 1 low. Report: ")
+        md = (only_folder(reports) / "report.md").read_text("utf-8")
+        assert "icon_only: e2 button @340,20 44x44: an icon-only button with no label" in md
+        assert "Basis: best practice: label every control" in md
+        assert (only_folder(reports) / "findings" / "finding-1.jpg").is_file()
+        assert journey.add_finding("a", UX) is False  # over: nothing is running
+        await finish(stop, task)
+    run(go)
+
+
+def test_ux_check_inside_a_journey_lands_in_the_report(reports):
+    async def go():
+        d = daemon([button("e1", "Log meal", "log-meal"), ui.Element("e2", "button", "", rect=(340, 20, 44, 44),
+                                                                       actions=("tap",), type="Button"), el("e3", "text", "Today")])
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        r = await d.run_tool("a", "ux_check", {})
+        assert "icon_only" in r["text"]
+        assert any(f.get("kind") == "icon_only" for f in d._journeys["a"].findings)
+        await d.run_tool("a", "journey", {"stop": True, "reached": False})
+        assert "icon_only" in (only_folder(reports) / "report.md").read_text("utf-8")
+        await finish(stop, task)
+    run(go)
+
+
+def test_max_taps_to_goal_is_checked_at_the_stop_and_the_report_names_the_rule(reports):
+    from tapwright import uxcheck
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        rules = uxcheck.Rules(("core features within 2 taps of home",), 1, True)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, ux_rules=rules)
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        await d.run_tool("a", "tap", {"target": {"ref": "e2"}})
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": True}, ux_rules=rules)
+        assert r["text"].splitlines()[1].startswith("Findings: 1 high. Report: ")
+        md = (only_folder(reports) / "report.md").read_text("utf-8")
+        assert "## House rules" in md and "core features within 2 taps of home (judged by the agent" in md
+        assert "max_taps_to_goal: 1: **broken**, reached the goal in 2 taps, more than the 1 the rule allows." in md
+        assert "way_back: no screen ux_check read broke it." in md
+        assert "house rule: max_taps_to_goal 1" in md
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_journey_within_the_rule_keeps_it_and_one_that_missed_its_goal_is_not_judged(reports):
+    from tapwright import uxcheck
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        rules = uxcheck.Rules((), 3, False)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, ux_rules=rules)
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": True}, ux_rules=rules)
+        assert "Findings: none." in r["text"]
+        assert "max_taps_to_goal: 3: kept, reached in 1 tap." in (only_folder(reports) / "report.md").read_text("utf-8")
+        await d.run_tool("a", "journey", {"start": True, "goal": "g2"}, ux_rules=rules)
+        for _ in range(4):
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        r = await d.run_tool("a", "journey", {"stop": True, "reached": False}, ux_rules=rules)
+        assert "Findings: none." in r["text"]
+        newest = sorted(reports.iterdir())[-1]
+        assert "not applicable, the goal wasn't reached" in (newest / "report.md").read_text("utf-8")
+        # no rules at all: no section
+        await d.run_tool("a", "journey", {"start": True, "goal": "g3"})
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        assert "House rules" not in (sorted(reports.iterdir())[-1] / "report.md").read_text("utf-8")
+        await finish(stop, task)
+    run(go)

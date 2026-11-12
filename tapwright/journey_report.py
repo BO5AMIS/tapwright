@@ -181,7 +181,7 @@ def model(j: jr.Journey, reached: bool, why: str | None, elapsed: float, picture
                      "caption": shot.caption if shot else "", "acted": s.acted})
     findings = []
     for n, f in enumerate(j.findings, 1):
-        findings.append({"n": n, "severity": f["severity"], "screen": f.get("screen") or "", "what": f["what"],
+        findings.append({"n": n, "severity": f["severity"], "screen": f.get("screen") or "", "what": jr.finding_text(f),
                          "basis": f["basis"], "image": pictures.get(n)})
     notes = list(j.notes)
     if j.shortcuts:
