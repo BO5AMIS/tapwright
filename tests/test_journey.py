@@ -1124,3 +1124,23 @@ def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_re_police_before_
         assert len(session.tap_points) == 1
         await finish(stop, task)
     run(go)
+
+
+def test_m4_in_a_users_eyes_text_does_not_reach_an_icon_only_button_by_its_voiceover_label(reports):
+    async def go():
+        d = daemon([button("e1", "Log meal", "log-meal"), icon_button("e2", "Settings gear")])
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"text": "Settings gear"}})
+        assert e.value.code == "not_found"
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e2"}})  # the ref, from the list, still works
+        assert r["text"].startswith("Tapped e2")
+        r = await d.run_tool("a", "tap", {"target": {"text": "Log meal"}})
+        assert r["text"].startswith("Tapped e1")
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        # outside a journey (the agent's eyes) the label is the way in
+        r = await d.run_tool("a", "tap", {"target": {"text": "Settings gear"}})
+        assert r["text"].startswith("Tapped e2")
+        await finish(stop, task)
+    run(go)

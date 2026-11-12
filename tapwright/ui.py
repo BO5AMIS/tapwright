@@ -884,9 +884,11 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
         miss = f'nothing on screen has label "{target.label}"; use {{text}} for a partial match, or look.'
     else:
         want = _norm(target.text)
-        hits = [e for e in items if _norm(e.label) == want or _norm(e.value) == want]
+        # in a user's eyes (a journey) text is what shows on the glass: an icon-only button's label is VoiceOver's
+        pool = [e for e in items if not (USERS_EYES.get() and e.icon_only)]
+        hits = [e for e in pool if _norm(e.label) == want or _norm(e.value) == want]
         if not hits:
-            hits = [e for e in items if want in _norm(e.label) or want in _norm(e.value)]
+            hits = [e for e in pool if want in _norm(e.label) or want in _norm(e.value)]
         hits = _without_nested(hits)
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     if not hits:
