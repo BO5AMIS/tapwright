@@ -129,10 +129,11 @@ def test_a_report_over_the_byte_cap_is_never_read_and_is_counted(phone):
     dev, afc = phone(files, sizes={name_of(2): 512 * 1024 * 1024})
     found = go(dev.crash_reports("Example", 5, APP))
     assert [r.filename for r in found.reports] == [name_of(1)] and found.too_big == 1
-    assert name_of(2) not in afc.opened
+    assert afc.read_bytes <= len(files[name_of(1)]) + device_module.CRASH_HEAD  # (only its first bytes, to see whose it is)
+    opened = list(afc.opened)
     with pytest.raises(device_module.CrashTooBig):
         go(dev.crash_file(name_of(2)))
-    assert name_of(2) not in afc.opened
+    assert afc.opened == opened  # a whole read of it is never started
     assert go(dev.crash_file(name_of(1))) == files[name_of(1)]
 
 
@@ -189,3 +190,24 @@ def test_a_crash_read_cancelled_on_a_file_service_that_stops_answering_ends_with
             await aio.wait_for(dev.crash_reports("Example", 1, APP), 0.1)
         return asyncio.get_running_loop().time() - began
     assert go(asyncio.wait_for(lookup(), 5)) < 1.5
+
+
+def test_a_report_of_another_app_is_never_counted_as_too_big_or_unreadable(phone):
+    """Codex, PR #4 cycle 2: two apps share the executable name; the other app's 9 MiB (or half written) report was
+    counted against the asked app, which said it exists and misattributed it."""
+    files = {name_of(1): ips(bundle=OTHER), name_of(2): ips(bundle=OTHER), name_of(3): b"{not json at all" + ips(bundle=OTHER),
+             name_of(4): b"\xff\xfe broken"}  # (names no app: nothing proves it is ours)
+    dev, _ = phone(files, sizes={name_of(1): 9 * 1024 * 1024 + 1})
+    found = go(dev.crash_reports("Example", 5, APP))
+    assert found.reports == [] and found.too_big == 0 and found.unreadable == 0
+    assert diagnostics.skipped_notes(found) == []
+
+
+def test_the_apps_own_oversize_or_half_written_report_is_counted_when_its_header_says_so(phone):
+    files = {name_of(1): ips(bundle=APP), name_of(2): ips(bundle=APP)[:-2] + b"\xff\xfe",
+             name_of(3): ips(bundle=APP, bug_type="109", text_identifier=APP)}
+    dev, _ = phone(files, sizes={name_of(1): 9 * 1024 * 1024 + 1})
+    found = go(dev.crash_reports("Example", 5, APP))
+    assert found.too_big == 1 and found.unreadable == 1 and [r.filename for r in found.reports] == [name_of(3)]
+    other = go(dev.crash_reports("Example", 5, OTHER))  # the same files, asked for the other app: none of them are its
+    assert other.too_big == 0 and other.unreadable == 0

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import json
 import posixpath
 import re
 from collections import deque
@@ -360,6 +361,24 @@ def _bundle_ids_in(report) -> list[str]:
                 found.append(line[len("Identifier:"):].strip())
                 break
     return found
+
+
+def names_app(head: bytes, bundle_id: str) -> bool:
+    """Does the start of a report file (as much as it was read) name the app: its header line's `bundleID`, or an old
+    report's `Identifier:` line? For a file that can't be parsed or wasn't read whole: only a file that says it is
+    the app's is counted as the app's skipped report (another app's is not mentioned, not even by a count)."""
+    text = head.decode("utf-8", errors="replace")
+    first, _, _ = text.partition("\n")
+    try:
+        meta = json.loads(first)
+    except ValueError:
+        meta = None
+    if isinstance(meta, dict) and isinstance(meta.get("bundleID"), str):
+        return meta["bundleID"] == bundle_id
+    for line in text.splitlines():
+        if line.startswith("Identifier:") and line[len("Identifier:"):].strip():
+            return line[len("Identifier:"):].strip() == bundle_id
+    return False
 
 
 def only_mine(reports: Iterable, executable: str, bundle_id: str | None = None) -> list:

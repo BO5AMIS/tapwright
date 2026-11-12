@@ -18,6 +18,7 @@ import sys
 import time
 
 from . import aio, store
+from . import diagnostics
 from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 
 WDA_PORT = 8100
@@ -388,14 +389,19 @@ class Device:
                 if len(found) >= count:
                     break
                 scanned += 1
+                data = None
                 try:
                     data = await _read_capped(manager.afc, path, size)
                     report = get_crash_report_from_buf(data.decode(), filename=path)
                 except CrashTooBig:
-                    too_big += 1
+                    # skipped counts are of this app's reports only: another app's file is not mentioned, so the
+                    # file's own header has to name the app (a report that can't be identified stays silent)
+                    if bundle_id and diagnostics.names_app(await _head_of(manager.afc, path), bundle_id):
+                        too_big += 1
                     continue
                 except (ValueError, KeyError, TypeError, AttributeError, IndexError):  # not a readable report
-                    unreadable += 1
+                    if bundle_id and data is not None and diagnostics.names_app(data[:CRASH_HEAD], bundle_id):
+                        unreadable += 1
                     continue
                 found += only_mine([report], executable, bundle_id)
             incomplete = len(found) < count and len(ordered) > CRASH_SCAN
@@ -615,6 +621,7 @@ def _started_of(proc: dict) -> float | None:
 CRASH_MAX_BYTES = CRASH_MAX_MB * 1024 * 1024  # no crash file is read beyond this (AGENT-TOOLS §15.2 words it in MB)
 CRASH_CHUNK = 256 * 1024  # bytes asked of the phone's file service at a time
 CRASH_SCAN = 40  # crash files of one executable name looked at in one search
+CRASH_HEAD = 64 * 1024  # bytes of a report's start that say whose it is (its header line, or the old `Identifier:` line)
 CRASH_CLOSE_WAIT = 2.0  # seconds a close of a file on the phone may take: a service that stopped answering is left
 
 
@@ -640,6 +647,22 @@ async def _close_file(afc, handle) -> None:
         if not closing.done():
             closing.cancel()
         closing.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+
+async def _head_of(afc, path: str) -> bytes:
+    """The first CRASH_HEAD bytes of a file of the phone (nothing when they can't be read)."""
+    try:
+        handle = await afc.fopen(path)
+        if not handle:
+            return b""
+        try:
+            return await afc.fread(handle, CRASH_HEAD)
+        finally:
+            await _close_file(afc, handle)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return b""
 
 
 async def _read_capped(afc, path: str, size: int) -> bytes:
