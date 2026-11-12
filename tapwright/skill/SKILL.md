@@ -114,6 +114,8 @@ with no element.
 | check the screen's accessibility | `audit`. Report each issue it lists with its element and fix; they are real findings for the developer |
 | catch a screen that looks different from before | `compare_screen` with a `name`: the first call saves the reference, later ones answer `Matches` or `Differs` and where. `ignore` what always changes (a clock, a timestamp). In a `run` or a recording, `"expect": {"matches": "<name>"}` makes it a check |
 | see an animation or a loading state | `filmstrip` (with `tap` to start it), not several `look`s |
+| find out why something failed | `logs` with `level: "warning"` (and `since` the last `Latest:`). If an answer says the app crashed, `crash` shows where; put both in your report |
+| check that the app is fast enough | `performance` with `launch: true` for opening it, or `tap` for one action. In a `run` or a recording, `"expect": {"under": {"launch_s": 2}}` makes it a check |
 | leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
 | pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |

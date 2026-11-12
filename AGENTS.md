@@ -58,7 +58,8 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     `record` saves what you do as a script that `replay` (or `tapwright replay FILE` in CI) runs
     again. `audit` checks the screen's accessibility; report what it finds. `compare_screen` checks how a
     screen looks against a saved reference (`"expect": {"matches": "<name>"}` in a step); `filmstrip` shows an
-    animation as one numbered picture.
+    animation as one numbered picture. When something fails, `logs` (the app's own log) and `crash` usually say
+    why; `performance` measures launch time, memory, CPU and frame rate.
 11. A tap on Buy, Delete, Send, Post, Sign out and the like answers
     `not_allowed: needs_confirmation`: the live view asks the person; repeat the same call once
     they allow it, or ask your user. Never look for another way. `dry_run: true` shows what a touch
