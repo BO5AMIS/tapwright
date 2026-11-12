@@ -895,13 +895,23 @@ def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
     run(go)
 
 
-def test_a_points_tap_never_reads_the_screen():
+def test_a_points_tap_reads_the_screen_only_when_a_policy_has_words():
+    """Without policy words a tap at a point is a raw touch, no read. With them, what is under the point is read
+    fresh first: the agent's list may be old, and a policy word may sit there now (safety review H2, 2026-11-12)."""
+    from tapwright import policy
+
     async def go():
         d = make()
         stop, task = await started(d)
         d.control.clock.t += 10.0
-        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
+        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False}, policy=policy.NONE)
         assert d.session.calls.count("refresh") == 0 and "look" not in d.session.calls
+        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
+        assert d.session.calls.count("refresh") == 1
+        d.session.tree = [el("e9", "button", "Delete account", rect=(0, 0, 100, 40))]  # it came in since the list
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
+        assert "needs_confirmation" in str(e.value)
         await finish(stop, task)
     run(go)
 

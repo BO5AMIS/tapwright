@@ -2201,11 +2201,11 @@ class Daemon:
         if a.get("dry_run"):
             raise DryRun(line)
 
-    def _element_at(self, point: tuple[float, float]) -> ui.Element | None:
-        """The front-most element of the agent's list whose rect contains the point (a later one is drawn over an
-        earlier one), or None."""
+    def _element_at(self, point: tuple[float, float], items: list[ui.Element] | None = None) -> ui.Element | None:
+        """The front-most element of the agent's list (or of `items`) whose rect contains the point (a later one is
+        drawn over an earlier one), or None."""
         x, y = point
-        return next((e for e in reversed(self.session.items)
+        return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
     def _police(self, tool: str, a: dict, element: ui.Element | None) -> str:
@@ -2317,12 +2317,17 @@ class Daemon:
         tool = "long_press" if hold_ms > 300 else "tap"
         word = "long-press" if hold_ms > 300 else "tap"
         if isinstance(found, tuple):  # the policy looks at the element under the point, if the list has one
-            said = self._police(tool, a, self._element_at(found))
-            self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
             if not a.get("force") and self._moved_under(view, *found):
                 x, y = (round(c) for c in found)
                 raise Refused("stale", f"the screen around ({x}, {y}) changed since your last look; "
                                        "look again, or pass force: true to touch there anyway.")
+            under = self._element_at(found)
+            if any(_POLICY.get().words(self._app_bundle())) and (view.moved or not self._screen_unchanged(view)):
+                # the agent's list can't vouch for what is under the point (it acted without a list since, or the
+                # picture moved): read what is there now, so a policy word that came in is seen (safety review H2)
+                under = self._element_at(found, (await s.refresh()).items)
+            said = self._police(tool, a, under)
+            self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
             return ui.without_place(await s.tap(target, hold_ms=hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
