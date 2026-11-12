@@ -24,6 +24,21 @@ from .stream import PictureGone, jpeg_of
 
 COOKIE = "tapwright_token"
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+# What a person sees when the link carries no valid key (2026-11-12: an agent opened `?token=SECRET`, and the old one
+# line, "Open the link that tapwright view prints", didn't tell the owner what to do)
+NO_KEY_PAGE = (
+    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+    "<title>Tapwright live view</title>"
+    "<body style='font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem'>"
+    "<h1 style='font-size:1.3rem'>This link has no valid key</h1>"
+    "<p>The live view opens only with the key the computer holds, so a link shared in chat or written by hand never "
+    "works, on purpose.</p>"
+    "<p>To open it:</p><ul>"
+    "<li>on this computer, run <code>tapwright view</code>: it opens the live view with a fresh key;</li>"
+    "<li>or ask your agent to use its <code>viewer</code> tool, which opens it for you.</li></ul>"
+    "<p>An agent driving Tapwright through a script opens it with <code>tapwright.client</code>'s "
+    "<code>viewer_url</code> and the browser, never by writing the link out.</p>"
+)
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 DEFAULT_PORT = 8417
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
@@ -84,7 +99,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             response.set_cookie(COOKIE, token, httponly=True, samesite="strict")
             return response
         if not (_bearer_ok(request, token) or _cookie_present(request, token)):
-            return HTMLResponse("<p>Open the link that <code>tapwright view</code> prints.</p>", status_code=401)
+            return HTMLResponse(NO_KEY_PAGE, status_code=401)
         if not _bearer_ok(request, token) and not _cookie_ok(request, token):
             return HTMLResponse("cross-site request refused", status_code=403)
         return HTMLResponse(page, headers=PAGE_HEADERS)
