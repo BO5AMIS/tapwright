@@ -4011,8 +4011,9 @@ def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
                 with pytest.raises(Refused) as e:
                     await d.run_tool("a", "tap", {"target": target, "force": force})
                 assert e.value.code == "not_actionable", target
+                # (§16.2: no scroll view holds it, so no scroll could bring it on screen; the message says why)
                 assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
-                                        'scroll to it first (scroll with this target and to: "target").')
+                                        "it isn't inside a scroll view, so no scroll brings it on screen.")
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "nowhere"}})
         assert e.value.code == "not_found"
@@ -4843,8 +4844,8 @@ def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
         stop, task = await started(d)
         LongList(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "row-30"}})
+        with pytest.raises(Refused) as e:  # a scroll toward a point of a target that is off screen isn't `to: "target"`
+            await d.run_tool("a", "scroll", {"target": {"id": "row-30"}})
         assert str(e.value).endswith('is off screen; scroll to it first (scroll with this target and to: "target").')
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
         first = r["text"].splitlines()[0]

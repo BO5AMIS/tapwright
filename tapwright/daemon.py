@@ -21,7 +21,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
+from . import (actionlog, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
                performance, report, ui)
 from . import policy as safety
 from .actionlog import ActionLog
@@ -159,6 +159,8 @@ NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answer
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
+REACH_TOOLS = KEYBOARD_TOOLS  # AGENT-TOOLS §16.2: on a target in the tree but off screen they scroll to it first
+SCROLLED_THEN = "Scrolled to it, then "
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
 
@@ -683,6 +685,8 @@ class Daemon:
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
+        self._scrolled_first: set[str] = set()  # agents whose action just scrolled to its target (§16.2): its first line says so
+        self._policed: tuple | None = None  # (tool, key) of a touch the policy checked before a scroll (§16.2)
         self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
@@ -1943,6 +1947,28 @@ class Daemon:
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
+        self._scrolled_first.discard(client_id)
+        try:
+            answer = await self._run_tool_core(client_id, name, args)
+            if client_id in self._scrolled_first:  # the action scrolled to its target first (§16.2): the first line says so
+                return {**answer, "text": self._said_scrolled(answer["text"])}
+            return answer
+        finally:
+            self._scrolled_first.discard(client_id)
+            self._policed = None
+
+    @staticmethod
+    def _said_scrolled(text: str) -> str:
+        """`Tapped e41 button "Save" id=save.` as `Scrolled to it, then tapped e41 button "Save" id=save.`"""
+        first, _, rest = text.partition("\n")
+        word = first.split(" ", 1)[0]
+        if word in ("Tapped", "Long-pressed", "Toggled", "Typed"):
+            first = SCROLLED_THEN + first[0].lower() + first[1:]
+        else:  # (a toggle that was already as asked: `e5 switch "X" is already true.`)
+            first = "Scrolled to it. " + first
+        return first + ("\n" + rest if rest else "")
+
+    async def _run_tool_core(self, client_id: str, name: str, args: dict) -> dict:
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
             raise Refused("unsupported", f"no tool named {name!r}; the tools are "
                                          f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
@@ -2046,7 +2072,8 @@ class Daemon:
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
-                        self._refuse_off_screen(target)
+                        if await self._reach(view, client_id, name, args, target, dry):
+                            box["scrolled"] = True
             # a person would close the keyboard before the touch
             box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, target))
             s.last_point = None
@@ -2085,6 +2112,8 @@ class Daemon:
         except DryRun as e:  # nothing was sent: the answer is what would have been
             return _answer([str(e)], notes)
         except Refused as e:
+            if e.code == "not_found" and (near := self._closest(view, target, str(e))):
+                raise Refused("not_found", f"{e}\n{near}") from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
                 said = str(e)
@@ -2158,7 +2187,8 @@ class Daemon:
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target,
+        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
+                                   drifted=to_target or bool(box.get("scrolled")),
                                    snap=landed[0] if landed is not None else None)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
@@ -3116,6 +3146,70 @@ class Daemon:
         named = self._front_line(front) if front is not None else "a sheet or menu"
         return f"; {named} is still open: tap its close control."
 
+    def _closest(self, view, target: ui.Target | None, message: str) -> str:
+        """The `Closest:` line of a `not_found` for an id, label or text (AGENT-TOOLS §16.2), or "". An `index` past
+        the matches already has them: it adds nothing."""
+        if target is None or target.point is not None or target.ref is not None or "out of range" in message:
+            return ""
+        hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
+        off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
+        return closest.find(target, view.items, off, self.session.screen)
+
+    async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> bool:
+        """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
+        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
+        has its say on the target first. Returns whether it scrolled. Where no scroll can bring it on screen, or it
+        isn't in the tree at all (a lazy row), it is refused as before: `off_screen`, or `not_found` further on."""
+        if name not in REACH_TOOLS:
+            self._refuse_off_screen(target)
+            return False
+        s = self.session
+        try:
+            hit = ui.resolve(getattr(s, "offscreen", []), dataclasses.replace(target, index=0))
+        except Refused:
+            return False  # not off screen either: the action says not_found
+        if not isinstance(hit, ui.Element):
+            return False
+        said = ""
+        if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
+            said = self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
+            if _POLICY.get().check(self._app_bundle(), hit.label if hit.role == "input" else hit.text) is not None:
+                self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
+        shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
+        area = ui.scroll_holding(view.items, hit, s.screen)
+        why = ""
+        if area is None:
+            why = "it isn't inside a scroll view, so no scroll brings it on screen."
+        else:
+            view_rect = self._scroll_view_rect(area)
+            if view_rect[3] <= 0:
+                why = "the scroll view that holds it lies under the bars."
+        if why:
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; {why}")
+        if dry:
+            dx, dy = ui.scroll_move(hit.rect, view_rect)
+            x, y = hit.center[0] + dx, hit.center[1] + dy
+            verb = {"tap": "tap", "long_press": "long-press", "toggle": "toggle"}.get(name)
+            if verb is None:
+                n = len(args["text"])
+                self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
+            self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
+        done = await self._scroll_to(view, target)
+        if self._missing(view.items, target):
+            note = getattr(done, "note", "") or "it is as far into view as it gets."
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
+                                            f"scrolling didn't bring it on screen: {note}")
+        self._scrolled_first.add(client_id)
+        return True
+
+    def _scroll_view_rect(self, area: ui.Element) -> tuple[float, float, float, float]:
+        """The part of a scroll view between the bars: where its content is seen and dragged."""
+        s = self.session
+        top, bottom = s.last_insets
+        band = (SCROLL_TOP_INSET if top is None else top, s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+        x, y, w, h = area.rect
+        return x, max(y, band[0]), w, min(y + h, band[1]) - max(y, band[0])
+
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's
         edge): `off_screen`, not `not_found`. A touch can't reach it, so `force` doesn't either."""
@@ -3168,9 +3262,10 @@ class Daemon:
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
-        # the element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)
-        key = (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
-                                           or ("role", element.role, element.label, element.text)))
+        key = self._police_key(element)
+        if self._policed == (tool, key) and not a.get("dry_run"):
+            self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
+            return ""
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
@@ -3181,6 +3276,11 @@ class Daemon:
             _GRANTED.get().append(True)
             return ""
         raise Refused("not_allowed", self._ask(tool, a, key, element, word, what, now))
+
+    def _police_key(self, element: ui.Element) -> tuple[str, ...]:
+        """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)."""
+        return (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
+                                            or ("role", element.role, element.label, element.text)))
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float) -> str:
