@@ -25,6 +25,7 @@ EXPECTED = {
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
     "audit": {"types"},
+    "filmstrip": {"frames", "interval_ms", "frame_width", "tap"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot"},
     "record": {"start", "stop", "name", "path"},
     "replay": {"name", "path", "look", "screenshot"},
@@ -44,6 +45,7 @@ DEFAULTS = {
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False, "dry_run": False},
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
+    "filmstrip": {"frames": 6, "interval_ms": 250, "frame_width": 200, "tap": None},
 }
 READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for"}
 
