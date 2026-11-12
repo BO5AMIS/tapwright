@@ -25,7 +25,10 @@ from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 from . import ui
 from .control import Refused
 
-NAME = re.compile(r"^[A-Za-z0-9][\w.-]{0,60}$")
+# ASCII only, as AGENT-TOOLS §14.1 reads in Tapline's JavaScript, where \w is [A-Za-z0-9_]. Python's \w takes any
+# Unicode letter, and Unicode names alias on real file systems (case, NFC/NFD on macOS, ignorable characters on
+# case-folding ext4: Codex, PR #3 cycles 9 to 11), so a later picture could replace an earlier check's.
+NAME = re.compile(r"^[A-Za-z0-9][\w.-]{0,60}$", re.ASCII)
 DEFAULT_THRESHOLD = 0.5  # percent of the screen that may change and still match
 TOLERANCE = 0.1  # of 255: how far the largest channel of a pixel must move to count as changed
 CUT = int(TOLERANCE * 255) + 1  # 26: the first channel difference that counts (> 25.5)

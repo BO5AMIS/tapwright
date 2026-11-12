@@ -1121,23 +1121,19 @@ def test_a_recording_refuses_a_name_that_differs_only_in_case(tmp_path):
     run(go)
 
 
-def test_a_recording_refuses_a_name_that_differs_only_in_unicode_form(tmp_path):
-    """macOS treats a name's NFC and NFD forms as one file: a recording that compared "a한글" (NFC) refuses its NFD
-    form before anything is written, and exports the first picture (Codex, PR #3 cycle 10)."""
+def test_a_reference_name_is_ascii_as_the_spec_reads_in_javascript(tmp_path):
+    """§14.1's name rule is ASCII in Tapline's JavaScript; Python's word class would take Unicode names, which alias on real file
+    systems (NFC/NFD on macOS, ignorable characters such as U+115F on case-folding ext4: Codex, PR #3 cycles 10-11)."""
     import unicodedata
 
     async def go():
-        nfc = unicodedata.normalize("NFC", "a한글")  # a name starts with an ASCII letter or digit
-        nfd = unicodedata.normalize("NFD", nfc)
-        assert nfc != nfd
         d = make()
         stop, task = await ready(d)
         show(d)
-        await d.run_tool("a", "record", {"start": True, "name": "forms"})
-        await d.run_tool("a", "compare_screen", {"name": nfc})
-        show(d, (BLOCK, (0, 0, 0)))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "compare_screen", {"name": nfd, "update": True})
-        assert e.value.code == "bad_params" and "Unicode form" in str(e.value)
+        for name in (unicodedata.normalize("NFC", "a한글"), unicodedata.normalize("NFD", "a한글"), "homeᅟ", "café"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "compare_screen", {"name": name})
+            assert e.value.code == "bad_params" and "name the reference" in str(e.value), name
+        await d.run_tool("a", "compare_screen", {"name": "home_2.v1-a"})  # ASCII letters, digits, _ . - still pass
         await finish(stop, task)
     run(go)
