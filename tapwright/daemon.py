@@ -933,19 +933,25 @@ class Daemon:
         self.last_request = time.monotonic()
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
-        # a recording's earlier pictures hold for the whole call too: a save that would change one is refused first
-        btoken = _BASELINES.set(self._recording[client_id].setdefault("references", [])) \
-            if client_id in self._recording and _BASELINES.get() is None else None
+        # While a client records, or starts or stops a recording, its outer calls run one at a time (a batch's steps are
+        # inside its call): a check's guard, its save and its registration are one step, and the recording a call checks
+        # against is the one in force once it holds the lock, read inside it (Codex, PR #3 cycles 6 and 7: a call queued
+        # behind a recording's restart checked the old one). Other clients, and a person's input, never wait on it.
+        outer = _BASELINES.get() is None
+        locks = outer and (client_id in self._recording or name == "record")
         try:
-            if btoken is not None:  # the outer call of a recording client (a batch's steps are inside it)
-                async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+            if not locks:
+                return await self._run_tool_policed(client_id, name, args, scope)
+            async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+                rec = self._recording.get(client_id)
+                btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
+                try:
                     return await self._run_tool_policed(client_id, name, args, scope)
-            return await self._run_tool_policed(client_id, name, args, scope)
+                finally:
+                    _BASELINES.reset(btoken)
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
-            if btoken is not None:
-                _BASELINES.reset(btoken)
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
