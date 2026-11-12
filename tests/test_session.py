@@ -1020,22 +1020,24 @@ def test_typing_into_a_field_that_took_focus_from_another_checks_the_keys_landed
 
 
 class FastRunner(Recorder):
-    """Tapwright's own runner: it has the fast tap route. `tap_error` makes the route answer with that error."""
+    """Tapwright's own runner: it has the fast tap route, and from `version` 2 the fast drag route. `tap_error` and
+    `drag_error` make those routes answer with that error."""
 
-    def __init__(self, has_route=True):
+    def __init__(self, has_route=True, version=1):
         super().__init__()
-        self.has_route, self.tap_error = has_route, None
+        self.has_route, self.version, self.tap_error, self.drag_error = has_route, version, None, None
 
     async def http(self, method, path, payload=None, timeout=30.0):
-        if path.endswith("/wda/tw/version") or path.endswith("/wda/tw/tap"):
+        if path.endswith("/wda/tw/version") or path.endswith("/wda/tw/tap") or path.endswith("/wda/tw/drag"):
             self.requests.append((method, path, payload))
-            if not self.has_route:
-                raise DeviceError("WebDriverAgent: unknown command: Unhandled endpoint: /session/S/wda/tw/version")
+            if not self.has_route or (path.endswith("/wda/tw/drag") and self.version < 2):
+                raise DeviceError(f"WebDriverAgent: unknown command: Unhandled endpoint: {path}")
             if path.endswith("/wda/tw/version"):
-                return {"value": {"tapwright": 1}}
-            if self.tap_error:
-                raise self.tap_error
-            return {"value": None}
+                return {"value": {"tapwright": self.version}}
+            error = self.drag_error if path.endswith("/wda/tw/drag") else self.tap_error
+            if error:
+                raise error
+            return {"value": {"ms": 600}}
         return await super().http(method, path, payload, timeout)
 
 
@@ -1124,3 +1126,133 @@ def test_an_error_that_may_follow_the_touch_is_raised_not_touched_again(phone, m
     runner.tap_error = DeviceError("WebDriverAgent: invalid argument: x and y must be finite numbers (screen points)")
     asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
     assert _paths(runner) == ["/wda/tw/version", "/wda/tw/tap", "/wda/tw/tap", "/actions"]
+
+
+def _played(actions):
+    """The finger path [[t_ms, x, y], ...] a W3C pointer action list describes, the way WebDriverAgent plays it:
+    the press at 0, each move's point at the sum of the durations before it, a pause adding no point of its own,
+    and the lift as a resting last point when it comes later than the last move."""
+    t, points, at, lift = 0, [], None, None
+    for step in actions["actions"][0]["actions"]:
+        if step["type"] == "pointerMove":
+            t += step["duration"]
+            at = (step["x"], step["y"])
+            if points:
+                points.append([t, *at])
+        elif step["type"] == "pointerDown":
+            points.append([t, *at])
+        elif step["type"] == "pause":
+            t += step["duration"]
+        elif step["type"] == "pointerUp":
+            lift = t
+    if lift != points[-1][0]:
+        points.append([lift, *at])
+    return points
+
+
+def _drags(runner):
+    return [body["points"] for _, path, body in runner.requests if path.endswith("/wda/tw/drag")]
+
+
+def test_a_scroll_goes_through_the_fast_drag_route_with_the_same_path_as_its_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=2)
+    s = Session(runner)
+    asyncio.run(s.scroll(215.4, 700, 215.4, 300.2))
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/drag", "/wda/tw/tap"] and s.fast_drag is True
+    sent = _drags(runner)[0]
+    assert sent == _played(ui_module.scroll_drag(215.4, 700, 215.4, 300.2))
+    # the eased end that keeps it from flinging: the last stretch at 250 pt/s, then a rest before the lift
+    assert sent == [[0, 215, 700], [350, 215, 338], [500, 215, 300], [580, 215, 300]]
+
+
+def test_swipes_and_paths_send_the_same_path_as_their_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=2)
+    s = Session(runner)
+    asyncio.run(s.swipe(10, 400, 300, 400, duration_ms=250))
+    asyncio.run(s.swipe(10, 400, 300, 400, duration_ms=300, hold_ms=120))
+    points = [(1000, 50, 60), (1005, 52, 70), (1200, 80, 200), (1200, 80, 200)]
+    asyncio.run(s.path(points))
+    sent = _drags(runner)
+    assert sent[0] == _played(ui_module.swipe(10, 400, 300, 400, 250)) == [[0, 10, 400], [300, 300, 400]]
+    assert sent[1] == _played(ui_module.swipe(10, 400, 300, 400, 300, 120)) == [[0, 10, 400], [350, 300, 400],
+                                                                                 [470, 300, 400]]
+    assert sent[2] == _played(ui_module.path(points)) == [[0, 50, 60], [10, 52, 70], [205, 80, 200],
+                                                          [215, 80, 200]]
+    assert "/actions" not in _paths(runner)
+
+
+def test_a_runner_with_only_the_fast_tap_drags_through_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=1)
+    s = Session(runner)
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
+    asyncio.run(s.scroll(215, 300, 215, 700))
+    assert _paths(runner) == ["/wda/tw/version", "/actions", "/wda/tw/tap", "/actions"]
+    assert s.fast_tap is True and s.fast_drag is False
+    appium = FastRunner(has_route=False)
+    s2 = Session(appium)
+    asyncio.run(s2.scroll(215, 700, 215, 300))
+    asyncio.run(s2.swipe(215, 700, 215, 300))
+    assert _paths(appium) == ["/wda/tw/version", "/actions", "/actions"] and s2.fast_drag is False
+
+
+def test_a_drag_refused_before_it_played_falls_back_and_one_that_may_have_played_is_raised(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=2)
+    s = Session(runner)
+    runner.drag_error = DeviceError("WebDriverAgent: invalid argument: point times must be in order, 0-60000 ms")
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    runner.drag_error = DeviceError("WebDriverAgent: unknown error: too many touches are still being played; try again")
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    assert _paths(runner) == ["/wda/tw/version", "/wda/tw/drag", "/actions", "/wda/tw/drag", "/actions"]
+    assert s.fast_drag is True
+    for error in ("WebDriverAgent: timeout: the touch was not played in time",
+                  "WebDriverAgent: unknown error: XCTest could not play the touch"):
+        runner.drag_error = DeviceError(error)
+        before = len(_paths(runner))
+        with pytest.raises(DeviceError):
+            asyncio.run(s.scroll(215, 700, 215, 300))
+        assert _paths(runner)[before:] == ["/wda/tw/drag"]  # it may have been played: never a second drag
+    runner.drag_error = DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    assert _paths(runner)[-3:] == ["/wda/tw/drag", "/actions", "/actions"] and s.fast_drag is False
+    assert s.fast_tap is True  # the tap route is a separate question
+
+
+def test_landscape_and_the_off_switches_drag_through_w3c_actions(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=2)
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    s.screen, s.turn = (932.0, 430.0), 90
+    asyncio.run(s.scroll(400, 200, 100, 200))
+    assert _paths(runner) == ["/actions"]
+    s.screen, s.turn = (430.0, 932.0), 0
+    monkeypatch.setattr(session_module, "FAST_DRAG", "0")
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    monkeypatch.setattr(session_module, "FAST_TAP", "0")
+    asyncio.run(s.swipe(215, 700, 215, 300))
+    assert _paths(runner) == ["/actions", "/actions", "/actions"]
+
+
+def test_a_new_session_asks_for_the_drag_route_again(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    monkeypatch.setattr(session_module, "FAST_DRAG", "1")
+    runner = FastRunner(version=1)
+    s = Session(runner)
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    asyncio.run(s.reset())
+    runner.rsd, runner.version = "tunnel", 2  # the runner was replaced by one with the drag route
+    asyncio.run(s.scroll(215, 700, 215, 300))
+    assert _paths(runner) == ["/wda/tw/version", "/actions", "/wda/tw/version", "/wda/tw/drag"]

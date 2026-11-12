@@ -43,6 +43,12 @@ TURN_RECHECK = 1.0  # seconds: in landscape, how often which side is asked again
 FAST_TAP = os.environ.get("TAPWRIGHT_FAST_TAP", "1")
 FAST_VERSION_PATH = "/session/{sid}/wda/tw/version"
 FAST_TAP_PATH = "/session/{sid}/wda/tw/tap"
+# The fork's route version 2 adds a fast drag: one touch path [[t_ms, x, y], ...] played the same way as the fast tap
+# (pressed at the first point, moved through each later one at its time, lifted at the last), answering once played.
+# Scrolls, swipes and drags send it the very path their W3C actions describe, so a scroll still eases and rests at
+# its end and never flings. TAPWRIGHT_FAST_DRAG=0 (or TAPWRIGHT_FAST_TAP=0) keeps drags on W3C actions.
+FAST_DRAG = os.environ.get("TAPWRIGHT_FAST_DRAG", "1")
+FAST_DRAG_PATH = "/session/{sid}/wda/tw/drag"
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -97,6 +103,7 @@ class Session:
         # banner landing between the check and the touch takes it (Daemon._taken_away)
         self.top_touch = False
         self.fast_tap: bool | None = None  # whether this session's runner has the fast tap route (None: not asked yet)
+        self.fast_drag: bool | None = None  # and the fast drag route (asked with the tap's)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -118,7 +125,7 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
         self.screen = (float(size["width"]), float(size["height"]))
-        self.fast_tap = None  # a new session may be a new runner: ask again
+        self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -452,13 +459,7 @@ class Session:
         if FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
         await self.ensure()
-        if self.fast_tap is None:
-            try:
-                answer = await self._call("GET", FAST_VERSION_PATH, timeout=LOCK_WAIT)
-            except DeviceError:
-                answer = {}
-            value = answer.get("value")
-            self.fast_tap = isinstance(value, dict) and isinstance(value.get("tapwright"), int) and value["tapwright"] >= 1
+        await self._fast_routes()
         if not self.fast_tap:
             return False
         body = {"x": x, "y": y, "duration": hold_ms / 1000, "wait": True}
@@ -471,6 +472,47 @@ class Session:
             elif not ("invalid argument" in said or "too many touches" in said):
                 raise  # it may have been played (a timeout, XCTest's own error): touching again could do it twice
             getattr(self.device, "log", lambda *a: None)(f"fast tap refused ({e}): W3C actions instead")
+            return False
+        return True
+
+    async def _fast_routes(self) -> None:
+        """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none)."""
+        if self.fast_tap is not None:
+            return
+        try:
+            answer = await self._call("GET", FAST_VERSION_PATH, timeout=LOCK_WAIT)
+        except DeviceError:
+            answer = {}
+        value = answer.get("value")
+        version = value.get("tapwright") if isinstance(value, dict) else None
+        version = version if isinstance(version, int) and not isinstance(version, bool) else 0
+        self.fast_tap, self.fast_drag = version >= 1, version >= 2
+
+    async def _drag(self, points: list, w3c: dict) -> None:
+        """Play a finger path, [(t_ms from the press, x, y), ...] in points: through the fork's fast drag route when
+        this runner has it (see FAST_DRAG), else as the W3C actions `w3c`, which describe the same path."""
+        if not await self._fast_drag(points):
+            await self._call("POST", "/session/{sid}/actions", w3c, timeout=points[-1][0] / 1000 + ACTION_WAIT)
+
+    async def _fast_drag(self, points: list) -> bool:
+        """False when the drag is left to W3C actions: no route, not portrait, or an error that says nothing was
+        played. An error that may come after the drag was played is raised, never retried: it would scroll twice."""
+        if FAST_DRAG == "0" or FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
+            return False
+        await self.ensure()
+        await self._fast_routes()
+        if not self.fast_drag:
+            return False
+        body = {"points": [[round(t), round(x), round(y)] for t, x, y in points]}  # W3C actions round them too
+        try:
+            await self._call("POST", FAST_DRAG_PATH, body, timeout=points[-1][0] / 1000 + ACTION_WAIT)
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" in said or "unknown method" in said:
+                self.fast_drag = False  # not this runner's route after all
+            elif not ("invalid argument" in said or "too many touches" in said):
+                raise  # it may have been played (a timeout, XCTest's own error): dragging again could do it twice
+            getattr(self.device, "log", lambda *a: None)(f"fast drag refused ({e}): W3C actions instead")
             return False
         return True
 
@@ -631,8 +673,8 @@ class Session:
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
         await self._touching(duration_ms + hold_ms, (x0, y0))
-        await self._call("POST", "/session/{sid}/actions", ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms),
-                         timeout=(duration_ms + hold_ms) / 1000 + ACTION_WAIT)
+        await self._drag(ui.swipe_points(x0, y0, x1, y1, duration_ms, hold_ms),
+                         ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -640,7 +682,7 @@ class Session:
         """A scroll drag that stops where the finger does (ui.scroll_drag)."""
         self.typed_into = None
         await self._touching(SCROLL_MS, (x0, y0))
-        await self._call("POST", "/session/{sid}/actions", ui.scroll_drag(x0, y0, x1, y1), timeout=2 + ACTION_WAIT)
+        await self._drag(ui.scroll_drag_points(x0, y0, x1, y1), ui.scroll_drag(x0, y0, x1, y1))
         self.last_point = (x0, y0)
         return f"scrolled ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -648,7 +690,7 @@ class Session:
         """Replay a finger path: [(t_ms from 0, x, y), ...] in points."""
         self.typed_into = None
         await self._touching(points[-1][0], (points[0][1], points[0][2]))
-        await self._call("POST", "/session/{sid}/actions", ui.path(points), timeout=points[-1][0] / 1000 + ACTION_WAIT)
+        await self._drag(ui.path_points(points), ui.path(points))
         self.last_point = (points[0][1], points[0][2])
         return f"dragged through {len(points)} points"
 

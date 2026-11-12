@@ -226,6 +226,10 @@ SCROLL_EASE_MS = 150  # the last stretch
 SCROLL_EASE_PT = 37.5  # at most this long (250 pt/s over SCROLL_EASE_MS)
 SCROLL_EASE_SHARE = 0.15  # and at most this share of the drag
 SCROLL_HOLD_MS = 80  # the rest before the finger lifts
+# W3C actions pause this long (ms) after a swipe's or scroll's press, before its move. A pause adds no touch event,
+# so XCTest moves the finger from the press on and reaches the move's end at this plus the move's duration. The fast
+# drag route is sent the same times.
+SWIPE_PRESS_MS = 50
 BAR_EDGE = 0.15  # a bar counts as a top or bottom bar when it starts in the top, or ends in the bottom, 15% of the screen
 
 
@@ -1072,25 +1076,56 @@ def swipe(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, ho
     lifts, so a scroll stops where the finger does instead of flinging."""
     return _pointer([{"type": "pointerMove", "duration": 0, "x": round(x0), "y": round(y0)},
                      {"type": "pointerDown", "button": 0},
-                     {"type": "pause", "duration": 50},
+                     {"type": "pause", "duration": SWIPE_PRESS_MS},
                      {"type": "pointerMove", "duration": duration_ms, "x": round(x1), "y": round(y1)},
                      *([{"type": "pause", "duration": hold_ms}] if hold_ms else []),
                      {"type": "pointerUp", "button": 0}])
 
 
+def _ease_start(x0: float, y0: float, x1: float, y1: float) -> tuple[float, float]:
+    """Where a scroll drag's slow last stretch begins (SCROLL_EASE_PT, SCROLL_EASE_SHARE)."""
+    length = math.hypot(x1 - x0, y1 - y0)
+    share = min(SCROLL_EASE_PT, SCROLL_EASE_SHARE * length) / length if length else 0.0
+    return x1 - (x1 - x0) * share, y1 - (y1 - y0) * share
+
+
 def scroll_drag(x0: float, y0: float, x1: float, y1: float) -> dict:
     """W3C actions for a scroll that stops where the finger does: a fast drag to the last stretch, that stretch
     slowly, then a rest (see SCROLL_EASE_MS)."""
-    length = math.hypot(x1 - x0, y1 - y0)
-    share = min(SCROLL_EASE_PT, SCROLL_EASE_SHARE * length) / length if length else 0.0
-    mx, my = x1 - (x1 - x0) * share, y1 - (y1 - y0) * share
+    mx, my = _ease_start(x0, y0, x1, y1)
     return _pointer([{"type": "pointerMove", "duration": 0, "x": round(x0), "y": round(y0)},
                      {"type": "pointerDown", "button": 0},
-                     {"type": "pause", "duration": 50},
+                     {"type": "pause", "duration": SWIPE_PRESS_MS},
                      {"type": "pointerMove", "duration": SCROLL_FAST_MS, "x": round(mx), "y": round(my)},
                      {"type": "pointerMove", "duration": SCROLL_EASE_MS, "x": round(x1), "y": round(y1)},
                      {"type": "pause", "duration": SCROLL_HOLD_MS},
                      {"type": "pointerUp", "button": 0}])
+
+
+def swipe_points(x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350,
+                 hold_ms: int = 0) -> list[tuple[float, float, float]]:
+    """The finger path [(t_ms, x, y), ...] that swipe()'s W3C actions describe (for the fork's fast drag route)."""
+    end = SWIPE_PRESS_MS + duration_ms
+    return [(0, x0, y0), (end, x1, y1), *([(end + hold_ms, x1, y1)] if hold_ms else [])]
+
+
+def scroll_drag_points(x0: float, y0: float, x1: float, y1: float) -> list[tuple[float, float, float]]:
+    """The finger path [(t_ms, x, y), ...] that scroll_drag()'s W3C actions describe: the same eased end and rest."""
+    mx, my = _ease_start(x0, y0, x1, y1)
+    fast = SWIPE_PRESS_MS + SCROLL_FAST_MS
+    return [(0, x0, y0), (fast, mx, my), (fast + SCROLL_EASE_MS, x1, y1),
+            (fast + SCROLL_EASE_MS + SCROLL_HOLD_MS, x1, y1)]
+
+
+def path_points(points: list) -> list[tuple[float, float, float]]:
+    """The finger path that path()'s W3C actions describe: each step at least 10 ms after the one before."""
+    t0, x0, y0 = points[0]
+    out, now, prev = [(0, x0, y0)], 0, t0
+    for t, x, y in points[1:]:
+        now += max(int(t - prev), 10)
+        prev = t
+        out.append((now, x, y))
+    return out
 
 
 def path(points: list) -> dict:
