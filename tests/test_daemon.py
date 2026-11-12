@@ -20,8 +20,10 @@ SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
 
 
 def unsettled(answer: dict) -> list[str]:
-    """The answer's lines without its `Settled in` line, which varies with timing."""
-    return [line for line in answer["text"].splitlines() if not SETTLED.fullmatch(line)]
+    """The answer's lines without its `Settled in` line and the `the tap was delivered` note of a touch that changed
+    nothing (1.5.1), which vary with timing; the tests of that note read it themselves (`delivered`)."""
+    return [line for line in answer["text"].splitlines()
+            if not SETTLED.fullmatch(line) and not line.startswith("Note: the tap was delivered")]
 
 
 def make(session=None, **options) -> Daemon:
@@ -82,7 +84,7 @@ def test_look_then_act_by_ref():
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change.",
                                     "Note: changes are since your last list, 3 actions ago."] and r["image"] is None
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert "Note:" not in r["text"]  # that block was since the last one
+        assert "changes are since" not in r["text"]  # that block was since the last one
         await finish(stop, task)
     run(go)
 
@@ -1625,7 +1627,8 @@ def test_an_unchanged_screen_is_answered_without_reading_the_tree():
         reads = d.session.calls.count("snapshot")
         r = await d.run_tool("a", "tap", TAP)
         text = r["text"].splitlines()
-        assert text[1:3] == ["Same screen. Changes:", "No visible change."] and SETTLED.fullmatch(text[-1])
+        assert text[1:3] == ["Same screen. Changes:", "No visible change."] and SETTLED.fullmatch(text[-2])
+        assert text[-1].startswith("Note: the tap was delivered")
         assert d.session.calls.count("snapshot") == reads and d.session.calls.count("refresh") == 0
         assert [e.ref for e in d.control.client("a").items] == ["e1"]  # the agent's list stays current
         await feeder.stop()
@@ -2340,6 +2343,117 @@ def test_a_slow_webdriveragent_terminate_after_the_kill_does_not_hold_the_answer
         assert d.session.device.killed == ["com.example.app"]
         assert any("process control" in line for line in logs)
         await finish(stop, task)
+    run(go)
+
+
+NOTE_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
+                "report it as a finding.")
+NOTE_FIELD = "It is a text field: type_text types into it."
+NOTE_POINT = "No element is at that point."
+
+
+def delivered(text: str) -> list[str]:
+    """The `the tap was delivered` notes of an answer, with the seconds replaced by N."""
+    return [re.sub(r"within \d+\.\d s", "within N s", line) for line in text.splitlines()
+            if line.startswith("Note: the tap was delivered")]
+
+
+def delivered_note(hint: str) -> str:
+    return f"Note: the tap was delivered, and nothing on screen changed within N s. {hint}"
+
+
+def test_a_tap_that_changes_nothing_says_the_touch_was_delivered_and_what_to_do():
+    """1.5.1: agents couldn't tell whether the tap landed, so they looked again and retried."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "No visible change." in r["text"].splitlines()  # the line itself, byte for byte
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        assert re.search(r"within \d\.\d s\. ", r["text"])  # seconds to one decimal
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_no_change_note_for_a_text_field_says_type_text_types_into_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "input", "Email", "email", rect=(10, 100, 200, 40))])
+        r = await d.run_tool("a", "tap", {"target": {"id": "email"}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_FIELD)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_no_change_note_for_a_bare_point_says_no_element_is_there():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"x": 300, "y": 600}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]
+        r = await d.run_tool("a", "tap", {"target": {"x": 20, "y": 110}})  # a point over the button is no bare point
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_long_press_that_changes_nothing_gets_the_same_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_health_sheet_note_stands_alone_without_the_delivered_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "Turn On All", rect=(20, 200, 200, 40)),
+                         button("e2", "Don’t Allow", rect=(20, 60, 100, 40)),
+                         button("e3", "Allow", rect=(300, 60, 80, 40), enabled=False)])
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "Note: this is iOS's Health access sheet" in r["text"] and delivered(r["text"]) == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_delivered_note_is_left_out_for_look_false_other_tools_and_a_changed_screen():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert "delivered" not in r["text"]
+        r = await d.run_tool("a", "wait", {"seconds": 0.1})  # no change either, but no touch
+        assert "No visible change." in r["text"] and "delivered" not in r["text"]
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 160, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "No visible change." not in r["text"] and "delivered" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_delivered_note_is_also_given_when_the_tree_read_is_skipped():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", TAP)
+        assert d.session.calls.count("snapshot") == reads  # the path that reads no tree
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]  # (5, 5) has no element under it
+        r = await d.run_tool("a", "long_press", TAP)
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]
+        await feeder.stop()
     run(go)
 
 

@@ -172,6 +172,14 @@ NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answer
 # (the JLD RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
 NOTE_HEALTH = ("this is iOS's Health access sheet; iOS doesn't let automation change it. Ask a person to choose and "
                "tap Allow.")
+# 1.5.1: a tap or long press that changed nothing. "No visible change." alone left agents unsure whether the touch
+# landed, so they looked again and retried; the note says it did, and what to try by what was touched.
+NOTE_DELIVERED = "the tap was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
+HINT_FIELD = "It is a text field: type_text types into it."
+HINT_BARE_POINT = "No element is at that point."
+HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
+                "report it as a finding.")
+DELIVERED_TOOLS = ("tap", "long_press")
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
@@ -2301,6 +2309,8 @@ class Daemon(journey_tool.JourneyTools):
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
+            if name in DELIVERED_TOOLS and not dry:
+                box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
             handler = self._handlers.get(name)
             if dry and name == "swipe":
                 self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
@@ -2406,6 +2416,8 @@ class Daemon(journey_tool.JourneyTools):
             # Not when something lies off screen: the action's effect may be there, and only a read shows it
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             view.unlooked = 0  # this block covers them: nothing changed since the list
+            if box.get("hint"):
+                notes = [*notes, NOTE_DELIVERED.format(seconds=done.seconds, hint=box["hint"])]
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -2414,7 +2426,8 @@ class Daemon(journey_tool.JourneyTools):
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
         answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
                                    drifted=to_target or bool(box.get("scrolled")),
-                                   snap=landed[0] if landed is not None else None)
+                                   snap=landed[0] if landed is not None else None,
+                                   hint="" if done.capped else box.get("hint", ""))  # (a screen still moving: no "nothing changed")
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -3828,6 +3841,20 @@ class Daemon(journey_tool.JourneyTools):
             reason = str(e).split(":", 1)[0]
         return NOTE_FORCED.format(reason=reason) if reason else ""
 
+    def _delivered_hint(self, a: dict) -> str:
+        """The advice that goes with a touch that changed nothing, by what the touch was aimed at in the agent's list:
+        a text input, a point with no element under it, or anything else. A target that can't be found gets the
+        general advice (the touch itself will say not_found)."""
+        try:
+            found = ui.resolve(self.session.items, _target(a))
+        except Refused:
+            return HINT_LOADING
+        if isinstance(found, tuple):
+            found = self._element_at(found)
+            if found is None:
+                return HINT_BARE_POINT
+        return HINT_FIELD if found.role == "input" else HINT_LOADING
+
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)
 
@@ -4192,10 +4219,12 @@ class Daemon(journey_tool.JourneyTools):
         return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,
-                     seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False) -> dict:
+                     seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False,
+                     hint: str = "") -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
-        `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
+        `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements. `hint`: a tap
+        or long press's advice for when nothing changed (NOTE_DELIVERED), given with `seconds`."""
         s = self.session
         tail = [] if seconds is None else [settled_line(seconds)]
         app_before, listed_before = view.app, view.shown
@@ -4248,6 +4277,8 @@ class Daemon(journey_tool.JourneyTools):
             return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             notes = [*notes, NOTE_HEALTH]  # iOS's own Health access sheet takes touches and changes nothing
+        elif changes.NO_CHANGE in up.lines and hint and seconds is not None:
+            notes = [*notes, NOTE_DELIVERED.format(seconds=seconds, hint=hint)]
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
