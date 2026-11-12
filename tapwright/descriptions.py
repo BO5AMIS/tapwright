@@ -150,6 +150,13 @@ SHARED = {
         'it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: '
         'run it on each new screen.'
     ),
+    'compare_screen': (
+        'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the reference; '
+        'later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on a difference a '
+        'picture with the changes in red. `threshold` is the percent that may change and still match (default 0.5); '
+        '`ignore` paints out elements or rects that always change, such as a clock. Keep the same `width` for a name. '
+        'In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a `compare_screen` step.'
+    ),
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '

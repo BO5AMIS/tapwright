@@ -25,11 +25,12 @@ EXPECTED = {
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
     "rotate": {"to", "look", "screenshot"},
     "audit": {"types"},
+    "compare_screen": {"name", "update", "width", "threshold", "ignore"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot"},
     "record": {"start", "stop", "name", "path"},
     "replay": {"name", "path", "look", "screenshot"},
 }
-REQUIRED = {"run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
+REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
             "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"]}
 DEFAULTS = {
@@ -44,6 +45,7 @@ DEFAULTS = {
     "toggle": {"value": None, "force": False, "look": True, "screenshot": False, "dry_run": False},
     "wait_for": {"gone": False, "timeout": 10, "look": True, "screenshot": False},
     "swipe": {"seconds": 0.35, "look": True, "screenshot": False, "dry_run": False},
+    "compare_screen": {"update": False, "width": 600, "threshold": 0.5, "ignore": None},
 }
 READ_ONLY = {"audit", "look", "apps", "viewer", "wait", "wait_for"}
 

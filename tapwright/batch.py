@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import ui
+from . import compare, ui
 from .control import Refused
 
 MAX_STEPS = 50
 BATCH_LIMIT = 120.0  # seconds a whole batch may take
 EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
-              "alert", "press_button", "rotate", "open_app", "close_app")
+              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen")
 EXPECT_KINDS = ("text", "id", "label")
 FORMAT, VERSION = "agent-tools-script", 1
 
@@ -35,21 +35,51 @@ def check_steps(steps: object, *, script: bool = False) -> list[dict]:
         if script and isinstance(target, dict) and "ref" in target:
             raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "
                                         "element's id, label or text")
+        if step["tool"] == "compare_screen":
+            check_compare_step(step, n, script)
         if "expect" in step:
-            check_expect(step["expect"], n)
+            check_expect(step["expect"], n, script)
     return steps
 
 
-def check_expect(expect: object, n: int) -> None:
+def check_compare_step(step: dict, n: int, script: bool) -> None:
+    """A `compare_screen` step (§14.2) is a check: it never saves, so `update` is refused here."""
+    if step.get("name") is None:
+        raise Refused("bad_params", f'step {n}: compare_screen needs a name, like {{"tool": "compare_screen", '
+                                    '"name": "home"}')
+    if step.get("update") is not None:
+        raise Refused("bad_params", f"step {n}: a compare_screen step only checks and never saves; leave out update "
+                                    "(save a reference with compare_screen on its own, outside run)")
+    compare.check_params(step, f"step {n}: ")
+    _no_refs(step.get("ignore"), n, script)
+
+
+def _no_refs(ignore: object, n: int, script: bool) -> None:
+    if script and isinstance(ignore, list) and any(isinstance(i, dict) and "ref" in i for i in ignore):
+        raise Refused("bad_params", f"step {n}: a script can't use refs in ignore (they don't outlive a session); use "
+                                    "the element's id, label or text")
+
+
+def check_expect(expect: object, n: int, script: bool = False) -> None:
     if not isinstance(expect, dict):
         raise Refused("bad_params", f"step {n}: expect must be an object, like {{\"text\": \"Saved\"}}")
     given = [k for k in EXPECT_KINDS if expect.get(k) is not None]
-    if len(given) != 1 or not isinstance(expect[given[0]], str) or not expect[given[0]]:
+    matches = expect.get("matches") is not None
+    if len(given) > 1 or (not given and not matches):
+        raise Refused("bad_params", f"step {n}: expect needs exactly one of text, id or label, as a non-empty string "
+                                    '(or "matches", the name of a reference picture, alone or beside one of them)')
+    if given and (not isinstance(expect[given[0]], str) or not expect[given[0]]):
         raise Refused("bad_params", f"step {n}: expect needs exactly one of text, id or label, as a non-empty string")
+    if matches:
+        compare.check_params({"name": expect["matches"], "threshold": expect.get("threshold"),
+                              "ignore": expect.get("ignore")}, f"step {n}: expect's matches: ")
+        _no_refs(expect.get("ignore"), n, script)
+    elif "threshold" in expect or "ignore" in expect:
+        raise Refused("bad_params", f"step {n}: expect's threshold and ignore go with matches")
     if "gone" in expect and not isinstance(expect["gone"], bool):
         raise Refused("bad_params", f"step {n}: expect's gone must be true or false")
     if "value" in expect:
-        if given[0] == "text" or not isinstance(expect["value"], str):
+        if not given or given[0] == "text" or not isinstance(expect["value"], str):
             raise Refused("bad_params", f"step {n}: expect's value goes with id or label, and is a string "
                                         '(a switch: "on" or "off")')
         if expect.get("gone"):
@@ -87,13 +117,14 @@ def summary(step: dict) -> str:
     extra = {"scroll": step.get("to") or step.get("direction") or "down", "wait": step.get("seconds"),
              "open_app": step.get("app"), "close_app": step.get("app"), "open_url": step.get("url"),
              "alert": step.get("action"), "press_button": step.get("name"), "rotate": step.get("to"),
+             "compare_screen": json.dumps(step["name"], ensure_ascii=False) if isinstance(step.get("name"), str) else None,
              "wait_for": next((json.dumps(step[k], ensure_ascii=False) for k in EXPECT_KINDS if step.get(k)), None)}
     shown = extra.get(tool)
     return f"{tool} {shown}" if shown is not None else tool
 
 
 def expect_failed(expect: dict) -> str:
-    """The reason an expectation failed, as the answer says it."""
+    """The reason a text, id or label expectation failed, as the answer says it."""
     kind = next(k for k in EXPECT_KINDS if expect.get(k) is not None)
     what = f"{kind} {json.dumps(expect[kind], ensure_ascii=False)}"
     seconds = f"{float(expect.get('timeout', EXPECT_DEFAULT)):g}"
@@ -165,6 +196,29 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
         return aim
     x, y = found.center
     return {"x": round(x, 1), "y": round(y, 1)}
+
+
+def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
+    """The `ignore` list a recording saves (§14.2): a ref becomes the element's id, label or text (with `index` when it
+    matches several), because refs don't outlive a session. A ref whose element has none of the three can't be saved
+    (`bad_params`, naming it). Rects and the other targets are kept as given."""
+    saved = []
+    for entry in ignore:
+        if not isinstance(entry, dict) or not entry.get("ref"):
+            saved.append(entry)
+            continue
+        try:
+            found = ui.resolve(items, ui.parse_target(entry))
+        except Refused:
+            found = None
+        aim = recorded_target(entry, items) if isinstance(found, ui.Element) else None
+        if aim is None or "x" in aim:
+            what = found.line(ref=False, actions=False, place=False) if isinstance(found, ui.Element) else entry["ref"]
+            raise Refused("bad_params", f"can't record ignore {entry['ref']} ({what}): it has no id, label or text to "
+                                        "find it by when the script replays; ignore it by a rect {x, y, width, "
+                                        "height} instead")
+        saved.append(aim)
+    return saved
 
 
 def _matches(element: ui.Element, kind: str, value: str) -> bool:

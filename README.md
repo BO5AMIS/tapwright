@@ -141,6 +141,7 @@ repository too.
 | `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once |
 | `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`) |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
+| `compare_screen` | visual regression: the first call for a name saves the screen as a reference picture; later calls say how much changed and where, with a picture of the changes in red. `threshold` is the percent that may change; `ignore` paints out a clock or any element or rect. In `run` and scripts: `expect: {"matches": name}`. References travel with a script |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
 screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`
