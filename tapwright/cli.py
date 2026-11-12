@@ -277,6 +277,17 @@ async def doctor_fix(problems: int) -> int:
         await phone.close()
 
 
+def report_checkout(package: Path | None = None) -> int:
+    """doctor's line on where Tapwright runs from (see checkout.py). Returns the problems it found."""
+    from . import checkout
+    verdict = checkout.check(package or Path(__file__).resolve().parent)
+    if verdict is None:
+        return 0
+    kind, message = verdict
+    {"ok": ok, "note": note, "fail": fail}[kind](message)
+    return 1 if kind == "fail" else 0
+
+
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
@@ -285,6 +296,7 @@ async def doctor(a) -> int:
     from . import repair, signing
     problems = 0
     ok(f"Python {sys.version.split()[0]}, pymobiledevice3 {version('pymobiledevice3')}")
+    problems += report_checkout()
     try:
         devices = await usbmux.list_devices()
         ok(f"device service reachable; on USB: {[d.serial for d in devices if d.connection_type == 'USB'] or 'none'}")

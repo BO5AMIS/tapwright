@@ -11,6 +11,8 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 
 1. `pip install tapwright`, then `tapwright doctor`. Fix
    what it reports on the computer (Windows: Apple Devices from the Microsoft Store).
+   For QA or any unattended run, install a pinned release in its own venv
+   (`pip install tapwright==<version>` or the wheel), never run from a development checkout.
 2. Ask the user to plug in and unlock the iPhone.
 3. Signing: ask for an App Store Connect API key (Key ID, Issuer ID, the `.p8` file's path,
    Admin role) and a bundle prefix they own (`com.theirname.tapwright`), or for their own
