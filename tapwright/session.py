@@ -510,8 +510,10 @@ class Session:
     async def photos_add(self, pictures: list[tuple[str, bytes]]) -> list[str]:
         """Add pictures (file name, bytes) to the photo library with add-only access; the local identifiers made. It
         may wait for the person to allow the runner once. Never sent twice."""
-        body = {"images": [base64.b64encode(data).decode("ascii") for _, data in pictures],
-                "names": [name for name, _ in pictures]}
+        def encode() -> dict:
+            return {"images": [base64.b64encode(data).decode("ascii") for _, data in pictures],
+                    "names": [name for name, _ in pictures]}
+        body = await asyncio.to_thread(encode)  # (tens of MB: not on the event loop)
         value = (await self._call("POST", PHOTOS_ADD_PATH, body, timeout=PHOTOS_WAIT)).get("value")
         found = value.get("identifiers") if isinstance(value, dict) else None
         return [i for i in found if isinstance(i, str)] if isinstance(found, list) else []

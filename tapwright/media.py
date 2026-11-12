@@ -13,6 +13,7 @@ from . import store
 EXTENSIONS = (".jpg", ".jpeg", ".png", ".heic")
 MAX_BYTES = 20 * 1024 * 1024  # per picture
 MAX_FILES = 20  # per call
+MAX_TOTAL = 40 * 1024 * 1024  # per call, all pictures together (the runner's JSON body is a third bigger)
 MIN_TW_VERSION = 3  # the runner route version that has the photo routes
 OLD_RUNNER = ("this phone's runner is older than the photo routes (tw version < 3); update the runner")
 NEED_CONFIRM = ("media changes the photo library on the user's phone. Ask your user first whether pictures may be "
@@ -31,6 +32,7 @@ def read_pictures(paths: list[str]) -> list[tuple[str, bytes]]:
     if len(paths) > MAX_FILES:
         raise ValueError(f"add takes at most {MAX_FILES} pictures at a time, not {len(paths)}")
     out: list[tuple[str, bytes]] = []
+    total = 0
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError(f"add holds paths of pictures, not {raw!r}")
@@ -45,6 +47,9 @@ def read_pictures(paths: list[str]) -> list[tuple[str, bytes]]:
             raise ValueError(f"{raw}: not a file")
         if size > MAX_BYTES:
             raise ValueError(f"{path.name}: {size / 1048576:.1f} MB is over the {MAX_BYTES // 1048576} MB limit")
+        total += size
+        if total > MAX_TOTAL:
+            raise ValueError(f"{path.name}: the pictures together are over the {MAX_TOTAL // 1048576} MB limit for one call")
         try:
             out.append((path.name, path.read_bytes()))
         except OSError as e:
@@ -84,14 +89,22 @@ def record(client: str, identifiers: list[str], names: list[str]) -> None:
     save(clients)
 
 
-def held_by(client: str) -> tuple[list[dict], bool]:
-    """What `remove` takes for this client: its own pictures; when it has none, the ones earlier agents of this daemon
-    left (True: they are from earlier sessions)."""
+def ledger_ids() -> set[str]:
+    """Every identifier in the ledger now (the daemon takes them at its start: they are from an earlier run)."""
+    return {e["id"] for entries in load().values() for e in entries}
+
+
+def held_by(client: str, earlier: set[str] | frozenset[str] = frozenset(), everything: bool = False) -> tuple[list[dict], bool]:
+    """What `remove` takes for this client: its own pictures, plus the ones recorded before this daemon started
+    (`earlier`: their identifiers; True in the answer says some were). `everything` (remove: "all") takes every picture
+    in the ledger, another live agent's too."""
     clients = load()
-    if clients.get(client):
-        return list(clients[client]), False
-    others = [e for entries in clients.values() for e in entries]
-    return others, bool(others)
+    if everything:
+        return [e for entries in clients.values() for e in entries], False
+    own = list(clients.get(client, ()))
+    mine = {e["id"] for e in own}
+    old = [e for c, entries in clients.items() if c != client for e in entries if e["id"] in earlier and e["id"] not in mine]
+    return own + old, bool(old)
 
 
 def drop(identifiers: list[str]) -> None:

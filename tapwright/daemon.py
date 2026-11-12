@@ -715,6 +715,7 @@ class Daemon(journey_tool.JourneyTools):
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll,
                           "alert": self._alert, "swipe": self._swipe}
+        self._media_earlier = frozenset(medialib.ledger_ids())  # pictures recorded before this daemon started (media remove)
         self._journeys: dict[str, journey.Journey] = {}  # {agent: its journey} (AGENT-TOOLS §17): one at a time
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
@@ -2738,8 +2739,9 @@ class Daemon(journey_tool.JourneyTools):
         """AGENT-TOOLS §17.6: put test pictures in the phone's photo library (add-only access), or delete what this
         daemon added (full access, which iOS asks the person for, and iOS asks them to confirm each delete)."""
         add, remove = args.get("add"), args.get("remove")
-        if remove is not None and not isinstance(remove, bool):
-            raise Refused("bad_params", f"remove must be true or false, not {remove!r}")
+        if remove is not None and not (isinstance(remove, bool) or remove == "all"):
+            raise Refused("bad_params", f'remove must be true or "all", not {remove!r}')
+        everything = remove == "all"
         if add is not None and (not isinstance(add, list) or not all(isinstance(p, str) for p in add)):
             raise Refused("bad_params", "add must be a list of paths of pictures on this computer")
         if add and remove:
@@ -2771,13 +2773,16 @@ class Daemon(journey_tool.JourneyTools):
             names = [name for name, _ in pictures]
             ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures")
             if len(ids) != len(names):
+                if ids:  # what it did make stays recorded, so remove can take it
+                    medialib.record(client_id, ids, names[:len(ids)])
                 raise Refused("internal", f"the phone made {len(ids)} pictures for {len(names)} sent. Check Photos > "
                                           "Recently Added.")
             medialib.record(client_id, ids, names)
             return _answer([medialib.added_text(names)], notes)
-        held, earlier = medialib.held_by(client_id)
+        held, earlier = medialib.held_by(client_id, self._media_earlier, everything)
         if not held:
-            return _answer(["Nothing to remove: this daemon has added no pictures that are still recorded."], notes)
+            return _answer(["Nothing to remove: this agent has added no pictures that are still recorded (remove: "
+                            '"all" takes every picture Tapwright ever added, another agent\'s too).'], notes)
         names = [e["name"] for e in held]
         if access.get("full") in ("denied", "restricted"):
             return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library "
@@ -2798,7 +2803,7 @@ class Daemon(journey_tool.JourneyTools):
     async def _media_write(self, call, doing: str):
         """A write to the phone's photo library, once: sent again after a drop it could be done twice."""
         try:
-            return await self.control.read(lambda: self._connected_only(call))
+            return await self.control.agent(lambda: self._connected_only(call))  # person-first, like a touch
         except ConnectionLost as e:
             self.lost(e)
             raise Refused("reconnecting", f"the connection dropped while {doing}; it may or may not have happened: "

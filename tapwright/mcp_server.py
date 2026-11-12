@@ -145,12 +145,23 @@ def _first_answer_notice() -> str | None:
         return None
 
 
+TIMEOUT = 120.0
+LONG_TIMEOUT = 200.0  # a batch may take up to 120 s on the phone; media waits up to 150 s for iOS's question to the person
+EXPORT_TIMEOUT = 600.0  # a journey's stop with export: the report is pushed to GitHub (journey_export)
+
+
+def _timeout(tool: str, args: dict) -> float:
+    """How long this client waits for the daemon's answer to one tool call."""
+    if tool == "journey" and args.get("stop") and args.get("export") is not None:
+        return EXPORT_TIMEOUT
+    return LONG_TIMEOUT if tool in ("run", "replay", "media") else TIMEOUT
+
+
 async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
     try:
-        long = tool in ("run", "replay")  # a batch may take up to 120 s on the phone
-        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, 200.0 if long else 120.0)
+        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, _timeout(tool, args))
     except client.DaemonError as e:
         return _error(e.code, str(e))
     except Exception:  # the daemon unreachable: never crash the server
@@ -263,10 +274,11 @@ async def ux_check() -> CallToolResult:
 
 
 @server.tool(description=describe("media"), structured_output=False)
-async def media(add: list[str] | None = None, remove: bool = False, confirm: bool = False) -> CallToolResult:
+async def media(add: list[str] | None = None, remove: bool | Literal["all"] = False,
+                confirm: bool = False) -> CallToolResult:
     # relative paths are the agent's: where this server was started, not where the daemon runs
     return await _tool("media", **({"add": [str(Path(p).expanduser().resolve()) for p in add]} if add else {}),
-                       **({"remove": True} if remove else {}), confirm=confirm)
+                       **({"remove": remove} if remove else {}), confirm=confirm)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("logs"), structured_output=False)

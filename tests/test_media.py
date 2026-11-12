@@ -266,3 +266,60 @@ def test_an_older_or_appiums_runner_has_version_zero():
     assert asyncio.run(s.runner_version()) == 0
     s, _ = runner({"version": {"tapwright": 2}})
     assert asyncio.run(s.runner_version()) == 2 and s.fast_drag and s.fast_tap
+
+
+# ---- review fixes (W14) ----
+def test_m7_remove_takes_this_agents_pictures_and_the_ones_from_before_the_daemon_started_not_a_live_agents(pictures):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("old", "media", {"add": pictures[:1], "confirm": True})
+        await finish(stop, task)
+
+        d2 = make()  # restarted: "old"'s picture is from an earlier run
+        stop, task = await started(d2)
+        d2.session.photos = ["a-library-that-has-others"]  # (the fake numbers pictures by the library's size)
+        await d2.run_tool("live", "media", {"add": pictures[1:2], "confirm": True})
+        r = await d2.run_tool("new", "media", {"remove": True, "confirm": True})
+        assert r["text"].startswith("Pictures from an earlier session: Removed 1 picture")
+        assert [e["name"] for e in media.load()["live"]] == ["label.PNG"]  # the live agent's is untouched
+        r = await d2.run_tool("new", "media", {"remove": True, "confirm": True})
+        assert r["text"].startswith("Nothing to remove")
+        assert list(media.load()) == ["live"]
+        r = await d2.run_tool("new", "media", {"remove": "all", "confirm": True})
+        assert r["text"] == "Removed 1 picture from the photo library: label.PNG." and media.load() == {}
+        e = await refused(d2, {"remove": "some", "confirm": True})
+        assert e.code == "bad_params"
+        await finish(stop, task)
+    run(go)
+
+
+def test_m8_media_writes_go_through_the_agent_path_a_person_first(pictures):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.control.person_active = lambda: True  # a person is driving the phone
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "busy"
+        assert not any(isinstance(c, tuple) and c[0] == "photos_add" for c in d.session.calls)
+        await finish(stop, task)
+    run(go)
+
+
+def test_m6_the_pictures_together_have_a_size_cap(tmp_path, pictures, monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        monkeypatch.setattr(media, "MAX_TOTAL", 40)  # each picture is ~20 bytes
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "bad_params" and "together are over the" in str(e)
+        assert not any(isinstance(c, tuple) and c[0] == "photos_add" for c in d.session.calls)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_mcp_client_waits_longer_for_media_and_for_a_stop_with_export():
+    assert mcp_server._timeout("look", {}) == 120.0
+    assert mcp_server._timeout("media", {"add": ["x.jpg"]}) > 150
+    assert mcp_server._timeout("journey", {"stop": True}) == 120.0
+    assert mcp_server._timeout("journey", {"stop": True, "export": {"to": "issue"}}) >= 600
