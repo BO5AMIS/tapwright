@@ -225,7 +225,8 @@ def test_a_reference_is_written_beside_its_name_and_never_through_a_link(tmp_pat
 
 
 def test_a_failed_save_leaves_no_temporary_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))  # **k: on POSIX the save passes src_dir_fd and dst_dir_fd)
+    # **k: on POSIX the save passes src_dir_fd and dst_dir_fd
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError):
         compare.save(tmp_path / "refs" / "home.png", screen(size=(32, 32)))
     assert list((tmp_path / "refs").iterdir()) == []
