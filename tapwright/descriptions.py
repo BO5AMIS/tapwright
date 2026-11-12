@@ -150,12 +150,6 @@ SHARED = {
         'it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: '
         'run it on each new screen.'
     ),
-    'ux_check': (
-        "Check the screen against usability basics: competing choices, one clear main action, thumb reach, icon-only buttons, cut-off text, contrast and target sizes, naming that changes between screens, and error or empty states that don't say what to do. Facts come first, each naming its element and basis; add your own judgment from the screenshot and say it is judgment. The user's house rules, when given, are checked too."
-    ),
-    'media': (
-        "Put test pictures in the phone's photo library for an app's photo picker (a food photo, a label): `add` with the pictures' paths and `confirm: true`; `remove: true` deletes only what was added. Ask your user first whether pictures may be added, and whether to remove them afterwards."
-    ),
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '
@@ -177,16 +171,6 @@ SHARED = {
         'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
         '`compare_screen` step.'
     ),
-    'journey': (
-        'Test a feature as a real user would: `start: true` with a `goal` ("log breakfast by scanning its barcode") '
-        'and, if useful, a `persona` and `conditions` (language, text size, network). While it runs you see the '
-        'screen as a user does: no ids, nothing off screen, no jump-scrolling; target by ref or visible text. The tool '
-        'measures taps, time, wrong turns and hesitations. `stress` adds a real-world moment (leaving the app, a bad '
-        'network, a double tap, rotating, relaunching) and checks what `survives`. `stop: true` with `reached` writes '
-        'a visual report (screenshots, a GIF) and answers its summary; `export` puts it in a GitHub PR or issue, only '
-        'when your user asks. Build personas for this app\'s own users and agree them with your user; examples are in '
-        'the skill.'
-    ),
     'filmstrip': (
         'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
         'shots. `tap` first taps an element, then films what it sets off.'
@@ -206,6 +190,28 @@ SHARED = {
         '3), after tapping `tap` if given. Answers the time and the memory, CPU and frames the tool can measure '
         '(fps and drops over 50 ms), and names what it couldn\'t. In `run` and scripts, `expect: {"under": '
         '{"launch_s": 2, "drops": 0}}` on a `performance` step makes it a check.'
+    ),
+    'journey': (
+        'Test a feature as a real user would: `start: true` with a `goal` ("log breakfast by scanning its '
+        'barcode") and, if useful, a `persona` and `conditions` (language, text size, network). While it runs you '
+        'see the screen as a user does: no ids, nothing off screen, no jump-scrolling; target by ref or visible '
+        'text. The tool measures taps, time, wrong turns and hesitations. `stress` adds a real-world moment '
+        '(leaving the app, a bad network, a double tap, rotating, relaunching) and checks what `survives`. `stop: '
+        'true` with `reached` writes a visual report (screenshots, a GIF) and answers its summary; `export` puts '
+        "it in a GitHub PR or issue, only when your user asks. Build personas for this app's own users and agree "
+        'them with your user; examples are in the skill.'
+    ),
+    'ux_check': (
+        'Check the screen against usability basics: competing choices, one clear main action, thumb reach, '
+        'icon-only buttons, cut-off text, contrast and target sizes, naming that changes between screens, and '
+        "error or empty states that don't say what to do. Facts come first, each naming its element and basis; "
+        "add your own judgment from the screenshot and say it is judgment. The user's house rules, when given, "
+        'are checked too.'
+    ),
+    'media': (
+        "Put test pictures in the phone's photo library for an app's photo picker (a food photo, a label): `add` "
+        "with the pictures' paths and `confirm: true`; `remove: true` deletes only what was added. Ask your user "
+        'first whether pictures may be added, and whether to remove them afterwards.'
     ),
     'session_report': (
         "Where this session's calls went: calls per tool, failures by code, and waste to cut, each with the call "
