@@ -5229,3 +5229,23 @@ def test_an_index_given_beside_the_target_is_taken_as_the_targets():
         assert r["text"].startswith('Tapped e2 button "Duplicate" id=dup-2')
         await finish(stop, task)
     run(go)
+
+
+def test_a_touch_that_changes_nothing_on_ioss_health_sheet_says_ask_a_person():
+    """The JLD RC pass (2026-11-12): iOS's Health access sheet took every touch and changed nothing; "Allow" stayed
+    disabled. iOS doesn't let automation change it, so the answer says so instead of leaving the agent to retry."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = [button("e1", "Turn On All", rect=(20, 200, 200, 40)),
+                          button("e2", "Don’t Allow", rect=(20, 60, 100, 40)),
+                          button("e3", "Allow", rect=(300, 60, 80, 40), enabled=False)]
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "No visible change." in r["text"]
+        assert "Note: this is iOS's Health access sheet; iOS doesn't let automation change it." in r["text"]
+        d.session.tree = [button("e1", "OK", rect=(20, 200, 200, 40))]  # any other screen: no such note
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert "Health" not in (await d.run_tool("a", "tap", {"target": {"ref": "e1"}}))["text"]
+        await finish(stop, task)
+    run(go)

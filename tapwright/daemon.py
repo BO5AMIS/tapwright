@@ -165,6 +165,11 @@ NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it 
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
+# iOS draws the Health access sheet (HealthKit) in a separate service inside the app's window, and doesn't let UI
+# automation change it: its switches and "Turn On All" take touches and nothing changes, "Allow" stays disabled
+# (the JLD RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
+NOTE_HEALTH = ("this is iOS's Health access sheet; iOS doesn't let automation change it. Ask a person to choose and "
+               "tap Allow.")
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
@@ -243,6 +248,14 @@ def step_caption(tool: str, result: str, args: dict) -> str | None:
         text = tool.replace("_", " ")
     text = " ".join(text.split())
     return text if len(text) <= CAPTION_MAX else text[:CAPTION_MAX - 1] + "…"
+
+
+def _health_sheet(items: list) -> bool:
+    """Is iOS's Health access sheet on screen? Its own buttons say so: "Turn On All" (or "Turn Off All") with "Allow"
+    and "Don't Allow"."""
+    said = {" ".join(str(getattr(e, k, "") or "").replace("’", "'").split()).casefold()
+            for e in items for k in ("label", "text")}
+    return bool({"turn on all", "turn off all"} & said) and "allow" in said and "don't allow" in said
 
 
 def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | None = None) -> dict:
@@ -4206,6 +4219,8 @@ class Daemon(journey_tool.JourneyTools):
             # a heading of its own (bare `~` lines after a list read as a second, broken block)
             beyond = [changes.OFF_SCREEN, *off] if off else []
             return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+        if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
+            notes = [*notes, NOTE_HEALTH]  # iOS's own Health access sheet takes touches and changes nothing
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:

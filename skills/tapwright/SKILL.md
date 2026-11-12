@@ -23,6 +23,8 @@ themselves; what follows is what they can't tell you.
   prompt one of those apps raises. That is by design: don't look for a way around it.
 - **`locked`** means a person must act: the phone is locked, or it is asking for its passcode.
   You can't pass Face ID, Touch ID or the passcode. Tell the user and wait.
+- **iOS's Health access sheet** (HealthKit's "Turn On All" and "Allow") can't be changed by automation: iOS ignores
+  the touches. Ask the user to choose and tap Allow, then go on.
 - **A person may be watching** in the live view (`viewer` opens it for the user) and can take over.
   Their input goes first.
 - **Each tool's description lists its arguments.** The calls below show the ones that matter.
