@@ -877,6 +877,41 @@ def test_a_recording_refuses_a_reference_updated_between_two_checks_of_its_name(
     run(go)
 
 
+def test_a_refused_update_in_a_recording_changes_nothing_on_disk(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "kept"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})  # picture A: the store's "home", a white screen
+        kept = stored(tmp_path, "home")
+        original = kept.read_bytes()
+        show(d, (BLOCK, (0, 0, 0)))  # the screen changes: picture B
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "home", "update": True})
+        assert e.value.code == "bad_params"
+        assert kept.read_bytes() == original  # the refusal wrote nothing: the store still holds A
+        assert [p.name for p in kept.parent.iterdir()] == ["home.png"]  # and left no temporary file
+        path = tmp_path / "kept.json"
+        await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert (tmp_path / "kept.references" / "home.png").read_bytes() == original  # the script exports A
+        assert kept.read_bytes() == original
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_allows_an_update_that_writes_the_same_picture(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "record", {"start": True, "name": "again"})
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        await d.run_tool("a", "compare_screen", {"name": "home", "update": True})  # the screen is the same: the same bytes
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_recording_allows_one_name_compared_twice_against_the_same_picture(tmp_path):
     async def go():
         d = make()

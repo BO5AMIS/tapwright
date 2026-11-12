@@ -76,6 +76,10 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 # bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
 # change it.
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
+# While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
+# source, digest), so `_compare` can refuse a save that would change one before it writes anything.
+_BASELINES: contextvars.ContextVar[list[tuple[str, str, pathlib.Path | None, str | None]] | None] = \
+    contextvars.ContextVar("tapwright_baselines", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
@@ -926,11 +930,16 @@ class Daemon:
         self.last_request = time.monotonic()
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
+        # a recording's earlier pictures hold for the whole call too: a save that would change one is refused first
+        btoken = _BASELINES.set(self._recording[client_id].setdefault("references", [])) \
+            if client_id in self._recording and _BASELINES.get() is None else None
         try:
             return await self._run_tool_policed(client_id, name, args, scope)
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+            if btoken is not None:
+                _BASELINES.reset(btoken)
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
@@ -2178,6 +2187,7 @@ class Daemon:
         if before is None:
             dest = compare.script_references(script["path"]) / f"{name}.png" if keep else compare.reference_path(folder, name)
             trusted = script["path"].parent if keep else compare.references_dir()  # nothing below it may be a link
+            await asyncio.to_thread(self._refuse_changed_baseline, name, folder, after)  # before anything is written
             try:
                 await asyncio.to_thread(compare.save, dest, after, trusted)
             except OSError as e:
@@ -2207,6 +2217,23 @@ class Daemon:
                  *compare.region_lines(result.regions, scale, view.items)]
         image = await asyncio.to_thread(result.picture)
         return Compared("differs", lines, notes, reason, image, result.percent, folder, found)
+
+    @staticmethod
+    def _refuse_changed_baseline(name: str, folder: str, picture: "Image.Image") -> None:
+        """While a client records: a reference about to be saved under a name the recording already compared (in this
+        app), as a picture that isn't the one it compared, is refused before anything is written, so the stored file
+        and what `record stop` exports stay the baseline. The same bytes are no change (the same screen again)."""
+        seen = _BASELINES.get()
+        if not seen:
+            return
+        wanted = [digest for bundle, was, _, digest in seen if was == name and bundle == folder and digest is not None]
+        if not wanted:
+            return
+        out = io.BytesIO()
+        picture.save(out, "PNG")  # the bytes compare.save would write
+        if hashlib.sha256(out.getvalue()).hexdigest() not in wanted:
+            raise Refused("bad_params", f'record: "{name}" was already compared against another picture in this '
+                                        "recording; give this check another name.")
 
     @staticmethod
     def _write_diff(script: pathlib.Path, name: str, result: "compare.Result") -> str | None:
