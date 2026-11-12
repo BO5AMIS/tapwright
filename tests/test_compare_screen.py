@@ -758,3 +758,19 @@ def test_the_bundle_a_recording_copies_from_is_its_own_calls_not_the_daemons(tmp
         assert not hasattr(d, "_compared_in")
         await finish(stop, task)
     run(go)
+
+
+def test_a_references_folder_that_is_a_link_gets_no_reference_saved(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_path / "refs").mkdir()
+        link(tmp_path / "refs" / "com.example.app", elsewhere, directory=True)  # the app's folder in the store
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "home"})
+        assert "link" in str(e.value) and list(elsewhere.iterdir()) == []
+        await finish(stop, task)
+    run(go)

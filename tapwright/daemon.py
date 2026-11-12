@@ -2152,8 +2152,9 @@ class Daemon:
         after = await asyncio.to_thread(compare.fit, png, size)
         if before is None:
             dest = compare.script_references(script["path"]) / f"{name}.png" if keep else compare.reference_path(folder, name)
+            trusted = script["path"].parent if keep else compare.references_dir()  # nothing below it may be a link
             try:
-                await asyncio.to_thread(compare.save, dest, after)
+                await asyncio.to_thread(compare.save, dest, after, trusted)
             except OSError as e:
                 raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
             return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes,
@@ -2188,7 +2189,7 @@ class Daemon:
         path = compare.script_diffs(script) / f"{name}.png"
         try:
             data = result.picture("PNG")
-            compare.write_file(path, lambda out: out.write(data))  # not through a link; see compare.write_file
+            compare.write_file(path, lambda out: out.write(data), script.parent)  # not through a link; see write_file
         except OSError:
             return None
         return str(path)

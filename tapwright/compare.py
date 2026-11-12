@@ -170,16 +170,34 @@ def load(path: Path) -> Image.Image:
         raise unreadable from None
 
 
-def write_file(dest: Path, write: Callable[[BinaryIO], object]) -> None:
-    """Write a file whole or not at all, and never through a link. The folder must be a real folder (a symlink or a
-    junction to somewhere else is refused: `OSError`), the bytes go to a new file with its own name beside `dest`
-    (made exclusively, so it can't be a link someone planted), and that is moved over `dest`. A link at `dest` is
-    replaced, not followed. A failed write leaves no temporary file."""
-    folder = dest.parent
-    folder.mkdir(parents=True, exist_ok=True)
-    if os.path.normcase(os.path.realpath(folder)) != os.path.normcase(os.path.join(os.path.realpath(folder.parent),
-                                                                                    folder.name)):
-        raise OSError(errno.EPERM, f"{folder} is a link to another folder; nothing is written through it")
+def real_folder(folder: Path, root: Path) -> Path:
+    """`folder` made (as far as it isn't there), and checked: every folder from `root` down to it must be a real
+    folder, not a symlink or a junction to somewhere else (`OSError` otherwise, before anything is made behind the
+    link). `root` is trusted, even when it is a link itself; it is made when it isn't there. The folder's real path."""
+    root = Path(os.path.abspath(root))
+    try:
+        parts = Path(os.path.abspath(folder)).relative_to(root).parts
+    except ValueError:
+        raise OSError(errno.EPERM, f"{folder} is outside {root}; nothing is written there") from None
+    root.mkdir(parents=True, exist_ok=True)
+    here = Path(os.path.realpath(root))
+    for part in parts:
+        step = here / part
+        step.mkdir(exist_ok=True)
+        if os.path.normcase(os.path.realpath(step)) != os.path.normcase(str(step)):
+            raise OSError(errno.EPERM, f"{step} is a link to another folder; nothing is written through it")
+        here = step
+    return here
+
+
+def write_file(dest: Path, write: Callable[[BinaryIO], object], root: Path | None = None) -> None:
+    """Write a file whole or not at all, and never through a link. Every folder from `root` (the trusted tree the
+    file belongs in: the references store, the script's folder; by default the folder above `dest`'s) down to
+    `dest`'s must be a real folder (a symlink or a junction to somewhere else is refused: `OSError`), the bytes go
+    to a new file with its own name beside `dest` (made exclusively, so it can't be a link someone planted), and
+    that is moved over `dest`. A link at `dest` is replaced, not followed. A failed write leaves no temporary file."""
+    folder = real_folder(dest.parent, dest.parent.parent if root is None else root)
+    dest = folder / dest.name
     fd, name = tempfile.mkstemp(dir=folder, prefix=dest.name + ".", suffix=".part")
     try:
         with os.fdopen(fd, "wb") as out:
@@ -191,9 +209,9 @@ def write_file(dest: Path, write: Callable[[BinaryIO], object]) -> None:
         raise
 
 
-def save(path: Path, image: Image.Image) -> None:
+def save(path: Path, image: Image.Image, root: Path | None = None) -> None:
     """Write a reference as PNG (lossless: a reference must not drift), whole or not at all (see `write_file`)."""
-    write_file(path, lambda out: image.save(out, "PNG"))
+    write_file(path, lambda out: image.save(out, "PNG"), root)
 
 
 # ---- the words ----
@@ -344,6 +362,6 @@ def copy_to_script(names: list[str], bundle: str | None, script: Path) -> tuple[
         source = reference_path(bundle or "unknown", name)  # the folder _compare saved it in
         if source.is_file():
             data = source.read_bytes()
-            write_file(folder / f"{name}.png", lambda out: out.write(data))
+            write_file(folder / f"{name}.png", lambda out: out.write(data), script.parent)
             count += 1
     return folder, count

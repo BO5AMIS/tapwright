@@ -256,3 +256,58 @@ def test_copying_a_reference_next_to_a_script_replaces_a_link_and_never_follows_
     link(folder / "home.png", outside)
     assert compare.copy_to_script(["home"], "com.example.app", tmp_path / "flow.json") == (folder, 1)
     assert outside.read_text() == "keep" and compare.load(folder / "home.png").size == (32, 32)
+
+
+def junction(path: Path, target: Path) -> None:
+    """A directory junction (Windows only); a test skips when the system really can't make one."""
+    if os.name != "nt":
+        pytest.skip("junctions are Windows only")
+    try:
+        import _winapi
+        _winapi.CreateJunction(str(target), str(path))
+    except (OSError, ImportError, AttributeError):
+        pytest.skip("this system doesn't let the tests make junctions")
+
+
+def either_link(kind: str, path: Path, target: Path) -> None:
+    link(path, target, directory=True) if kind == "symlink" else junction(path, target)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_a_link_higher_up_than_the_folder_is_not_written_through(tmp_path, kind):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "tree"
+    root.mkdir()
+    either_link(kind, root / "linked", elsewhere)
+    with pytest.raises(OSError, match="link"):
+        compare.write_file(root / "linked" / "flow.references" / "home.png", lambda f: f.write(b"x"), root=root)
+    with pytest.raises(OSError, match="link"):
+        compare.save(root / "linked" / "app" / "home.png", screen(size=(32, 32)), root=root)
+    assert list(elsewhere.iterdir()) == []  # not even a folder was made there
+
+
+@pytest.mark.parametrize("kind", ["symlink", "junction"])
+def test_a_link_in_the_middle_of_the_references_store_is_not_written_through(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(compare, "references_dir", lambda: tmp_path / "refs")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "refs").mkdir()
+    either_link(kind, tmp_path / "refs" / "com.example.app", elsewhere)  # the bundle's own folder is the link
+    with pytest.raises(OSError, match="link"):
+        compare.save(compare.reference_path("com.example.app", "home"), screen(size=(32, 32)), root=compare.references_dir())
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_folder_that_is_not_below_its_root_is_refused(tmp_path):
+    with pytest.raises(OSError, match="outside"):
+        compare.write_file(tmp_path / "other" / "x.png", lambda f: f.write(b"x"), root=tmp_path / "tree")
+    assert not (tmp_path / "other").exists()
+
+
+def test_a_root_that_is_itself_a_link_is_trusted_and_real_folders_below_it_are_written(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link(tmp_path / "home", real, directory=True)  # (~/.tapwright may well be a link the owner made)
+    compare.save(tmp_path / "home" / "refs" / "app" / "home.png", screen(size=(32, 32)), root=tmp_path / "home")
+    assert compare.load(real / "refs" / "app" / "home.png").size == (32, 32)
