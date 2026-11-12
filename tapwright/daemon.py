@@ -2541,6 +2541,9 @@ class Daemon:
             try:
                 if launch:
                     await self.run_tool(client_id, "close_app", {"app": bundle}, scope)
+                # the window begins here: what the instruments gave while they were set up, and the app that was
+                # running before a launch, are dropped (the instruments stay ready)
+                await meter.begin_window(fresh=launch)
                 began = clock()
                 if launch:
                     answer = await self.run_tool(client_id, "open_app", {"app": bundle}, scope)

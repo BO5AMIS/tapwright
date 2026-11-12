@@ -1,0 +1,199 @@
+"""device.AppMeter, the real orchestration (start, window, sampling, stop) over fake instruments: the phone's process
+list, sysmontap and graphics are scripted by a World. Codex and CodeRabbit, PR #4."""
+import asyncio
+import datetime
+import sys
+import time
+import types
+
+import pytest
+
+from tapwright import device as device_module
+
+APP = "com.example.app"
+MB = device_module.MB
+
+
+def run(go):
+    asyncio.run(go())
+
+
+async def settle(check, tries=300):
+    for _ in range(tries):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("never happened")
+
+
+def when(seconds_ago: float) -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(time.time() - seconds_ago)
+
+
+class World:
+    """What the fake instruments know: the process list, the sysmontap batches and the frame rates still to come."""
+
+    def __init__(self) -> None:
+        self.procs: list[dict] = []
+        self.proc_error: Exception | None = None
+        self.batches: asyncio.Queue = asyncio.Queue()
+        self.frames: asyncio.Queue = asyncio.Queue()
+        self.hang_on_close = False  # graphics never finishes closing, as a tunnel that can't drain
+        self.closed: list[str] = []
+
+    def row(self, pid: int, mb: float, cpu: float = 10.0) -> dict:
+        return {"pid": pid, "physFootprint": mb * MB, "cpuUsage": cpu}
+
+
+@pytest.fixture
+def world(monkeypatch):
+    w = World()
+
+    class Dvt:
+        def __init__(self, rsd):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            w.closed.append("dvt")
+
+    class Info:
+        def __init__(self, dvt):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            w.closed.append("info")
+
+        async def proclist(self):
+            if w.proc_error is not None:
+                raise w.proc_error
+            return [dict(p) for p in w.procs]
+
+    class Tap:
+        @classmethod
+        async def create(cls, dvt, ms):
+            return cls()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            w.closed.append("tap")
+
+        async def iter_processes(self):
+            while True:
+                yield await w.batches.get()
+
+    class Graphics:
+        def __init__(self, dvt):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            if w.hang_on_close:
+                await asyncio.sleep(3600)
+            w.closed.append("graphics")
+
+        async def fps(self):
+            while True:
+                yield await w.frames.get()
+
+    base = "pymobiledevice3.services.dvt.instruments."
+    for module, cls_name, cls in (("dvt_provider", "DvtProvider", Dvt), ("device_info", "DeviceInfo", Info),
+                                  ("sysmontap", "Sysmontap", Tap), ("graphics", "Graphics", Graphics)):
+        fake = types.ModuleType(base + module)
+        setattr(fake, cls_name, cls)
+        monkeypatch.setitem(sys.modules, base + module, fake)
+    return w
+
+
+class Quiet:
+    rsd = None
+
+    def log(self, text):
+        pass
+
+
+def test_a_launch_measures_the_new_process_not_the_old_one_or_the_setup(world):
+    """Codex P2, PR #4: the running app (500 MB) was sampled before the window; the cold start uses 100 MB."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.batches.put_nowait([world.row(7, 500, 90.0)])  # before the close: the old process
+        world.frames.put_nowait(5.0)
+        await settle(lambda: meter.measurement.memory_mb and meter.measurement.fps)
+        # the app is closed and the window begins; the old process is still listed for a moment, the new one starts
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        await meter.begin_window(fresh=True)
+        world.batches.put_nowait([world.row(7, 520, 95.0)])  # a late sample of the old process
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)},
+                       {"pid": 8, "bundleIdentifier": APP, "startDate": when(0)}]
+        world.batches.put_nowait([world.row(7, 530, 99.0), world.row(8, 100, 20.0)])
+        world.batches.put_nowait([world.row(8, 110, 30.0)])
+        world.frames.put_nowait(60.0)
+        await settle(lambda: len(meter.measurement.memory_mb) == 2 and meter.measurement.fps)
+        found = await meter.stop()
+        assert found.memory_mb == [100.0, 110.0] and found.cpu_pct == [20.0, 30.0] and found.fps == [60.0]
+    run(go)
+
+
+def test_a_window_without_a_launch_still_drops_what_was_sampled_before_it(world):
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.batches.put_nowait([world.row(7, 800)])  # while the instruments were set up
+        await settle(lambda: meter.measurement.memory_mb)
+        await meter.begin_window(fresh=False)
+        world.batches.put_nowait([world.row(7, 150)])
+        await settle(lambda: meter.measurement.memory_mb == [150.0])
+        assert (await meter.stop()).memory_mb == [150.0]  # the same process counts: it was not started for the window
+    run(go)
+
+
+def test_a_pid_taken_by_another_app_is_not_sampled_as_the_app(world):
+    """Codex P1, PR #4: the meter kept its pids for 2 s, so a replacement process was sampled until the next refresh."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.batches.put_nowait([world.row(7, 120)])
+        await settle(lambda: meter.measurement.memory_mb == [120.0])
+        world.procs = [{"pid": 7, "bundleIdentifier": "com.private.app", "startDate": when(1)}]  # pid 7, another app
+        world.batches.put_nowait([world.row(7, 900, 99.0)])
+        world.proc_error = RuntimeError("process list unavailable")  # and then the phone can't be asked at all
+        world.batches.put_nowait([world.row(7, 901, 99.0)])
+        await asyncio.sleep(0.1)
+        world.proc_error = None
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(0)}]  # the app itself, started again
+        world.batches.put_nowait([world.row(7, 130)])
+        await settle(lambda: len(meter.measurement.memory_mb) == 2)
+        assert (await meter.stop()).memory_mb == [120.0, 130.0]
+    run(go)
+
+
+def test_stop_returns_when_an_instrument_cannot_close(world, monkeypatch):
+    """CodeRabbit, PR #4: a tunnel that can't drain left graphics' close waiting, and stop() with it."""
+    monkeypatch.setattr(device_module, "METER_TEARDOWN", 0.1)
+    monkeypatch.setattr(device_module, "METER_STOP", 2.0)
+
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        world.hang_on_close = True
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.batches.put_nowait([world.row(7, 120)])
+        await settle(lambda: meter.measurement.memory_mb)
+        began = time.monotonic()
+        found = await meter.stop()
+        assert time.monotonic() - began < 1.5 and found.memory_mb == [120.0]
+        assert "tap" in world.closed and "dvt" in world.closed  # the others were closed all the same
+    run(go)

@@ -656,6 +656,8 @@ async def _read_capped(afc, path: str, size: int) -> bytes:
 PID_REFRESH = 2.0 # seconds between looks at which process ids the app has (it has new ones after a launch)
 PID_RETRY = 0.25  # the same while no sample has shown the app's process (it is starting)
 METER_START = 15.0  # seconds the instruments service may take to start sampling
+METER_TEARDOWN = 3.0  # seconds one instrument may take to close before it is abandoned
+METER_STOP = 15.0  # seconds stop() waits for the sampling task to end
 MB = 1024 * 1024
 
 
@@ -673,6 +675,10 @@ class AppMeter:
         self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
         self._failed: Exception | None = None
+        self._epoch = 0  # counts the windows begun: a sample taken before the current one is not kept
+        self._fresh_after: float | None = None  # a launch's window keeps only a process started at or after this (epoch s)
+        self._seen: set[int] = set()  # the pids of the app's processes sampled so far
+        self._stale: set[int] = set()  # ... as the window began: not the new process, whatever their start times say
 
     async def start(self) -> None:
         """Begin sampling. However this ends (too slow, a service that won't start, or the call cancelled while it
@@ -689,13 +695,48 @@ class AppMeter:
             await asyncio.shield(self.stop())
             raise
 
+    async def begin_window(self, fresh: bool = False) -> None:
+        """The measured window begins now: what the instruments gave until now (their set-up, the app that was running
+        before a launch) is dropped, and a sample taken before this moment is never kept, even one still on its way.
+        `fresh`: the window is a cold start, so only a process that started after this moment is the app's."""
+        from .performance import Measurement
+        self._epoch += 1
+        self.measurement = Measurement()
+        self._fresh_after = time.time() - START_SLACK if fresh else None
+        self._stale = set(self._seen) if fresh else set()
+        for _ in range(3):  # samples already queued are taken (and dropped) before the first of the window
+            await asyncio.sleep(0)
+        self.measurement = Measurement()
+
     async def stop(self):
-        """End the sampling; the Measurement of what was seen."""
+        """End the sampling; the Measurement of what was seen. Bounded: an instrument that can't close (a tunnel that
+        can't drain) doesn't hold the call."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            done, _ = await asyncio.wait({task}, timeout=METER_STOP)
+            if not done:
+                self.device.log("performance: the instruments didn't close in time; leaving them")
+            elif not task.cancelled():
+                task.exception()  # collected, so it isn't logged as never retrieved
         return self.measurement
+
+    async def _enter(self, stack, cm):
+        """Open an instrument and register its close, which waits at most METER_TEARDOWN (a close that hangs is
+        abandoned, cancelled and said so, and the next instrument is closed all the same)."""
+        opened = await cm.__aenter__()
+
+        async def close() -> None:
+            try:
+                await aio.wait_for(cm.__aexit__(None, None, None), METER_TEARDOWN)
+            except asyncio.TimeoutError:
+                self.device.log(f"performance: closing {type(cm).__name__} took over {METER_TEARDOWN:g} s; abandoned")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # a close that fails: the rest are still closed
+                self.device.log(f"performance: closing {type(cm).__name__} failed: {e}")
+        stack.push_async_callback(close)
+        return opened
 
     async def _run(self) -> None:
         from contextlib import AsyncExitStack
@@ -706,14 +747,14 @@ class AppMeter:
         from .performance import SAMPLE_MS
         try:
             async with AsyncExitStack() as stack:
-                dvt = await stack.enter_async_context(DvtProvider(self.device.rsd))
-                info = await stack.enter_async_context(DeviceInfo(dvt))
+                dvt = await self._enter(stack, DvtProvider(self.device.rsd))
+                info = await self._enter(stack, DeviceInfo(dvt))
                 tap = await Sysmontap.create(dvt, SAMPLE_MS)
-                await stack.enter_async_context(tap)
+                await self._enter(stack, tap)
                 jobs = [asyncio.create_task(self._processes(tap, info))]
                 try:
                     graphics = Graphics(dvt)
-                    await stack.enter_async_context(graphics)
+                    await self._enter(stack, graphics)
                     jobs.append(asyncio.create_task(self._frames(graphics)))
                 except Exception as e:  # frames are left out; memory and CPU still count
                     self.device.log(f"performance: no frame rate ({e})")
@@ -733,16 +774,30 @@ class AppMeter:
         finally:
             self._ready.set()
 
+    def _is_new(self, pid: int, started: float | None) -> bool:
+        """In a launch's window: is this process one that started after the window began?"""
+        if self._fresh_after is None:
+            return True
+        if pid in self._stale:
+            return False
+        return started is None or started >= self._fresh_after
+
     async def _processes(self, tap, info) -> None:
-        pids: set[int] = set()
-        looked = -PID_REFRESH
+        """Each batch of rows is kept only for processes the phone's list shows as the app's right after the batch came
+        (pid, bundle id and start time as listed then), so a pid that went to another process is never sampled as the
+        app, and in a launch's window only for a process that started in it. A list that can't be had drops the batch."""
         async for rows in tap.iter_processes():
-            now = time.monotonic()
-            ours = [r for r in rows if r.get("pid") in pids]  # only the app's own process, whatever else is listed
-            if now - looked >= (PID_REFRESH if ours else PID_RETRY):  # new process ids come with a launch
-                pids = {p["pid"] for p in await info.proclist() if p.get("bundleIdentifier") == self.bundle_id}
-                looked = now
-                ours = [r for r in rows if r.get("pid") in pids]
+            epoch = self._epoch
+            try:
+                listed = await info.proclist()
+            except Exception:
+                continue  # whose pid it is can't be said: this batch isn't kept
+            if epoch != self._epoch:
+                continue  # the window began while the list was asked for: the batch is from before it
+            mine = {p["pid"]: _started_of(p) for p in listed
+                    if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
+            ours = [r for r in rows if r.get("pid") in mine and self._is_new(r["pid"], mine[r["pid"]])]
+            self._seen.update(r["pid"] for r in rows if r.get("pid") in mine)
             memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
             cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
             if memory:

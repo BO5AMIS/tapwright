@@ -190,6 +190,24 @@ def test_launch_closes_the_app_then_times_its_open_to_the_settled_screen():
     run(go)
 
 
+def test_the_measured_window_begins_after_the_close_and_before_the_open():
+    """Codex P2, PR #4: samples from the set-up and from the app that was running before the launch were kept."""
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        s.device.measurement = Measurement(memory_mb=[100.0])
+        order = []
+        s.device.on_window = lambda fresh: order.append(("window", fresh, list(s.closed), list(s.launched)))
+        await d.run_tool("a", "performance", {"launch": True})
+        assert order == [("window", True, ["com.example.app"], [])]  # closed already, not yet opened
+        order.clear()
+        await d.run_tool("a", "performance", {"seconds": 1})
+        assert order == [("window", False, ["com.example.app"], ["com.example.app"])]  # (no close or open of its own)
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_tap_goes_through_the_ordinary_tool_and_so_through_the_policy():
     async def go():
         s = FakeSession()

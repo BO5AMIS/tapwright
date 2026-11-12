@@ -125,6 +125,11 @@ class FakeMeter:
         if self.device.meter_error is not None:
             raise self.device.meter_error
 
+    async def begin_window(self, fresh: bool = False) -> None:
+        self.device.windows.append(fresh)
+        if self.device.on_window is not None:
+            self.device.on_window(fresh)
+
     async def stop(self):
         self.device.metered.append(("stop", self.bundle_id))
         return self.device.measurement
@@ -136,6 +141,8 @@ class FakeDevice:
         self.measurement = Measurement()  # what a meter's stop() returns (tests set it)
         self.metered: list = []  # ("start" | "stop", bundle id) in order
         self.meter_error: Exception | None = None
+        self.windows: list[bool] = []  # one per begin_window of a meter (True: a launch's)
+        self.on_window = None  # called with `fresh` when a window begins (tests look at what has happened by then)
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
