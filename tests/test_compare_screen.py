@@ -202,6 +202,37 @@ def test_in_personal_mode_only_a_given_apps_screen_is_compared_or_saved(tmp_path
     run(go)
 
 
+def test_an_app_that_leaves_while_the_picture_is_taken_saves_nothing(tmp_path):
+    """Review 2026-11-12 (M1): the question before the call can't see an app that changes during it, so the front app
+    is asked again once the picture is taken."""
+    async def go():
+        s = FakeSession()
+        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
+        d = make(s)
+        stop, task = await ready(d)
+        show(d)
+        taken = d.session.screenshot_png
+
+        async def shot_then_leave():
+            png = await taken()
+            s.foreground = "com.example.mail"  # the picture may be of Mail by now
+            return png
+        s.foreground, d.session.screenshot_png = "com.example.app", shot_then_leave
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "home"}, scope=Scope(("com.example.app",)))
+        assert e.value.code == "not_allowed" and "outside_apps: com.example.mail" in str(e.value)
+        assert not stored(tmp_path, "home").exists() and not stored(tmp_path, "home", "com.example.mail").exists()
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("name", ["home\n", "../up", ".hidden", "a/b", "x" * 62])
+def test_names_that_arent_plain_are_bad_params(name):
+    with pytest.raises(Refused) as e:
+        compare.check_params({"name": name})
+    assert e.value.code == "bad_params"
+
+
 def test_the_action_log_has_the_name_and_the_percentage_and_no_picture(tmp_path):
     async def go():
         d = make(actions=ActionLog(tmp_path / "log"))

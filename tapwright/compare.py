@@ -228,7 +228,7 @@ def check_params(args: dict, label: str = "") -> None:
     """The parameters `compare_screen` and `expect.matches` share, checked before anything runs. `label` starts
     each message (`step 3: `) inside a batch."""
     name = args.get("name", args.get("matches"))
-    if not isinstance(name, str) or not NAME.match(name):
+    if not isinstance(name, str) or not NAME.fullmatch(name):
         raise Refused("bad_params", f"{label}name the reference with letters, digits, '.', '_' and '-' (at most 61 "
                                     f"characters, starting with a letter or digit), not {name!r}")
     if args.get("update") is not None and not isinstance(args["update"], bool):

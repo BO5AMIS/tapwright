@@ -229,6 +229,29 @@ def test_personal_mode_shows_the_strip_only_while_a_given_app_is_in_front():
     run(go)
 
 
+def test_an_app_that_comes_and_goes_inside_the_strip_stops_it():
+    """Review 2026-11-12 (M2): the front app is watched while filming, so another app that is in front for a moment
+    in the middle (and gone again by the end) never shows in the strip."""
+    async def go():
+        s = FakeSession()
+        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
+        d = make(s, shot_wait=0.5)
+        stop, task = await started(d)
+        feed = reel(d)
+        asked = []
+
+        async def visits():  # Mail is in front for the 3rd to 5th questions only
+            asked.append(1)
+            return "com.example.mail" if 3 <= len(asked) <= 5 else "com.example.app"
+        s.foreground_bundle_id = visits
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "filmstrip", {"frames": 12, "interval_ms": 200}, scope=Scope(("com.example.app",)))
+        assert e.value.code == "not_allowed" and "outside_apps: com.example.mail" in str(e.value)
+        await feed_stop(feed)
+        await finish(stop, task)
+    run(go)
+
+
 def test_in_personal_mode_the_tap_inside_has_its_own_checks():
     async def go():
         s = FakeSession()

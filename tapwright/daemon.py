@@ -482,6 +482,7 @@ SPRINGBOARD = "com.apple.springboard"
 PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own system prompt is in front
 PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its prompt is answered
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
+FRONT_WATCH = 0.15  # s between front-app questions while a filmstrip films in personal mode
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
 # whatever row lies under it. It is in no app's tree, so a row half under it looked reachable: a tap on Settings'
@@ -496,6 +497,9 @@ MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
 READS = ("look", "apps", "audit", "filmstrip", "compare_screen")
 # The scope of the filmstrip call being run: its tap goes through run_tool with it, like any other touch
 _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_film_scope", default=None)
+# Personal mode's given apps for the call being run (set by _within): a picture tool checks the front app again after
+# its picture is taken, since the app may have changed after the question before the call
+_GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar("tapwright_given", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
@@ -1393,7 +1397,11 @@ class Daemon:
             if front not in given and front != PROMPT_FRONT:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names,
                                                       alert=getattr(self.session, "last_alert", None) is not None))
-        answer = await self._run_tool(client_id, name, args)
+        given_token = _GIVEN.set(given)
+        try:
+            answer = await self._run_tool(client_id, name, args)
+        finally:
+            _GIVEN.reset(given_token)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
         if name == "filmstrip":  # asked of the phone before and after filming (_filmstrip): the last read is no guide
@@ -1950,6 +1958,26 @@ class Daemon:
         self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None)
         return result
 
+    async def _watch_front(self, given: dict[str, str], client_id: str, away: list) -> None:
+        """While a filmstrip films in personal mode: ask the phone which app is in front, again and again, and note
+        the first that isn't a given app (or iOS's prompt for one) in `away`. SpringBoard is asked about as _front does,
+        so a notification banner over the app isn't taken for leaving it."""
+        view = self.control.client(client_id)
+        while True:
+            front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=True))
+            if front not in given and front != PROMPT_FRONT:
+                away.append(front)
+                return
+            await asyncio.sleep(FRONT_WATCH)
+
+    async def _still_given(self, given: dict[str, str]) -> None:
+        """Refuse unless a given app is in front now (after a picture was taken for it): personal mode's question
+        before the call can't see an app that changes during it."""
+        front = await self._front(given)
+        if front not in given:
+            raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
+                                                  ", ".join(given.values())))
+
     async def _film_frame(self, after_seq: int, due: float) -> tuple[int, int, bytes]:
         """(seq, epoch ms, picture) of the stream's newest frame once loop time `due` has come. It must be newer than
         `after_seq` and fresh; if none comes in time the phone is asked for a screenshot instead (seq unchanged)."""
@@ -1983,23 +2011,34 @@ class Daemon:
         interval, width = args.get("interval_ms", filmlib.INTERVAL_MS[2]) / 1000, args.get("frame_width", filmlib.FRAME_WIDTH[2])
         scope, loop = _FILM_SCOPE.get(), asyncio.get_running_loop()
         notes, shots, seq = list(notes), [], 0
-        if tap is not None:
-            shots.append(await self._film_frame(0, loop.time()))
-            seq = shots[0][0]
-            tapped = await self.run_tool(client_id, "tap", {"target": tap, "look": False}, scope)
-            notes += [line[len("Note: "):] for line in tapped["text"].splitlines()[1:] if line.startswith("Note: ")]
-            seq = max(seq, self._mark()[0])  # the rest follow the tap: a frame that was there as it returned is before
-        start = loop.time()
-        while len(shots) < count:
-            shots.append(await self._film_frame(seq, start + (len(shots) - (1 if tap is not None else 0)) * interval))
-            seq = shots[-1][0]
-        if scope is not None:  # personal mode: the picture is shown only if a given app is still in front
-            given = await self._given(scope)
-            front = await self._read(self.session.foreground_bundle_id)
-            if front not in given and not (front == SPRINGBOARD and await self._prompt_of_given(
-                    given, self.control.client(client_id), read=True)):
-                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
-                                                      ", ".join(given.values())))
+        given = await self._given(scope) if scope is not None else None
+        # Personal mode: the front app is watched while filming, not only at the end. A tap that opens another app
+        # and comes back inside the strip would otherwise put that app's frames in the picture (review 2026-11-12).
+        away: list[str | None] = []
+        watcher = asyncio.create_task(self._watch_front(given, client_id, away)) if given is not None else None
+        try:
+            if tap is not None:
+                shots.append(await self._film_frame(0, loop.time()))
+                seq = shots[0][0]
+                tapped = await self.run_tool(client_id, "tap", {"target": tap, "look": False}, scope)
+                notes += [line[len("Note: "):] for line in tapped["text"].splitlines()[1:] if line.startswith("Note: ")]
+                seq = max(seq, self._mark()[0])  # the rest follow the tap: a frame that was there as it returned is before
+            start = loop.time()
+            while len(shots) < count and not away:
+                shots.append(await self._film_frame(seq, start + (len(shots) - (1 if tap is not None else 0)) * interval))
+                seq = shots[-1][0]
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+        if given is not None and not away:  # and once more at the end, for the last frame
+            front = await self._front(given, prompt=lambda: self._prompt_of_given(
+                given, self.control.client(client_id), read=True))
+            if front not in given and front != PROMPT_FRONT:
+                away.append(front)
+        if away:
+            raise Refused("not_allowed", _outside(away[0], self.session.app_names.get(away[0] or ""),
+                                                  ", ".join(given.values())))
         arrivals = [at for _, at, _ in shots]
         later = arrivals[1:] if tap is not None and count >= 3 else arrivals  # the tap's own time isn't a spacing
         spacing = round((later[-1] - later[0]) / (len(later) - 1))
@@ -2046,6 +2085,7 @@ class Daemon:
         replay the script's own references folder comes first, and `--update-references` saves into it. `given`:
         in personal mode only a given app's screen is compared or saved."""
         script = SCRIPT.get()
+        given = given if given is not None else _GIVEN.get()
         keep = bool(script and script["update"])  # a replay that makes the script's references
         threshold = compare.DEFAULT_THRESHOLD if threshold is None else float(threshold)
         await self._settle_pending()
@@ -2060,6 +2100,8 @@ class Daemon:
         if found is None and check and not keep:
             return Compared("missing", [], notes, compare.missing(name))
         png = await self._read(self.session.screenshot_png)
+        if given is not None:  # the picture is saved or compared only if a given app was still in front for it
+            await self._still_given(given)
         before = await asyncio.to_thread(compare.load, found) if found is not None else None
         size = width or (before.width if before is not None and check else shotlib.DEFAULT_WIDTH)
         after = await asyncio.to_thread(compare.fit, png, size)
