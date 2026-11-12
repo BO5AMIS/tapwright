@@ -3,7 +3,7 @@ import argparse
 import asyncio
 import datetime
 import json
-import time
+import re
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -27,7 +27,8 @@ def clock(ms: int) -> str:
 
 def tuned(d: Daemon) -> Daemon:
     """Short waits, the app running as pid 42."""
-    d.log_retry, d.log_idle, d.log_warmup, d.crash_poll = 0.01, 0.3, 0.0, 0.01
+    d.log_retry, d.log_idle, d.log_warmup, d.crash_poll, d.log_check = 0.01, 0.3, 0.0, 0.01, 0.01
+    d.log_drain = 0.05
     d.session.device.pids[APP] = [42]
     return d
 
@@ -235,7 +236,11 @@ def test_only_8_frames_and_the_top_frame_when_none_is_the_apps():
 def test_reports_of_other_processes_are_dropped():
     reports = [FakeReport(name="Example"), FakeReport(name="ExampleHelper"), FakeReport(name="Other")]
     assert [r.name for r in diagnostics.only_mine(reports, "Example")] == ["Example"]
-    assert diagnostics.crash_pattern("Example") == r"^Example[-.].*\.ips$"
+    pattern = re.compile(diagnostics.crash_pattern("Example"))
+    assert pattern.search("Example-2026-11-12-101010.ips") and pattern.search("Example-2026-11-12-101010-1.ips")
+    for other in ("Example-Dev-2026-11-12-101010.ips", "Example.cpu_resource-2026-11-12-101010.ips",
+                  "Example.wakeups_resource-2026-11-12-101010.ips", "ExampleHelper-2026-11-12-101010.ips"):
+        assert not pattern.search(other)
 
 
 def test_crash_answers_the_newest_report_since_the_session_began(tmp_path, monkeypatch):
@@ -343,14 +348,14 @@ def test_a_crash_that_reaches_the_phone_later_is_told_once_with_its_time():
         await d.run_tool("a", "look", {"screenshot": False})
         die(d)  # no report yet
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert "crashed" not in r["text"] and d._crash_pending is not None
+        assert "crashed" not in r["text"] and d._crash_pending
         when = datetime.datetime.now().replace(microsecond=0)
         d.session.device.crashes["Example"] = [FakeReport(when=when)]
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert r["text"].splitlines()[-1] == (f"Note: the app crashed at {when:%H:%M:%S}: EXC_BAD_ACCESS (SIGSEGV) in "
                                               "Example -[HomeController crash] +40. logs and crash show more.")
         r = await d.run_tool("a", "look", {"screenshot": False})
-        assert "crashed" not in r["text"] and d._crash_pending is None
+        assert "crashed" not in r["text"] and not d._crash_pending
         await finish(stop, task)
     run(go)
 
@@ -366,25 +371,37 @@ def test_a_report_never_comes_and_the_looking_stops():
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         for _ in range(3):
             await d.run_tool("a", "look", {"screenshot": False})
-        assert d._crash_pending is None
+        assert not d._crash_pending
         await finish(stop, task)
     run(go)
 
 
 # ---- failures carry their diagnostics ----
+def during_tap(d: Daemon, emit) -> None:
+    """`emit()` runs when the next tap does: the log lines of a step, arriving while it runs."""
+    session = d.session
+    real = session.tap
+
+    async def tap(target, hold_ms=60):
+        emit()
+        return await real(target, hold_ms)
+    session.tap = tap
+
+
 def test_a_failed_run_step_adds_the_logs_since_it_began_at_warning_or_above():
     async def go():
         d = tuned(make())
-        now = [BASE]
-        d._epoch_ms = lambda: now[0]
         stop, task = await started(d)
         await opened(d)
         device = d.session.device
         device.emit(42, BASE - 500, "before the step", raw=0x10)
-        for n in range(25):  # more than 20: the newest 20 show
-            device.emit(42, BASE + 10 + n, f"problem {n}", raw=0x10)
-        device.emit(42, BASE + 40, "just info")
-        await settle(lambda: len(d._rings[APP].entries) == 27)
+        await settle(lambda: len(d._rings[APP].entries) == 1)
+
+        def lines():
+            for n in range(25):  # more than 20: the newest 20 show
+                device.emit(42, BASE + 10 + n, f"problem {n}", raw=0x10)
+            device.emit(42, BASE + 40, "just info")
+        during_tap(d, lines)
         steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "run", {"steps": steps})
@@ -410,9 +427,9 @@ def test_a_failure_without_warnings_adds_no_logs_and_a_crash_adds_its_note():
         assert "Logs (since" not in str(e.value)
         await d.run_tool("a", "look", {"screenshot": False})
         die(d, FakeReport())
-        d.session.device.emit(42, int(time.time() * 1000) + 60_000, "fatal: lost the database", raw=0x11)
-        await settle(lambda: len(d._rings[APP].entries) == 1)
-        steps = [{"tool": "tap", "target": {"ref": "e1"}}, {"tool": "tap", "target": {"ref": "e1"}}]
+        during_tap(d, lambda: d.session.device.emit(42, BASE, "fatal: lost the database", raw=0x11))
+        steps = [{"tool": "wait", "seconds": 0.5},  # (the log line and the death come with the second step)
+                 {"tool": "tap", "target": {"ref": "e1"}, "expect": {"text": "Never there", "timeout": 0.5}}]
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "run", {"steps": steps})
         text = str(e.value)
@@ -420,6 +437,244 @@ def test_a_failure_without_warnings_adds_no_logs_and_a_crash_adds_its_note():
         assert "stopped at step 2" in text and "Logs (since step 2):" in text and "lost the database" in text
         await finish(stop, task)
     run(go)
+
+
+# ---- review findings (1.3 review, W7) ----
+def test_a_report_is_the_apps_only_by_exact_name_type_and_bundle_id():
+    mine = FakeReport(name="Example", bundle_id=APP)
+    other_app = FakeReport(name="Example", bundle_id="com.other.app")  # same executable name, another app
+    no_bundle = FakeReport(name="Example")  # an old-format report names no bundle: the name decides
+    unnamed = FakeReport(name=None)
+
+    class Unreadable:
+        bug_type_str, _metadata, _data = "309", {}, {}
+
+        @property
+        def name(self):
+            raise KeyError("name")
+    unreadable = Unreadable()
+    helper = FakeReport(name="Example-Dev", bundle_id=APP)
+    resource = FakeReport(name="Example", bundle_id=APP, bug_type="385")  # a resource report is not a crash
+    kept = diagnostics.only_mine([mine, other_app, no_bundle, unnamed, helper, resource], "Example", APP)
+    assert kept == [mine, no_bundle]
+    assert diagnostics.only_mine([unreadable], "Example", APP) == []
+
+
+def test_the_crash_time_is_compared_in_the_reports_own_zone():
+    now_local = datetime.datetime.now().astimezone()
+    zone = datetime.timezone(datetime.timedelta(hours=-5))
+    old = (now_local - datetime.timedelta(hours=3)).astimezone(zone)  # three hours ago, in a zone far from here's
+    stamp = old.strftime("%Y-%m-%d %H:%M:%S.00 %z")
+    # pycrashreport drops the offset, leaving the phone's wall clock, which looks like now to this computer
+    wall = old.replace(tzinfo=None)
+    report = FakeReport(when=wall, stamp=stamp)
+    info = diagnostics.describe_crash(report, "Example")
+    assert info.when.tzinfo is not None and not diagnostics.newer(info, now_local.replace(tzinfo=None))
+    fresh = (now_local - datetime.timedelta(seconds=5)).astimezone(zone)
+    info = diagnostics.describe_crash(FakeReport(when=fresh.replace(tzinfo=None),
+                                                 stamp=fresh.strftime("%Y-%m-%d %H:%M:%S.00 %z")), "Example")
+    assert diagnostics.newer(info, datetime.datetime.now())
+    naive = diagnostics.describe_crash(FakeReport(when=datetime.datetime.now()), "Example")  # no offset: as before
+    assert naive.when.tzinfo is None and diagnostics.newer(naive, datetime.datetime.now())
+
+
+def test_a_new_process_is_read_at_once_when_open_app_starts_it_and_the_old_stream_stops():
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0  # the pid check alone would not notice for a minute: open_app has to
+        stop, task = await started(d)
+        await opened(d)
+        device = d.session.device
+        device.pids[APP] = [43]  # the app crashed and was opened again
+        await d.run_tool("a", "open_app", {"app": "Example", "look": False})
+        await settle(lambda: 43 in device.streamed and 42 in device.stream_closed)
+        device.emit(43, BASE + 5, "second life")
+        device.emit(42, BASE + 6, "ghost of the first")  # nobody reads the old stream any more
+        await settle(lambda: d._rings[APP].latest() == BASE + 5)
+        assert [e.text for e in d._rings[APP].entries] == ["second life"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_process_that_changes_without_open_app_is_found_by_the_watcher():
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        await opened(d)
+        d.session.device.pids[APP] = [77]  # started from the phone's home screen, say
+        await settle(lambda: 77 in d.session.device.streamed and 42 in d.session.device.stream_closed)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_stream_that_starts_again_for_the_same_process_does_not_repeat_what_the_ring_has():
+    async def go():
+        d = tuned(make())
+        device = d.session.device
+        device.replay[42] = [(BASE + 1, 0, "a", 42), (BASE + 2, 0, "b", 42), (BASE + 2, 0, "b2", 42)]  # the phone's replay
+        stop, task = await started(d)
+        await opened(d)
+        await settle(lambda: len(d._rings[APP].entries) == 3)
+        device.emit(42, BASE + 3, "c")
+        await settle(lambda: len(d._rings[APP].entries) == 4)
+        device.replay[42] = [(BASE + 1, 0, "a", 42), (BASE + 2, 0, "b", 42), (BASE + 2, 0, "b2", 42), (BASE + 3, 0, "c", 42)]
+        device.streams[42].put_nowait(None)  # the relay closes the stream; the watcher opens another, replay and all
+        await settle(lambda: device.streamed.count(42) == 2)
+        device.emit(42, BASE + 3, "c2")  # the same millisecond as the newest entry, but a new line: kept
+        device.emit(42, BASE + 4, "d")
+        await settle(lambda: d._rings[APP].latest() == BASE + 4)
+        assert [e.text for e in d._rings[APP].entries] == ["a", "b", "b2", "c", "c2", "d"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_phone_without_a_log_service_is_tried_a_few_times_and_logs_says_so():
+    async def go():
+        d = tuned(make())
+        d.session.device.stream_error = RuntimeError("no such service: com.apple.os_trace_relay")
+        stop, task = await started(d)
+        await opened(d)
+        await settle(lambda: APP in d._log_dead)
+        assert d.session.device.streamed == [42] * diagnostics.LOG_STREAM_FAILS  # then it stops trying
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "logs", {})
+        assert e.value.code == "unsupported" and diagnostics.LOGS_NO_SOURCE in str(e.value)
+        await asyncio.sleep(0.1)
+        assert d.session.device.streamed == [42] * diagnostics.LOG_STREAM_FAILS
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_meter_stops_its_sampling_when_start_is_cancelled(monkeypatch):
+    from tapwright import device as device_module
+    stopped = []
+
+    class Quiet:
+        rsd = None
+
+        def log(self, text):
+            pass
+
+    async def never_ready(self):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            stopped.append("sampling closed")  # where the instrument sessions would be closed
+    monkeypatch.setattr(device_module.AppMeter, "_run", never_ready)
+
+    async def go():
+        meter = device_module.AppMeter(Quiet(), APP)
+        starting = asyncio.create_task(meter.start())
+        await asyncio.sleep(0.05)
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert stopped == ["sampling closed"] and meter._task is None
+    run(go)
+
+
+def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_report_is_told():
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        await opened(d)
+        device = d.session.device
+        device.crash_error = ConnectionLost("tunnel dropped")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "crash", {})
+        assert e.value.code == "reconnecting"
+        device.crash_error = RuntimeError("AFC error: permission denied")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "crash", {})
+        assert e.value.code == "unsupported" and "permission denied" in str(e.value)
+        device.crash_error = None
+        device.crash_unreadable = 1  # a half-written report: skipped, said so, and not taken for "no crash"
+        r = await d.run_tool("a", "crash", {})
+        assert r["text"].startswith("No crash report for") and "1 crash report(s) of this app couldn't be read" in r["text"]
+        device.crashes["Example"] = [FakeReport()]
+        r = await d.run_tool("a", "crash", {})
+        assert "Crash of " in r["text"] and "couldn't be read" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_performance_refuses_an_app_that_came_to_the_front_after_the_check():
+    from tapwright.performance import Measurement
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        session = d.session
+        reads = []
+
+        async def front():
+            reads.append(1)
+            return APP if len(reads) == 1 else "com.bank.app"  # another app comes forward between the two reads
+        session.foreground_bundle_id = front
+        session.device.measurement = Measurement(memory_mb=[1.0])
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "performance", {"seconds": 1}, scope=Scope((APP,)))
+        assert e.value.code == "not_allowed" and session.device.metered == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_late_crash_note_goes_to_its_own_client_while_it_drives_that_app():
+    async def go():
+        d = tuned(make())
+        d.crash_polls = 1
+        d.session.installed.append({"bundle_id": "com.other.app", "name": "Other", "version": "1", "build": "1",
+                                    "executable": "Other"})
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        die(d)  # no report yet
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "a" in d._crash_pending
+        d.session.device.crashes["Example"] = [FakeReport(when=datetime.datetime.now().replace(microsecond=0))]
+        # another agent, given only another app: no note, and the note is still waiting for its own client
+        r = await d.run_tool("b", "apps", {}, scope=Scope(("com.other.app",)))
+        assert "crashed" not in r["text"] and "a" in d._crash_pending
+        # the same client, while another app is in front: it waits
+        d.session.app, d.session.foreground = ("Other", "com.other.app"), "com.other.app"
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert "crashed" not in r["text"] and "a" in d._crash_pending
+        # and when it is back with the stopped app (or the home screen), it gets the note, once
+        d.session.app, d.session.foreground = ("Home screen", SPRINGBOARD), SPRINGBOARD
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert "Note: the app crashed at " in r["text"] and "a" not in d._crash_pending
+        await finish(stop, task)
+    run(go)
+
+
+def test_nan_and_infinity_are_bad_params_and_a_stored_line_is_capped():
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        await opened(d)
+        for bad in ({"since": float("inf")}, {"since": float("nan")}, {"limit": float("inf")}, {"limit": float("nan")}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "logs", bad)
+            assert e.value.code == "bad_params"
+        await finish(stop, task)
+    run(go)
+    ring = LogRing()
+    ring.add(LogEntry(BASE, "info", "x" * 5000))
+    assert len(ring.entries[0].text) == diagnostics.LOG_TEXT_KEPT == 2000
+    assert diagnostics.line_of(ring.entries[0]).endswith("…(+1700)")  # the answer still cuts at 300
+
+
+def test_the_cli_pulls_a_crash_only_for_the_crash_note_not_for_words_in_the_message(tmp_path, monkeypatch):
+    calls = []
+
+    def call(tool, args, client_id, timeout=120.0):
+        calls.append(tool)
+        raise client.DaemonError("expect_failed", "Ran 0 of 1 steps; stopped at step 1 (tap id=save): text \"x\" didn't "
+                                 "appear.\nLogs (since step 1):\n12:00:01.123 error the app crashed while saving, retrying")
+
+    monkeypatch.setattr(client, "call", call)
+    monkeypatch.setattr(client, "set_scope", lambda apps, dedicated=False: None)
+    a = argparse.Namespace(files=[write_script(tmp_path, "words")], junit=None, apps=APP, dedicated=False)
+    assert cli.replay(a) == 1 and calls == ["replay"]
 
 
 # ---- the CLI ----

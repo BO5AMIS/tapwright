@@ -52,6 +52,10 @@ class Measurement:
     memory_mb: list[float] = dataclasses.field(default_factory=list)
     cpu_pct: list[float] = dataclasses.field(default_factory=list)
     fps: list[float] = dataclasses.field(default_factory=list)
+    failed: str | None = None  # why sampling stopped before the call ended (the samples are then only part of the window)
+
+
+SAMPLING_STOPPED = "sampling stopped early ({why}); the numbers cover only part of the window."
 
 
 @dataclasses.dataclass

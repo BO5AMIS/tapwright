@@ -18,6 +18,7 @@ LOG_RING = 2000  # entries kept per app while the daemon runs
 LOG_LEVELS = ("info", "warning", "error")  # weakest first: a level asks for itself and everything above
 LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT = 100, 500
 LOG_TEXT_CUT = 300  # characters of one entry's text shown
+LOG_TEXT_KEPT = 2000  # characters of one entry's text kept (os_trace lines can be 64 KB; 2000 of them per app would be too much)
 FAILURE_LOGS = 20  # entries a failed step adds
 # os_log has no "warning": its levels are default/info/debug, error and fault. Errors and faults are `error`. A line
 # logged at the default level (NSLog, print, React Native's console in a release build) is `warning` when its own words
@@ -29,6 +30,7 @@ LATEST = "Latest: {ms}"
 FAILURE_HEAD = "Logs (since step {n}):"
 LOGS_NO_APP = "no app under test yet: open_app one first, then logs shows its log."
 LOGS_NO_SOURCE = "this phone can't stream an app's log (no log service)."
+LOG_STREAM_FAILS = 5  # tries in a row to start an app's log stream, then the daemon stops trying and logs says so
 
 # ---- crashes ----
 CRASH_RECENT = 5  # `all: true` shows this many
@@ -42,6 +44,7 @@ NONE_SINCE = "No crash report for {app} since the session began."
 NONE_AT_ALL = "No crash report for {app}."  # with all: true, which looks at the last 5 whenever they were
 CRASH_NO_EXECUTABLE = ("{app} has no executable name on record (only apps you installed have one), so its crash "
                        "reports can't be told from other apps'.")
+CRASH_UNREADABLE = "{n} crash report(s) of this app couldn't be read (half written, or a format this version doesn't know) and were skipped."
 SAVED = "Saved: {path}"
 CRASH_MARK = "*"  # in front of a frame of the app's own code
 FAILURE_CRASH_FILE = "Crash report: {path}"
@@ -68,7 +71,25 @@ class LogRing:
         self.entries: deque[LogEntry] = deque(maxlen=size)
 
     def add(self, entry: LogEntry) -> None:
+        if len(entry.text) > LOG_TEXT_KEPT:
+            entry = dataclasses.replace(entry, text=entry.text[:LOG_TEXT_KEPT])
         self.entries.append(entry)
+
+    def newest(self) -> tuple[int, frozenset[str]] | None:
+        """(the newest entry's time, the texts of the entries at that time): where a stream that starts again for the
+        same process must pick up, so the phone's replay of what it already gave isn't added twice."""
+        if not self.entries:
+            return None
+        at = self.entries[-1].at
+        return at, frozenset(e.text[:LOG_TEXT_KEPT] for e in self.entries if e.at == at)
+
+    def add_unseen(self, entry: LogEntry, after: tuple[int, frozenset[str]] | None) -> bool:
+        """Add `entry` unless `after` (from newest()) says it is already here: older than the newest entry, or the
+        same time and text as one. True when it was added."""
+        if after is not None and (entry.at < after[0] or (entry.at == after[0] and entry.text[:LOG_TEXT_KEPT] in after[1])):
+            return False
+        self.add(entry)
+        return True
 
     def latest(self) -> int | None:
         return self.entries[-1].at if self.entries else None
@@ -157,6 +178,14 @@ class CrashInfo:
     remote: str = ""  # its path on the phone, for pull
 
 
+@dataclasses.dataclass
+class CrashSearch:
+    """What a look at the phone's crash folder found: the app's reports (newest first) and how many reports of its
+    file name couldn't be read (they are passed over, and the answer says so)."""
+    reports: list
+    unreadable: int = 0
+
+
 def _safely(fn: Callable[[], object], default=None):
     try:
         return fn()
@@ -192,6 +221,23 @@ def _frame_text(frame) -> str:
     return f"+{offset}" if offset is not None else "?"
 
 
+def _when_of(report) -> datetime.datetime | None:
+    """The crash's time with the report's own UTC offset when the header has one (`2026-11-12 10:10:10.00 +0300`):
+    pycrashreport drops the offset, and the phone's zone isn't this computer's. Without an offset, the naive time."""
+    meta = _safely(lambda: report._metadata)
+    raw = meta.get("timestamp") if isinstance(meta, dict) else None
+    if isinstance(raw, str):
+        text, _, zone = raw.strip().rpartition(" ")
+        if re.fullmatch(r"[+-]\d{4}", zone):
+            try:
+                parsed = datetime.datetime.strptime(f"{text} {zone}", "%Y-%m-%d %H:%M:%S.%f %z")
+            except ValueError:
+                parsed = None
+            if parsed is not None:
+                return parsed
+    return _safely(lambda: report.timestamp)
+
+
 def describe_crash(report, executable: str) -> CrashInfo:
     """A parsed crash report (pycrashreport's) as the few facts `crash` shows."""
     kind = str(_safely(lambda: report.exception_type) or "unknown exception")
@@ -207,7 +253,7 @@ def describe_crash(report, executable: str) -> CrashInfo:
         if n < CRASH_FRAMES:
             shown.append(f"{n:>2} {CRASH_MARK if mine else ' '} {text}")
     where = top_app or top_any
-    return CrashInfo(_safely(lambda: report.timestamp), kind, _reason_of(report), tuple(shown),
+    return CrashInfo(_when_of(report), kind, _reason_of(report), tuple(shown),
                      f"{kind} in {where}" if where else kind,
                      posixpath.basename(str(_safely(lambda: report.filename) or "")),
                      str(_safely(lambda: report.filename) or ""))
@@ -233,12 +279,21 @@ def crash_lines(info: CrashInfo, app: str) -> list[str]:
 
 
 def crash_pattern(executable: str) -> str:
-    """The reports' file names for an executable: `Name-2026-11-12-101010.ips` (a retired report has no folder here)."""
-    return rf"^{re.escape(executable)}[-.].*\.ips$"
+    """The reports' file names for an executable: `Name-2026-11-12-101010.ips` (a retired report has no folder here).
+    The name is followed by the date and nothing else: `Name-Dev-…` is another process's, and `Name.cpu_resource-…` is
+    a resource report, not a crash."""
+    return rf"^{re.escape(executable)}-\d{{4}}-\d\d-\d\d-\d{{6}}(?:[-.]\d+)?\.ips$"
 
 
 def newer(info: CrashInfo, than: datetime.datetime) -> bool:
-    return info.when is not None and info.when >= than - datetime.timedelta(seconds=CRASH_SLACK)
+    """Is the crash at `than` or later (a little earlier counts: the clocks differ)? A time with the report's own
+    offset is compared as the moment it is; a naive one is taken as this computer's local time."""
+    if info.when is None:
+        return False
+    when = info.when
+    if (when.tzinfo is None) != (than.tzinfo is None):
+        when, than = when.astimezone(), than.astimezone()  # a naive time is local time to astimezone
+    return when >= than - datetime.timedelta(seconds=CRASH_SLACK)
 
 
 def crash_folder(bundle_id: str) -> Path:
@@ -253,6 +308,27 @@ def safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", base).lstrip(".") or "crash.ips"
 
 
-def only_mine(reports: Iterable, executable: str) -> list:
-    """The reports whose process is this app's executable (a name pattern matched a few others')."""
-    return [r for r in reports if _safely(lambda: r.name) in (executable, None)]
+CRASH_BUG_TYPES = ("109", "309")  # iOS's user-mode crash report types; cpu_resource, wakeups_resource and the like aren't crashes
+
+
+def _bundle_ids_in(report) -> list[str]:
+    """The bundle ids a report names: `bundleID` in the first JSON line of an .ips file, and `bundleInfo` inside it."""
+    found: list[str] = []
+    meta = _safely(lambda: report._metadata)
+    if isinstance(meta, dict) and isinstance(meta.get("bundleID"), str):
+        found.append(meta["bundleID"])
+    data = _safely(lambda: report._data)
+    info = data.get("bundleInfo") if isinstance(data, dict) else None
+    if isinstance(info, dict) and isinstance(info.get("CFBundleIdentifier"), str):
+        found.append(info["CFBundleIdentifier"])
+    return found
+
+
+def only_mine(reports: Iterable, executable: str, bundle_id: str | None = None) -> list:
+    """The crash reports of this app: its process is named exactly `executable` (a name that can't be read is not
+    this app's), the report is a crash and not a resource report, and the bundle id inside it, when it has one, is the
+    app's (two installed apps can share an executable name). Anything else is dropped."""
+    return [r for r in reports
+            if _safely(lambda: r.name) == executable
+            and _safely(lambda: r.bug_type_str) in CRASH_BUG_TYPES
+            and all(b == bundle_id for b in _bundle_ids_in(r) if bundle_id is not None)]

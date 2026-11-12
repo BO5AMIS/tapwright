@@ -91,9 +91,15 @@ class FakeReport:
     """A parsed crash report, with the fields of pycrashreport's UserModeCrashReport that Tapwright reads."""
 
     def __init__(self, name="Example", when=None, kind="EXC_BAD_ACCESS (SIGSEGV)", subtype="KERN_INVALID_ADDRESS at 0x0",
-                 frames=None, filename="/Example-2026-11-12-101010.ips", info=None) -> None:
+                 frames=None, filename="/Example-2026-11-12-101010.ips", info=None, bug_type="309", bundle_id=None,
+                 stamp=None) -> None:
         import datetime
         self.name, self.timestamp = name, when or datetime.datetime.now()
+        self.bug_type_str = bug_type  # 309 and 109 are crashes; 385 and the like are resource reports
+        # the .ips header (its first JSON line): `bundleID`, and `timestamp` with the phone's UTC offset
+        self._metadata = {"name": name, "bug_type": bug_type, **({"bundleID": bundle_id} if bundle_id else {}),
+                          **({"timestamp": stamp} if stamp else {})}
+        self._data = {}
         self.exception_type, self.exception_subtype, self.filename = kind, subtype, filename
         self.application_specific_information = info
         app = "/private/var/containers/Bundle/Application/X/Example.app/Example"
@@ -136,6 +142,11 @@ class FakeDevice:
         self.crashes: dict[str, list] = {}  # executable -> reports, newest first
         self.crash_files: dict[str, bytes] = {}  # path on the phone -> the whole report
         self.crash_asks = 0
+        self.stream_error: Exception | None = None  # app_log_stream raises this when asked
+        self.stream_closed: list[int] = []  # the pids whose log streams have ended
+        self.replay: dict[int, list] = {}  # pid -> entries every new stream of it gives first (the phone's replay)
+        self.crash_error: Exception | None = None  # crash_reports / crash_file raise this
+        self.crash_unreadable = 0  # how many reports crash_reports says it passed over
         self.app_pids_calls = 0
 
     async def app_pids(self, bundle_id: str) -> list[int]:
@@ -148,16 +159,33 @@ class FakeDevice:
         self.streams.setdefault(pid, asyncio.Queue()).put_nowait((at, raw, text, pid if from_pid is None else from_pid))
 
     async def app_log_stream(self, pid: int):
+        """The pid's stream: what the phone replays first (`replay`), then what `emit` gives; a None put in the queue
+        ends it, as a relay that closes does. `stream_error` makes it fail at once, as a phone without the service."""
         self.streamed.append(pid)
+        if self.stream_error is not None:
+            raise self.stream_error
         queue = self.streams.setdefault(pid, asyncio.Queue())
-        while True:
-            yield await queue.get()
+        try:
+            for entry in self.replay.get(pid, []):
+                yield entry
+            while True:
+                entry = await queue.get()
+                if entry is None:
+                    return
+                yield entry
+        finally:
+            self.stream_closed.append(pid)
 
-    async def crash_reports(self, executable: str, count: int) -> list:
+    async def crash_reports(self, executable: str, count: int, bundle_id: str | None = None):
+        from tapwright.diagnostics import CrashSearch
         self.crash_asks += 1
-        return list(self.crashes.get(executable, []))[:count]
+        if self.crash_error is not None:
+            raise self.crash_error
+        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable)
 
     async def crash_file(self, filename: str) -> bytes:
+        if self.crash_error is not None:
+            raise self.crash_error
         return self.crash_files[filename]
 
     async def open_stream(self):

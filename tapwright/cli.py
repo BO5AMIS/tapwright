@@ -509,7 +509,7 @@ def replay(a) -> int:
             print(f"{f}: Error {e.code}: {e}")
             kind = "error" if e.code in START_CODES and not str(e).startswith("Ran ") else "failed"
             message = f"{e.code}: {e}"
-            if str(e).startswith("Ran ") and diagnostics.CRASHED in str(e):
+            if str(e).startswith("Ran ") and any(ln.startswith("Note: " + diagnostics.CRASHED) for ln in str(e).splitlines()):
                 # the app crashed: its report is pulled next to the script and named (AGENT-TOOLS §15.4)
                 if saved := pull_crash_beside(path):
                     message += "\n" + diagnostics.FAILURE_CRASH_FILE.format(path=saved)

@@ -11,10 +11,13 @@ over:
 import asyncio
 import json
 import os
+import posixpath
+import re
 import sys
 import time
 
 from . import store
+from .diagnostics import CrashSearch, crash_pattern, only_mine
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
@@ -344,16 +347,33 @@ class Device:
         finally:
             await self._close(service)
 
-    async def crash_reports(self, executable: str, count: int) -> list:
-        """The newest `count` crash reports of the process named `executable` (parsed; newest first)."""
+    async def crash_reports(self, executable: str, count: int, bundle_id: str | None = None) -> CrashSearch:
+        """The newest `count` crash reports of the app (parsed; newest first): its process is named `executable`
+        and, when a report names one, its bundle id is `bundle_id`. Each report is read on its own: one that can't be
+        parsed (half written, as the app has just died) is counted in `unreadable` and passed over, never taken for
+        "no crash". Errors of the phone's file service are not caught here."""
         from pymobiledevice3.services.crash_reports import CrashReportsManager
-        from .diagnostics import crash_pattern, only_mine
+        pattern = re.compile(crash_pattern(executable))
+        found: list = []
+        unreadable = 0
         async with CrashReportsManager(self.rsd) as manager:
-            try:
-                found = await manager.parse_latest("/", match=[crash_pattern(executable)], count=count)
-            except ValueError:  # none match
-                return []
-        return only_mine(found, executable)
+            candidates = []
+            async for entry in manager.afc.dirlist("/", depth=1):
+                if entry == "/" or not pattern.search(posixpath.basename(entry)):
+                    continue
+                stat = await manager.afc.stat(entry)
+                if stat.get("st_ifmt") == "S_IFREG":
+                    candidates.append((stat["st_mtime"].timestamp(), entry))
+            for _, path in sorted(candidates, reverse=True)[:count + 10]:
+                if len(found) >= count:
+                    break
+                try:
+                    report = await manager.parse(path)
+                except (ValueError, KeyError, TypeError, AttributeError, IndexError):  # not a readable report
+                    unreadable += 1
+                    continue
+                found += only_mine([report], executable, bundle_id)
+        return CrashSearch(found, unreadable)
 
     async def crash_file(self, filename: str) -> bytes:
         """The whole of one crash report, as it is on the phone."""
@@ -560,14 +580,19 @@ class AppMeter:
         self._failed: Exception | None = None
 
     async def start(self) -> None:
+        """Begin sampling. However this ends (too slow, a service that won't start, or the call cancelled while it
+        waits), no sampling task is left running with its instrument sessions open."""
         self._task = asyncio.create_task(self._run(), name="app-meter")
         try:
-            await asyncio.wait_for(self._ready.wait(), METER_START)
-        except asyncio.TimeoutError:
-            await self.stop()
-            raise DeviceError("the phone's instruments service didn't start sampling in time") from None
-        if self._failed is not None:
-            raise DeviceError(f"couldn't sample the app: {self._failed}") from self._failed
+            try:
+                await asyncio.wait_for(self._ready.wait(), METER_START)
+            except asyncio.TimeoutError:
+                raise DeviceError("the phone's instruments service didn't start sampling in time") from None
+            if self._failed is not None:
+                raise DeviceError(f"couldn't sample the app: {self._failed}") from self._failed
+        except BaseException:
+            await asyncio.shield(self.stop())
+            raise
 
     async def stop(self):
         """End the sampling; the Measurement of what was seen."""
@@ -608,6 +633,7 @@ class AppMeter:
             raise
         except Exception as e:
             self._failed = e
+            self.measurement.failed = str(e) or type(e).__name__  # stop() hands this on: the numbers are partial
             self.device.log(f"performance: sampling stopped: {e}")
         finally:
             self._ready.set()

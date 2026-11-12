@@ -225,6 +225,9 @@ def test_no_app_in_front_and_a_meter_that_cannot_start_are_told_plainly():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "performance", {"seconds": 1})
         assert e.value.code == "unsupported" and "no instruments" in str(e.value)
+        with pytest.raises(Refused) as e:  # a launch that can't be measured leaves the app open (review 2026-11-12)
+            await d.run_tool("a", "performance", {"launch": True})
+        assert e.value.code == "unsupported" and s.closed == []
         await finish(stop, task)
     run(go)
 
