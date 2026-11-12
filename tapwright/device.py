@@ -323,6 +323,10 @@ class Device:
                 await control.kill(pid)
         return len(pids)
 
+    def meter(self, bundle_id: str) -> "AppMeter":
+        """A meter for that app's own process (`performance`): start() it, do the thing, stop() it."""
+        return AppMeter(self, bundle_id)
+
     async def wda_alive(self) -> bool:
         try:
             await self.http("GET", "/status", timeout=3)
@@ -493,3 +497,99 @@ class Device:
         await self._stop_runner()
         if self.tunnel:
             await self.tunnel.aclose()
+
+
+PID_REFRESH = 2.0  # seconds between looks at which process ids the app has (it has new ones after a launch)
+PID_RETRY = 0.25  # the same while no sample has shown the app's process (it is starting)
+METER_START = 15.0  # seconds the instruments service may take to start sampling
+MB = 1024 * 1024
+
+
+class AppMeter:
+    """Samples one app's own process over the developer tunnel (`performance`): memory (physical footprint) and CPU
+    from sysmontap, and the display's frame rate from graphics. The process is found by bundle id from the phone's
+    process list, and again after a launch (a new process has a new id). Every number comes from a process whose
+    bundle id is the app's: nothing of another process is kept. A service that can't start leaves its numbers
+    out (an iOS without the graphics service, say), and the answer says so."""
+
+    def __init__(self, device: "Device", bundle_id: str) -> None:
+        from .performance import Measurement
+        self.device, self.bundle_id = device, bundle_id
+        self.measurement = Measurement()
+        self._task: asyncio.Task | None = None
+        self._ready = asyncio.Event()
+        self._failed: Exception | None = None
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._run(), name="app-meter")
+        try:
+            await asyncio.wait_for(self._ready.wait(), METER_START)
+        except asyncio.TimeoutError:
+            await self.stop()
+            raise DeviceError("the phone's instruments service didn't start sampling in time") from None
+        if self._failed is not None:
+            raise DeviceError(f"couldn't sample the app: {self._failed}") from self._failed
+
+    async def stop(self):
+        """End the sampling; the Measurement of what was seen."""
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return self.measurement
+
+    async def _run(self) -> None:
+        from contextlib import AsyncExitStack
+        from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.graphics import Graphics
+        from pymobiledevice3.services.dvt.instruments.sysmontap import Sysmontap
+        from .performance import SAMPLE_MS
+        try:
+            async with AsyncExitStack() as stack:
+                dvt = await stack.enter_async_context(DvtProvider(self.device.rsd))
+                info = await stack.enter_async_context(DeviceInfo(dvt))
+                tap = await Sysmontap.create(dvt, SAMPLE_MS)
+                await stack.enter_async_context(tap)
+                jobs = [asyncio.create_task(self._processes(tap, info))]
+                try:
+                    graphics = Graphics(dvt)
+                    await stack.enter_async_context(graphics)
+                    jobs.append(asyncio.create_task(self._frames(graphics)))
+                except Exception as e:  # frames are left out; memory and CPU still count
+                    self.device.log(f"performance: no frame rate ({e})")
+                self._ready.set()
+                try:
+                    await asyncio.gather(*jobs)
+                finally:
+                    for job in jobs:
+                        job.cancel()
+                    await asyncio.gather(*jobs, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._failed = e
+            self.device.log(f"performance: sampling stopped: {e}")
+        finally:
+            self._ready.set()
+
+    async def _processes(self, tap, info) -> None:
+        pids: set[int] = set()
+        looked = -PID_REFRESH
+        async for rows in tap.iter_processes():
+            now = time.monotonic()
+            ours = [r for r in rows if r.get("pid") in pids]  # only the app's own process, whatever else is listed
+            if now - looked >= (PID_REFRESH if ours else PID_RETRY):  # new process ids come with a launch
+                pids = {p["pid"] for p in await info.proclist() if p.get("bundleIdentifier") == self.bundle_id}
+                looked = now
+                ours = [r for r in rows if r.get("pid") in pids]
+            memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
+            cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
+            if memory:
+                self.measurement.memory_mb.append(sum(memory) / MB)
+            if cpu:
+                self.measurement.cpu_pct.append(float(sum(cpu)))
+
+    async def _frames(self, graphics) -> None:
+        async for fps in graphics.fps():
+            self.measurement.fps.append(float(fps))
