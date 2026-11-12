@@ -18,8 +18,9 @@
   tapwright view     open the live view in your browser (starts the daemon if needed)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
+                     [--policy FILE | --no-policy]
                      connect an agent in one go: register the MCP server and install the skill
-  tapwright replay FILE|NAME... [--junit OUT] [--dedicated]
+  tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated) [--junit OUT]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
 
@@ -464,7 +465,7 @@ def install(a) -> int:
     from . import connect
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
     try:
-        lines = connect.install(a.client, apps, a.dedicated, a.project)
+        lines = connect.install(a.client, apps, a.dedicated, a.project, policy=a.policy, no_policy=a.no_policy)
     except connect.ConnectError as e:
         print(f"tapwright install: {e}")
         return 1
@@ -481,6 +482,14 @@ def replay(a) -> int:
     script held, 1 when one stopped at a step, 2 when one couldn't start (no phone, no app, a bad file)."""
     from . import batch, client
     from .control import Refused
+    apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
+    if apps and a.dedicated:
+        print("tapwright replay: --apps and --dedicated can't be used together.")
+        return 2
+    if not apps and not a.dedicated:
+        # a script comes from anyone (a pull request, a download): its own `app` must not choose what it may drive
+        print("tapwright replay: pass --apps <bundle id> (the apps these scripts may use) or --dedicated")
+        return 2
     results: list[tuple[str, str, str, float]] = []  # (file, "ok" | "failed" | "error", message, seconds)
     for f in a.files:
         path = str(Path(f).resolve()) if Path(f).exists() else str(batch.named(f))  # a file, else a saved name
@@ -491,7 +500,7 @@ def replay(a) -> int:
             print(f"{f}: Error {e.code}: {e}")
             results.append((f, "error", str(e), 0.0))
             continue
-        client.set_scope([data["app"]] if data.get("app") else [], a.dedicated)
+        client.set_scope(apps, a.dedicated)
         try:
             answer = client.call("replay", {"path": path}, "cli-replay", timeout=200.0)
         except client.DaemonError as e:
@@ -573,8 +582,11 @@ def main() -> int:
     p = sub.add_parser("replay", help="run scripts saved with record (or written by hand) on the phone, with no agent")
     p.add_argument("files", nargs="+", metavar="FILE")
     p.add_argument("--junit", metavar="OUT", help="also write the results as JUnit XML, one test case per script")
+    p.add_argument("--apps", metavar="APP[,APP]",
+                   help="the apps the scripts may read and touch, as bundle ids or exact names (personal mode); "
+                        "a script's own `app` doesn't widen this")
     p.add_argument("--dedicated", action="store_true",
-                   help="the phone is kept for testing: let the scripts use any app (default: only each script's app)")
+                   help="the phone is kept for testing: let the scripts use any app (needed when --apps isn't given)")
     p = sub.add_parser("skill", help="the agent skill: how to test with Tapwright, for Claude Code, Codex and others")
     p.add_argument("action", choices=("install", "path"),
                    help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")
@@ -588,6 +600,11 @@ def main() -> int:
                    help="the phone is kept for testing: the agent may use every app on it")
     p.add_argument("--project", metavar="DIR",
                    help="for this project only: its .mcp.json (Claude Code) or .cursor/mcp.json (Cursor), and its skill folders")
+    rules = p.add_mutually_exclusive_group()
+    rules.add_argument("--policy", metavar="FILE",
+                       help="the safety policy file to register with the server (see tapwright mcp --policy). A rerun "
+                            "keeps the entry's earlier --policy, --no-policy and --screenshots unless this replaces them")
+    rules.add_argument("--no-policy", action="store_true", help="register the server with no words needing an OK or blocked")
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
                    help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")

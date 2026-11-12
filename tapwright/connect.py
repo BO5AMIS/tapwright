@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -26,9 +27,102 @@ class ConnectError(RuntimeError):
     """Something the user can fix; the message says what."""
 
 
-def mcp_args(apps: list[str], dedicated: bool) -> list[str]:
-    """The arguments after `tapwright`: `mcp --apps a,b` or `mcp --dedicated`."""
-    return ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
+def mcp_args(apps: list[str], dedicated: bool, policy: str | None = None, no_policy: bool = False,
+             screenshots: str | None = None) -> list[str]:
+    """The arguments after `tapwright`: `mcp --apps a,b` or `mcp --dedicated`, then the policy and screenshot flags."""
+    args = ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
+    if policy:
+        args += ["--policy", policy]
+    if no_policy:
+        args.append("--no-policy")
+    if screenshots:
+        args += ["--screenshots", screenshots]
+    return args
+
+
+def existing_flags(args: list[str]) -> tuple[str | None, bool, str | None]:
+    """(policy file, no_policy, screenshots dir) of an existing `tapwright mcp` argument list."""
+    policy: str | None = None
+    screenshots: str | None = None
+    for i, a in enumerate(args):
+        if a == "--policy" and i + 1 < len(args):
+            policy = args[i + 1]
+        elif a.startswith("--policy="):
+            policy = a.split("=", 1)[1]
+        elif a == "--screenshots" and i + 1 < len(args):
+            screenshots = args[i + 1]
+        elif a.startswith("--screenshots="):
+            screenshots = a.split("=", 1)[1]
+    return policy, "--no-policy" in args, screenshots
+
+
+def merge_flags(old: list[str] | None, apps: list[str], dedicated: bool, policy: str | None,
+                no_policy: bool) -> tuple[list[str], list[str]]:
+    """(new args, notes). Flags of the existing entry that this run doesn't set are kept. When this run's flag
+    replaces an earlier policy, a note says what was replaced; a policy is never dropped without one."""
+    old_policy, old_no_policy, old_shots = existing_flags(old or [])
+    notes: list[str] = []
+    if policy or no_policy:
+        if old_policy and old_policy != policy:
+            notes.append(f"replaced the earlier --policy {old_policy}")
+        if old_no_policy and not no_policy:
+            notes.append("replaced the earlier --no-policy")
+    else:
+        policy, no_policy = old_policy, old_no_policy
+    if policy and no_policy:  # a hand-edited entry with both: keep the stricter, say so
+        no_policy = False
+        notes.append("the existing entry had both --policy and --no-policy; kept --policy")
+    return mcp_args(apps, dedicated, policy, no_policy, old_shots), notes
+
+
+def _json_args(path: Path, *keys: str) -> list[str] | None:
+    """The `args` list at `path`'s JSON object under `keys`, or None when the file, the entry or the list isn't there."""
+    try:
+        return _args_in_json(path.read_text(encoding="utf-8"), *keys)
+    except OSError:
+        return None
+
+
+def _json_args_of(text: str) -> list[str] | None:
+    return _args_in_json(text, "mcpServers", NAME, "args")
+
+
+def _args_in_json(text: str, *keys: str) -> list[str] | None:
+    try:
+        node: object = json.loads(text)
+    except ValueError:
+        return None
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return [a for a in node if isinstance(a, str)] if isinstance(node, list) else None
+
+
+def claude_existing_args(project: str | None, home: Path | None) -> list[str] | None:
+    """The args of Claude Code's current tapwright entry: the project's `.mcp.json`, else the user's `~/.claude.json`."""
+    if project:
+        return _json_args(Path(project).expanduser() / ".mcp.json", "mcpServers", NAME, "args")
+    return _json_args((home or Path.home()) / ".claude.json", "mcpServers", NAME, "args")
+
+
+def codex_existing_args(text: str) -> list[str] | None:
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10: read the args line instead
+        m = re.search(r"^\s*args\s*=\s*(\[[^\n]*\])", text[text.find("[mcp_servers.tapwright]"):], re.M) \
+            if "[mcp_servers.tapwright]" in text else None
+        try:
+            found = json.loads(m.group(1)) if m else None
+        except ValueError:
+            return None
+        return [a for a in found if isinstance(a, str)] if isinstance(found, list) else None
+    try:
+        entry = tomllib.loads(text).get("mcp_servers", {}).get(NAME, {})
+    except tomllib.TOMLDecodeError:
+        return None
+    args = entry.get("args") if isinstance(entry, dict) else None
+    return [a for a in args if isinstance(a, str)] if isinstance(args, list) else None
 
 
 def check_scope(apps: list[str], dedicated: bool) -> None:
@@ -121,21 +215,33 @@ def _check_toml(text: str) -> None:
         raise ConnectError(f"the Codex config would not be valid TOML after the edit ({e}); nothing was changed.") from e
 
 
+ArgsFor = Callable[[list[str] | None], list[str]]  # the entry's existing args (None: no entry) -> the args to write
+
+
 def _write_atomically(path: Path, text: str) -> None:
+    """Replace the file in one step, keeping its permission mode, and writing the target of a symlink."""
+    path = Path(os.path.realpath(path))  # a symlinked config stays a symlink; its target is rewritten
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tapwright-tmp")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    except OSError:
+        mode = None
+    tmp.touch()
+    if mode is not None:
+        os.chmod(tmp, mode)  # before the text goes in: a 0600 file is never briefly readable by others
     tmp.write_text(text, encoding="utf-8", newline="\n")
     os.replace(tmp, path)
 
 
-def install_codex(args: list[str], config: Path) -> str:
+def install_codex(args_for: ArgsFor, config: Path) -> str:
     try:
         old = config.read_text(encoding="utf-8") if config.exists() else ""
     except OSError as e:
         raise ConnectError(f"can't read {config}: {e}") from e
     if old:
         _check_toml(old)  # never edit a file that already isn't valid
-    new = update_codex_toml(old, args)
+    new = update_codex_toml(old, args_for(codex_existing_args(old) if old else None))
     _check_toml(new)
     _write_atomically(config, new)
     return f"Codex: wrote [mcp_servers.tapwright] in {config}. Start a new Codex session to pick it up."
@@ -156,12 +262,13 @@ def update_cursor_json(text: str, args: list[str]) -> str:
     return json.dumps(data, indent=2) + "\n"
 
 
-def install_cursor(args: list[str], config: Path) -> str:
+def install_cursor(args_for: ArgsFor, config: Path) -> str:
     try:
         old = config.read_text(encoding="utf-8") if config.exists() else ""
     except OSError as e:
         raise ConnectError(f"can't read {config}: {e}") from e
-    _write_atomically(config, update_cursor_json(old, args))
+    existing = _json_args_of(old)
+    _write_atomically(config, update_cursor_json(old, args_for(existing)))
     return f"Cursor: wrote mcpServers.tapwright in {config}. Restart Cursor, or toggle the server in its MCP settings."
 
 
@@ -178,20 +285,38 @@ def config_path(client: str, project: str | None, home: Path | None = None) -> P
 
 
 def install(client: str, apps: list[str], dedicated: bool, project: str | None = None, home: Path | None = None,
-            runner: Runner = _run, which: Callable[[str], str | None] = shutil.which) -> list[str]:
-    """Register the server with `client` and install the skill. Returns the lines to print."""
+            runner: Runner = _run, which: Callable[[str], str | None] = shutil.which,
+            policy: str | None = None, no_policy: bool = False) -> list[str]:
+    """Register the server with `client` and install the skill. Returns the lines to print. A rerun keeps the
+    `--policy`, `--no-policy` and `--screenshots` of the existing entry that this run doesn't set."""
     from . import skills
     check_scope(apps, dedicated)
-    args = mcp_args(apps, dedicated)
+    if policy and no_policy:
+        raise ConnectError("--policy and --no-policy can't be used together.")
+    if policy:
+        policy = str(Path(policy).expanduser().resolve())  # the agent starts the server from another folder
+        if not Path(policy).is_file():
+            raise ConnectError(f"the policy file {policy} doesn't exist; nothing was changed.")
+    chosen: list[list[str]] = []
+    notes: list[str] = []
+
+    def args_for(old: list[str] | None) -> list[str]:
+        args, notes[:] = merge_flags(old, apps, dedicated, policy, no_policy)
+        chosen[:] = [args]
+        return args
+
     if client == "claude":
+        args = args_for(claude_existing_args(project, home))
         lines = [install_claude(args, project, runner, which)]
     elif client == "codex":
-        lines = [install_codex(args, config_path("codex", project, home))]
+        lines = [install_codex(args_for, config_path("codex", project, home))]
     elif client == "cursor":
-        lines = [install_cursor(args, config_path("cursor", project, home))]
+        lines = [install_cursor(args_for, config_path("cursor", project, home))]
     else:
         raise ConnectError(f"unknown client {client!r}; the clients are {', '.join(CLIENTS)}")
+    args = chosen[0]
     lines.append(f"  server command: tapwright {' '.join(args)}")
+    lines.extend(f"  note: {n}" for n in notes)
     if project and client == "codex":
         lines.append("  (Codex reads one config, in your home folder, so --project only decides where the skill goes.)")
     try:

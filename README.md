@@ -139,7 +139,7 @@ repository too.
 | `open_url` | deep links |
 | `viewer` | the link to the live view |
 | `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once |
-| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE` runs it in CI with no agent (exit code, `--junit`) |
+| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`) |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
@@ -159,8 +159,10 @@ step with the check that proves it worked:
 ]}
 ```
 
-With `record`, what it does is saved in that same format. `tapwright replay sign-up.json --junit
-out.xml` runs the file again on the phone with no agent: it reopens the app, stops at the first step
+With `record`, what it does is saved in that same format. `tapwright replay sign-up.json --apps
+com.example.app --junit out.xml` runs the file again on the phone with no agent (`--apps` names the apps
+the script may use, or `--dedicated` on a phone kept for testing; the script's own `app` doesn't widen
+it, and without either it refuses): it reopens the app, stops at the first step
 that fails and says which, and exits 0, 1 (a step failed) or 2 (it couldn't start). Tapline runs the
 same files inside your app.
 

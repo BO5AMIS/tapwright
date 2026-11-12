@@ -20,8 +20,13 @@ first. The interface is AGENT-TOOLS 1.8, shared with Tapline.
 **From a session to a test**
 - `record` saves what the agent does as a script (the agent-tools script format Tapline shares); `replay`
   runs it again.
-- `tapwright replay FILE… [--junit OUT]` runs scripts with no agent, for CI: each reopens its app and
-  waits for it, exit 0 when all held, 1 when one stopped, 2 when one couldn't start.
+- `tapwright replay FILE… (--apps ID[,ID] | --dedicated) [--junit OUT]` runs scripts with no agent, for CI: each
+  reopens its app and waits for it, exit 0 when all held, 1 when one stopped, 2 when one couldn't start. The apps
+  the scripts may use come from `--apps` (or `--dedicated`), never from a script's own `app`; with neither it
+  refuses and exits 2.
+- `tapwright install` takes `--policy FILE` and `--no-policy`. A rerun keeps the entry's `--policy`, `--no-policy`
+  and `--screenshots`, and says so when it replaces a policy. The config file keeps its permission mode, and a
+  symlinked config is written through.
 
 **Find problems for the developer**
 - `audit`: Apple's own XCTest accessibility audit of the screen (contrast, tap targets under 44x44 pt,

@@ -165,3 +165,126 @@ def test_the_command_refuses_and_prints(tmp_path, capsys, monkeypatch):
 def test_install_command_is_listed():
     out = subprocess.run([sys.executable, "-m", "tapwright", "install", "--help"], capture_output=True, text=True)
     assert out.returncode == 0 and all(f in out.stdout for f in ("--client", "--apps", "--dedicated", "--project"))
+
+
+# ---------- M5: policy flags, kept flags, file modes, symlinks ----------
+
+def policy_file(tmp_path: Path) -> Path:
+    p = tmp_path / "policy.json"
+    p.write_text('{"confirm": [], "block": ["Delete"]}', encoding="utf-8")
+    return p
+
+
+def codex_args(config: Path) -> list[str]:
+    import re
+    m = re.search(r"^args = (\[.*\])$", config.read_text(encoding="utf-8"), re.M)
+    assert m is not None
+    return json.loads(m.group(1))
+
+
+def test_policy_and_no_policy_are_exclusive(tmp_path):
+    with pytest.raises(connect.ConnectError, match="together"):
+        connect.install("codex", ["a"], False, home=home(tmp_path), policy=str(policy_file(tmp_path)), no_policy=True)
+    with pytest.raises(connect.ConnectError, match="doesn't exist"):
+        connect.install("codex", ["a"], False, home=home(tmp_path), policy=str(tmp_path / "missing.json"))
+
+
+def test_install_passes_the_policy_through_for_every_client(tmp_path):
+    pol = str(policy_file(tmp_path).resolve())
+    fake = FakeClaude()
+    connect.install("claude", ["a"], False, home=home(tmp_path), runner=fake, which=lambda n: "claude", policy=pol)
+    assert fake.calls[1][0][-4:] == ["--apps", "a", "--policy", pol]
+    connect.install("codex", ["a"], False, home=home(tmp_path), policy=pol)
+    assert codex_args(home(tmp_path) / ".codex" / "config.toml") == ["mcp", "--apps", "a", "--policy", pol]
+    connect.install("cursor", ["a"], False, home=home(tmp_path), no_policy=True)
+    data = json.loads((home(tmp_path) / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+    assert data["mcpServers"]["tapwright"]["args"] == ["mcp", "--apps", "a", "--no-policy"]
+
+
+def test_a_rerun_keeps_policy_and_screenshots_for_codex(tmp_path):
+    h = home(tmp_path)
+    config = h / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('[mcp_servers.tapwright]\ncommand = "tapwright"\n'
+                      'args = ["mcp", "--apps", "old", "--policy", "/p/pol.json", "--screenshots", "/shots"]\n',
+                      encoding="utf-8")
+    lines = connect.install("codex", ["new"], False, home=h)
+    assert codex_args(config) == ["mcp", "--apps", "new", "--policy", "/p/pol.json", "--screenshots", "/shots"]
+    assert not any("replaced" in ln for ln in lines)
+
+
+def test_a_rerun_keeps_no_policy_for_cursor(tmp_path):
+    h = home(tmp_path)
+    config = h / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"mcpServers": {"tapwright": {"command": "tapwright",
+                                                               "args": ["mcp", "--apps", "x", "--no-policy"]}}}),
+                      encoding="utf-8")
+    connect.install("cursor", ["y"], False, home=h)
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["tapwright"]["args"] == [
+        "mcp", "--apps", "y", "--no-policy"]
+
+
+def test_replacing_a_policy_is_said_in_the_output(tmp_path):
+    h = home(tmp_path)
+    config = h / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('[mcp_servers.tapwright]\ncommand = "tapwright"\n'
+                      'args = ["mcp", "--apps", "a", "--policy", "/p/old.json"]\n', encoding="utf-8")
+    lines = connect.install("codex", ["a"], False, home=h, no_policy=True)
+    assert any("replaced the earlier --policy /p/old.json" in ln for ln in lines)
+    assert codex_args(config) == ["mcp", "--apps", "a", "--no-policy"]
+
+
+def test_claude_rerun_keeps_flags_from_the_existing_entry(tmp_path):
+    h = home(tmp_path)
+    (h / ".claude.json").write_text(json.dumps({"mcpServers": {"tapwright": {
+        "command": "tapwright", "args": ["mcp", "--apps", "a", "--policy", "/p/pol.json"]}}}), encoding="utf-8")
+    fake = FakeClaude()
+    connect.install("claude", ["b"], False, home=h, runner=fake, which=lambda n: "claude")
+    assert fake.calls[1][0][-5:] == ["mcp", "--apps", "b", "--policy", "/p/pol.json"]
+
+
+def test_merge_flags_unit():
+    old = ["mcp", "--dedicated", "--no-policy", "--screenshots=/s"]
+    args, notes = connect.merge_flags(old, [], True, None, False)
+    assert args == ["mcp", "--dedicated", "--no-policy", "--screenshots", "/s"] and notes == []
+    args, notes = connect.merge_flags(old, [], True, "/p.json", False)
+    assert args == ["mcp", "--dedicated", "--policy", "/p.json", "--screenshots", "/s"]
+    assert notes == ["replaced the earlier --no-policy"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_the_config_keeps_its_permission_mode(tmp_path):
+    h = home(tmp_path)
+    config = h / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('model = "x"\n', encoding="utf-8")
+    config.chmod(0o600)
+    connect.install("codex", ["a"], False, home=h)
+    assert (config.stat().st_mode & 0o777) == 0o600
+
+
+def test_a_symlinked_config_is_written_through(tmp_path):
+    h = home(tmp_path)
+    real = tmp_path / "dotfiles" / "config.toml"
+    real.parent.mkdir()
+    real.write_text('model = "x"\n', encoding="utf-8")
+    link = h / ".codex" / "config.toml"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks aren't allowed here")
+    connect.install("codex", ["a"], False, home=h)
+    assert link.is_symlink()
+    assert "[mcp_servers.tapwright]" in real.read_text(encoding="utf-8")
+
+
+def test_install_command_takes_policy_flags(monkeypatch):
+    out = subprocess.run([sys.executable, "-m", "tapwright", "install", "--help"], capture_output=True, text=True)
+    assert "--policy" in out.stdout and "--no-policy" in out.stdout
+    monkeypatch.setattr(sys, "argv", ["tapwright", "install", "--client", "cursor", "--apps", "a",
+                                      "--policy", "p.json", "--no-policy"])
+    with pytest.raises(SystemExit):
+        cli.main()
