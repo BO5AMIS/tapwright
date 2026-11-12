@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 (2026-11-12)
+
+- A touch that had to close the keyboard first failed with an internal error while a layer was open in front
+  (an AutoFill menu, a sheet). Found by an app's release-candidate pass on the phone.
+
 ## 1.1.0, "the Autopilot Update" (2026-11-12)
 
 Agents get more done per call, a session becomes a test you keep, and every touch that matters asks you
