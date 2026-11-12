@@ -204,5 +204,21 @@ def resolve(name: str | None, path: str | None) -> str:
     return str(file)
 
 
+def writable(path: str) -> Path:
+    """Where `record` may save: a `.json` file that doesn't exist yet or is an agent-tools script already. Never
+    another kind of file (an agent's recording must not overwrite what isn't a script)."""
+    file = Path(path)
+    if file.suffix.lower() != ".json":
+        raise Refused("bad_params", f"a script is saved as a .json file, not {file.name!r}")
+    if file.exists():
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            data = None
+        if not isinstance(data, dict) or data.get("format") != FORMAT:
+            raise Refused("bad_params", f"{file.name} exists and isn't an agent-tools script; pick another path")
+    return file
+
+
 def script(name: str, app: str | None, steps: list[dict]) -> dict:
     return {"format": FORMAT, "version": VERSION, "name": name, "app": app, "fresh": True, "steps": steps}

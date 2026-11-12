@@ -219,3 +219,39 @@ def test_a_switch_expectation_also_takes_true_and_false():
     switch = el("e4", "switch", "Alerts", "alerts", rect=(10, 400, 300, 44), checked=True)
     assert batch.has_value(switch, "on") and batch.has_value(switch, "true") and batch.has_value(switch, "True")
     assert not batch.has_value(switch, "false")
+
+
+def test_in_personal_mode_a_batch_needs_an_app_list_and_never_shows_another_apps_screen(tmp_path):
+    """Safety review H1/H4 (2026-11-12): a run's one answer, and a stopped batch's message, went out unchecked."""
+    from fakes import FakeSession
+    from tapwright.daemon import Scope
+
+    async def go():
+        s = FakeSession()
+        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
+        d = make(s)
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "record", {"start": True}, scope=Scope(()))
+        assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps")
+        mine = Scope(("com.example.app",))
+        s.foreground, s.app = "com.example.mail", ("Mail box", "com.example.mail")
+        s.tree = [el("e1", "text", "a private message", rect=(10, 100, 300, 20))]
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1}]}, scope=mine)
+        assert "a private message" not in r["text"] and "outside_apps: Mail box" in r["text"]
+        with pytest.raises(Refused) as e:  # a step refused there: its message shows nothing of the screen either
+            await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1},
+                                                    {"tool": "tap", "target": {"x": 5, "y": 5}}]}, scope=mine)
+        assert "a private message" not in str(e.value) and e.value.code == "not_allowed"
+        await finish(stop, task)
+    run(go)
+
+
+def test_record_saves_only_json_scripts_and_never_overwrites_another_file(tmp_path):
+    other = tmp_path / "notes.json"
+    other.write_text('{"mine": true}', "utf-8")
+    for bad in (str(tmp_path / "x.bat"), str(other)):
+        with pytest.raises(Refused) as e:
+            batch.writable(bad)
+        assert e.value.code == "bad_params"
+    assert batch.writable(str(tmp_path / "new.json")).name == "new.json"

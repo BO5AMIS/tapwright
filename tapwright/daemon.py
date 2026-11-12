@@ -867,7 +867,9 @@ class Daemon:
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
-            return await self._batch_tool(client_id, name, args, scope)
+            if scope is None:
+                return await self._batch_tool(client_id, name, args, scope)
+            return await self._batch_within(scope, client_id, name, args)
         if name == "wait_for" and client_id in self._recording:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
@@ -1008,7 +1010,7 @@ class Daemon:
             path = args.get("path")
             if path is not None and (not isinstance(path, str) or not path):
                 raise Refused("bad_params", f"path must be a file path, not {path!r}")
-            path = path or str(batch.named(rec["name"]))
+            path = str(batch.writable(path or str(batch.named(rec["name"]))))
             try:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
                 pathlib.Path(path).write_text(json.dumps(batch.script(rec["name"], rec["app"], rec["steps"]),
@@ -1120,6 +1122,24 @@ class Daemon:
             raise Refused("internal", f"{name} failed unexpectedly: {e}. This is a bug; report it.") from e
         finally:
             _GRANTED.reset(grant_token)
+
+    async def _batch_within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
+        """`run`, `record` and `replay` in personal mode: like every tool, nothing without an app list, and the one
+        answer (or a stopped batch's message, which carries the same change block) shows no other app's screen.
+        Each step went through the app check on its own already."""
+        if not scope.apps:
+            raise Refused("not_allowed", NO_APPS)
+        given = await self._given(scope)
+        names = ", ".join(given.values())
+        try:
+            answer = await self._batch_tool(client_id, name, args, scope)
+        except Refused as e:
+            message = str(e)
+            if "\n" not in message:
+                raise
+            kept = await self._withheld(client_id, name, {"text": message, "image": None}, given, names)
+            raise Refused(e.code, kept["text"]) from None
+        return await self._withheld(client_id, name, answer, given, names)
 
     # ---- personal mode: the agent stays in the apps it was given ----
     async def _given(self, scope: "Scope") -> dict[str, str]:
@@ -1237,18 +1257,25 @@ class Daemon:
             lines = answer["text"].splitlines()
             kept = [ln for ln in lines if ln.split(" ", 1)[0] in given or not BUNDLE_ID.match(ln.split(" ", 1)[0])]
             return {**answer, "text": "\n".join(kept)}
-        # The answer's own App: line says whose screen it lists; without one, the app at the last read does.
+        return await self._withheld(client_id, name, answer, given, names)
+
+    async def _withheld(self, client_id: str, name: str, answer: dict, given: dict[str, str], names: str) -> dict:
+        """An answer as personal mode may show it: whole when it lists one of the given apps (or iOS's prompt for
+        one), else only its first line and why. The answer's own App: line says whose screen it lists; without one,
+        the app at the last read does; when not even that is known, nothing beyond the first line is shown."""
         shown = APP_LINE.search(answer["text"])
         app = (shown.group(1), shown.group(2)) if shown else self.session.app
-        if (app is not None and app[1] not in given and ("\n" in answer["text"] or answer.get("image"))
-                and not (app[1] == SPRINGBOARD
+        bundle = app[1] if app is not None else None
+        if ((bundle is None or bundle not in given) and ("\n" in answer["text"] or answer.get("image"))
+                and not (bundle == SPRINGBOARD
                          and await self._prompt_of_given(given, self.control.client(client_id), read=True))):
             alert = "\nAlert: " in answer["text"]
+            named = app[0] if app is not None else None
             if name == "look":  # nothing was done, so there is nothing to report but the refusal
-                raise Refused("not_allowed", _outside(app[1], app[0], names, alert))
+                raise Refused("not_allowed", _outside(bundle, named, names, alert))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
-            return {"text": f"{first}Note: {_outside(app[1], app[0], names, alert)}", "image": None, "image_size": None}
+            return {"text": f"{first}Note: {_outside(bundle, named, names, alert)}", "image": None, "image_size": None}
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
