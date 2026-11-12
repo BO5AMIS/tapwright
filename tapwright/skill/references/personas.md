@@ -1,8 +1,9 @@
 # Personas for usability journeys
 
 A persona is a short description of one kind of user, so a journey is judged by the right eyes. No tool enforces it:
-you build it, agree it with your user, and keep to it while you test. Pass the conditions a persona suggests as
-`conditions` on `journey { start }`; each tool applies them its own way.
+you build it, agree it with your user, and keep to it while you test. A persona's conditions are values of
+`language`, `region`, `text_size` and `network`; pass these as `conditions` on `journey { start }`; each tool applies
+them its own way.
 
 ## Build one for the app at hand
 

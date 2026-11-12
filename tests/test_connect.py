@@ -288,3 +288,19 @@ def test_install_command_takes_policy_flags(monkeypatch):
                                       "--policy", "p.json", "--no-policy"])
     with pytest.raises(SystemExit):
         cli.main()
+
+
+def test_install_keeps_and_replaces_the_ux_rules_file(tmp_path):
+    rules = tmp_path / "ux.json"
+    rules.write_text('{"rules": [{"way_back": true}]}', encoding="utf-8")
+    other = tmp_path / "other.json"
+    other.write_text("{}", encoding="utf-8")
+    config = home(tmp_path) / ".codex" / "config.toml"
+    connect.install("codex", ["a"], False, home=home(tmp_path), ux_rules=str(rules))
+    assert codex_args(config) == ["mcp", "--apps", "a", "--ux-rules", str(rules.resolve())]
+    connect.install("codex", ["b"], False, home=home(tmp_path))  # a rerun keeps it
+    assert codex_args(config) == ["mcp", "--apps", "b", "--ux-rules", str(rules.resolve())]
+    lines = connect.install("codex", ["b"], False, home=home(tmp_path), ux_rules=str(other))
+    assert codex_args(config)[-1] == str(other.resolve()) and any("replaced the earlier --ux-rules" in x for x in lines)
+    with pytest.raises(connect.ConnectError, match="ux rules file"):
+        connect.install("codex", ["a"], False, home=home(tmp_path), ux_rules=str(tmp_path / "missing.json"))
