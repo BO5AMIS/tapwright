@@ -140,6 +140,7 @@ class Journey:
     typed_chars: int = 0
     scrolls: int = 0
     errors: int = 0
+    error_codes: dict[str, int] = field(default_factory=dict)  # the refusals counted in `errors`, by code
     wrong_turns: int = 0
     dead_ends: int = 0
     hesitations: int = 0
@@ -171,6 +172,7 @@ class Journey:
         self.calls += 1
         if error is not None:
             self.errors += 1
+            self.error_codes[error] = self.error_codes.get(error, 0) + 1
             return False
         if name in WAITS:
             self.waiting += max(0.0, seconds)
@@ -407,4 +409,5 @@ def summary_line(j: Journey, reached: bool, elapsed: float) -> str:
 def findings_line(j: Journey, folder: Path | str) -> str:
     counts = j.counts()
     said = ", ".join(f"{n} {sev}" for sev, n in counts.items() if n)
-    return f"Findings: {said or 'none'}. Report: {folder}"
+    errors = f" Errors: {j.errors} ({', '.join(f'{n} {code}' for code, n in j.error_codes.items())})." if j.errors else ""
+    return f"Findings: {said or 'none'}.{errors} Report: {folder}"

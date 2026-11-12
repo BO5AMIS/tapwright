@@ -931,6 +931,18 @@ def test_the_mcp_result_carries_a_second_picture():
     assert [c.type for c in result.content] == ["text", "image", "image"]
 
 
+def test_the_findings_line_names_the_errors_the_report_counts(tmp_path):
+    j = new_journey(tmp_path)
+    assert journey.findings_line(j, "F") == "Findings: none. Report: F"  # no errors: the line is as it was
+    j.note_call("tap", {}, "", 0.1, "not_found")
+    j.note_call("tap", {}, "", 0.1, "covered")
+    j.note_call("tap", {}, "", 0.1, "not_found")
+    assert j.errors == 3  # (the report's `Errors` row)
+    assert journey.findings_line(j, "F") == "Findings: none. Errors: 3 (2 not_found, 1 covered). Report: F"
+    j.findings.append({"severity": "high", "what": "x"})
+    assert journey.findings_line(j, "F") == "Findings: 1 high. Errors: 3 (2 not_found, 1 covered). Report: F"
+
+
 # ---- ux_check and the house rules (the merge with §17.3) ----
 UX = {"kind": "icon_only", "element": 'e2 button @340,20 44x44', "what": "an icon-only button with no label",
       "basis": "best practice: label every control", "screen": '"Example" (Today)'}
