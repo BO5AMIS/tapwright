@@ -823,10 +823,6 @@ Answers:
 - CLI: `tapwright replay` / `tapline replay` take `--update-references`: the checks save into the script's
   references folder instead of comparing; exit 0 when every step ran. A failed check writes its picture to
   `<script dir>/<script name>.diff/<name>.<ext>`, and the JUnit failure message ends with `(diff: <path>)`.
-- Tapwright writes reference pictures (the store's and `.references/`) and `.diff/` pictures whole or not at all, and
-  never through a link. On Windows this narrows, but can't close, the window for a folder swapped by another process
-  of the same user. Pictures saved by `--screenshots DIR` (filmstrips, a difference picture returned to the agent) go
-  through the ordinary screenshot writer, outside this.
 
 ### 14.4 `filmstrip`
 
