@@ -62,7 +62,7 @@ def check_expect(expect: object, n: int) -> None:
 def args_of(step: dict) -> dict:
     """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
     (the batch answers once)."""
-    args = {k: v for k, v in step.items() if k not in ("tool", "expect", "route", "look", "screenshot")}
+    args = {k: v for k, v in step.items() if k not in ("tool", "expect", "route", "secure", "look", "screenshot")}
     if step["tool"] != "close_app":
         args["look"] = False
     return args

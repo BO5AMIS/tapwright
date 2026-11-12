@@ -52,6 +52,8 @@ NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); loo
 OCR_REF = re.compile(r"o[1-9][0-9]*")
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
+SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
+DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
 REASONED = frozenset({"not_actionable", "not_allowed"})  # codes whose message starts with a reason word
@@ -67,6 +69,7 @@ _POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwrig
 # Set to a list by run_tool; a touch a person's OK let through puts True in it, and the answer then ends with NOTE_ALLOWED
 _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright_granted", default=[])
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
+DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
 NOTE_ALLOWED = "a person allowed this."
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
@@ -543,7 +546,8 @@ class Daemon:
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
-                          "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll}
+                          "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll,
+                          "alert": self._alert, "swipe": self._swipe}
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -911,7 +915,19 @@ class Daemon:
         an element of the list the agent has now)."""
         if client_id not in self._recording or name not in batch.STEP_TOOLS:
             return None
-        return batch.recorded_target(args.get("target"), self.control.client(client_id).items)
+        items = self.control.client(client_id).items
+        if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
+            field = None
+            try:
+                found = ui.resolve(items, ui.parse_target(args["target"])) if args.get("target") else None
+                field = found if isinstance(found, ui.Element) else None
+            except Refused:
+                pass
+            if field is None and not args.get("target"):
+                inputs = [e for e in items if e.role == "input"]
+                field = inputs[0] if len(inputs) == 1 else None
+            self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
+        return batch.recorded_target(args.get("target"), items)
 
     def _record_expect(self, client_id: str, args: dict) -> None:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
@@ -932,6 +948,11 @@ class Daemon:
         if rec is None or name not in batch.STEP_TOOLS:
             return
         step = {"tool": name, **{k: v for k, v in args.items() if k not in ("target", "look", "screenshot")}}
+        if name == "type_text" and rec.pop("next_secure", False):
+            # a password is never written to a file (safety review M4): the user puts a test password in the script
+            step["text"] = ""
+            step["secure"] = True
+            rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
         if aimed is not None:
             step["target"] = aimed
         elif "target" in args:
@@ -1018,7 +1039,11 @@ class Daemon:
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
-            return _answer([f"Saved {len(rec['steps'])} steps to {path}."])
+            secure = rec.get("secure_steps") or []
+            note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
+                     "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
+                    if secure else [])
+            return _answer([f"Saved {len(rec['steps'])} steps to {path}."], note)
         raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
                                     "path)")
 
@@ -1083,8 +1108,13 @@ class Daemon:
                     return batch.expect_failed(expect)
                 raise
         target, deadline = ui.parse_target({kind: expect[kind]}), self.control.clock() + timeout
+        given = await self._given(scope) if scope is not None else None
         while True:
             await self._read(lambda: self._silent_read(view))
+            if given is not None and self._bundle() not in given:
+                # in personal mode a value is read only in a given app, as wait_for is (safety review M3)
+                app = getattr(self.session, "app", None)
+                raise Refused("not_allowed", _outside(self._bundle(), app[0] if app else None, ", ".join(given.values())))
             try:
                 found = ui.resolve(view.items, target)
             except Refused:
@@ -2225,7 +2255,9 @@ class Daemon:
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
-        key = (element.identifier and ("id", element.identifier)) or ("role", element.role, element.label, element.text)
+        # the element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)
+        key = (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
+                                           or ("role", element.role, element.label, element.text)))
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
@@ -2248,6 +2280,10 @@ class Daemon:
             if c.state == "pending" and c.until >= now:
                 open_ = True
                 continue
+            if c.state == "declined" and c.until >= now:
+                # a person said no a moment ago: asking again at once would only wear them down (safety review L2)
+                return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and they declined "
+                        "it just now. Don't ask again by repeating the call: ask your user what they want.")
             if c.state != "allowed":  # an allow nobody used lapses without a word
                 said = " They declined." if c.state == "declined" else " Nobody answered."
             del self._confirms[c.id]
@@ -2271,7 +2307,8 @@ class Daemon:
             return
         allow = message.get("allow") is True
         request.state = "allowed" if allow else "declined"
-        request.until = now + CONFIRM_TTL  # an allow is good for one call within CONFIRM_TTL
+        # an allow is good for one call within CONFIRM_TTL; a decline holds for DECLINE_HOLD, then may be asked again
+        request.until = now + (CONFIRM_TTL if allow else DECLINE_HOLD)
         self.broadcast({"type": "confirm_closed", "id": request.id, "allow": allow})
 
     def _app_bundle(self) -> str | None:
@@ -2388,6 +2425,26 @@ class Daemon:
 
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)
+
+    async def _alert(self, view, a: dict) -> str:
+        """`alert`: `accept` presses an alert's main button. An app's own alert ("Delete trip?" [Cancel] [Delete]) is
+        an alert too, so a button with a policy word goes through the policy, as a tap on it would (safety review
+        H3). Permission prompts' Allow carries none. `dismiss` and `text` are never held back."""
+        if a.get("action") == "accept":
+            alert = getattr(self.session, "last_alert", None)
+            for button in (alert.buttons if alert is not None else ()):
+                if button.strip().lower() not in DISMISS_WORDS:
+                    self._police("alert", a, ui.Element(ref="", role="button", label=button))
+        return await ACTIONS["alert"][0](self.session, a)
+
+    async def _swipe(self, view, a: dict) -> str:
+        """`swipe`: a drag that barely moves is a touch where it starts, so it goes through the policy as a tap there
+        would (safety review H3)."""
+        x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
+        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP and any(_POLICY.get().words(self._app_bundle())):
+            under = self._element_at((x0, y0), (await self.session.refresh()).items)
+            self._police("swipe", a, under)
+        return await ACTIONS["swipe"][0](self.session, a)
 
     async def _long_press(self, view, a: dict) -> str:
         return await self._touch(view, a, int(float(a.get("seconds", 1.0)) * 1000))

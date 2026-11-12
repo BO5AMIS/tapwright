@@ -207,9 +207,13 @@ def test_a_decline_and_an_expiry_are_said_on_the_retry_and_it_asks_again():
         stop, task = await ready(d)
         await refused(d, "tap", TAP)
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})
+        e = await refused(d, "tap", TAP)  # right after a no: no new request, ask the user (safety review L2)
+        assert "they declined it just now" in str(e) and "ask your user" in str(e)
+        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c1-x"]
+        d.control.clock.t += 61  # the decline held a minute: now it may be asked again
         e = await refused(d, "tap", TAP)
         assert str(e) == NEEDS + " They declined."
-        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c1-x", "c2-x"]
+        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c2-x"]
         d.control.clock.t += 121  # nobody answered c2
         await d.viewer_message({"type": "confirm_answer", "id": "c2-x", "allow": True})  # too late: ignored
         e = await refused(d, "tap", TAP)
@@ -438,5 +442,27 @@ def test_a_viewer_that_connects_while_a_request_is_open_is_sent_it():
         assert ask["type"] == "confirm" and ask["id"] == "c1-x" and ask["word"]
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})
         assert d.open_confirms() == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_alerts_policy_word_button_and_a_swipe_that_is_a_touch_go_through_the_policy():
+    """Safety review H3 (2026-11-12): `alert accept` on an app's own "Delete trip?" alert, and a swipe that doesn't
+    move, were touches the policy never saw. A permission prompt's Allow still goes straight through."""
+    from tapwright import ui
+
+    async def go():
+        d = make()
+        d._queues_seen = d.subscribe()
+        stop, task = await ready(d)
+        d.session.last_alert = ui.Alert("Delete trip?", ("Cancel", "Delete"), (50.0, 300.0, 300.0, 200.0))
+        e = await refused(d, "alert", {"action": "accept", "look": False})
+        assert "needs_confirmation" in str(e) and '"Delete"' in str(e)
+        d.session.last_alert = ui.Alert("Allow notifications?", ("Allow", "Don't Allow"), (50.0, 300.0, 300.0, 200.0))
+        await d.run_tool("a", "alert", {"action": "accept", "look": False})
+        d.session.last_alert = None
+        e = await refused(d, "swipe", {"x0": 50, "y0": 120, "x1": 52, "y1": 121, "look": False})
+        assert "needs_confirmation" in str(e)
+        await d.run_tool("a", "swipe", {"x0": 50, "y0": 120, "x1": 50, "y1": 400, "look": False})  # a real drag
         await finish(stop, task)
     run(go)

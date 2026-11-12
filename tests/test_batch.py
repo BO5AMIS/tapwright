@@ -255,3 +255,24 @@ def test_record_saves_only_json_scripts_and_never_overwrites_another_file(tmp_pa
             batch.writable(bad)
         assert e.value.code == "bad_params"
     assert batch.writable(str(tmp_path / "new.json")).name == "new.json"
+
+
+def test_a_recording_never_saves_what_was_typed_into_a_secure_field(tmp_path):
+    """Safety review M4 (2026-11-12): passwords went into the script file."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.tree = [el("e1", "input", "Password", "pw", rect=(10, 100, 300, 44), secure=True),
+                          el("e2", "input", "Email", "email", rect=(10, 200, 300, 44))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "record", {"start": True, "name": "sign in"})
+        await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "a@b.co", "look": False})
+        await d.run_tool("a", "type_text", {"target": {"id": "pw"}, "text": "hunter2", "look": False})
+        path = tmp_path / "s.json"
+        r = await d.run_tool("a", "record", {"stop": True, "path": str(path)})
+        assert "Step 2 typed into a secure field" in r["text"]
+        saved = path.read_text("utf-8")
+        assert "hunter2" not in saved and "a@b.co" in saved
+        assert json.loads(saved)["steps"][1] == {"tool": "type_text", "text": "", "secure": True, "target": {"id": "pw"}}
+        await finish(stop, task)
+    run(go)
