@@ -256,6 +256,13 @@ async def audit(types: list[str] | None = None) -> CallToolResult:
     return await _tool("audit", **({"types": types} if types else {}))
 
 
+@server.tool(description=describe("filmstrip"), structured_output=False)
+async def filmstrip(frames: int = 6, interval_ms: int = 250, frame_width: int = 200,
+                    tap: Target | None = None) -> CallToolResult:
+    return await _tool("filmstrip", frames=frames, interval_ms=interval_ms, frame_width=frame_width,
+                       **({"tap": tap} if tap is not None else {}))
+
+
 @server.tool(annotations=READ_ONLY, description=describe("apps"), structured_output=False)
 async def apps() -> CallToolResult:
     return await _tool("apps")

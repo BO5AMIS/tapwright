@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import actionlog, audit, batch, changes, ocr, ui
+from . import actionlog, audit, batch, changes, filmstrip as filmlib, ocr, ui
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -315,6 +315,20 @@ def _checked(name: str, args: dict) -> dict:
     for key in ("look", "screenshot", "labels", "dry_run", "ocr"):
         if key in args and not isinstance(args[key], bool):
             raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if name == "filmstrip":  # AGENT-TOOLS §14.4
+        for key, (low, high, _) in FILM_LIMITS.items():
+            value = args.get(key)
+            if value is None:
+                checked.pop(key, None)
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or value != int(value) or not low <= value <= high):
+                raise Refused("bad_params", f"{key} must be a whole number from {low} to {high}, not {value!r}")
+            checked[key] = int(value)
+        if args.get("tap") is not None:
+            ui.parse_target(args["tap"])  # bad_params, with an example of a target
+        else:
+            checked.pop("tap", None)
     if name == "audit" and args.get("types") is not None:
         types = args["types"]
         if not isinstance(types, list) or not types or any(t not in audit.TYPES for t in types):
@@ -455,7 +469,10 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit")
+READS = ("look", "apps", "audit", "filmstrip")
+# The scope of the filmstrip call being run: its tap goes through run_tool with it, like any other touch
+_FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_film_scope", default=None)
+FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for")  # sleep before they answer, so they don't hold the phone's queue meanwhile
 REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
@@ -874,6 +891,8 @@ class Daemon:
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
+        if name == "filmstrip":
+            return await self._filmstrip_logged(client_id, args, scope)
         if name == "wait_for" and client_id in self._recording:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
@@ -891,7 +910,8 @@ class Daemon:
             return result
         return await self._run_tool_inner(client_id, name, args, scope)
 
-    def _log_action(self, name: str, args: dict, started: float, error: Refused | None) -> None:
+    def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
+                    frames: int | None = None) -> None:
         """The agent's action, one line in the action log. Typed text only as its length (AGENT-TOOLS §12)."""
         told = self._announced or {}
         message = str(error) if error is not None else ""
@@ -901,7 +921,7 @@ class Daemon:
             "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
-            "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None,
+            "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "batch": BATCH.get(), "confirmed": True if self._granted_now else None})
 
     def _bundle(self) -> str | None:
@@ -1271,7 +1291,7 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -1283,6 +1303,8 @@ class Daemon:
         answer = await self._run_tool(client_id, name, args)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
+        if name == "filmstrip":  # asked of the phone before and after filming (_filmstrip): the last read is no guide
+            return answer
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
             kept = [ln for ln in lines if ln.split(" ", 1)[0] in given or not BUNDLE_ID.match(ln.split(" ", 1)[0])]
@@ -1341,6 +1363,8 @@ class Daemon:
             return await self._wait_for(view, args, notes, shot)
         if name == "audit":
             return await self._audit(view, args, notes)
+        if name == "filmstrip":
+            return await self._filmstrip(client_id, args, notes)
         if name == "look":
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
@@ -1814,6 +1838,80 @@ class Daemon:
         name = app[0] if app else "the screen"
         text = audit.report(f'"{name}"', issues, view.items, types)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    async def _filmstrip_logged(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
+        """`filmstrip` as one tool call, with its line in the action log (its tap is logged as a tap, as usual)."""
+        started, self._announced, self._granted_now = time.monotonic(), None, False
+        token = _FILM_SCOPE.set(scope)
+        logged = {**args, "target": args.get("tap")}
+        try:
+            result = await self._run_tool_inner(client_id, "filmstrip", args, scope)
+        except Refused as e:
+            self._log_action("filmstrip", logged, started, e)
+            raise
+        finally:
+            _FILM_SCOPE.reset(token)
+        made = re.match(r"Filmstrip: (\d+) frames", result["text"])
+        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None)
+        return result
+
+    async def _film_frame(self, after_seq: int, due: float) -> tuple[int, int, bytes]:
+        """(seq, epoch ms, picture) of the stream's newest frame once loop time `due` has come. It must be newer than
+        `after_seq` and fresh; if none comes in time the phone is asked for a screenshot instead (seq unchanged)."""
+        loop = asyncio.get_running_loop()
+        if (wait := due - loop.time()) > 0:
+            await asyncio.sleep(wait)
+
+        def fresh(f: Frame | None) -> bool:
+            return f is not None and f.seq > after_seq and self.hub.now_ms() - f.at <= FRESH_FRAME * 1000
+        frame = self.hub.latest
+        if not fresh(frame):
+            frame = await self.hub.next_after(after_seq, timeout=self.shot_wait)
+        if fresh(frame):
+            try:
+                source = await jpeg_of(frame)
+            except PictureGone:  # one of the older pictures, whose pixels are let go
+                source = None
+            turn = getattr(self.session, "turn", 0)
+            if source is not None and turn and getattr(frame, "picture", None) is None:
+                source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
+            if source is not None:
+                return frame.seq, frame.at, source
+        return after_seq, self.hub.now_ms(), await self._read(self.session.screenshot_png)
+
+    async def _filmstrip(self, client_id: str, args: dict, notes: list) -> dict:
+        """AGENT-TOOLS §14.4: `frames` pictures of the screen about `interval_ms` apart, from the live stream (a
+        screenshot where it has none), in one numbered image. With `tap`, frame 1 is taken first, then the tap goes
+        through the ordinary tool (policy, personal mode, log), then the rest. How far apart they were is measured
+        from when the frames arrived."""
+        count, tap = args.get("frames", filmlib.FRAMES[2]), args.get("tap")
+        interval, width = args.get("interval_ms", filmlib.INTERVAL_MS[2]) / 1000, args.get("frame_width", filmlib.FRAME_WIDTH[2])
+        scope, loop = _FILM_SCOPE.get(), asyncio.get_running_loop()
+        notes, shots, seq = list(notes), [], 0
+        if tap is not None:
+            shots.append(await self._film_frame(0, loop.time()))
+            seq = shots[0][0]
+            tapped = await self.run_tool(client_id, "tap", {"target": tap, "look": False}, scope)
+            notes += [line[len("Note: "):] for line in tapped["text"].splitlines()[1:] if line.startswith("Note: ")]
+            seq = max(seq, self._mark()[0])  # the rest follow the tap: a frame that was there as it returned is before
+        start = loop.time()
+        while len(shots) < count:
+            shots.append(await self._film_frame(seq, start + (len(shots) - (1 if tap is not None else 0)) * interval))
+            seq = shots[-1][0]
+        if scope is not None:  # personal mode: the picture is shown only if a given app is still in front
+            given = await self._given(scope)
+            front = await self._read(self.session.foreground_bundle_id)
+            if front not in given and not (front == SPRINGBOARD and await self._prompt_of_given(
+                    given, self.control.client(client_id), read=True)):
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
+                                                      ", ".join(given.values())))
+        arrivals = [at for _, at, _ in shots]
+        later = arrivals[1:] if tap is not None and count >= 3 else arrivals  # the tap's own time isn't a spacing
+        spacing = round((later[-1] - later[0]) / (len(later) - 1))
+        strip, _ = await asyncio.to_thread(filmlib.compose, [picture for _, _, picture in shots], width)
+        head = (f"Filmstrip: {count} frames about {spacing} ms apart, numbered in order, left to right and top to "
+                f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
+        return _answer([head], notes, strip)
 
     async def _wait_for(self, view, args: dict, notes: list, shot) -> dict:
         """Poll the fast tree (outside the phone's queue between reads) until the text, id or label is

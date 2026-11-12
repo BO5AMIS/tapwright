@@ -150,6 +150,10 @@ SHARED = {
         'it. Answers one numbered issue per line with its fix, then which types were checked. It costs no image: '
         'run it on each new screen.'
     ),
+    'filmstrip': (
+        'Several screenshots in one numbered image, for animations and loading states; cheaper than separate shots. '
+        '`tap` first taps an element, then films what it sets off.'
+    ),
     'record': (
         'Record a run as a script that replays without an AI: `start: true` (with a `name`), then every action '
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '
