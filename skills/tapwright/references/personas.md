@@ -35,8 +35,8 @@ Conditions: `text_size: ax3`.
 mixed text in order. Wants a task done in their own language. Conditions: `language: ar · region: QA`.
 
 **Poor connection.** On a train or abroad, the network drops and crawls. Wants to know what happened when something
-does not load, and to retry without losing what they typed. Conditions: `network: 3g` (and `network: offline` for the
-worst moment).
+does not load, and to retry without losing what they typed. Conditions: `network: 3g`, and a `network` stress step to
+`offline` at the worst moment (a field half filled, a form being sent).
 
 **One-handed on a big phone.** Holds a large phone in one hand and can only reach the lower half with a thumb. Wants
 to finish the task without stretching or using the other hand. Conditions: none, a large phone.
