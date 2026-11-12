@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.1 (unreleased)
+
+Small fixes from the first real-app runs. No new tools.
+
+- `close_app` is faster. It ends the app through iOS's own process control, then tells WebDriverAgent, which waited a
+  median of 46 s for a real app to finish quitting. The answer is the same. Without the tunnel, or if iOS refuses or
+  takes over 5 s, it falls back to WebDriverAgent alone as before; `TAPWRIGHT_CLOSE=wda` forces that.
+- A `tap` or `long_press` that changes nothing keeps `No visible change.` and adds a note: the tap was delivered, and
+  nothing on screen changed within N s, with what to try (a text field: `type_text`; a point with no element; else
+  `wait_for` what you expect, then report it as a finding). Agents couldn't tell whether the touch landed, so they
+  looked again and retried. iOS's Health access sheet keeps its own note.
+- The skill and the agent guide say four things more: read every answer whole (never pipe a call through `head`,
+  `grep` or `sed`), send known steps as one `run`, ask for the app's deep links and use them with `open_url`, and
+  connect once as an MCP server (a wrapper that starts a new process for every call adds about 2 s to each call).
+
 ## 1.5.0, "the Real User Update" (unreleased)
 
 Apps are made or broken by whether a user can find a feature, understand it and finish it easily. An agent can now
