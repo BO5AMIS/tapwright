@@ -67,3 +67,15 @@ def test_the_audit_tool_asks_xctest_for_the_types_and_reads_the_tree_first():
         assert e.value.code == "bad_params"
         await finish(stop, task)
     run(go)
+
+
+def test_an_issue_that_matches_no_tree_element_is_named_by_xctests_own_label_and_frame_before_the_screen():
+    items = [el("e1", "button", "Close", "close", rect=(390, 60, 20, 20))]
+    bare = {"auditType": audit.XCTEST["contrast"], "compactDescription": "", "detailedDescription": "",
+            "elementAttributes": {"label": "Total", "rect": {"x": 16, "y": 300, "width": 120, "height": 20}}}
+    text = audit.report('"App"', [bare], items, ["contrast"])
+    assert '1. contrast: an element "Total" at @16,300 120x20: ' in text
+    framed = {**bare, "elementAttributes": {"identifier": "total", "frame": "{{16, 300}, {120, 20}}"}}
+    assert 'an element id=total at @16,300 120x20' in audit.report('"App"', [framed], items, ["contrast"])
+    nothing = {**bare, "elementAttributes": {}}
+    assert "1. contrast: the screen: " in audit.report('"App"', [nothing], items, ["contrast"])
