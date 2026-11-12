@@ -173,6 +173,8 @@ def test_viewer_opens_the_live_view_for_the_user_and_never_gives_the_agent_its_k
 
 
 def test_viewer_never_logs_the_token(monkeypatch, caplog):
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: True)  # never a real tab
     monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "SECRET"})
     with caplog.at_level("DEBUG"):
         asyncio.run(mcp_server.viewer())
