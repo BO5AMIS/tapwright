@@ -2129,7 +2129,7 @@ class Daemon:
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
         # what an open layer hides takes touches too, once it closes (an AutoFill menu hid a card that a "blank" touch
         # then opened, 2026-11-12): keep away from those as well
-        hidden = [e for e in getattr(s, "behind", []) if e.actions]
+        hidden = [e for e, _ in getattr(s, "behind", []) if e.actions]  # (element, layer) pairs
         if (blank := ui.blank_point([*view.items, *hidden], s.screen, top, bottom)) is not None:
             await s.tap(ui.Target(x=blank[0], y=blank[1]))
             await self._silent_read(view)
