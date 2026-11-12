@@ -70,7 +70,7 @@ action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
 
 ## 1.3.1 (unreleased)
 
-Four small fixes from a QA pass.
+Small fixes from a QA pass.
 
 - `tapwright doctor` checks where Tapwright runs from. In a git checkout with uncommitted changes it warns; with
   unresolved merge markers (`<<<<<<<`) in the package it fails. An installed package is fine, and no git means no
@@ -83,6 +83,8 @@ Four small fixes from a QA pass.
   take labels, ocr; it takes types.` The same holds for the steps of `run` and scripts.
 - `audit`: a finding whose element isn't in the screen's tree is named by XCTest's own label or id and frame
   (`an element "Total" at @16,300 120x20`) before it falls back to "the screen".
+- The live view's page for a link without a valid key now says what to do (run `tapwright view`, or ask the agent to
+  use its `viewer` tool), instead of one line a person couldn't act on.
 
 ## 1.3.0, "the Diagnostics Update" (unreleased)
 
