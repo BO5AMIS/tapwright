@@ -25,7 +25,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    Enable UI Automation, which stops the phone asking.
 6. Add the MCP server to your host with the apps the user wants tested (Claude Code:
    `claude mcp add tapwright -- tapwright mcp --apps <bundle id>`). Without `--apps` every
-   call is refused. `--dedicated` is only for a phone kept for testing.
+   call is refused. `--dedicated` is only for a phone kept for testing. Connect once: load it as an
+   MCP server when the session starts. A wrapper that starts a new process for every call adds
+   about 2 s to each call.
 7. `tapwright skill install` puts the Tapwright skill where Claude Code, Codex and other
    agents look for skills (`--project DIR` for one project). The skill is
    [skills/tapwright/SKILL.md](skills/tapwright/SKILL.md): how to test well with these tools.
@@ -33,11 +35,14 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
 ## Testing an app
 
 1. `apps` lists the installed apps; `open_app` starts one (a bundle id, or a name) and `look`
-   shows the first screen.
+   shows the first screen. Ask for the app's deep links and use them: `open_url` with the app's
+   own link reaches a screen in one call.
 2. Every action (`tap`, `toggle`, `scroll`, ...) answers with what changed (`+` new, `-` gone,
    `~` changed, `No visible change.`), or the whole list when most of the screen changed.
    **Read it before the next step**: check that the action did what you meant, not just that it
-   didn't fail. `Settled in N s.` is how long the screen took to stop moving.
+   didn't fail. `Settled in N s.` is how long the screen took to stop moving. Read every answer
+   whole: never pipe a call through `head`, `grep` or `sed`. The list of what changed is the part
+   you need, and cutting it costs a second `look`.
 3. Target with one object: `{id}` (accessibility identifier, React Native `testID`) when there
    is one, else `{label}` or `{text}`, else `{ref}` from the latest list. `{x, y}` (points) only
    for things with no element: a canvas, a map. `index` picks among several matches.
@@ -55,8 +60,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    for a permission prompt of an app you were given; after the answer the call waits for the app
    to come back.
 9. Start a fresh run with `close_app` then `open_app`.
-10. A known sequence is one `run`: its `steps` are ordinary calls, each with an optional `expect`
-    (`{"text": "Saved"}`) that must hold after it. It stops at the first that fails and says which.
+10. When you know the next two or more steps, send them as one `run`: its `steps` are ordinary
+    calls, each with an optional `expect` (`{"text": "Saved"}`) that must hold after it; put one on
+    the steps that matter. It stops at the first that fails and says which.
     `record` saves what you do as a script that `replay` (or `tapwright replay FILE` in CI) runs
     again. `audit` checks the screen's accessibility; report what it finds. `compare_screen` checks how a
     screen looks against a saved reference (`"expect": {"matches": "<name>"}` in a step); `filmstrip` shows an
