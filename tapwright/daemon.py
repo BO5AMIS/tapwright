@@ -693,6 +693,7 @@ class Daemon(journey_tool.JourneyTools):
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
+        self._closing: set[asyncio.Future] = set()  # WebDriverAgent terminates after a close_app's kill, left to finish
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
         # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
         self.agent_stream = os.environ.get("TAPWRIGHT_AGENT_STREAM", "1") != "0"
@@ -2646,13 +2647,16 @@ class Daemon(journey_tool.JourneyTools):
         bundle_id, shown = await self._app(a["app"])
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
         try:
-            if extra:
-                try:
-                    await self.session.terminate(bundle_id)  # a running app is closed first
-                except ConnectionLost:
-                    raise
-                except DeviceError:
-                    pass  # not running
+            if extra:  # a running app is closed first, as close_app does (WebDriverAgent's terminate alone is slow)
+                if (await self._end_app(bundle_id))[1]:
+                    await self._tell_runner_closed(bundle_id)
+                else:
+                    try:
+                        await self.session.terminate(bundle_id)
+                    except ConnectionLost:
+                        raise
+                    except DeviceError:
+                        pass  # not running
                 await self.session.launch(bundle_id, extra)
             else:
                 await self.session.launch(bundle_id)
@@ -2667,33 +2671,61 @@ class Daemon(journey_tool.JourneyTools):
 
     async def _close_app(self, view, a: dict) -> str:
         """End the app through iOS's process control, which doesn't wait on the app, then tell WebDriverAgent so its
-        own bookkeeping matches (the app already gone, it has nothing to wait for). Without the tunnel, or when iOS
-        refuses or is slow, or with TAPWRIGHT_CLOSE=wda, WebDriverAgent's terminate alone, as before: on a real app it
-        waited a median of 46 s for the app to finish quitting."""
+        own bookkeeping matches (the app already gone, it has nothing to wait for). WebDriverAgent's terminate alone,
+        as before and with no cap, when there is no tunnel, iOS refuses or is slow, TAPWRIGHT_CLOSE=wda, or the kill
+        found no process (the app may not have been running, or the kill missed it: its terminate is then quick or
+        the right one). On a real app it waited a median of 46 s for the app to finish quitting."""
         bundle_id, shown = await self._app(a["app"], partial=False)
-        began, device = time.monotonic(), self.session.device
-        way = "WebDriverAgent alone"
-        if os.environ.get("TAPWRIGHT_CLOSE") == "wda":
-            way += " (TAPWRIGHT_CLOSE=wda)"
-        elif device.rsd is None:
-            way += " (no tunnel)"
+        began = time.monotonic()
+        way, found = await self._end_app(bundle_id)
+        if found:
+            if not await self._tell_runner_closed(bundle_id):
+                way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left to finish"
         else:
             try:
-                await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
-                way = "iOS process control"
-            except asyncio.TimeoutError:
-                way += f" (iOS process control took over {CLOSE_KILL_CAP:g} s)"
-            except Exception as e:
-                way += f" (iOS process control failed: {e})"
-        if way == "iOS process control":
-            try:
-                await asyncio.wait_for(self.session.terminate(bundle_id), CLOSE_TERMINATE_CAP)
-            except asyncio.TimeoutError:
-                way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left"
-        else:
-            await self.session.terminate(bundle_id)
+                await self.session.terminate(bundle_id)
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                if shown == bundle_id:  # named by a bundle id that no installed app and no built-in app name has
+                    raise Refused("not_found", f"couldn't close {bundle_id}: {e}; call apps for the installed "
+                                               "apps") from None
+                raise
         self.log(f"closed {bundle_id} through {way} in {time.monotonic() - began:.1f} s")
         return f"Closed {shown}."
+
+    async def _end_app(self, bundle_id: str) -> tuple[str, int]:
+        """Ask iOS's process control to end the app: (the way it went, for the log; how many processes it ended).
+        None ended, with no tunnel, TAPWRIGHT_CLOSE=wda, or iOS refusing or slow: WebDriverAgent's terminate is the
+        caller's to make."""
+        way, device = "WebDriverAgent alone", self.session.device
+        if os.environ.get("TAPWRIGHT_CLOSE") == "wda":
+            return way + " (TAPWRIGHT_CLOSE=wda)", 0
+        if device.rsd is None:
+            return way + " (no tunnel)", 0
+        try:
+            found = await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+        except asyncio.TimeoutError:
+            return way + f" (iOS process control took over {CLOSE_KILL_CAP:g} s)", 0
+        except Exception as e:
+            return way + f" (iOS process control failed: {e})", 0
+        return ("iOS process control", found) if found else (way + " (iOS process control found no process)", 0)
+
+    async def _tell_runner_closed(self, bundle_id: str) -> bool:
+        """After a kill that ended the app: tell WebDriverAgent, for at most CLOSE_TERMINATE_CAP. False if it was
+        still going by then. Its request is never cancelled (that tears down the connection and leaves the request
+        in flight on the phone): it is left to end by its own timeout, and a failure is only logged. The app is
+        closed either way."""
+        task = asyncio.ensure_future(self.session.terminate(bundle_id))
+        self._closing.add(task)
+
+        def ended(done: asyncio.Future) -> None:
+            self._closing.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                self.log(f"closed {bundle_id}; WebDriverAgent's terminate afterwards failed: {done.exception()}")
+        task.add_done_callback(ended)
+        finished, _ = await asyncio.wait({task}, timeout=CLOSE_TERMINATE_CAP)
+        return bool(finished)
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
         """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
@@ -4482,6 +4514,8 @@ class Daemon(journey_tool.JourneyTools):
             await asyncio.wait_for(self._clear_network(), 10)  # first: the phone is never left in a condition
         except Exception as e:
             self.log(f"closing: network: {e}")
+        for closing in list(self._closing):
+            closing.cancel()
         if self._feeder_task is not None:
             self._feeder_task.cancel()
             await asyncio.gather(self._feeder_task, return_exceptions=True)

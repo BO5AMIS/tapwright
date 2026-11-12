@@ -5,8 +5,10 @@
 Small fixes from the first real-app runs. No new tools.
 
 - `close_app` is faster. It ends the app through iOS's own process control, then tells WebDriverAgent, which waited a
-  median of 46 s for a real app to finish quitting. The answer is the same. Without the tunnel, or if iOS refuses or
-  takes over 5 s, it falls back to WebDriverAgent alone as before; `TAPWRIGHT_CLOSE=wda` forces that.
+  median of 46 s for a real app to finish quitting. The answer is the same, and a slow or failing second step is
+  logged, not waited for. Without the tunnel, if iOS refuses, takes over 5 s or finds no process to end, it falls back
+  to WebDriverAgent alone as before; `TAPWRIGHT_CLOSE=wda` forces that. `open_app` with a language, region or text size
+  closes a running app the same way. A bundle id nothing has gives `not_found`.
 - A `tap` or `long_press` that changes nothing keeps `No visible change.` and adds a note: the tap was delivered, and
   nothing on screen changed within N s, with what to try (a text field: `type_text`; a point with no element; else
   `wait_for` what you expect, then report it as a finding). Agents couldn't tell whether the touch landed, so they

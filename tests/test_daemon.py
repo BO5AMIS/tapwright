@@ -2346,6 +2346,109 @@ def test_a_slow_webdriveragent_terminate_after_the_kill_does_not_hold_the_answer
     run(go)
 
 
+def test_close_app_waits_for_webdriveragent_when_the_kill_found_nothing(monkeypatch):
+    """Review of 1.5.1 (M2): a kill that ended no process proves nothing (the app may be running under another name,
+    or have restarted), so WebDriverAgent's terminate is the one that decides, as before 1.5.1: with no cap."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.device.kill_found = 0
+        d.session.terminate_delay = 0.3
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.terminated == ["com.example.app"]  # it was waited for, to its end
+        assert [line for line in logs if "found no process" in line]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_slow_terminate_after_a_kill_is_left_to_finish_not_cancelled(monkeypatch):
+    """Review of 1.5.1 (M2): a cancelled request stays in flight on the phone and its connection is torn down; the
+    request is left alone to end by its own timeout, and the answer doesn't wait for it."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.terminate_delay = 0.3
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert asyncio.get_running_loop().time() - began < 0.25 and r["text"] == "Closed Example (com.example.app)."
+        assert d.session.terminated == []  # still going
+        await asyncio.sleep(0.4)
+        assert d.session.terminated == ["com.example.app"]  # and it was not cancelled
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("error", [DeviceError("invalid session"), ConnectionLost("the phone didn't answer")])
+def test_a_failing_terminate_after_a_good_kill_is_logged_and_the_app_is_closed(error):
+    """Review of 1.5.1 (L2): the app is gone; a WebDriverAgent error then is no reason to say it isn't."""
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.terminate_error = error
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        await asyncio.sleep(0.05)
+        assert [line for line in logs if "terminate" in line and str(error) in line]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_of_an_unknown_bundle_id_is_not_found():
+    """Review of 1.5.1 (L4): any bundle id is allowed through (a dedicated phone's agent may close any app), so one
+    nothing has says so instead of a bare WebDriverAgent error."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_found = 0
+        d.session.terminate_error = DeviceError("no such application")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "close_app", {"app": "com.nobody.nothing"})
+        assert e.value.code == "not_found" and "com.nobody.nothing" in str(e.value) and "apps" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_with_launch_arguments_ends_a_running_app_the_fast_way_too(monkeypatch):
+    """Review of 1.5.1 (L3): a language, region or text size is taken only by a fresh launch, so the running app is
+    closed first; that waited the median 46 s on WebDriverAgent's terminate alone."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.terminate_delay = 0.3
+        began = asyncio.get_running_loop().time()
+        await d.run_tool("a", "open_app", {"app": "Example", "language": "ar"})
+        assert asyncio.get_running_loop().time() - began < 0.25
+        assert d.session.device.killed == ["com.example.app"] and d.session.launched == ["com.example.app"]
+        await asyncio.sleep(0.4)  # the first terminate ends on its own
+        d.session.device.kill_found = 0  # nothing to end there: WebDriverAgent's terminate is waited for, as before
+        d.session.terminated.clear()
+        await d.run_tool("a", "open_app", {"app": "Example", "language": "ar"})
+        assert d.session.terminated == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_outside_the_given_apps_ends_nothing():
+    async def go():
+        s = FakeSession()
+        s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
+        d = make(s)
+        stop, task = await started(d)
+        for app in ("com.example.mail", "Mail box"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "close_app", {"app": app}, scope=Scope(("com.example.app",)))
+            assert e.value.code == "not_allowed"
+        assert s.device.kill_asks == [] and s.closed == []
+        await finish(stop, task)
+    run(go)
+
+
 NOTE_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
                 "report it as a finding.")
 NOTE_FIELD = "It is a text field: type_text types into it."
