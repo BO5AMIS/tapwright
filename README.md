@@ -220,7 +220,9 @@ is final: `not_allowed: blocked`); `--no-policy` turns the check off, for a test
 The policy guards against mistakes, not against an agent set on getting around it: the live view's
 link, and with it the Allow button, are on the same computer the agent runs on. Only the live view page
 can answer (a request carries a random id, and an answer from anything but the page is ignored), but an
-agent with a shell could still forge one. Use a test phone with test data for agents you don't trust.
+agent with a shell could still forge one, by reading the key from `~/.tapwright`. The agent's `viewer` tool
+opens the page for you and never sees its link, and after you decline, the same touch isn't asked again for a
+minute. Use a test phone with test data for agents you don't trust.
 
 A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
 the agent's last look: a sheet or a banner that came in meanwhile would take the touch.
