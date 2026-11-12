@@ -17,15 +17,17 @@ jobs:
       id-token: write   # trusted publishing: PyPI trusts this workflow, no token exists
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: The tag matches the package version
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}  # through the environment, never into the script
         run: |
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          tag="$TAG"
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           test "$tag" = "v$version" || { echo "tag $tag but pyproject says $version"; exit 1; }
       - name: Build and check
@@ -40,5 +42,5 @@ jobs:
           if curl -sf "https://pypi.org/pypi/tapwright/$version/json" >/dev/null; then
             echo "tapwright $version is already on PyPI"; echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         if: steps.have.outputs.skip != 'true'
