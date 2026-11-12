@@ -2269,7 +2269,12 @@ class Daemon(journey_tool.JourneyTools):
             s = self.session
             # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
             # from it is read for again before it is not_found
-            live = by_lookup and (not self._current(view) or (target.kind != "point" and self._missing(view.items, target)))
+            # (the first list after a launch is read again too: the app may still have been drawing, and a touch
+            # aimed with it lands under a search field that came after; seen on iOS Settings, 4 taps in 5)
+            live = by_lookup and (view.opened or not self._current(view)
+                                  or (target.kind != "point" and self._missing(view.items, target)))
+            if by_lookup:
+                view.opened = False
             if not live:  # a silent re-read settles for itself
                 await self._settle_pending()
             s.items = view.items
@@ -2672,6 +2677,7 @@ class Daemon(journey_tool.JourneyTools):
         else:
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
+        view.opened = True
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
         if before and not extra:  # the plain open after one with conditions: they are undone, which the answer says
@@ -4254,6 +4260,7 @@ class Daemon(journey_tool.JourneyTools):
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             view.unlooked = 0
+            view.opened = False  # the agent's own look is later than the launch's
             return text, image
         try:
             text, image = await self._read(read)

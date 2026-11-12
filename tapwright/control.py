@@ -43,6 +43,7 @@ class ClientView:
     unlooked: int = 0  # how many answers since the last list or change block carried none (`look: false`)
     shown_off: list = field(default_factory=list)  # what lay off screen at the agent's last answer (for `~` lines)
     dropped: bool = False  # the connection dropped since `items` was read
+    opened: bool = False  # open_app made the last list: a screen still drawing its last parts (a floating search field)
     shown: list = field(default_factory=list)  # the list as of the agent's last answer: what changes are measured against
     top_ref: int = 0  # the highest ref number this agent was given: numbers are never reused until a full list
     app: tuple[str, str] | None = None  # (name, bundle id) of the foreground app at the last read

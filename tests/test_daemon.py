@@ -4186,6 +4186,50 @@ def test_a_card_under_the_tab_bar_is_tapped_where_it_shows():
     run(go)
 
 
+# (its glass reaches a little above the field itself, which sits at y 861: the visible part ends at y 846)
+SETTINGS_SEARCH = ui.Bar("SearchField", (33.0, 846.0, 364.0, 66.0), "input Search @33,846 364x66")
+
+
+def settings_rows(search: bool) -> list:
+    """iOS Settings' first screen as the phone checks found it (2026-11-12): the General row's centre lies under the
+    Search field, which the first list after the launch may not show yet."""
+    return [el("e1", "cell", "Wi-Fi", "wifi", rect=(20, 700, 390, 57)),
+            el("e2", "cell", "General", "com.apple.settings.general", rect=(20, 832, 390, 57),
+               covered_by=(SETTINGS_SEARCH,) if search else ())]
+
+
+def test_the_first_tap_after_open_app_reads_the_screen_again_and_aims_at_the_part_the_search_field_leaves():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.session.tree = settings_rows(search=False)  # what open_app's own list had: the field wasn't there yet
+        await d.run_tool("a", "open_app", {"app": "com.example.app"})
+        d.session.tree = settings_rows(search=True)
+        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
+        assert d.session.last_point == (215.0, 839.0)  # the strip above the field, not the row's centre (215, 860.5)
+        assert re.fullmatch(r'Tapped e\d cell "General" id=com.apple.settings.general at its visible part \(215, 839\)\.',
+                            r["text"])
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_look_after_open_app_is_the_list_a_touch_uses_with_no_second_read():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.session.tree = settings_rows(search=False)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        d.session.tree = settings_rows(search=True)
+        await d.run_tool("a", "look", {"screenshot": False})  # the agent's own look, after the launch
+        reads = d.session.calls.count("refresh")
+        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
+        assert d.session.calls.count("refresh") == reads and "at its visible part (215, 839)" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_an_element_with_too_little_showing_is_refused():
     async def go():
         d = make()
