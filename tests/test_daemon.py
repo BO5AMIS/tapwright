@@ -2480,13 +2480,13 @@ NOTE_POINT = "No element is at that point."
 
 
 def delivered(text: str) -> list[str]:
-    """The `the tap was delivered` notes of an answer, with the seconds replaced by N."""
+    """The `was delivered` notes of an answer (tap, long press, double tap), with the seconds replaced by N."""
     return [re.sub(r"within \d+\.\d s", "within N s", line) for line in text.splitlines()
-            if line.startswith("Note: the tap was delivered")]
+            if re.match(r"Note: the (tap|long press|double tap) was delivered", line)]
 
 
-def delivered_note(hint: str) -> str:
-    return f"Note: the tap was delivered, and nothing on screen changed within N s. {hint}"
+def delivered_note(hint: str, touch: str = "tap") -> str:
+    return f"Note: the {touch} was delivered, and nothing on screen changed within N s. {hint}"
 
 
 def test_a_tap_that_changes_nothing_says_the_touch_was_delivered_and_what_to_do():
@@ -2527,13 +2527,28 @@ def test_the_no_change_note_for_a_bare_point_says_no_element_is_there():
     run(go)
 
 
-def test_a_long_press_that_changes_nothing_gets_the_same_note():
+def test_a_long_press_that_changes_nothing_says_the_long_press_was_delivered():
     async def go():
         d = make()
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}})
-        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING, "long press")]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_double_tap_that_changes_nothing_says_the_double_tap_was_delivered():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        token = daemon_module._DOUBLE.set(True)  # what a journey's double_tap stress does around its tap
+        try:
+            r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        finally:
+            daemon_module._DOUBLE.reset(token)
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING, "double tap")]
         await finish(stop, task)
     run(go)
 
@@ -2579,7 +2594,7 @@ def test_the_delivered_note_is_also_given_when_the_tree_read_is_skipped():
         assert d.session.calls.count("snapshot") == reads  # the path that reads no tree
         assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]  # (5, 5) has no element under it
         r = await d.run_tool("a", "long_press", TAP)
-        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT, "long press")]
         await feeder.stop()
     run(go)
 
@@ -2804,9 +2819,121 @@ def test_back_does_nothing_when_the_bar_has_no_back_button():
     run(go)
 
 
-def test_back_with_no_visible_change_says_a_gesture_was_sent():
+def test_back_with_look_false_checks_too_and_nothing_changed_is_no_action():
+    """V1.6 finding 3: `Swiped from the left edge.` read like success on a screen with no navigation bar and its own back
+    button. back exists to change the screen, so it answers no_action with `look: false` as it does with a look."""
     async def go():
         d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(then=b"A")  # the swipe changes nothing on the screen
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {"look": False})
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: nothing changed after back."
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_look_false_and_a_change_answers_its_first_line_alone_and_leaves_the_screen_settled():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub).start(frames=[b"B"], then=b"C")  # the screen moves, then stands still
+        r = await d.run_tool("a", "back", {"look": False})
+        assert r["text"] == "Swiped from the left edge."  # no changes block: the check was made, and not asked for
+        assert d.unsettled is False  # (nothing more to wait for before the next call)
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_look_false_and_a_stream_that_moves_and_comes_back_is_no_action():
+    """Seen on the phone 2026-11-13: the edge swipe on a screen with its own back button makes the picture move (an
+    interactive pop that snaps back). The end state decides, not the movement."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub)
+        swipe = d.session.swipe
+
+        async def swipe_and_move(*args, **kwargs):
+            out = await swipe(*args, **kwargs)
+            feeder.start(frames=[b"B", b"C"], then=b"A")  # moves, then back to the original picture
+            return out
+        d.session.swipe = swipe_and_move
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {"look": False})  # the tree is unchanged
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: nothing changed after back."
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_look_false_and_a_stream_that_comes_back_but_a_tree_that_changed_is_success():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        swipe = d.session.swipe
+
+        async def swipe_then_change(*args, **kwargs):
+            out = await swipe(*args, **kwargs)
+            d.session.tree = [button("e9", "Detail", "detail")]
+            return out
+        d.session.swipe = swipe_then_change
+        d.hub.publish(b"A")
+        feeder = FrameFeeder(d.hub)
+
+        async def move(*args, **kwargs):
+            out = await swipe_then_change(*args, **kwargs)
+            feeder.start(frames=[b"B"], then=b"A")
+            return out
+        d.session.swipe = move
+        r = await d.run_tool("a", "back", {"look": False})
+        assert r["text"] == "Swiped from the left edge."
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_look_false_and_no_stream_reads_the_tree_and_an_unchanged_one_is_no_action():
+    """No frames to judge by: a light read before and after the touch decides, so `Swiped from the left edge.` is not
+    success for a screen that didn't change (V1.6 finding 3)."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "back", {"look": False})  # the fake's tree stays as it was
+        assert e.value.code == "not_actionable" and str(e.value) == "no_action: nothing changed after back."
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_look_false_and_no_stream_a_changed_tree_keeps_the_first_line():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        swipe = d.session.swipe
+
+        async def swipe_then_change(*args, **kwargs):
+            out = await swipe(*args, **kwargs)
+            d.session.tree = [button("e9", "Detail", "detail")]  # the screen is another one now
+            return out
+        d.session.swipe = swipe_then_change
+        r = await d.run_tool("a", "back", {"look": False})
+        assert r["text"] == "Swiped from the left edge."
+        await finish(stop, task)
+    run(go)
+
+
+def test_back_with_no_visible_change_says_a_gesture_was_sent():
+    async def go():
+        # the first frame after the swipe may take a feeder period, which Windows Python 3.10 stretches to ~16 ms:
+        # longer than make()'s 10 ms first-frame wait, so the stream read as stalled and the tree decided (seen once
+        # under a full run); a real stream doesn't stall for 10 ms
+        d = make(settle_first_frame=0.2)
         stop, task = await started(d)
         d.hub.publish(b"A")
         feeder = FrameFeeder(d.hub).start(then=b"A")  # the swipe changes nothing on the screen
@@ -4302,13 +4429,13 @@ def test_a_row_under_the_status_bar_is_tapped_below_it_or_refused():
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
         assert d.session.last_point == (215.0, 58.5)  # 50-67 shows
         await looked(d, [el("e1", "button", "Notifications", rect=(20, 10, 390, 57), covered_by=(nav,))])
-        calls = len(d.session.calls)
+        calls = d.session.actions()  # (not every call: the heartbeat's "locked" checks land in `calls` at any moment)
         with pytest.raises(Refused) as e:  # 50-59 is all that shows between the status bar and the bar
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
         assert str(e.value) == ('covered: e1 button "Notifications" @20,10 390x57 is under the status bar, where a '
                                 'touch scrolls the list to its top; scroll to it first (scroll with this target and '
                                 'to: "target").')
-        assert len(d.session.calls) == calls  # nothing touched
+        assert d.session.actions() == calls  # nothing touched
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
         assert d.session.last_point == (215.0, 38.5)  # forced: its own centre
         d.session.screen = (932.0, 430.0)  # landscape: no status bar
@@ -4438,12 +4565,37 @@ def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
                     await d.run_tool("a", "tap", {"target": target, "force": force})
                 assert e.value.code == "not_actionable", target
                 # (§16.2: no scroll view holds it, so no scroll could bring it on screen; the message says why)
+                # (clarification 3: off_screen now means no scroll helps, and the message says what to do then)
                 assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
-                                        "it isn't inside a scroll view, so no scroll brings it on screen.")
+                                        "it isn't inside a scroll view, so no scroll brings it on screen. It lies in a part "
+                                        "of the screen that nothing scrolls (behind a fixed bar, or outside every list): "
+                                        "look at the screen, then target something else or report it.")
+                assert 'to: "target"' not in str(e.value)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "nowhere"}})
         assert e.value.code == "not_found"
         assert "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_scroll_aimed_at_a_point_of_an_off_screen_target_says_how_to_bring_it_on_screen():
+    """The four touches scroll an off-screen target into view themselves (§16.2); a scroll aimed at a point of one
+    doesn't, so for it a `to: "target"` scroll still brings the target on screen, and the message says that instead
+    of the superseded "scroll with this target"."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        await looked(d, [el("e1", "button", "Top", "lab-top", rect=(16, 300, 398, 48))])
+        d.session.offscreen = [el("", "button", "Bottom", "lab-bottom", rect=(16, 1500, 398, 48))]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "scroll", {"target": {"id": "lab-bottom"}})
+        assert e.value.code == "not_actionable"
+        assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
+                                'a scroll aims at a point of its target: bring it on screen first '
+                                '(`scroll` with `to: "target"` and this target), or use `tap`, which scrolls to it.')
+        assert "scroll with this target" not in str(e.value)
         await finish(stop, task)
     run(go)
 
@@ -5219,6 +5371,36 @@ def test_scroll_to_the_end_stops_as_soon_as_the_tree_shows_nothing_past_the_edge
     run(go)
 
 
+def test_scroll_to_the_end_of_a_14_row_list_is_two_drags_one_wait_and_one_read():
+    """Seen on the phone 2026-11-13 (Wayfare Explore, 14 rows): 7 s for `to: "end"`, and the same for `to: "start"`.
+    Every drag was followed by a wait for the screen, a second wait inside the read, and the read: about 2 s a drag.
+    Before: 2 drags, 4 waits, 2 reads. The tree says how far the end is, so the drags go out one after the other
+    and the screen is waited for and read once."""
+    async def go():
+        d = make(settle_still=0.03, settle_quiet=0.03, settle_fallback=0.05)
+        stop, task = await started(d)
+        rows = LongList(d, rows=14, pitch=120.0)  # 1680 pt of rows in an 800 pt screen
+        await d.run_tool("a", "look", {"screenshot": False})
+        waits = []
+        real = d._settle
+
+        async def counting(*args, **kwargs):
+            waits.append(1)
+            return await real(*args, **kwargs)
+        d._settle = counting
+        reads = d.session.calls.count("refresh")
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "scroll", {"to": "end", "look": False})
+        took = asyncio.get_running_loop().time() - began
+        assert r["text"].startswith("Scrolled") and rows.offset == rows.lowest
+        assert len(d.session.scrolls) <= 2 and len(waits) <= 1 and d.session.calls.count("refresh") - reads <= 1
+        assert took < 1.5
+        r = await d.run_tool("a", "scroll", {"to": "start", "look": False})  # and back: the same
+        assert r["text"].startswith("Scrolled") and rows.offset == 0.0 and len(d.session.scrolls) <= 4
+        await finish(stop, task)
+    run(go)
+
+
 def test_rotate_turns_the_phone_and_checks_its_argument():
     async def go():
         d = make()
@@ -5273,7 +5455,8 @@ def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
         await d.run_tool("a", "look", {"screenshot": False})
         with pytest.raises(Refused) as e:  # a scroll toward a point of a target that is off screen isn't `to: "target"`
             await d.run_tool("a", "scroll", {"target": {"id": "row-30"}})
-        assert str(e.value).endswith('is off screen; scroll to it first (scroll with this target and to: "target").')
+        assert str(e.value).endswith('is off screen; a scroll aims at a point of its target: bring it on screen first '
+                                     '(`scroll` with `to: "target"` and this target), or use `tap`, which scrolls to it.')
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
         first = r["text"].splitlines()[0]
         assert first.startswith("Scrolled e1 scroll id=list to e") and 'button "Row 30" id=row-30' in first
@@ -5674,5 +5857,331 @@ def test_a_touch_that_changes_nothing_on_ioss_health_sheet_says_ask_a_person():
         d.session.tree = [button("e1", "OK", rect=(20, 200, 200, 40))]  # any other screen: no such note
         await d.run_tool("a", "look", {"screenshot": False})
         assert "Health" not in (await d.run_tool("a", "tap", {"target": {"ref": "e1"}}))["text"]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- a read doesn't wait for a stillness the stream already proved (1.6 E1a saving 1) ----
+
+def timed_hub(d: Daemon, start: float = 100.0):
+    """The daemon's hub on a clock the test moves: (publish, advance)."""
+    now = [start]
+    d.hub._mono = lambda: now[0]
+
+    def publish(*pictures: bytes, every: float = 0.01) -> None:
+        for p in pictures:
+            now[0] += every
+            d.hub.publish(p)
+
+    def advance(seconds: float) -> None:
+        now[0] += seconds
+    return publish, advance
+
+
+def counting_settle(d: Daemon) -> list[int]:
+    waits: list[int] = []
+
+    async def settle(*args, **kwargs):
+        waits.append(1)
+        return daemon_module.Settled(0.0, False, False)
+    d._settle = settle  # type: ignore[method-assign]
+    return waits
+
+
+def test_silent_read_skips_the_settle_when_the_stream_proves_stillness():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        publish, _ = timed_hub(d)
+        publish(*[b"A"] * 40)
+        waits = counting_settle(d)
+        assert d._proven_still()
+        view = d.control.client("a")
+        assert await d._silent_read(view) is False  # nothing moved: no reason to read again
+        assert waits == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_silent_read_waits_after_a_recent_change():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        publish, _ = timed_hub(d)
+        publish(*[b"A"] * 40, b"B", b"B")  # changed 10 ms ago: inside the 30 ms window
+        waits = counting_settle(d)
+        assert not d._proven_still()
+        await d._silent_read(d.control.client("a"))
+        assert waits == [1]
+        publish(*[b"B"] * 5)  # the change is now older than the window
+        assert d._proven_still()
+        await finish(stop, task)
+    run(go)
+
+
+def test_silent_read_waits_without_frames_or_with_a_stale_newest_one():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        waits = counting_settle(d)
+        assert not d._proven_still()  # no frames
+        await d._silent_read(d.control.client("a"))
+        assert waits == [1]
+        publish, advance = timed_hub(d)
+        publish(*[b"A"] * 40)
+        assert d._proven_still()
+        advance(0.5)  # the stream went quiet: the picture may be old
+        assert not d._proven_still()
+        await d._silent_read(d.control.client("a"))
+        assert waits == [1, 1]
+        await finish(stop, task)
+    run(go)
+
+
+def test_stillness_needs_the_history_to_cover_the_window():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        publish, _ = timed_hub(d)
+        publish(b"A", b"A", b"A", b"A", b"A", every=0.005)  # 20 ms of history: nothing from before the 30 ms window began
+        assert not d._proven_still()
+        await finish(stop, task)
+    run(go)
+
+
+# ---- a touch's scope check taken from the read it makes anyway (1.6 E1a saving 2) ----
+
+async def personal_stale(**tree) -> tuple:
+    """A personal-mode daemon whose agent's list is stale (`moved`, as after a `look: false` action): the next tap on an id
+    reads the tree. Returns (session, scope, daemon, stop, task); `tree` sets the fake's read before that tap."""
+    s = FakeSession()
+    s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
+    s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
+    s.foreground = "com.example.app"
+    mine = Scope(("com.example.app",))
+    d = make(s)
+    stop, task = await started(d)
+    await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+    d.control.client("a").moved = True  # as after a `look: false` action: the list is no longer known to be the screen
+    for key, value in tree.items():
+        setattr(s, key, value)
+    return s, mine, d, stop, task
+
+
+def test_tap_scope_comes_from_the_read_when_it_names_a_given_app():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.tree_app = ("Example", "com.example.app")
+        asks, reads = s.front_asks, s.calls.count("refresh")
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert r["text"].startswith("Tapped")
+        assert s.calls.count("refresh") == reads + 1  # it read the tree
+        # (the one question after the touch, _taken_away, is all that is asked; before it was one more)
+        s2, mine2, d2, stop2, task2 = await personal_stale()
+        asks2 = s2.front_asks
+        await d2.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine2)  # the read names no app
+        assert s2.front_asks - asks2 == s.front_asks - asks + 1
+        await finish(stop, task)
+        await finish(stop2, task2)
+    run(go)
+
+
+def test_tap_is_refused_when_its_read_names_another_app_and_nothing_is_touched():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.tree_app, s.foreground, s.app = ("Mail box", "com.example.mail"), "com.example.mail", ("Mail box", "com.example.mail")
+        s.tap_points.clear()
+        asks = s.front_asks
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        assert s.tap_points == [] and s.front_asks > asks  # the question was asked, as before
+        await finish(stop, task)
+    run(go)
+
+
+def test_tap_asks_separately_when_the_read_names_no_app_or_the_home_screen_or_an_alert():
+    async def go():
+        alert = ui.Alert("Allow?", ("OK",), (0, 0, 10, 10))
+        for tree_app, last_alert in ((None, None), (("Home screen", "com.apple.springboard"), None),
+                                     (("Example", "com.example.app"), alert)):
+            s, mine, d, stop, task = await personal_stale()
+            s.tree_app, s.last_alert = tree_app, last_alert
+            asks = s.front_asks
+            if last_alert is not None:  # (an alert covers the button: the tap is refused, after the separate check)
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+                assert e.value.code == "not_actionable" and s.front_asks > asks and not s.tap_points
+            else:
+                await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+                assert s.front_asks - asks >= 2, (tree_app, last_alert)  # the separate check, then the one after the touch
+                assert s.tap_points
+            await finish(stop, task)
+    run(go)
+
+
+def test_tap_with_a_current_list_or_by_ref_keeps_the_separate_check():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.tree_app = ("Example", "com.example.app")
+        asks = s.front_asks
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)  # a ref reads nothing first
+        assert s.front_asks - asks >= 2
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)  # now the list is current: no read either
+        reads, asks = s.calls.count("refresh"), s.front_asks
+        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert s.calls.count("refresh") == reads and s.front_asks - asks >= 2
+        await finish(stop, task)
+    run(go)
+
+
+MAIL = (("Mail box", "com.example.mail"), "com.example.mail")  # (what a read names, what the phone says is in front)
+SPINNER = el("e9", "activityindicator", "In progress", "", rect=(150, 300, 40, 40), type="ActivityIndicator")
+
+
+def switch_apps_when(s: FakeSession, when, tree: list) -> None:
+    """From the first read at which `when()` holds, the fake's reads show the Mail app with `tree`, and the phone has
+    it in front (another app came up while the tap was on its way)."""
+    real = s.refresh
+
+    async def refresh(timeout=None):
+        if when():
+            s.tree, (s.tree_app, s.foreground) = list(tree), MAIL
+        return await real(timeout)
+    s.refresh = refresh
+
+
+def test_a_loading_wait_that_reads_another_app_touches_nothing_there():
+    """(Codex, PR #9 cycle 1) The tap's read shows the given app loading, with no target; a poll of the loading wait
+    reads another app with that target. The scope check is made again on that read: nothing is touched, and the
+    separate question answers outside_apps."""
+    async def go():
+        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
+        reads = []
+        switch_apps_when(s, lambda: reads.append(1) or len(reads) > 2, [button("e1", "OK", "ok-button", rect=(10, 500, 100, 40))])
+        s.tap_points.clear()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert len(reads) > 2  # the loading wait read again, and found the target in the other app
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        assert s.tap_points == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_loading_wait_that_ends_in_the_given_app_still_taps_and_hands_the_runner_the_check():
+    async def go():
+        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
+        s.touch_checks_front, s.calls_touch_hook = True, True
+        reads = []
+        real = s.refresh
+
+        async def refresh(timeout=None):
+            reads.append(1)
+            if len(reads) > 2:
+                s.tree = [button("e1", "OK", "ok-button")]
+            return await real(timeout)
+        s.refresh = refresh
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert r["text"].startswith("Tapped") and len(s.tap_points) == 1 and len(reads) > 2
+        assert s.checked_taps == [("com.example.app",)]  # the runner's tap checked the app in front too (E3)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_touch_on_the_way_to_the_tap_is_checked_against_the_read_before_it():
+    """The keyboard is closed before the tap: a touch where nothing responds, then (the keyboard still up) a drag and
+    the keyboard's own dismissal. When the read after the first touch shows another app, neither of the others, nor
+    the tap, is made there."""
+    async def go():
+        form = [el("e1", "text", "Title", rect=(10, 70, 100, 20), type="StaticText"),
+                el("e2", "input", "Field A", "a", rect=(10, 100, 300, 40)),
+                button("e4", "Save", "save", rect=(10, 300, 100, 40)),
+                el("e8", "scroll", "", "form", rect=(0, 60, 400, 440))]
+        s, mine, d, stop, task = await personal_stale(tree=form, tree_app=("Example", "com.example.app"))
+        s.last_keyboard, s.last_insets, s.focused, s.blank_tap_closes = True, (60.0, 300.0), "a", False
+        s.calls_touch_hook = True
+        s.tap_points.clear()
+        switch_apps_when(s, lambda: bool(s.tap_points), form)  # the read after the first touch: the Mail app's form
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "save"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box")
+        assert s.tap_points == [(60.0, 80.0)]  # only the first touch, made while the given app was read in front
+        assert "swipe" not in s.calls and "dismiss_keyboard" not in s.calls
+        await finish(stop, task)
+    run(go)
+
+
+# ---- a touch's scope check made by the runner's tap itself (route version 4, 1.6 E3) ----
+
+def test_tap_lets_the_runner_check_the_app_in_front_and_asks_nothing_first():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.touch_checks_front = True
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)  # a current list: the tap reads nothing first
+        asks, reads = s.front_asks, s.calls.count("refresh")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert r["text"].startswith("Tapped") and s.checked_taps == [("com.example.app",)]
+        assert s.calls.count("refresh") == reads and s.front_asks - asks == 1  # only the one after the touch
+        assert s.front_apps is None
+        s.touch_checks_front = False  # a runner that can't: the question first, as before
+        asks = s.front_asks
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert s.front_asks - asks >= 2 and len(s.checked_taps) == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_tap_the_runner_refuses_touches_nothing_and_gets_todays_outside_apps_answer():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.touch_checks_front = True
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        s.foreground, s.app = "com.example.mail", ("Mail box", "com.example.mail")
+        s.tap_points.clear()
+        asks = s.front_asks
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        assert s.tap_points == [] and s.checked_taps == [("com.example.app",)] and s.front_asks > asks
+        assert s.front_apps is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_runner_refusal_on_a_given_apps_own_prompt_still_lets_the_tap_through_by_the_question():
+    """SpringBoard draws a given app's permission prompt: the runner sees SpringBoard and refuses, and the question
+    that follows knows the prompt (as before E3), so the tap goes out the old way, once."""
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.touch_checks_front = True
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        s.foreground = "com.apple.springboard"
+        calls: list = []
+
+        async def prompt_of_given(given, view, read):
+            calls.append(read)
+            return True
+        d._prompt_of_given = prompt_of_given
+
+        async def running():
+            return ["com.example.app"]
+        s.device.foreground_apps = running
+        s.tap_points.clear()
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
+        assert len(s.checked_taps) == 1 and len(s.tap_points) == 1 and calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_dry_run_and_a_dedicated_device_never_hand_the_check_to_the_runner():
+    async def go():
+        s, mine, d, stop, task = await personal_stale()
+        s.touch_checks_front = True
+        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "dry_run": True}, scope=mine)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # dedicated: no scope
+        assert s.checked_taps == []
         await finish(stop, task)
     run(go)

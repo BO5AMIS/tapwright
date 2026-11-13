@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs the Tapwright MCP server (`tapwright mcp --apps <bundle id>`) and an iPhone that went through `tapwright setup`. Works from Windows, Linux or macOS.
 metadata:
   tool: tapwright
-  interface: AGENT-TOOLS v1.8
+  interface: AGENT-TOOLS v1.13
 ---
 
 # Tapwright: test an app on a real iPhone
@@ -203,6 +203,45 @@ To judge whether a real user can find and finish a feature, not only whether it 
   Tapwright never asks iOS for full access to the library: unless the person gave the runner full access themselves,
   `remove` names what to delete by hand.
 
+## 4c. Driving fast
+
+Once the tool knows the app, a trip is one call. Your rules:
+
+- **Known ground: call `drive` yourself, once.** `map` lists the places, routes and reflexes. `drive {"to": "language"}`
+  goes by proven roads, or by a link, and answers once: how it travelled, how long, and the screen it arrived at. No
+  `look` after it. It never claims an arrival it didn't check. `off_route` means it stopped where the screen isn't what
+  the road expects and touched nothing more: go on by hand from the screen shown, and what you do replaces the old road.
+- **Unknown ground: hand the goal to the driver.** Don't drive it step by step yourself. The driver is a subagent on a
+  small, fast model (`phone-driver`, which `tapwright install` writes for Claude Code and Codex; for another host paste
+  [references/driver.md](references/driver.md) as the brief and use your fastest model). Give it the goal, the app,
+  what counts as arrived and the account names. Keep one driver for the session and send it the next goal, rather than
+  starting a new one. Read its five lines, then judge the result yourself.
+- **Accounts by name, never passwords.** `drive {"route": "sign_in", "account": "tester2"}`: the tool types the
+  username and password from the user's `--accounts` file, only into the right kind of field. You never see them
+  (answers show `<tester2's password>`), so never ask for or type one yourself.
+- **Routes** are saved flows that start from a named place and take variables. `record` with `start: true` and
+  `route: "sign_in"`, do the flow (`type_text` with `as: "email"` saves its text as a variable), then `stop: true`.
+  `drive {"route": "sign_in", "with": {"email": "a@b.c"}, "then": [...]}` runs it and then your own `run` steps. `by`
+  is `any`, `taps` or `link`.
+- **A maybe-screen in a flow:** `if` runs a step only when something is on screen, `optional` skips it when its own
+  target isn't there. In `run` and routes: `{"tool": "tap", "target": {"text": "Not now"}, "optional": true}`.
+- **Reflexes** close what always interrupts (a rating sheet). One step, never anything the policy flags; each firing is
+  said in the answer. A permission prompt is never a reflex: answer it with `alert`.
+  `map {"reflex": {"name": "rate", "when": {"text": "Rate Wayfare"}, "do": {"tool": "tap", "target": {"text": "Not now"}}}}`
+- **`brief: true`** on an action, `run` or `drive` (or `tapwright mcp --brief`) answers the first line, at most 12
+  lines of changes, then `…<n> more: look shows them.` `look` is always whole. Never cut an answer with head, grep or sed.
+- **A person's OK** (`needs_confirmation`) shows as a question in your user's chat when the host can show the
+  dialog, and in the live view. The call waits for the answer; if it still answers `needs_confirmation` after they
+  allowed it, make the same call again once, for a single action. A `run` or `drive` with `then` that stopped at one
+  has already done its earlier steps: read the reported progress and the screen, and go on from the stopped step,
+  never the whole batch again. `locked` and `paused`: stop and tell the user.
+- **`session_report`** gives seconds as well as calls: the `Time:` line splits them into thinking time between
+  calls and the tool's own time, by tool, and it flags calls that each started a new process (load the MCP server
+  once). Read it after a driver's run: when the thinking time between its calls is most of the total, a faster model
+  for the driver helps (`tapwright install --driver-model NAME`); and a run of calls over a way `map` knows should
+  have been one `drive`.
+- **In a `journey` in a user's eyes** there are no jumps, reflexes or shortcuts unless the journey allowed them.
+
 ## 5. Errors
 
 Every failure is `Error <code>: <message>`, and the message says what to do next.
@@ -220,6 +259,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `reconnecting` | wait a few seconds, then `look` |
 | `timeout` | the action may have happened: `look` before you retry |
 | `expect_failed` | a `run` step's expectation didn't hold: the first line says which step and what was expected. Look, then decide: a bug to report, or a step to fix |
+| `off_route` | `drive` stopped because the screen isn't where the road leads, and touched nothing else: go on by hand from the screen the answer shows (what you do is remembered) |
 | `bad_params` | fix the call |
 | `internal` | a bug in the tool: report it with the call you made |
 

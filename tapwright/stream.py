@@ -239,6 +239,14 @@ class FrameHub:
         """(arrival on the monotonic clock, frame) of the kept frames after `seq`, up to `upto`, oldest first."""
         return [(t, f) for t, f in self._recent if f.seq > seq and (upto is None or f.seq <= upto)]
 
+    def recent(self) -> list[tuple[float, Frame]]:
+        """(arrival on the monotonic clock, frame) of the kept frames, oldest first."""
+        return list(self._recent)
+
+    def age(self) -> float | None:
+        """Seconds since the newest frame arrived (monotonic clock); None with no frame."""
+        return self._mono() - self._recent[-1][0] if self._recent else None
+
     def close(self) -> None:
         self.closed = True
         self._new.set()

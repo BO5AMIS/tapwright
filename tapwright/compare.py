@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import io
+import math
 import os
 import re
 import secrets
@@ -22,7 +23,7 @@ from typing import BinaryIO, Callable, NamedTuple
 
 from PIL import Image, ImageChops, ImageDraw, UnidentifiedImageError
 
-from . import ui
+from . import names, ui
 from .control import Refused
 
 # ASCII only, as AGENT-TOOLS §14.1 reads in Tapline's JavaScript, where \w is [A-Za-z0-9_]. Python's \w takes any
@@ -34,6 +35,8 @@ TOLERANCE = 0.1  # of 255: how far the largest channel of a pixel must move to c
 CUT = int(TOLERANCE * 255) + 1  # 26: the first channel difference that counts (> 25.5)
 CELL = 16  # px: changed pixels are joined by the cell they fall in, and cells by their 8 neighbours
 MAX_LINES = 8  # region lines in an answer
+NAMED_FLOOR = 0.1  # percent of the screen: a changed cluster this large is named under the threshold too (1.13.1)
+PAGE = 0.25  # of the screen: an element larger than this is a page, never the name of a change
 PAINT = (128, 128, 128)  # what an ignored rect and the status bar are painted with, on both pictures
 FADE, TINT, OUTLINE = 0.6, 0.55, 2  # the picture: towards white; red over a change; a region's outline in px
 RED, WHITE = (255, 0, 0), (255, 255, 255)
@@ -359,6 +362,52 @@ def region_lines(regions: list[Region], scale: float, items: list[ui.Element]) -
     return lines
 
 
+def _changed_in(mask: Image.Image, rect: tuple[float, float, float, float], scale: float) -> bool:
+    """Did any pixel change inside an element's rect (points)? One crop and a bounding box, in C."""
+    x, y, w, h = rect
+    box = (max(0, math.floor(x * scale)), max(0, math.floor(y * scale)),
+           min(mask.width, math.ceil((x + w) * scale)), min(mask.height, math.ceil((y + h) * scale)))
+    return box[2] > box[0] and box[3] > box[1] and mask.crop(box).getbbox() is not None
+
+
+def _holds(outer: tuple[float, float, float, float], inner: tuple[float, float, float, float]) -> bool:
+    return (outer[0] <= inner[0] + 1 and outer[1] <= inner[1] + 1
+            and outer[0] + outer[2] >= inner[0] + inner[2] - 1 and outer[1] + outer[3] >= inner[1] + inner[3] - 1)
+
+
+def named_changes(result: Result, scale: float, items: list[ui.Element]) -> list[str]:
+    """What changed under the threshold, by name (AGENT-TOOLS 1.13.1 §14): each changed cluster at least NAMED_FLOOR
+    of the screen, and every changed cluster that has changed pixels inside a text element, however small. A
+    cluster is named by the elements whose own rect holds changed pixels (the innermost of those: a card gives way to
+    the price in it), as `e9 text "from €1,362"`; one with no element is named by its place, `@x,y WxH`. A page-sized
+    element names nothing. At most MAX_LINES names, then `(+N more)`."""
+    floor = result.total * NAMED_FLOOR / 100
+    page = result.total / (scale * scale) * PAGE
+    found: list[str] = []
+    seen: set[int] = set()
+    for region, box in zip(result.regions, point_regions(result.regions, scale)):
+        big = region.width * region.height >= floor
+        px = (region.x / scale, region.y / scale, region.width / scale, region.height / scale)
+        hits = [e for e in items if (e.text if not big else e.text or e.identifier) and e.width * e.height <= page
+                and e.x < px[0] + px[2] and e.x + e.width > px[0] and e.y < px[1] + px[3] and e.y + e.height > px[1]
+                and _changed_in(result.mask, e.rect, scale)]
+        # (two elements of one rect hold each other: the first stays, so a change is never left with no name)
+        leaves = [e for n, e in enumerate(hits)
+                  if not any(o is not e and _holds(e.rect, o.rect) and (not _holds(o.rect, e.rect) or m < n)
+                             for m, o in enumerate(hits))]
+        if leaves:
+            found += [e.line(actions=False, place=False) for e in leaves if id(e) not in seen]
+            seen.update(id(e) for e in leaves)
+        elif big:
+            found.append(f"@{box[0]},{box[1]} {box[2]}x{box[3]}")
+    return found if len(found) <= MAX_LINES else [*found[:MAX_LINES], f"(+{len(found) - MAX_LINES} more)"]
+
+
+def matched_with_changes(name: str, share: str, threshold: float, names: list[str]) -> str:
+    """The answer of a match that still has changes to name."""
+    return f'Matches the reference "{name}" ({share} changed, under the {threshold:g}% threshold): changed at {", ".join(names)}.'
+
+
 def failure(name: str, result: Result, threshold: float, scale: float) -> str:
     """Why a check didn't hold (§14.2): the share, the pass bar and where, without element names."""
     boxes = point_regions(result.regions, scale)
@@ -444,7 +493,16 @@ def references_dir() -> Path:
 
 
 def reference_path(bundle: str, name: str) -> Path:
-    return references_dir() / re.sub(r"[^\w.-]", "_", bundle) / f"{name}.png"
+    return references_dir() / re.sub(r"[^\w.-]", "_", bundle, flags=re.ASCII) / f"{name}.png"
+
+
+def twin(bundle: str, name: str, script: Path | None = None) -> str | None:
+    """The name of a saved reference that is `name` in another case (the store's, and a script's own folder), or None:
+    `home` and `HOME` are one file on Windows and macOS (AGENT-TOOLS 1.13.1, item 5)."""
+    for folder in (reference_path(bundle, name).parent, *([script_references(script)] if script is not None else [])):
+        if folder.is_dir() and (other := names.twin(name, (p.stem for p in folder.glob("*.png")))) is not None:
+            return other
+    return None
 
 
 def script_references(script: Path) -> Path:

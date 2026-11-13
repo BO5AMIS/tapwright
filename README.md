@@ -85,7 +85,7 @@ it working, `tapwright doctor` warns 30 days before the signing runs out, and
 `tapwright doctor --fix` (phone on USB) repairs what it can.
 
 **Give it to your agent**, naming the apps it may use. One command registers the MCP server
-with your agent and installs the skill (`--client claude`, `codex` or `cursor`; run it again to
+with your agent and installs the skill and the driver agent (`--client claude`, `codex` or `cursor`; run it again to
 change the apps, it never adds a second entry):
 
 ```sh
@@ -139,14 +139,16 @@ repository too.
 | `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). A safety policy with `network` in its `block` list refuses it (`normal` always works). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
 | `open_url` | deep links |
 | `viewer` | opens the live view in a browser on this computer, for you (the agent never gets the link: its key could approve a held-back touch) |
-| `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once |
-| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`) |
+| `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once. A step may carry `if` (run it only when that is on screen) and `optional` (skip it when its own target isn't there), so one call covers a flow with a maybe-screen in it |
+| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`). `record` with `route: "<name>"` saves a route for `drive` instead: it starts from a named place, and a `type_text` with `as` is saved as a variable |
 | `logs`, `crash` | the app's own log (level, grep, since) and its crash reports, read from the phone; a failed `run` step adds the log lines from that step, and a call the app crashed in ends with a note |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
 | `performance` | memory, CPU and frame rate of the app's own process while it waits, around a tap, or from a cold start to the first settled screen (`launch`); `run` and scripts can hold it to limits with `expect.under` |
 | `ux_check` | one screen against the usability basics, as measured facts first (each names its element and its basis): too many competing choices, no one clear main action, the main action out of thumb reach, icon-only buttons with no label, cut-off text, low contrast and small targets (from `audit`), the same action named differently on screens you saw earlier, an error or empty state that doesn't say what to do next. Your house rules (`tapwright mcp --ux-rules FILE`: text rules you judge, `{"max_taps_to_goal": 4}` and `{"way_back": true}` the tool checks) are included |
 | `media` | puts test pictures (jpeg, png, heic, up to 20 MB each) in the phone's photo library for an app's photo picker: `add` with their paths and `confirm: true` (ask your user first); `remove: true` deletes only what it added. Needs the runner with the photo routes (iOS asks you once to let it add photos, and once more, with a confirmation for each delete, to remove them) |
-| `session_report` | where this session's calls went (the same from the shell: `tapwright report [--since TIME] [--client ID]`): calls per tool, failures by code, and waste to cut, each with its call numbers: looks right after an answer that had the changes, retries after `not_found`, scroll hunts, runs of actions that could have been one `run` |
+| `session_report` | where this session's calls went (the same from the shell: `tapwright report [--since TIME] [--client ID]`): calls per tool, failures by code, and waste to cut, each with its call numbers: looks right after an answer that had the changes, retries after `not_found`, scroll hunts, runs of actions that could have been one `run`; and the seconds, not only the calls: the agent's thinking time between calls, the tool's own time, by tool, and a line when calls came one process each (load the MCP server once) |
+| `drive` | go to a place the map knows (`to`), or run a saved route (`route`), at the tool's own speed: a link when the place has one, else the shortest chain of proven roads, each move through the same scope, policy and confirmation as a single call. `with` fills a link's params, `then` adds `run` steps after arriving, `by` is `any`, `taps` or `link`, `dry_run` says the way, `account` names a test account (`--accounts FILE`: the tool types its username and password, the agent never sees them). One answer: `Arrived at language by 3 taps in 1.9 s (settings > general > language).` A road whose target is missing is repaired by another name or the only closest match, then planned again from a known place (twice at most), else `off_route`: nothing more is touched |
+| `map` | the app's map, learned as you drive: the places Tapwright recognised, the roads (moves) between them, saved routes and reflexes, one line each, and where the app is now; `to` shows the shortest known way to a place and whether each road is proven on this build, `name` names the current place, `link` adds the link that reaches a place, `reflex` / `forget_reflex` and `forget` edit it. The file is `~/.tapwright/maps/<bundle id>/map.json` (`--maps DIR` on `serve`, `mcp` and `call` keeps it with a project); list-row text, typed text and secure values are never in it, and a navigation title only as a hash |
 | `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
 | `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
 | `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
@@ -183,6 +185,19 @@ with the changes in red to `sign-up.diff/`. Reference pictures and those two fol
 all, and never through a link; on Windows that narrows, but can't close, the window for a folder that another process
 of the same user swaps at that very moment. With `--screenshots DIR`, filmstrips and the difference picture an agent
 gets back are saved to that folder by the ordinary screenshot writer, outside this guarantee.
+
+**Driving fast.** Tapwright learns an app as an agent uses it: each screen it recognises is a place, each
+move between places a road, kept in one map file per app (`~/.tapwright/maps`, or `--maps DIR` to keep it with
+your project, shared with Tapline). On ground the map knows, `drive` goes to a place in one call and no model is
+asked anything. On new ground, `tapwright install` also writes a driver agent, `phone-driver`: a subagent on your
+agent's fastest small model (Claude Code: `.claude/agents/phone-driver.md` on Haiku; Codex:
+`.codex/agents/phone-driver.toml`; `--driver-model NAME` changes it) that sends several moves in one call and saves
+what it learns. No model runs inside Tapwright and no API key is asked for. Test accounts stay on your computer
+(`--accounts FILE`): the agent says `tester2`, the tool types the password, and no answer, log or map holds it.
+`brief: true` (or `tapwright mcp --brief`) shortens answers; `tapwright call look --apps ID` makes a call without an
+MCP connection, to the running `tapwright serve` (`serve --apps` sets the widest scope any call may ask for); and a
+person's OK can be given in your chat, through the host's dialog, as well as in the live view (`--no-dialog` turns
+that off).
 
 ## Live view
 

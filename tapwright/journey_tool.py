@@ -10,7 +10,7 @@ import json
 import logging
 
 from . import journey, journey_export, journey_report, launch as launchlib, network, ui, uxcheck
-from .control import Refused
+from .control import STILL_WANTED, Refused
 from .device import ConnectionLost
 
 HIDDEN = "in a journey, ids and labels are hidden; use a ref or the visible text"
@@ -18,6 +18,8 @@ NO_JUMP = ('in a journey, scroll to: "target" is off (a user can\'t jump to what
            "direction, or to: start or end, and read the screen")
 NO_URL = ('blocked: in a journey, open_url is refused unless the journey\'s start allows it (allow: ["open_url"]); '
           "reach the screen by touch, as a user would.")
+NO_MAP = ("in a journey, map is off: a user has no map of the app, and its places and links are what a user can't see; "
+          "finish the journey, then use map")
 NO_JOURNEY = "no journey is running; start one with journey start: true and a goal"
 MODES = ("start", "stop", "stress", "finding")
 KEYS = {"start": ("goal", "persona", "conditions", "allow", "eyes"), "stop": ("reached", "why", "export"),
@@ -46,6 +48,8 @@ class JourneyTools:
                 jr.shortcuts.append(f"open_url {args.get('url')}")
         if not jr.users_eyes:
             return args
+        if name == "map":
+            raise Refused("not_allowed", NO_MAP)
         if journey.hidden(name, args):
             raise Refused("bad_params", HIDDEN)
         if name == "scroll" and args.get("to") == "target":
@@ -220,13 +224,21 @@ class JourneyTools:
                                  "are open. The report says so."])
         return _d()._answer(["Back in a user's eyes."])
 
-    async def _calls_of_its_own(self, client_id: str, jr: journey.Journey, scope, name: str, args: dict) -> dict:
-        """One of the tool's own calls: through run_tool (so scope, policy and log apply), not counted as the agent's."""
+    async def _calls_of_its_own(self, client_id: str, jr: journey.Journey, scope, name: str, args: dict,
+                                restore: bool = False) -> dict:
+        """One of the tool's own calls: through run_tool (so scope, policy and log apply), not counted as the agent's.
+        `restore`: it puts back what the tool already changed on the phone (upright after a rotate, the app in front
+        after a background, the plain launch after a journey's conditions). It runs even when the HTTP caller left
+        meanwhile (Codex, PR #9 cycle 2): the caller-left check is for what wasn't started, and a phone left in
+        landscape is the tool's doing. A pause, or a person using the phone, still holds it back."""
         d = _d()
         token, own = d._NESTED.set(True), d._JOURNEY_OWN.set(True)  # (of this task only: another call of the agent still goes through the gate)
+        wanted = STILL_WANTED.set(None) if restore else None
         try:
             return await self.run_tool(client_id, name, args, scope)
         finally:
+            if wanted is not None:
+                STILL_WANTED.reset(wanted)
             d._JOURNEY_OWN.reset(own)
             d._NESTED.reset(token)
 
@@ -294,8 +306,8 @@ class JourneyTools:
         jr.network_set = False
         if jr.launched_with and jr.app:
             try:
-                await self._calls_of_its_own(client_id, jr, scope, "close_app", {"app": jr.app})
-                await self._calls_of_its_own(client_id, jr, scope, "open_app", {"app": jr.app, "look": False})
+                await self._calls_of_its_own(client_id, jr, scope, "close_app", {"app": jr.app}, restore=True)
+                await self._calls_of_its_own(client_id, jr, scope, "open_app", {"app": jr.app, "look": False}, restore=True)
                 notes.append("the app was opened again without the journey's language, region and text size.")
             except Refused as e:
                 notes.append(f"couldn't open the app again without the conditions: {e}")
@@ -381,6 +393,7 @@ class JourneyTools:
             raise Refused("bad_params", f"stress must be one of {', '.join(journey.STRESSES)}, not {kind!r}")
         survives = journey.check_survives(args.get("survives"))
         label, target, mode = kind, args.get("target"), args.get("mode")
+        changed: list[str] = []  # what a double tap found different under its second touch
         if args.get("done") is not None and not isinstance(args["done"], bool):
             raise Refused("bad_params", "done must be true or false")
         if kind == "network":
@@ -403,36 +416,39 @@ class JourneyTools:
         if survives and "goal_step" in survives and not any(s.index == survives["goal_step"] for s in jr.screens):
             raise Refused("bad_params", f"survives goal_step {survives['goal_step']}: the journey has "
                                         f"{journey.plural(len(jr.screens), 'screen')} so far")
-        run = lambda name, a: self._calls_of_its_own(client_id, jr, scope, name, a)  # noqa: E731
+        run = lambda name, a, restore=False: self._calls_of_its_own(client_id, jr, scope, name, a, restore)  # noqa: E731
         if not args.get("done"):
             if kind == "background":
                 await run("press_button", {"name": "home", "look": False})
                 await self.control.sleep(d.STRESS_BACKGROUND_S)
                 resume = d._RESUME.set(True)  # the same process, in front again: its language and text size stay
                 try:
-                    await run("open_app", {"app": bundle, "look": False})
+                    await run("open_app", {"app": bundle, "look": False}, restore=True)  # (its app in front again)
                 finally:
                     d._RESUME.reset(resume)
             elif kind == "network":
                 await run("network", {"mode": mode})
                 jr.network_set = mode != "normal"
             elif kind == "double_tap":
-                token = d._DOUBLE.set(True)
+                token, changed_token = d._DOUBLE.set(True), d._DOUBLE_CHANGED.set(changed)
                 try:
                     await run("tap", {"target": target, "look": False})
                 finally:
                     d._DOUBLE.reset(token)
+                    d._DOUBLE_CHANGED.reset(changed_token)
+                if changed:  # (1.13.1, item 6) the second touch was never sent: the control wasn't the same
+                    label = f"double_tap: changed after the first tap ({changed[0]}), so there was no second tap"
             elif kind == "rotate":
                 await run("rotate", {"to": "landscape_left", "look": False})
                 try:
                     await self.control.sleep(d.STRESS_ROTATE_S)
                 finally:
-                    await run("rotate", {"to": "portrait", "look": False})
+                    await run("rotate", {"to": "portrait", "look": False}, restore=True)  # (upright again)
             else:  # relaunch
                 await run("close_app", {"app": bundle})
                 # a new start is a launch with the journey's conditions (the tool's own call skips the gate that adds them)
                 await run("open_app", {"app": bundle, "look": False,
-                                       **{k: v for k, v in jr.conditions.items() if k in launchlib.KEYS}})
+                                       **{k: v for k, v in jr.conditions.items() if k in launchlib.KEYS}}, restore=True)
         looked = await run("look", {"screenshot": False})
         jr.see(looked["text"])
         line = f"Stress: {label}"

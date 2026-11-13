@@ -395,6 +395,61 @@ def test_a_blank_touch_prefers_a_point_inside_a_scroll_view():
     assert ui.blank_point(items, (430.0, 932.0), 50.0, 849.0) == (68.0, 384.0)
 
 
+# ---- what lies wholly to the left or right of the screen is not off-screen content (V1.6 finding 6) ----
+PHONE = (393.0, 852.0)
+
+
+def stack(*, behind_x: float = -129.0, behind_children=(), pushed_children=()) -> ui.Tree:
+    """A stack navigator mid-push: the previous screen kept mounted, slid to `behind_x`, and the new one in front."""
+    behind = node("Other", rect=(behind_x, 0, 393, 852), children=behind_children)
+    pushed = node("Other", rect=(0, 0, 393, 852), children=pushed_children)
+    return ui.read(xml(node("Application", "App", rect=(0, 0, 393, 852), children=[behind, pushed])), PHONE)
+
+
+def test_a_previous_screen_at_a_negative_x_leaves_no_element_in_the_tree_or_the_off_screen_list():
+    tree = stack(behind_children=[node("StaticText", "Trips", rect=(-113, 100, 100, 20)),
+                                  node("Button", "Add", "add-trip", rect=(-100, 200, 90, 40))],
+                 pushed_children=[node("StaticText", "Plan a trip", rect=(20, 100, 200, 30))])
+    assert [e.text for e in tree.items] == ["Plan a trip"]
+    assert tree.offscreen == [] and (tree.above, tree.below) == (0, 0)
+
+
+def test_what_lies_wholly_to_the_right_is_dropped_too_and_a_partly_visible_element_keeps_its_old_handling():
+    tree = stack(behind_x=393.0, behind_children=[node("Button", "Next", "next", rect=(420, 200, 90, 40))],
+                 pushed_children=[node("StaticText", "Plan a trip", rect=(20, 100, 200, 30)),
+                                  node("StaticText", "Half", rect=(380, 300, 60, 20))])
+    assert [e.text for e in tree.items] == ["Plan a trip"]
+    assert [e.text for e in tree.offscreen] == ["Half"]  # its centre is past the edge but it touches the screen
+
+
+def test_an_element_below_the_screen_is_still_counted_and_listed_as_off_screen():
+    tree = stack(pushed_children=[node("Button", "Far", "far", rect=(20, 900, 90, 40))])
+    assert [e.text for e in tree.offscreen] == ["Far"] and tree.below == 1
+
+
+def test_a_horizontal_scroll_view_keeps_its_cards_beyond_the_edge():
+    cards = node("ScrollView", "", "carousel", rect=(0, 100, 393, 120), children=[
+        node("Button", "Card 1", "c1", rect=(16, 110, 160, 100)), node("Button", "Card 2", "c2", rect=(420, 110, 160, 100)),
+        node("Button", "Card 3", "c3", rect=(600, 110, 160, 100))])
+    tree = stack(pushed_children=[cards])
+    assert [e.text for e in tree.items if e.role == "button"] == ["Card 1"]
+    assert [e.text for e in tree.offscreen] == ["Card 2", "Card 3"]
+
+
+def test_the_pages_of_a_pager_keep_their_content_even_inside_a_scroll_view_of_their_own():
+    page = node("Other", "", "page-2", rect=(393, 0, 393, 852), children=[
+        node("ScrollView", "", "page-2-list", rect=(393, 0, 393, 852), children=[
+            node("StaticText", "Second page", rect=(413, 100, 200, 30))])])
+    pager = node("ScrollView", "", "pager", rect=(0, 0, 393, 852), children=[page])
+    tree = stack(pushed_children=[pager])
+    assert "Second page" in [e.text for e in tree.offscreen]
+
+
+def test_a_scroll_view_of_the_previous_screen_is_no_pager():
+    old = node("ScrollView", "", "old-list", rect=(-129, 0, 393, 852), children=[
+        node("StaticText", "Old row", rect=(-109, 100, 100, 20))])
+    tree = stack(behind_children=[old], pushed_children=[node("StaticText", "Plan a trip", rect=(20, 100, 200, 30))])
+    assert tree.offscreen == [] and [e.text for e in tree.items if e.text] == ["Plan a trip"]
 # React Native gives accessibilityRole radio and checkbox no accessibility trait, so XCUITest types such a view
 # `Other`, and VoiceOver speaks the role's words after the label. These are the lines an agent should get for it.
 def _option(label: str, word: str, y: int, same_rect: bool = False) -> ET.Element:

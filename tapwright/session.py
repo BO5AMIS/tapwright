@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from . import store, ui
+from . import store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 
@@ -54,8 +54,26 @@ PHOTOS_ACCESS_PATH = "/session/{sid}/wda/tw/photos/access"
 PHOTOS_ADD_PATH = "/session/{sid}/wda/tw/photos/add"
 PHOTOS_DELETE_PATH = "/session/{sid}/wda/tw/photos/delete"
 PHOTOS_WAIT = 150.0  # seconds: iOS may be asking the person to allow the runner photo access
+# The fork's route version 4 (Tapwright 1.6 E2, E3) adds a compact tree read: only what the list reads, as compact JSON
+# (ui.xml_of_tree turns it back into the XML /source sends), with "unchanged" when nothing changed since the read whose
+# token it is sent. TAPWRIGHT_FAST_READ=0 keeps reads on /source. And the fast tap takes `apps`: the runner touches only
+# while one of them is in front (FRONT_REFUSED otherwise), so personal mode's question needs no request of its own.
+# TAPWRIGHT_FRONT_IN_TAP=0 keeps that question separate.
+FAST_READ = os.environ.get("TAPWRIGHT_FAST_READ", "1")
+TREE_PATH = "/wda/tw/tree"  # (without a session, as SOURCE_PATH: the same app is read)
+FRONT_IN_TAP = os.environ.get("TAPWRIGHT_FRONT_IN_TAP", "1")
+FRONT_REFUSED = "tapwright front:"  # how the fork's tap starts its refusal: another app is in front, nothing touched
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
+
+
+class FrontUnchecked(Refused):
+    """A tap whose app-in-front check was left to the fork's tap (`front_apps`) wasn't made: the runner said another
+    app is in front, or the touch couldn't go by that route, or something else was about to act first. Nothing was
+    touched; the daemon asks the phone its own way, as it did before (daemon.Rescope)."""
+
+    def __init__(self, why: str) -> None:
+        super().__init__("rescope", why)
 
 
 def _field_key(field: ui.Element) -> str | None:
@@ -84,6 +102,7 @@ class Session:
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
+        self.last_tree: ui.Tree | None = None  # the tree of the last read, for the places the daemon recognises
         self.retyped = False  # the last type_text cleared the field and typed once more (see type_text)
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end (y)
         self.last_point: tuple[float, float] | None = None  # where the last tap, swipe or drag began, in points
@@ -110,6 +129,12 @@ class Session:
         self.fast_tap: bool | None = None  # whether this session's runner has the fast tap route (None: not asked yet)
         self.fast_drag: bool | None = None  # and the fast drag route (asked with the tap's)
         self.tw_version = 0  # the fork's route version the runner answered with (0: Appium's build, or not asked yet)
+        self.fast_read: bool | None = None  # whether the compact read works on this runner (None: not tried yet)
+        self.last_compact: tuple[str, str] | None = None  # (token, XML) of the last compact read: "unchanged" reuses it
+        # Set by the daemon for a personal-mode tap whose app-in-front check the fork's tap makes (see FRONT_IN_TAP):
+        # the given bundle ids. While it is set, nothing else may act on the phone (FrontUnchecked); the tap that
+        # passes the check clears it.
+        self.front_apps: tuple[str, ...] | None = None
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -133,6 +158,7 @@ class Session:
         self.screen = (float(size["width"]), float(size["height"]))
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
+        self.fast_read, self.last_compact = None, None
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -172,18 +198,22 @@ class Session:
         self.items, self.offscreen, self.behind = [], [], []
         self.typed_into = None
         self.last_point = None
+        self.last_compact = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30,
                     again: bool | None = None) -> dict:
         await self.ensure()
+        if self.front_apps is not None and method == "POST" and path != FAST_TAP_PATH:
+            # the tap is to check the app in front itself: nothing may act before it has
+            raise FrontUnchecked("something was to act before the tap that checks the app in front")
         full = path.replace("{sid}", self.sid)
         try:
             try:
                 if not TRACE:
-                    return await self.device.http(method, full, payload, timeout)
+                    return await self._timed(method, path, full, payload, timeout)
                 began = time.monotonic()
                 try:
-                    return await self.device.http(method, full, payload, timeout)
+                    return await self._timed(method, path, full, payload, timeout)
                 finally:
                     getattr(self.device, "log", lambda *a: None)(
                         f"trace {method} {path.split('?')[0]} {(time.monotonic() - began) * 1000:.0f} ms")
@@ -213,6 +243,19 @@ class Session:
                 self.sid = None
                 raise ConnectionLost(str(e)) from e
             raise
+
+    async def _timed(self, method: str, path: str, full: str, payload: dict | None, timeout: float) -> dict:
+        """device.http, with the timing trace (trace.py) noting a touch's or a tree read's request and answer."""
+        pending = trace.request(method, path)
+        if pending is None:
+            return await self.device.http(method, full, payload, timeout)
+        try:
+            answer = await self.device.http(method, full, payload, timeout)
+        except BaseException:
+            trace.response(pending, ok=False)
+            raise
+        trace.response(pending, answer)
+        return answer
 
     async def _follow_orientation(self, source: str | None) -> None:
         """Keep `screen` and `turn` with the phone's orientation: the tree's root says the screen's size in points
@@ -260,13 +303,13 @@ class Session:
         accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
         try:
             # (asked a second time by _call when the first got no answer: a frozen app answers neither)
-            source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+            source = await self._read_tree(timeout)
             await self._follow_orientation(source)
             waited = 0.0
             while await self._banner_over_an_app(source) and waited < min(BANNER_WAIT, timeout):
                 await asyncio.sleep(BANNER_POLL)
                 waited += BANNER_POLL
-                source = (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+                source = await self._read_tree(timeout)
             if waited:
                 still = " and it is still there" if await self._banner_over_an_app(source) else ""
                 getattr(self.device, "log", lambda *a: None)(
@@ -276,6 +319,52 @@ class Session:
             raise
         except ConnectionLost as e:
             raise await self._why_stuck(False, e) from e
+
+    async def _read_tree(self, timeout: float):
+        """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
+        else /source itself."""
+        if FAST_READ != "0" and self.fast_read is not False:
+            if self.fast_tap is None:
+                await self._fast_routes()  # (once per session: the version route doesn't read the app)
+            if self.tw_version >= 4:
+                source = await self._compact_tree(timeout)
+                if source is not None:
+                    return source
+        return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
+
+    async def _compact_tree(self, timeout: float, since: bool = True) -> str | None:
+        """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
+        can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
+        `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree."""
+        last = self.last_compact if since else None
+        path = TREE_PATH + (f"?since={last[0]}" if last else "")
+        try:
+            value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" in said or "unknown method" in said:
+                self.fast_read = False  # not this runner's route after all
+            getattr(self.device, "log", lambda *a: None)(f"compact read refused ({e}): /source instead")
+            return None
+        token = value.get("token") if isinstance(value, dict) else None
+        if not isinstance(token, str) or not token:
+            getattr(self.device, "log", lambda *a: None)("compact read answered without a token: /source instead")
+            return None
+        if value.get("unchanged") is True:
+            if last is not None and last[0] == token:
+                return last[1]
+            # an "unchanged" this read can't use (it sent no such token): read the whole tree
+            return await self._compact_tree(timeout, since=False) if since else None
+        try:
+            source = ui.xml_of_tree(value.get("tree"))
+        except ValueError as e:
+            getattr(self.device, "log", lambda *a: None)(f"compact read unreadable ({e}): /source instead")
+            return None
+        self.fast_read = True
+        self.last_compact = (token, source)
+        return source
 
     async def foreground_bundle_id(self) -> str | None:
         try:
@@ -361,6 +450,7 @@ class Session:
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
+        self.last_tree = tree
         return Snapshot(tree, self.app, self.scale)
 
     async def screenshot_png(self) -> bytes:
@@ -407,6 +497,7 @@ class Session:
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
+        self.last_tree = tree
         return tree
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:
@@ -426,6 +517,7 @@ class Session:
             self.top_touch = self.top_touch or at[1] < BANNER_ZONE
         if self.touch_hook is not None:
             await self.touch_hook(ms)
+        trace.mark("guard")
 
     async def _clear_of_banner(self, at: tuple[float, float]) -> None:
         """A touch near the top of the screen while a notification banner is there lands on the banner: a tap opens
@@ -470,17 +562,32 @@ class Session:
         if not self.fast_tap:
             return False
         body = {"x": x, "y": y, "duration": hold_ms / 1000, "wait": True}
+        checked = self.front_apps is not None
+        if checked:
+            if self.tw_version < 4:
+                raise FrontUnchecked("this runner's tap can't check the app in front")
+            body["apps"] = list(self.front_apps or ())
         try:
             await self._call("POST", FAST_TAP_PATH, body, timeout=hold_ms / 1000 + ACTION_WAIT)
         except DeviceError as e:
             said = str(e).lower()
+            if checked and not isinstance(e, ConnectionLost) and FRONT_REFUSED in said:
+                raise FrontUnchecked(str(e)) from None  # nothing was touched: the daemon asks its own way
             if "unknown command" in said or "unknown method" in said:
                 self.fast_tap = False  # not this runner's route after all
             elif not ("invalid argument" in said or "too many touches" in said):
                 raise  # it may have been played (a timeout, XCTest's own error): touching again could do it twice
             getattr(self.device, "log", lambda *a: None)(f"fast tap refused ({e}): W3C actions instead")
             return False
+        if checked:
+            self.front_apps = None  # the app in front was one of them as the touch went out: the check is done
         return True
+
+    def front_by_touch(self) -> bool:
+        """Can the next tap check the app in front itself (personal mode, FRONT_IN_TAP)? Only when it would go through
+        the fork's fast tap with `apps`: a runner known to be version 4, in portrait, the fast tap on."""
+        return (FRONT_IN_TAP != "0" and FAST_TAP != "0" and self.sid is not None and self.fast_tap is True
+                and self.tw_version >= 4 and self.turn == 0 and self.screen[0] <= self.screen[1])
 
     async def _fast_routes(self, strict: bool = False) -> None:
         """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none). Only an

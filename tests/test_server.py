@@ -1,4 +1,6 @@
 """The HTTP side with a fake session: page, token, API, stream, WebSocket."""
+import asyncio
+import json
 import time
 from importlib.resources import files
 
@@ -443,3 +445,97 @@ def test_the_live_views_key_is_never_printed():
         for line in inspect.getsource(module).splitlines():
             if re.search(r"\bprint\(", line):
                 assert "token=" not in line and "{token}" not in line and "viewer_url(" not in line and "{url}" not in line, line
+
+
+def test_the_daemon_proves_it_holds_the_token_without_giving_it_away():
+    """The proof a client asks for before it sends the token (1.6 security): HMAC of its own challenge, from nobody's token."""
+    import hashlib
+    import hmac
+    app, _ = app_and_daemon()
+    challenge = bytes(range(32))
+    # the daemon signs the address and port the connection arrived on (TestClient's server is ("testserver", 80))
+    want = hmac.new(TOKEN.encode(), b"tapwright-proof-v2\0" + challenge + b"\0testserver\0" + b"80",
+                    hashlib.sha256).hexdigest()
+    with TestClient(app) as c:
+        got = c.post("/api/prove", json={"challenge": challenge.hex()})  # no token, by design
+        assert got.status_code == 200 and got.json() == {"proof": want} and TOKEN not in got.text
+        # a Host header naming another port doesn't change what is signed: a relay can't pick the port
+        relayed = c.post("/api/prove", json={"challenge": challenge.hex()}, headers={"host": "127.0.0.1:8417"})
+        assert relayed.status_code in (200, 403) and (relayed.status_code == 403 or relayed.json() == {"proof": want})
+        assert c.post("/api/prove", json={"challenge": "00"}).status_code == 400  # too short to mean anything
+        assert c.post("/api/prove", json={"challenge": "zz" * 16}).status_code == 400
+        assert c.post("/api/prove", content=b"{nope").status_code == 400
+        assert c.post("/api/prove", json={"challenge": challenge.hex()}, headers={"host": "evil.example"}).status_code == 403
+        assert c.post("/api/look", json={}).status_code == 401  # the other routes still need the token
+
+
+def test_a_queued_call_whose_caller_left_never_touches_the_phone():
+    """An HTTP call waiting in the phone's queue whose client gave up (its own timeout) is not run when the phone comes
+    free: nobody would see what it did. It ends as `timeout`, with nothing touched."""
+    async def go():
+        _, d = app_and_daemon()
+        app = create_app(d, TOKEN, hosts={"testserver"})
+        await d.run_tool("agent-1", "look", {"screenshot": False})
+        free = asyncio.Event()
+        holding = asyncio.create_task(d.control.read(free.wait))  # something else has the phone
+        await asyncio.sleep(0)
+        left, body, out = asyncio.Event(), json.dumps({"target": {"ref": "e1"}, "look": False}).encode(), []
+        given = []
+
+        async def receive():
+            if not given:
+                given.append(1)
+                return {"type": "http.request", "body": body, "more_body": False}
+            await left.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            out.append(message)
+        headers = [(k.lower().encode(), v.encode()) for k, v in {**AUTH, "Host": "testserver"}.items()]
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "scheme": "http",
+                 "path": "/api/tap", "raw_path": b"/api/tap", "query_string": b"", "headers": headers,
+                 "client": ("127.0.0.1", 50000), "server": ("testserver", 80), "root_path": ""}
+        call = asyncio.create_task(app(scope, receive, send))
+        await asyncio.sleep(0.05)
+        assert not call.done()  # it waits for the phone
+        left.set()  # the client gives up
+        free.set()
+        await holding
+        await asyncio.wait_for(call, 2)
+        assert "tap" not in d.session.calls
+        start = next(m for m in out if m["type"] == "http.response.start")
+        answer = json.loads(b"".join(m.get("body", b"") for m in out if m["type"] == "http.response.body"))
+        assert start["status"] == 504 and answer["error"]["code"] == "timeout"
+        # a caller that stays gets its answer as before
+        await d.run_tool("agent-1", "look", {"screenshot": False})
+        given.clear()
+        out.clear()
+        left.clear()
+        await asyncio.wait_for(app(scope, receive, send), 2)
+        start = next(m for m in out if m["type"] == "http.response.start")
+        assert start["status"] == 200 and d.session.calls.count("tap") == 1
+    asyncio.run(go())
+
+
+def test_on_windows_the_daemon_claims_its_port_alone():
+    """Tapline's Codex review: on Windows a later socket with SO_REUSEADDR can share an address and port unless the first
+    claims it exclusively; the daemon's does, so no other process can sit on its port while it runs."""
+    import os
+    import socket
+
+    import pytest
+
+    from tapwright import server
+    if os.name != "nt":
+        pytest.skip("Windows only")
+    first = server._bind(0)
+    assert first is not None
+    try:
+        port = first.getsockname()[1]
+        second = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        second.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with pytest.raises(OSError):
+            second.bind(("127.0.0.1", port))
+        second.close()
+    finally:
+        first.close()

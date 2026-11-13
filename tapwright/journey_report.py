@@ -196,6 +196,10 @@ def model(j: jr.Journey, reached: bool, why: str | None, elapsed: float, picture
         notes.append(f"{jr.plural(j.over_cap, 'picture')} not kept: a report holds at most {jr.MAX_FRAMES}.")
     if j.shortcuts:
         notes.append("Shortcuts used: " + "; ".join(j.shortcuts))
+    if j.approvals:  # where each person's OK came from (AGENT-TOOLS §11.3)
+        n = len(j.approvals)
+        notes.append(f"A person allowed {n} {'touch' if n == 1 else 'touches'}: "
+                     + ", ".join(f"{j.approvals.count(w)} in {w}" for w in dict.fromkeys(j.approvals)) + ".")
     return {"title": f'Journey: {j.goal}', "facts": facts, "numbers": numbers, "path": path, "findings": findings,
             "stress": list(j.stress), "notes": notes, "extra": [(h, list(lines)) for h, lines in j.extra_sections],
             "strip": pictures.get("strip"), "gif": pictures.get("gif")}

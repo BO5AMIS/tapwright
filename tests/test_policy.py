@@ -173,7 +173,7 @@ def test_a_confirm_word_asks_the_live_view_and_the_retry_after_an_allow_passes_o
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": False})  # the first answer won
         assert sent(d) == []
         answer = await d.run_tool("a", "tap", TAP)
-        assert answer["text"].splitlines()[-1] == "Note: a person allowed this." and d.session.calls.count("tap") == 1
+        assert answer["text"].splitlines()[-1] == "Note: allowed by a person (in the live view)." and d.session.calls.count("tap") == 1
         e = await refused(d, "tap", TAP)  # the OK was for one call: a second one needs a new one
         assert str(e) == NEEDS and "They declined" not in str(e)
         (again,) = [m for m in sent(d) if m["type"] == "confirm"]
@@ -195,7 +195,7 @@ def test_an_allow_is_for_the_same_tool_and_the_same_element_only():
         e = await refused(d, "long_press", TAP)  # another tool
         assert "needs_confirmation" in str(e)
         assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}))["text"].endswith(
-            "Note: a person allowed this.")  # the same element, named another way
+            "Note: allowed by a person (in the live view).")  # the same element, named another way
         await finish(stop, task)
     run(go)
 
@@ -252,7 +252,7 @@ def test_a_point_over_a_delete_button_is_checked_as_the_button():
         assert str(e) == NEEDS and "tap" not in d.session.calls
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         answer = await d.run_tool("a", "tap", {"target": {"x": 60, "y": 120}, "look": False})
-        assert d.session.calls.count("tap") == 1 and answer["text"].endswith("Note: a person allowed this.")
+        assert d.session.calls.count("tap") == 1 and answer["text"].endswith("Note: allowed by a person (in the live view).")
         d.session.tap_points.clear()
         await d.run_tool("a", "tap", {"target": {"x": 300, "y": 600}, "look": False})  # nothing there: no word
         assert d.session.tap_points == [(300, 600)]
@@ -273,7 +273,7 @@ def test_a_switch_is_checked_too_and_a_toggle_to_where_it_is_asks_nothing():
         assert "already false" in r["text"]
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         r = await d.run_tool("a", "toggle", {"target": {"id": "notify"}, "look": False})
-        assert d.session.calls.count("tap") == 1 and r["text"].endswith("Note: a person allowed this.")
+        assert d.session.calls.count("tap") == 1 and r["text"].endswith("Note: allowed by a person (in the live view).")
         await finish(stop, task)
     run(go)
 
@@ -348,7 +348,7 @@ def test_a_dry_run_does_not_use_up_a_persons_ok():
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         r = await d.run_tool("a", "tap", {**TAP, "dry_run": True})
         assert r["text"] == 'Would tap e1 button "Delete trip" at 60,120.'  # it is allowed: nothing to add
-        assert (await d.run_tool("a", "tap", TAP))["text"].endswith("Note: a person allowed this.")
+        assert (await d.run_tool("a", "tap", TAP))["text"].endswith("Note: allowed by a person (in the live view).")
         await finish(stop, task)
     run(go)
 
@@ -384,7 +384,7 @@ def test_dry_run_is_validated_and_belongs_to_the_touch_tools():
         e = await refused(d, "tap", {**TAP, "dry_run": "yes"})
         assert e.code == "bad_params" and "dry_run must be true or false" in str(e)
         e = await refused(d, "open_app", {"app": "Example", "dry_run": True})
-        assert e.code == "bad_params" and str(e) == "open_app doesn't take dry_run; it takes app, language, region, text_size, look, screenshot."
+        assert e.code == "bad_params" and str(e) == "open_app doesn't take dry_run; it takes app, language, region, text_size, look, screenshot, brief."
         await finish(stop, task)
     run(go)
 

@@ -1,5 +1,112 @@
 # Changelog
 
+## 1.6.0, "the Speed Update" (2026-11-13)
+
+An agent on the phone should feel almost instant. A real run (10 workers, 760 calls) showed the largest cost was
+outside the tools (a new process for every call), then the number of decisions, then the size of each. 1.6 goes after
+all three, with no model inside Tapwright and no API key. On ground the tool knows, no model is asked anything; on new
+ground a small, fast model drives and the tool remembers the way. The interface is AGENT-TOOLS 1.13, shared with
+Tapline.
+
+**A call without the plumbing**
+- `tapwright call TOOL '{json}'` runs one tool in the running daemon and loads only Python's standard library, for a
+  host that can't keep an MCP connection (`--apps` or `$TAPWRIGHT_APPS` for the scope, `--client`, `--json`; exit 0,
+  2 for a refusal, 3 when the daemon can't be reached). Loading the MCP server once is still the fastest route.
+- `tapwright serve --apps A,B` (or `--dedicated`, `--policy FILE`) is a ceiling: no call, MCP or thin, may name
+  more apps than that or drop a word from the policy.
+- `session_report` counts seconds, not only calls: the agent's thinking time between calls, the tool's time, by tool,
+  and a line when every call came from a new process.
+
+**Shorter answers, fewer calls**
+- `brief: true` on any action, `run` or `drive` (`tapwright mcp --brief` for all): the first line, at most 12 lines
+  of changes, then `…<n> more: look shows them.` A new screen lists its actionable elements and rows only.
+- Steps gain `if` (do this step only when that is on screen) and `optional` (skip it when its own target isn't
+  there), in `run`, scripts and routes, so one decision covers a flow with a maybe-screen. Time spent waiting for a
+  person doesn't count toward a batch's 120 s.
+
+**The map, and `drive`**
+- Tapwright recognises a screen again whatever its content or language (a signature of the fixed elements, with
+  the title kept only as a hash) and saves each move between screens as a road, in one readable file per app
+  (`~/.tapwright/maps/<bundle id>/map.json`, or `--maps DIR` to share it with a project and with Tapline; two tools
+  can write one file, merged on load). A list row's text, typed text and secure values are never in it.
+- `map` lists the places, roads, routes and reflexes, shows the way to a place, and names places, adds a place's
+  link, adds and removes reflexes, and forgets a place. Every full answer says `Place: <name>.`
+- `drive` goes to a place by a link or the shortest chain of proven roads and answers once (`Arrived at language
+  by 3 taps in 1.9 s`). It repairs a stale road by another name of the same element, plans again from another
+  known place, and otherwise stops with the new error `off_route`, having touched nothing more. It never claims an
+  arrival it didn't check, and every move passes the same scope, policy and confirmation as a single call.
+- Routes: `record` with `route` saves a flow that starts from a named place and takes variables (script version
+  2); `drive` runs it with `with`, `account` and `then` (and `by`: `any`, `taps`, `link`).
+- Test accounts: `--accounts FILE` keeps named accounts on the user's computer. The agent says `account: "tester2"`
+  and the tool types the values, a password only into a secure field. They are never in an answer, log, map, script or
+  report, and a file inside a git work tree that git doesn't ignore is refused.
+- Reflexes: the tool waits out a loading indicator before calling a target `not_found`, moves the keyboard out of
+  the way, and runs the reflexes the user or agent declared for the app (one step each, never an action the policy
+  flags), saying every firing.
+- `alert` answers an alert that another app draws about a given app (Settings asking `Delete "Wayfare"?`), under the
+  policy; a risky answer still asks a person.
+- A journey in a user's eyes has no jumps, reflexes or shortcuts unless it allows them (`allow`: `drive`, `reflexes`,
+  `fast_animations`).
+
+**Agreed with Tapline after AGENT-TOOLS 1.13 (the 1.13.1 clarifications)**
+- `off_screen` now means no scroll can bring the element on screen (a touch scrolls to an off-screen target by itself),
+  and says to look, then target something else or report it.
+- A script, reference picture, route or place name is ASCII, and one that differs from an existing name only in case is
+  refused (`bad_params`, naming the existing one) before anything is written.
+- A double-tap stress sends no second touch when the control's id, label or text changed after the first: it answers
+  `changed`.
+- A route's drive line is `Arrived at home by route sign_in in 3.2 s.`, and `session_report` flags five thin calls in a
+  row, and a retry after an id's `not_found` says to target what the latest look shows.
+
+**A driver for new ground**
+- `tapwright install` and `tapwright skill install` write the driver agent `phone-driver`: a subagent on the host's
+  fastest small model (Claude Code: `.claude/agents/phone-driver.md` on Haiku, low effort, the driving tools of
+  Tapwright and Tapline; Codex: `.codex/agents/phone-driver.toml` on `gpt-6.1-terra`), with a short handbook:
+  `map` first, `drive` when the map has the way, several moves in one `run`, read every answer whole, stop on
+  `needs_confirmation`, `locked` or `paused`, and finish in five lines. `--driver-model NAME` changes the model.
+  For a host with no agent files the handbook is `references/driver.md` in the skill, to paste as a brief.
+- The skill's "Driving fast" gives the main agent its rules: known ground is one `drive`, unknown ground goes to
+  the driver (one for the session), accounts by name, never step by step.
+
+**A person's OK in chat, and fewer hands on the phone**
+- A touch that needs a person's OK (Buy, Delete, Send...) is asked in the host's own dialog (MCP elicitation) as
+  well as in the live view: Allow once or Don't allow, the first answer wins, and the screen is read again after an
+  allow. `--no-dialog` turns it off for a host that can't show it. The agent can never answer it.
+- A locked phone, the XCTest passcode prompt, iOS's Health sheet and an iOS alert are asked of the person the same
+  way, and the call goes on by itself when it clears (up to 120 s).
+- `tapwright doctor --unattended` says what would stop a run with nobody there (the phone locked with no passcode
+  given, Enable UI Automation off, the computer not trusted, Developer Mode off, a low battery) and how to fix each.
+
+**Faster touches, and a more honest read**
+- The runner on the phone is now the fork `tw-16.15.3.4` (Appium's 16.15.3 with Tapwright's changes). It reads the
+  screen in a compact form and checks which app is in front inside the tap itself, so a tap needs fewer round trips.
+  `tapwright setup` installs it.
+- The wait for a still screen is cut when the live picture already proves the screen is still, so a read right after
+  a tap doesn't wait again.
+- `scroll` with `to: "end"` or `"start"` sends the drags one after the other, then waits once and reads once, where
+  it waited and read after every drag.
+- `back` always checks that something changed, with or without a `look`, by the picture before and after and by the
+  tree. When nothing changed it answers `not_actionable: no_action`, as before.
+- A tap on an element that another view is drawn over is refused `covered`, as a person's finger would be stopped,
+  even when that view isn't in the list (a named plain view over a button). `force` still works. iOS's scroll bars
+  never count as covering.
+- Elements that lie wholly off screen to the left or right (the screen before, kept under a stack navigator) are no
+  longer listed.
+- The note after a touch that changed nothing names the touch: `the tap was delivered…`, `the long press was
+  delivered…`, `the double tap was delivered…`.
+- `TAPWRIGHT_TRACE=1` writes one line of timing for each touch and each read to `~/.tapwright/trace.jsonl`, for
+  finding where a slow call spends its time. Off by default; no screen content is written.
+- Fixed: `type_text` and `drive` failed through MCP in a 1.6 build. A typing that doesn't land says why in the trace.
+
+**Measured** (the same iPhone 14 Pro Max, Wayfare's benchmark lab, Tapline's runner, 1.0.0 against 1.6.0, over USB):
+a tap 0.74 to 0.61 s, a toggle 0.60 to 0.42 s, a scroll by a real touch 2.05 to 1.64 s. Misses in the touch checks
+(R1, R2) went from 6 to 3 of 48, and a tap on a covered element is now refused. Typing and a text look are the same
+as in 1.0.0, and closing and opening a development build are not faster. Wi-Fi varies from minute to minute, and
+scroll and typing over Wi-Fi came out slower in this run. The tables and the notes are in
+[docs/benchmarks.md](docs/benchmarks.md).
+
+**Not in 1.6:** fast animations, the Safari and web-page tools, the Wi-Fi radio work, unlocking the phone with a given passcode and the starter map for iOS Settings move to a later update.
+
 ## 1.5.1 (2026-11-13)
 
 Small fixes from the first real-app runs. No new tools.

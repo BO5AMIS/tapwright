@@ -7,6 +7,8 @@ may be watching or driving in its live view at the same time.
 """
 import asyncio
 import base64
+import contextvars
+import functools
 import io
 import logging
 import os
@@ -21,9 +23,9 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import client, device, policy, repair, ui, uxcheck
+from . import client, device, hostdialog, policy, repair, ui, uxcheck
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -82,6 +84,7 @@ class TapwrightServer(MCPServer):
     `Error <code>: <message>` form as the daemon's refusals."""
 
     async def call_tool(self, name, arguments, context=None):
+        token = _CONTEXT.set(context)  # the tool reads it to reach the host's dialog (hostdialog.py)
         try:
             return await super().call_tool(name, arguments, context)
         except UnexpectedToolError:
@@ -99,6 +102,8 @@ class TapwrightServer(MCPServer):
                 tools = ", ".join(t.name for t in self._tool_manager.list_tools())
                 return _error("unsupported", f"no tool named {name!r}; the tools are {tools}")
             return _error("bad_params", str(e).removeprefix(f"Error executing tool {name}: "))
+        finally:
+            _CONTEXT.reset(token)
 
 
 def _unset_means_absent(schema: dict) -> None:
@@ -129,6 +134,12 @@ class Target(BaseModel):
 READ_ONLY = ToolAnnotations(read_only_hint=True)
 server = TapwrightServer("tapwright", instructions=INSTRUCTIONS)
 CLIENT_ID = uuid.uuid4().hex  # this agent's own last look, kept by the daemon
+# the request being served, for the host's dialog (set by TapwrightServer.call_tool; None outside a request)
+_CONTEXT: contextvars.ContextVar[object | None] = contextvars.ContextVar("tapwright_mcp_context", default=None)
+# The host's dialog for a person's OK and "needs a person" moments (AGENT-TOOLS §11.3, §11.5); `tapwright mcp --no-dialog`
+# turns it off, for a host that passes elicitation requests to the model instead of showing them to a person.
+DIALOGS = hostdialog.HostDialogs(poll=lambda since, wait: client.dialog_poll(CLIENT_ID, since, wait),
+                                 answer=lambda ask_id, value: client.dialog_answer(CLIENT_ID, ask_id, value))
 
 
 _notice_given = False
@@ -156,14 +167,26 @@ def _timeout(tool: str, args: dict) -> float:
     """How long this client waits for the daemon's answer to one tool call."""
     if tool == "journey" and args.get("stop") and args.get("export") is not None:
         return EXPORT_TIMEOUT
-    return LONG_TIMEOUT if tool in ("run", "replay", "media") else TIMEOUT
+    return LONG_TIMEOUT if tool in ("run", "replay", "media", "drive") else TIMEOUT
+
+
+BRIEF_DEFAULT = False  # `tapwright mcp --brief`: every action and run asks for a brief answer unless it says otherwise
 
 
 async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
+    if "brief" in args:  # (the tools that take it; an argument overrides the server's setting, §13.4)
+        if args["brief"] is None:
+            args.pop("brief")
+            if BRIEF_DEFAULT:
+                args["brief"] = True
     try:
-        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, _timeout(tool, args))
+        async with DIALOGS.during(_CONTEXT.get()) as dialog:  # while the call is out, the host's dialog is polled for
+            # (only a call that has one says so, and may take as long as a person needs to answer)
+            options = {"dialog": True} if dialog else {}
+            answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID,
+                                             _timeout(tool, args) + (hostdialog.EXTRA_WAIT if dialog else 0.0), **options)
     except client.DaemonError as e:
         return _error(e.code, str(e))
     except Exception:  # the daemon unreachable: never crash the server
@@ -200,74 +223,108 @@ async def look(screenshot: bool = True, width: int = 600, labels: bool = False, 
 
 @server.tool(description=describe("tap"), structured_output=False)
 async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool = False,
-              dry_run: bool = False) -> CallToolResult:
-    return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot, dry_run=dry_run)
+              dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot, dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("long_press"), structured_output=False)
 async def long_press(target: Target, seconds: float = 1.0, force: bool = False, look: bool = True,
-                     screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+                     screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("long_press", target=target, seconds=seconds, force=force, look=look, screenshot=screenshot,
-                       dry_run=dry_run)
+                       dry_run=dry_run, brief=brief)
+
+
+def _wire_names(**aliases: str):
+    """The MCP library calls a tool with each argument's wire name (its alias), but `as` and `with` are Python's
+    words and cannot be parameters: the tool declares `variable` / `values` with `Field(alias=...)` (so the schema
+    says `as` / `with`) and this maps the wire name back to the parameter before the call."""
+    def wrap(fn):
+        @functools.wraps(fn)  # (the signature, with the aliases, is still what the schema is built from)
+        async def call(*args, **kwargs):
+            for wire, name in aliases.items():
+                if wire in kwargs:
+                    kwargs[name] = kwargs.pop(wire)
+            return await fn(*args, **kwargs)
+        return call
+    return wrap
 
 
 @server.tool(description=describe("type_text"), structured_output=False)
+@_wire_names(**{"as": "variable"})
 async def type_text(text: str, target: Target | None = None, replace: bool = True, submit: bool = False,
                     force: bool = False, look: bool = True, screenshot: bool = False,
-                    dry_run: bool = False) -> CallToolResult:
+                    dry_run: bool = False, brief: bool | None = None,
+                    variable: str | None = Field(default=None, alias="as")) -> CallToolResult:
+    # (`as` is Python's word: while recording a route, the text is saved as this variable, AGENT-TOOLS §18.5)
     return await _tool("type_text", text=text, target=target, replace=replace, submit=submit, force=force,
-                       look=look, screenshot=screenshot, dry_run=dry_run)
+                       look=look, screenshot=screenshot, dry_run=dry_run, brief=brief,
+                       **({"as": variable} if variable is not None else {}))
 
 
 @server.tool(description=describe("scroll"), structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
                  to: Literal["start", "end", "target"] | None = None, target: Target | None = None, look: bool = True,
-                 screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+                 screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
-                       screenshot=screenshot, dry_run=dry_run)
+                       screenshot=screenshot, dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("toggle"), structured_output=False)
 async def toggle(target: Target, value: bool | None = None, force: bool = False, look: bool = True,
-                 screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+                 screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("toggle", target=target, value=value, force=force, look=look, screenshot=screenshot,
-                       dry_run=dry_run)
+                       dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("back"), structured_output=False)
-async def back(look: bool = True, screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
-    return await _tool("back", look=look, screenshot=screenshot, dry_run=dry_run)
+async def back(look: bool = True, screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("back", look=look, screenshot=screenshot, dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("open_url"), structured_output=False)
-async def open_url(url: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("open_url", url=url, look=look, screenshot=screenshot)
+async def open_url(url: str, look: bool = True, screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("open_url", url=url, look=look, screenshot=screenshot, brief=brief)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("wait"), structured_output=False)
-async def wait(seconds: float, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("wait", seconds=seconds, look=look, screenshot=screenshot)
+async def wait(seconds: float, look: bool = True, screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("wait", seconds=seconds, look=look, screenshot=screenshot, brief=brief)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("wait_for"), structured_output=False)
 async def wait_for(text: str | None = None, id: str | None = None, label: str | None = None, gone: bool = False,
-                   timeout: float = 10.0, look: bool = True, screenshot: bool = False) -> CallToolResult:
+                   timeout: float = 10.0, look: bool = True, screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("wait_for", text=text, id=id, label=label, gone=gone, timeout=timeout, look=look,
-                       screenshot=screenshot)
+                       screenshot=screenshot, brief=brief)
 
 
 @server.tool(name="run", description=describe("run"), structured_output=False)
 async def run_steps(steps: list[dict[str, object]], trace: bool = False, dry_run: bool = False, look: bool = True,
-                    screenshot: bool = False) -> CallToolResult:
-    return await _tool("run", steps=steps, trace=trace, dry_run=dry_run, look=look, screenshot=screenshot)
+                    screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("run", steps=steps, trace=trace, dry_run=dry_run, look=look, screenshot=screenshot, brief=brief)
+
+
+@server.tool(description=describe("drive"), structured_output=False)
+@_wire_names(**{"with": "values"})
+async def drive(to: str | None = None, route: str | None = None, values: dict[str, str] | None = Field(default=None, alias="with"),
+                account: str | None = None, then: list[dict[str, object]] | None = None,
+                by: Literal["any", "taps", "link"] = "any", dry_run: bool = False, look: bool = True,
+                screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    # (`with` is Python's word: the argument is its alias. Each argument is sent only when given.)
+    given = {"to": to, "route": route, "with": values, "account": account, "then": then}
+    return await _tool("drive", **{k: v for k, v in given.items() if v is not None}, by=by, dry_run=dry_run, look=look,
+                       screenshot=screenshot, brief=brief)
 
 
 @server.tool(description=describe("record"), structured_output=False)
 async def record(start: bool = False, stop: bool = False, name: str | None = None,
-                 path: str | None = None) -> CallToolResult:
+                 path: str | None = None, route: str | None = None,
+                 action: Literal["start", "stop"] | None = None) -> CallToolResult:
+    # `action` is the form both tools take (TOOL-TEXT 1.6); `start` and `stop` stay for older agents
+    start, stop = start or action == "start", stop or action == "stop"
     # a relative path is the agent's: where this server was started, not where the daemon runs
     return await _tool("record", start=start, stop=stop, **({"name": name} if name else {}),
-                       **({"path": str(Path(path).resolve())} if path else {}))
+                       **({"path": str(Path(path).resolve())} if path else {}), **({"route": route} if route else {}))
 
 
 @server.tool(description=describe("replay"), structured_output=False)
@@ -338,12 +395,22 @@ async def session_report(since: int | None = None) -> CallToolResult:
     return await _tool("session_report", **({"since": since} if since is not None else {}))
 
 
+@server.tool(description=describe("map"), structured_output=False)
+async def map(to: str | None = None, name: str | None = None, link: str | None = None, place: str | None = None,
+              reflex: dict[str, object] | None = None, forget_reflex: str | None = None,
+              forget: str | None = None) -> CallToolResult:
+    # (a read for scope; the edits it makes are to the app's map file only. Each argument is sent only when given.)
+    given = {"to": to, "name": name, "link": link, "place": place, "reflex": reflex, "forget_reflex": forget_reflex,
+             "forget": forget}
+    return await _tool("map", **{k: v for k, v in given.items() if v is not None})
+
+
 @server.tool(description=describe("open_app"), structured_output=False)
 async def open_app(app: str, look: bool = True, screenshot: bool = False, language: str | None = None,
-                   region: str | None = None, text_size: str | None = None) -> CallToolResult:
+                   region: str | None = None, text_size: str | None = None, brief: bool | None = None) -> CallToolResult:
     # (language, region and text_size are sent only when given: AGENT-TOOLS §16.3)
     given = {k: v for k, v in (("language", language), ("region", region), ("text_size", text_size)) if v is not None}
-    return await _tool("open_app", app=app, look=look, screenshot=screenshot, **given)
+    return await _tool("open_app", app=app, look=look, screenshot=screenshot, **given, brief=brief)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("viewer"), structured_output=False)
@@ -400,27 +467,27 @@ async def close_app(app: str) -> CallToolResult:
 
 @server.tool(description=describe("alert"), structured_output=False)
 async def alert(action: Literal["accept", "dismiss", "text"], look: bool = True,
-                screenshot: bool = False) -> CallToolResult:
-    return await _tool("alert", action=action, look=look, screenshot=screenshot)
+                screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("alert", action=action, look=look, screenshot=screenshot, brief=brief)
 
 
 @server.tool(description=describe("press_button"), structured_output=False)
 async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bool = True,
-                       screenshot: bool = False) -> CallToolResult:
-    return await _tool("press_button", name=name, look=look, screenshot=screenshot)
+                       screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("press_button", name=name, look=look, screenshot=screenshot, brief=brief)
 
 
 @server.tool(description=describe("swipe"), structured_output=False)
 async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True,
-                screenshot: bool = False, dry_run: bool = False) -> CallToolResult:
+                screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot,
-                       dry_run=dry_run)
+                       dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("rotate"), structured_output=False)
 async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], look: bool = True,
-                 screenshot: bool = False) -> CallToolResult:
-    return await _tool("rotate", to=to, look=look, screenshot=screenshot)
+                 screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+    return await _tool("rotate", to=to, look=look, screenshot=screenshot, brief=brief)
 
 
 HEARTBEAT = 5.0  # s between the signs this process gives the daemon that it lives (a network condition is kept meanwhile)
@@ -439,10 +506,16 @@ def _heartbeat(stop: threading.Event) -> None:
 
 
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
-        rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None) -> None:
+        rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None, brief: bool = False,
+        maps: str | None = None, dialog: bool = True, accounts: str | None = None) -> None:
+    global BRIEF_DEFAULT
+    BRIEF_DEFAULT = brief
+    DIALOGS.enabled = dialog
     client.set_scope(apps, dedicated)
     client.set_policy(rules)
     client.set_ux_rules(ux_rules)
+    client.set_maps(maps)
+    client.set_accounts(accounts)
     global SHOTS_DIR
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     if SHOTS_DIR is not None:

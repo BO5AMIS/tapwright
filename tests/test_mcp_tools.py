@@ -7,25 +7,27 @@ from tapwright import client, mcp_server
 
 EXPECTED = {
     "look": {"screenshot", "width", "labels", "ocr"},
-    "tap": {"target", "force", "look", "screenshot", "dry_run"},
-    "long_press": {"target", "seconds", "force", "look", "screenshot", "dry_run"},
-    "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot", "dry_run"},
-    "scroll": {"direction", "amount", "to", "target", "look", "screenshot", "dry_run"},
-    "toggle": {"target", "value", "force", "look", "screenshot", "dry_run"},
-    "back": {"look", "screenshot", "dry_run"},
-    "open_url": {"url", "look", "screenshot"},
-    "wait": {"seconds", "look", "screenshot"},
-    "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot"},
+    "tap": {"target", "force", "look", "screenshot", "dry_run", "brief"},
+    "long_press": {"target", "seconds", "force", "look", "screenshot", "dry_run", "brief"},
+    "type_text": {"text", "target", "replace", "submit", "force", "look", "screenshot", "dry_run", "brief", "as"},
+    "scroll": {"direction", "amount", "to", "target", "look", "screenshot", "dry_run", "brief"},
+    "toggle": {"target", "value", "force", "look", "screenshot", "dry_run", "brief"},
+    "back": {"look", "screenshot", "dry_run", "brief"},
+    "open_url": {"url", "look", "screenshot", "brief"},
+    "wait": {"seconds", "look", "screenshot", "brief"},
+    "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot", "brief"},
     "apps": set(),
     "session_report": {"since"},
-    "open_app": {"app", "look", "screenshot", "language", "region", "text_size"},
+    "map": {"to", "name", "link", "place", "reflex", "forget_reflex", "forget"},
+    "drive": {"to", "route", "with", "account", "then", "by", "dry_run", "look", "screenshot", "brief"},
+    "open_app": {"app", "look", "screenshot", "language", "region", "text_size", "brief"},
     "network": {"mode"},
     "viewer": set(),
     "close_app": {"app"},
-    "alert": {"action", "look", "screenshot"},
-    "press_button": {"name", "look", "screenshot"},
-    "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run"},
-    "rotate": {"to", "look", "screenshot"},
+    "alert": {"action", "look", "screenshot", "brief"},
+    "press_button": {"name", "look", "screenshot", "brief"},
+    "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
+    "rotate": {"to", "look", "screenshot", "brief"},
     "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"},
     "audit": {"types"},
@@ -36,8 +38,8 @@ EXPECTED = {
     "performance": {"launch", "seconds", "tap"},
     "filmstrip": {"frames", "interval_ms", "frame_width", "tap"},
     "compare_screen": {"name", "update", "width", "threshold", "ignore"},
-    "run": {"steps", "trace", "dry_run", "look", "screenshot"},
-    "record": {"start", "stop", "name", "path"},
+    "run": {"steps", "trace", "dry_run", "look", "screenshot", "brief"},
+    "record": {"start", "stop", "name", "path", "route", "action"},
     "replay": {"name", "path", "look", "screenshot"},
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
@@ -244,3 +246,38 @@ def test_a_target_filled_with_nulls_is_still_accepted(monkeypatch):
     nulls = {"id": "a", "ref": None, "label": None, "text": None, "x": None, "y": None, "index": None}
     out = asyncio.run(mcp_server.server.call_tool("tap", {"target": nulls}))
     assert not out.is_error and seen[0]["target"] == {"id": "a"}
+
+
+def test_record_takes_action_start_and_stop_as_both_tools_do(monkeypatch):
+    sent: list[dict] = []
+
+    async def fake(tool, **args):
+        sent.append({"tool": tool, **args})
+        return mcp_server._result("ok")
+    monkeypatch.setattr(mcp_server, "_tool", fake)
+    asyncio.run(mcp_server.record(action="start", route="sign_in"))
+    asyncio.run(mcp_server.record(action="stop"))
+    assert sent[0]["start"] is True and sent[0]["route"] == "sign_in" and sent[1]["stop"] is True
+
+
+def test_type_text_and_drive_work_through_a_real_mcp_session_with_python_keyword_arguments(monkeypatch):
+    """`as` and `with` are wire names of `variable` / `values`: the library calls the tool with them (1.6 crashed)."""
+    from mcp.client import Client
+    seen = []
+
+    def fake_call(tool, args, client_id, timeout=120.0, **options):
+        seen.append((tool, args))
+        return {"text": f"did {tool}", "image": None, "image_size": None}
+    monkeypatch.setattr(client, "call", fake_call)
+    monkeypatch.setattr(mcp_server, "_first_answer_notice", lambda: None)
+
+    async def go():
+        async with Client(mcp_server.server, mode="legacy") as c:
+            return [await c.call_tool("type_text", {"text": "a"}),
+                    await c.call_tool("type_text", {"text": "b", "as": "name"}),
+                    await c.call_tool("drive", {"to": "home"}),
+                    await c.call_tool("drive", {"route": "r", "with": {"k": "v"}})]
+    outs = asyncio.run(go())
+    assert [o.is_error for o in outs] == [False] * 4
+    assert "as" not in seen[0][1] and seen[1][1]["as"] == "name" and seen[1][1]["text"] == "b"
+    assert "with" not in seen[2][1] and seen[3][1]["with"] == {"k": "v"}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import compare, params, performance, ui
+from . import compare, names, params, performance, ui
 from . import shot as shotlib
 from .control import Refused
 
@@ -13,10 +13,13 @@ MAX_STEPS = 50
 BATCH_LIMIT = 120.0  # seconds a whole batch may take
 EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
-              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance", "network")
+              "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance", "network", "drive")
 EXPECT_KINDS = ("text", "id", "label")
-STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot")  # besides its tool's own arguments (a step's look and screenshot are ignored, §9.1)
-FORMAT, VERSION = "agent-tools-script", 1
+STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot", "brief", "if", "optional")  # besides its tool's own arguments (a step's look, screenshot and brief are ignored, §9.1; `if` and `optional` are the batch's own)
+IF_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "if": {"text": "Not now"}}'
+OPTIONAL_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "optional": true}'
+FORMAT, VERSION = "agent-tools-script", 1  # a route (AGENT-TOOLS §18.5) is version 2: routes.py
+VERSIONS = (1, 2)
 
 
 def check_steps(steps: object, *, script: bool = False) -> list[dict]:
@@ -33,16 +36,63 @@ def check_steps(steps: object, *, script: bool = False) -> list[dict]:
         if step["tool"] not in STEP_TOOLS:
             raise Refused("bad_params", f"step {n}: {step['tool']!r} can't be a step; a step is one of "
                                         f"{', '.join(STEP_TOOLS)}")
-        params.check(step["tool"], {k: v for k, v in step.items() if k not in STEP_KEYS}, f"step {n}: ")
+        params.check(step["tool"], tool_args(step), f"step {n}: ")
         target = step.get("tap") if step["tool"] == "performance" else step.get("target")
         if script and isinstance(target, dict) and "ref" in target:
             raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "
                                         "element's id, label or text")
+        check_conditions(step, n)
         if step["tool"] == "compare_screen":
             check_compare_step(step, n, script)
         if "expect" in step:
             check_expect(step["expect"], n, script, step["tool"])
     return steps
+
+
+def check_conditions(step: dict, n: int) -> None:
+    """A step's `if` and `optional` (§9.1), checked. `if` is one of text, id or label with an optional `gone`, and
+    nothing else: it is one check with no wait of its own. `optional` goes with a step that has an element to aim at."""
+    if "if" in step:
+        cond = step["if"]
+        if not isinstance(cond, dict):
+            raise Refused("bad_params", f"step {n}: if must be an object, like {IF_EXAMPLE}")
+        other = [k for k in cond if k not in (*EXPECT_KINDS, "gone")]
+        if other:
+            raise Refused("bad_params", f"step {n}: if takes only text, id or label, and gone; not {', '.join(other)}. "
+                                        f"It is one check with no wait; wait_for is the step that waits. Like {IF_EXAMPLE}")
+        given = [k for k in EXPECT_KINDS if cond.get(k) is not None]
+        if len(given) != 1 or not isinstance(cond[given[0]], str) or not cond[given[0]]:
+            raise Refused("bad_params", f"step {n}: if needs exactly one of text, id or label, as a non-empty string, "
+                                        f"like {IF_EXAMPLE}")
+        if "gone" in cond and not isinstance(cond["gone"], bool):
+            raise Refused("bad_params", f"step {n}: if's gone must be true or false, like "
+                                        '{"if": {"text": "Loading", "gone": true}}')
+    if "optional" not in step:
+        return
+    if not isinstance(step["optional"], bool):
+        raise Refused("bad_params", f"step {n}: optional must be true or false, like {OPTIONAL_EXAMPLE}")
+    if not step["optional"]:
+        return
+    if "target" not in params.ALLOWED[step["tool"]] or not isinstance(step.get("target"), dict):
+        raise Refused("bad_params", f"step {n}: optional goes with a step that has a target (tap, long_press, "
+                                    f"type_text, scroll, toggle), like {OPTIONAL_EXAMPLE}")
+    try:
+        aim = ui.parse_target(step["target"])
+    except Refused as e:
+        raise Refused("bad_params", f"step {n}: {e}") from None
+    if aim.point is not None:
+        raise Refused("bad_params", f"step {n}: optional needs a target by id, label or text (a point has no element to "
+                                    f"look for), like {OPTIONAL_EXAMPLE}")
+
+
+def aim_name(kind: str, value: str) -> str:
+    """How a skip line names what it looked for: `"Not now"` for text or a label, `id=save`, or a ref."""
+    return f"id={value}" if kind == "id" else value if kind == "ref" else json.dumps(value, ensure_ascii=False)
+
+
+def skipped(n: int, why: str) -> str:
+    """A skipped step's line in the answer (§9.3), in the form `trace` uses."""
+    return f"  {n}. skipped ({why})."
 
 
 def check_compare_step(step: dict, n: int, script: bool) -> None:
@@ -108,10 +158,15 @@ def check_expect(expect: object, n: int, script: bool = False, tool: str = "") -
         raise Refused("bad_params", f"step {n}: expect's timeout must be from {EXPECT_MIN:g} to {EXPECT_MAX:g} s")
 
 
+def tool_args(step: dict) -> dict:
+    """The step's own parameters for its tool: everything but the batch's keys (`route` is a drive's own argument)."""
+    return {k: v for k, v in step.items() if k not in STEP_KEYS or (k == "route" and step.get("tool") == "drive")}
+
+
 def args_of(step: dict) -> dict:
     """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
     (the batch answers once)."""
-    args = {k: v for k, v in step.items() if k not in ("tool", "expect", "route", "secure", "look", "screenshot")}
+    args = tool_args(step)
     if step["tool"] not in ("close_app", "performance"):  # (a measurement has no list to show)
         args["look"] = False
     return args
@@ -177,12 +232,15 @@ def load_script(path: str) -> dict:
         raise Refused("bad_params", f"the script {path} isn't valid JSON: {e}") from None
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise Refused("bad_params", f'the script {path} isn\'t an agent-tools script (its "format" must be "{FORMAT}")')
-    if data.get("version") != VERSION:
-        raise Refused("bad_params", f"the script {path} is version {data.get('version')!r}; this tool reads version "
-                                    f"{VERSION}")
+    if data.get("version") not in VERSIONS:
+        raise Refused("bad_params", f"the script {path} is version {data.get('version')!r}; this tool reads versions "
+                                    f"{', '.join(map(str, VERSIONS))}")
     if data.get("app") is not None and not isinstance(data["app"], str):
         raise Refused("bad_params", f'the script {path}: "app" must be a bundle id or an app\'s name')
     check_steps(data.get("steps"), script=True)
+    if data.get("version") == 2:
+        from . import routes
+        routes.check(data)
     return data
 
 
@@ -248,8 +306,16 @@ def scripts_dir() -> Path:
 
 def named(name: str) -> Path:
     """The file of a saved script: its name, made safe for a file name."""
-    safe = "".join(c if c.isalnum() or c in "-_ ." else "-" for c in name).strip(" .") or "recording"
+    safe = "".join(c if c.isascii() and c.isalnum() or c in "-_ ." else "-" for c in name).strip(" .") or "recording"
     return scripts_dir() / f"{safe}.json"
+
+
+def check_name(name: str) -> None:
+    """`bad_params` for a script name with a character beyond ASCII (names are ASCII), or one that differs from a saved
+    script's only in case (`home` and `HOME` are one file on Windows and macOS)."""
+    if not name.isascii():
+        raise Refused("bad_params", f"a script's name is ASCII letters, digits, spaces, '-', '_' and '.', not {name!r}")
+    names.refuse_twin("script", name, saved())
 
 
 def saved() -> list[str]:
@@ -275,6 +341,8 @@ def writable(path: str) -> Path:
     file = Path(path)
     if file.suffix.lower() != ".json":
         raise Refused("bad_params", f"a script is saved as a .json file, not {file.name!r}")
+    if file.parent.is_dir():  # (before anything is written: `home.json` and `HOME.json` are one file on some systems)
+        names.refuse_twin("script", file.name, (p.name for p in file.parent.iterdir()))
     if file.exists():
         try:
             data = json.loads(file.read_text(encoding="utf-8"))

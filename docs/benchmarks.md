@@ -4,6 +4,62 @@ What Tapwright measures against, how, and the latest numbers. The targets are th
 [quality bar](QUALITY-BAR.md), the same for Tapwright and Tapline. The runner is the shared benchmark in
 Tapline's repository (`bench/`): it drives a tool through MCP exactly as an agent does.
 
+## 1.0.0 against 1.6.0, 2026-11-13
+
+The same iPhone, the same lab and the same runner, once with 1.0.0 and once with 1.6.0, over USB and over Wi-Fi.
+Median / p95, in seconds. Reliability rows are misses out of checks, three passes.
+
+| | 1.0.0 USB | 1.6.0 USB | 1.0.0 Wi-Fi | 1.6.0 Wi-Fi |
+|---|---|---|---|---|
+| Tap (S1) | 0.74 / 0.77 | **0.61** / 0.63 | 1.15 / 1.28 | **0.96** / 1.95 |
+| Toggle | 0.60 / 0.63 | **0.42** / 0.43 | 0.90 / 1.63 | **0.64** / 0.92 |
+| Scroll, by a real touch | 2.05 / 3.33 | **1.64** / 3.20 | 2.38 / 3.75 | 2.63 / 4.39 |
+| Type | 0.71 / 0.74 | 0.71 / 0.73 | 0.89 / 1.18 | 1.02 / 2.05 |
+| Look, text only (S2) | 0.13 / 0.16 | 0.15 / 0.16 | 0.29 / 0.89 | 0.27 / 0.57 |
+| Look with a screenshot (S3) | 0.21 / 0.23 | 0.19 / 0.21 | 0.28 / 1.43 | 0.36 / 0.43 |
+| Start to ready (S5, one sample) | 2.05 | 1.96 | 2.08 | 6.18 |
+| Scroll to the end of a list | 0.50 / 7.91 | 0.49 / 4.57 | 0.69 / 20.77 | 0.59 / 7.70 |
+| Scroll to the start of a list | 0.49 / 8.17 | 0.50 / 4.53 | 0.70 / 12.99 | 1.24 / 6.40 |
+| One scroll step in a list | 1.33 / 1.65 | 1.06 / 1.25 | 1.83 / 4.20 | 1.49 / 3.82 |
+| Tap a tab | 0.55 / 0.64 | 0.53 / 0.98 | 1.04 / 2.18 | 0.55 / 0.89 |
+| Wait for text | 0.17 / 0.20 | 0.19 / 0.25 | 0.92 / 2.27 | 0.24 / 0.55 |
+| Close the app | 2.12 / 2.20 | 2.54 / 4.64 | 4.42 / 8.39 | 3.62 / 15.75 |
+| Open the app | 2.65 / 2.85 | 3.33 / 4.25 | 4.62 / 8.98 | 3.41 / 5.28 |
+| The right element (R1) | 6 of 48 | 3 of 48 | 8 of 48 | 4 of 48 |
+| No false refusals (R2) | 6 of 48 | 3 of 48 | 8 of 48 | 4 of 48 |
+| Refuses what a person couldn't do (R3) | 6 of 21 | 9 of 21 | 6 of 21 | 9 of 21 |
+| Several matches are never a guess (R5) | 0 of 3 | 0 of 3 | 0 of 3 | 0 of 3 |
+| The app frozen for 20 s (R6) | 0 | 0 | 0 | 0 |
+| Answer size of an action (J6), tokens | 10 (p95 47) | 7 (p95 42) | 10 (p95 47) | 7 (p95 42) |
+| Answer size of a text look (J6), tokens | 479 | 463 | 479 | 441 |
+
+**Setup.** One iPhone 14 Pro Max on iOS 26.5, next to the computer. The app is Wayfare's benchmark lab (the demo
+app's lab screen). The runner is Tapline's (`bench/`), driving each version through MCP as an agent does. 1.0.0 is
+the release from PyPI on Appium's WebDriverAgent 16.15.3. 1.6.0 is at commit `fbf7adf`, on Tapwright's own fork
+`tw-16.15.3.4`. The one commit after it, `4a13182`, only lets a tap on a button under an iOS scroll bar through
+again; this run found that. The suites ran one after another, with no live view open.
+
+**What changed.** A tap is 18% faster over USB, a toggle 30%, a scroll 20%. The touch checks (R1, R2) miss half as
+often. A tap on a covered element is refused in 1.6.0 (the R3 check of it passes in all six runs); 1.0.0 taps it.
+Reading and typing didn't get faster: they are bounded by the phone's own tree read.
+
+**Honest notes.**
+- Wi-Fi varies from minute to minute. A Wi-Fi difference under 20% is not a claim, and the scroll and typing over
+  Wi-Fi came out slower in this run (scroll 2.63 against 2.38 s, typing 1.02 against 0.89 s). The Wi-Fi tap's p95 of
+  1.95 s is one slow sample.
+- Closing and opening the app on Wayfare's development build don't show the gain seen on real apps. `close_app`
+  measured slower over USB here (2.54 against 2.12 s), and the open lands on the Expo launcher first.
+- The look rows on Wayfare (`look_text`, `look_shot`) are slower in 1.6.0 than in 1.0.0 (0.13 against 0.06 s). The
+  runner's own look rows (S2, S3) are level. A read is dominated by the phone building the tree (about 120 to 145
+  ms); the compact read doesn't make a look faster.
+- R3 has 21 checks, 7 a pass. In 1.6.0 three of each pass count as misses, and only one is a product result: the
+  share-sheet row was skipped by rule (it can open apps on the owner's phone); the row that taps a button at the
+  bottom of the lab now scrolls to it and then taps, as agreed since 1.4, which the runner still counts as a miss;
+  and the native-alert row refused a tap because iOS's scroll bar was taken for something covering the button. That
+  last one is fixed in `4a13182` and not measured again. 1.0.0's 6 misses are not comparable: it taps a covered button.
+- The live-view suite (V, and R4) was not run: the live view was already open in a browser on the computer.
+- Start to ready over Wi-Fi was 6.18 s in this run against 4.76 s in the speed pass; it is one sample.
+
 ## 1.1.0, 2026-11-12
 
 The same lab, phone and runner as below, at commit `47985a2` (AGENT-TOOLS 1.8: batches, the audit, the policy,

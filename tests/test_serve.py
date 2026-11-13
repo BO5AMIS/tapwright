@@ -184,9 +184,20 @@ def test_a_restart_right_after_a_stop_takes_over(home):
 
 
 class Slow(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep-alive: the token goes over the connection that proved it
     seen = 0
 
     def do_POST(self):
+        if self.path == "/api/prove":  # answers the proof at once; the action is what is slow
+            from tapwright.server import proof_of
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            port = self.server.server_address[1]
+            reply = json.dumps({"proof": proof_of("t" * 32, bytes.fromhex(json.loads(body)["challenge"]), port)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+            return
         type(self).seen += 1
         time.sleep(1.5)
 
@@ -251,3 +262,72 @@ def test_healthy_rejects_odd_answers():
 def test_nothing_running():
     assert client.healthy({}) is None
     assert client.healthy({"port": 9, "token": "x"}) is None
+
+
+def test_the_client_sends_no_token_to_a_process_that_cannot_prove_it_holds_it():
+    """A stale serve.json: its daemon died and another local process listens on the port now (1.6 security)."""
+    heard: list[dict] = []
+
+    class Impostor(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            heard.append(dict(self.headers))
+            reply = json.dumps({"proof": "f" * 64, "protocol": 1}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        do_GET = do_POST
+
+        def log_message(self, *args):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Impostor)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    info = {"port": httpd.server_address[1], "token": "s" * 43}
+    try:
+        with pytest.raises(client.DaemonError) as e:
+            client._request(info, "POST", "/api/look", {}, client_id="a")
+        assert e.value.code == "unauthorized" and "token was not sent" in str(e.value)
+        assert client.healthy(info) is None
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert heard and all("Authorization" not in h and "authorization" not in h for h in heard)
+    assert not any(info["token"] in json.dumps(h) for h in heard)
+
+
+def test_the_client_sends_no_token_when_the_line_that_proved_it_is_closed():
+    """Codex PR #9 c2: the proof and the request used two connections, so whoever bound the port in between got the token."""
+    from tapwright.server import proof_of
+    heard: list[dict] = []
+
+    class Daemon(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            heard.append({k.lower(): v for k, v in self.headers.items()})
+            data = json.dumps({"proof": proof_of("t" * 43, bytes.fromhex(json.loads(body)["challenge"]),
+                                                 self.server.server_address[1])}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+            self.close_connection = True
+
+        do_GET = do_POST
+
+        def log_message(self, *args):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Daemon)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(client.DaemonError) as e:
+            client._request({"port": httpd.server_address[1], "token": "t" * 43}, "POST", "/api/look", {}, client_id="a")
+        assert e.value.code == "unauthorized" and "token was not sent" in str(e.value)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert heard and all("authorization" not in h for h in heard)

@@ -83,6 +83,47 @@ tapwright install --client claude --apps <bundle id>      # or --client codex, -
 - It needs `--apps` or `--dedicated`, like `tapwright mcp`. Without either, the agent can do
   nothing.
 
+### Driving fast: the options
+
+`install` also writes the driver agent (`phone-driver`: `.claude/agents/phone-driver.md` for Claude Code,
+`.codex/agents/phone-driver.toml` for Codex) on that host's fastest small model; `--driver-model NAME` changes the
+model. No model runs inside Tapwright and no API key is asked for. The options below go on `tapwright mcp`
+(`tapwright install` doesn't carry them: add them to the registered command), and `tapwright serve` takes the same
+ones as the daemon's own settings.
+
+- **`--accounts FILE`**: test accounts, kept on your computer. A JSON file:
+
+  ```json
+  {"accounts": {"tester2": {"username": "tester2@example.com", "password": "...", "apps": ["com.example.app"]}}}
+  ```
+
+  An agent says `account: "tester2"` in `drive`, and the tool types the values: a password only into a secure
+  field, a username only into a text field. They are never in an answer, the action log, a map, a script or a
+  report. The file may not sit inside a git work tree unless git ignores it. `tapwright doctor --accounts FILE`
+  checks it. An entry named `phone` with a `passcode` is accepted and kept for unlocking the phone, which this
+  release doesn't do yet.
+- **`--maps DIR`**: where each app's map is kept (`<DIR>/<bundle id>/map.json`, and its `routes/`). The default is
+  `~/.tapwright/maps`. Point it at a folder in your project and a team, CI and Tapline share what was learned.
+- **`--brief`**: answer every action in brief (the first line, at most 12 lines of changes, then `...N more:
+  look`) unless the call says `brief: false`. `look` always answers whole.
+- **`--no-dialog`**: never ask the host's dialog (MCP elicitation) for a person's OK or a moment that needs a
+  person; only the live view answers. For a host that passes such a question to the model instead of showing it.
+  Without it, a host that can show the dialog does, and the first answer, in chat or in the live view, wins.
+- **`tapwright serve --apps A,B`** (or `--dedicated`): the ceiling, the widest scope any call may ask for, from
+  an MCP server or from `tapwright call`. A call may name these apps or fewer, never more, and its own `--policy`
+  may add words that need an OK or are blocked, never remove one (`serve --policy FILE` sets the daemon's own).
+  Without `--apps` or `--dedicated` the daemon refuses every call (no scope, nothing allowed), and adding `--apps` to
+  each call doesn't fix that: restart it with a scope. The flags apply when the daemon starts: a daemon that is
+  already running keeps its own, so `tapwright serve --stop` first.
+- **`tapwright call TOOL ['JSON']`**: one tool without an MCP connection, for a host that can't keep one. It talks to
+  the running daemon (it never starts one: `tapwright serve` does) and loads only Python's standard library, so it
+  starts in a fraction of a second. For example `tapwright call look --apps com.example.app` and
+  `tapwright call tap '{"target": {"id": "save"}}' --apps com.example.app`; `--apps` (or `$TAPWRIGHT_APPS`) is the
+  scope, and without it the call is refused, as for an MCP server. Also `--dedicated`, `--policy`, `--maps`,
+  `--client NAME` (keeps one run's report and journey together: pass one), `--json` and `--timeout`. It exits 0 with
+  the answer, 2 for a refusal (`Error <code>: <message>` on stderr) or a mistake in the command, and 3 when the
+  daemon can't be reached. Loading the MCP server once, when the session starts, is faster still.
+
 ### Keeping it working
 
 The development profile and certificate last a year. Then WebDriverAgent stops starting.

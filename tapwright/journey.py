@@ -27,7 +27,9 @@ from . import store
 from .control import Refused
 
 CONDITION_KEYS = ("language", "region", "text_size", "network")
-ALLOWABLE = ("open_url", "app_command")  # shortcuts a journey may allow (app_command is Tapline's; Tapwright has none)
+# shortcuts a journey may allow (app_command is Tapline's; Tapwright has none). `drive`, `reflexes` and `fast_animations`
+# are AGENT-TOOLS §18.12's: without them a drive in a user's eyes uses roads only, with no jumps, no reflexes and no quick animations
+ALLOWABLE = ("open_url", "app_command", "drive", "reflexes", "fast_animations")
 SEVERITIES = ("high", "medium", "low")
 STRESSES = ("background", "network", "double_tap", "rotate", "relaunch")
 TAPS = frozenset({"tap", "long_press", "toggle", "alert"})
@@ -36,6 +38,7 @@ SCROLLS = frozenset({"scroll", "swipe"})
 READS = frozenset({"look", "audit", "compare_screen"})
 WAITS = frozenset({"wait", "wait_for"})
 MOVES = frozenset({"back", "open_app", "close_app", "open_url", "press_button", "rotate"})  # actions that aren't a tap
+APPROVED = re.compile(r"^Note: allowed by a person \(in (.+?)\)\.$", re.M)  # the end of an answer a person's OK let through
 SAME_SCREEN = 0.8  # share of elements alike for a return to a screen already seen
 NEW_SCREEN = 0.5  # fewer alike than this: another screen
 MAX_FRAMES = 200
@@ -154,6 +157,7 @@ class Journey:
     stress: list[str] = field(default_factory=list)  # the answer lines of the stress moments, in order
     shortcuts: list[str] = field(default_factory=list)  # allowed shortcuts used (`open_url https://…`)
     notes: list[str] = field(default_factory=list)  # things the report says (undone conditions, a network ended)
+    approvals: list[str] = field(default_factory=list)  # where each person's OK came from ("chat", "the live view") (§11.3)
     extra_sections: list[tuple[str, list[str]]] = field(default_factory=list)  # (heading, markdown lines) added by ux_check
     network_set: bool = False  # the journey put the phone's network in a condition (to undo at stop)
     launched_with: dict = field(default_factory=dict)  # the language/region/text size the app was launched with
@@ -170,6 +174,7 @@ class Journey:
         if name == "journey":
             return False
         self.calls += 1
+        self.approvals += APPROVED.findall(text)
         if error is not None:
             self.errors += 1
             self.error_codes[error] = self.error_codes.get(error, 0) + 1
