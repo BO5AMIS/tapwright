@@ -2,6 +2,8 @@
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from tapwright import checkout, cli
 
 
@@ -59,28 +61,35 @@ def test_no_git_is_skipped_quietly(tmp_path):
     assert checkout.check(pkg, git_says("", 128)) is None
 
 
-def test_doctor_in_a_fresh_process_reports_a_conflicted_signing_module(tmp_path):
-    """The CLI loads without importing signing.py, so `tapwright doctor` reaches its checkout check even when that
-    file holds merge markers, instead of failing with a SyntaxError first (CodeRabbit and Codex, PR #5)."""
+def _conflicted_copy(tmp_path, module: str):
     import shutil
-    import subprocess
-    import sys
     from pathlib import Path
     import tapwright
     copy = tmp_path / "src"
-    shutil.copytree(Path(tapwright.__file__).parent, copy / "tapwright",
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(Path(tapwright.__file__).parent, copy / "tapwright", ignore=shutil.ignore_patterns("__pycache__"))
     (copy / "pyproject.toml").write_text('[project]\nname = "tapwright"\n', encoding="utf-8")
-    (copy / ".git").mkdir()  # a source checkout in a git work tree: doctor stops at the conflict, before the phone
-    signing = copy / "tapwright" / "signing.py"
-    signing.write_text("<<<<<<< HEAD\nx = 1\n=======\nx = 2\n>>>>>>> other\n", encoding="utf-8")
-    code = ("import sys; sys.argv = ['tapwright', 'doctor']\n"
-            "from tapwright import cli\n"
-            "raise SystemExit(cli.main())\n")
-    r = subprocess.run([sys.executable, "-c", code], cwd=copy, capture_output=True, text=True, timeout=120,
-                       env={"PYTHONPATH": str(copy), "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", ""),
-                            "TAPWRIGHT_HOME": str(tmp_path / "home")})
-    out = r.stdout + r.stderr
-    assert "SyntaxError" not in out, out
-    assert "merge markers" in out and "signing.py" in out, out
-    assert "device service" not in out, out  # it ended before reaching for the phone
+    (copy / ".git").mkdir()  # a source checkout in a git work tree
+    (copy / "tapwright" / module).write_text("<<<<<<< HEAD\nx = 1\n=======\nx = 2\n>>>>>>> other\n", encoding="utf-8")
+    return copy
+
+
+def _run_tapwright(copy, tmp_path, *args):
+    import os
+    import subprocess
+    import sys
+    env = {"PYTHONPATH": str(copy), "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""), "TAPWRIGHT_HOME": str(tmp_path / "home")}
+    r = subprocess.run([sys.executable, "-m", "tapwright", *args], cwd=copy, capture_output=True, text=True,
+                       timeout=120, env=env)
+    return r.returncode, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("module", ["signing.py", "device.py", "cli.py", "daemon.py"])
+def test_a_fresh_tapwright_names_merge_markers_in_any_module_before_loading_it(tmp_path, module):
+    """`python -m tapwright` (and the `tapwright` command, tapwright.entry:main) checks the package's files for merge
+    markers before the CLI is imported, so whichever module holds them, the answer names it instead of a SyntaxError,
+    and nothing reaches for the phone (CodeRabbit and Codex, PR #5 cycles 2 and 3)."""
+    copy = _conflicted_copy(tmp_path, module)
+    code, out = _run_tapwright(copy, tmp_path, "doctor")
+    assert code == 1 and "SyntaxError" not in out, out
+    assert "merge markers" in out and module in out, out
+    assert "device service" not in out, out

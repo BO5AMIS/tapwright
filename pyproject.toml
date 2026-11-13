@@ -41,7 +41,7 @@ video = ["av>=14"]  # the H.264 live view (/video): decode the AirPlay stream, e
 ocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]  # look with ocr: true: text read from the picture, on the CPU
 
 [project.scripts]
-tapwright = "tapwright.cli:main"
+tapwright = "tapwright.entry:main"
 
 [tool.setuptools]
 packages = ["tapwright"]
