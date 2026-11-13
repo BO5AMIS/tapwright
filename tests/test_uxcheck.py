@@ -271,7 +271,8 @@ def test_ux_check_is_a_read_in_personal_mode_and_refused_outside_the_given_apps(
 def test_findings_are_added_to_a_running_journey_when_there_is_one(monkeypatch):
     from tapwright import journey as journey_module
     got = []
-    monkeypatch.setattr(journey_module, "add_finding", lambda client_id, finding: got.append((client_id, finding)))
+    monkeypatch.setattr(journey_module, "add_finding",
+                        lambda client_id, finding, lines=None: got.append((client_id, finding)))
 
     async def go():
         d = make()

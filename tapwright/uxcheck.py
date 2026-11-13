@@ -391,10 +391,10 @@ def report(screen: str, result: Result, rules: Rules = NONE) -> str:
     return "\n".join(lines)
 
 
-def tell_journey(client: str, result: Result, screen: str) -> None:
+def tell_journey(client: str, result: Result, screen: str, lines: str | None = None) -> None:
     """Add the findings to the journey that is running, if there is one: `journey.add_finding(client, finding)` with
     the finding as a dict (kind, element, what, basis, screen). Without the journey module, or without a journey
-    running, nothing happens."""
+    running, nothing happens. `lines`: the element lines of the screen that was checked (journey.add_finding)."""
     try:
         from . import journey  # type: ignore[attr-defined]
         add = journey.add_finding
@@ -402,6 +402,6 @@ def tell_journey(client: str, result: Result, screen: str) -> None:
         return
     for f in result.findings:
         try:
-            add(client, f.to_dict(screen))
+            add(client, f.to_dict(screen), lines) if lines is not None else add(client, f.to_dict(screen))
         except Exception:  # a journey that can't take a finding never fails the check
             return

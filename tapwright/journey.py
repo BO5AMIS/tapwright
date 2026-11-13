@@ -222,12 +222,24 @@ class Journey:
         return max(0.0, now - self.started)
 
     # ---- findings (also the API for ux_check: journey.add_finding) ----
-    def add_finding(self, finding: dict) -> dict:
+    def add_finding(self, finding: dict, at: "Screen | None | object" = None) -> dict:
         """File a finding: `{severity, what, basis, screen?, rect?}`. `screen` is a screen's number or its name (the
-        current one by default); `rect` is `(x, y, width, height)` in points to mark on its picture."""
+        current one by default); `rect` is `(x, y, width, height)` in points to mark on its picture. `at` (ux_check):
+        the screen the finding was found on, as screen_of matched it when it was read, or NOWHERE when none matched;
+        it stands for the current screen, which another call may have moved on since."""
         clean = check_finding(finding)
         if len(self.findings) >= MAX_FINDINGS:
             raise Refused("bad_params", f"a journey keeps at most {MAX_FINDINGS} findings")
+        if isinstance(at, Screen):
+            clean["screen_index"] = at.index
+            clean["screen"] = f"{at.index}. {at.title}"
+            clean["frame"] = self.last_frame_of(at.index)
+            self.findings.append(clean)
+            return clean
+        if at is NOWHERE:  # a screen the journey hasn't listed: filed without a screen or a picture to mark
+            clean["screen_index"], clean["frame"] = None, None
+            self.findings.append(clean)
+            return clean
         if "screen" not in clean and self.current is not None:
             clean["screen_index"] = self.current.index
             clean["screen"] = f"{self.current.index}. {self.current.title}"
@@ -236,6 +248,15 @@ class Journey:
         clean["frame"] = self.last_frame_of(clean.get("screen_index"))
         self.findings.append(clean)
         return clean
+
+    def screen_of(self, lines: str) -> "Screen | None":
+        """The journey's screen whose elements these element lines are, without moving `current`: the current one when
+        it is alike as `see` takes it, else a screen already seen that is the same, else None."""
+        sig = signature(lines)
+        if self.current is not None and alike(self.current.signature, sig) >= NEW_SCREEN:
+            return self.current
+        best = max(self.screens, key=lambda s: alike(s.signature, sig), default=None)
+        return best if best is not None and alike(best.signature, sig) >= SAME_SCREEN else None
 
     def screen_number(self, named: object) -> int | None:
         if named is None:
@@ -261,11 +282,16 @@ class Journey:
         return {sev: sum(1 for f in self.findings if f["severity"] == sev) for sev in SEVERITIES}
 
 
-def add_finding(client: str, finding: dict) -> bool:
+NOWHERE = object()  # Journey.add_finding: on no screen the journey knows
+
+
+def add_finding(client: str, finding: dict, lines: str | None = None) -> bool:
     """File a `ux_check` finding in the journey `client` has running (docs/AGENT-TOOLS.md §17.3, §17.5). `finding` is
     `{kind, element, what, basis, screen}`; its severity comes from its kind (a house rule is high) and the box round
     the element from the `@x,y WxH` of its line. It goes on the journey's current screen (ux_check reads that one).
-    The same finding twice (the agent checked the screen again) is filed once. True when it was filed."""
+    The same finding twice (the agent checked the screen again) is filed once. True when it was filed. `lines`: the
+    element lines of the screen ux_check read, which name the screen the finding goes on (another call of the agent
+    may have moved the journey's current screen on meanwhile, Codex, PR #7 cycle 5)."""
     jr = running.get(client)
     if jr is None or not isinstance(finding, dict):
         return False
@@ -273,7 +299,11 @@ def add_finding(client: str, finding: dict) -> bool:
     what, basis = str(finding.get("what") or "").strip(), str(finding.get("basis") or "").strip()
     if not what or not basis:
         return False
-    here = jr.current.index if jr.current is not None else None
+    place = (jr.screen_of(lines) or NOWHERE) if lines is not None else None
+    if lines is None:
+        here = jr.current.index if jr.current is not None else None
+    else:
+        here = place.index if isinstance(place, Screen) else None
     if any((f.get("kind"), f.get("element"), f["what"], f.get("screen_index")) == (kind or None, element or None, what, here)
            for f in jr.findings):
         return False
@@ -285,7 +315,7 @@ def add_finding(client: str, finding: dict) -> bool:
         raw["element"] = element
         if (m := _PLACE.search(element)) is not None:
             raw["rect"] = tuple(float(v) for v in m.groups())
-    jr.add_finding(raw)
+    jr.add_finding(raw, place)
     return True
 
 

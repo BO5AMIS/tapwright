@@ -123,6 +123,49 @@ def test_ux_check_of_a_given_apps_prompt_checks_what_its_own_turn_read_not_the_s
     run(go)
 
 
+def test_ux_check_files_its_findings_on_the_journey_screen_it_read_not_on_the_current_one():
+    """Codex, PR #7 cycle 5: while the prompt check waits for the process list, another call of the agent moves the
+    journey's current screen on. The finding goes on the screen ux_check read (the prompt), with that screen's picture,
+    through the real journey.add_finding."""
+    from tapwright import daemon as daemon_module, ui
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        mine = Scope((APP,))
+        s.app_names[APP] = "Example"
+        s.foreground, s.tree = APP, [button("e1", "Remind me", "remind")]
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=mine)
+        jr = d._journeys["a"]
+        # a given app's permission prompt, with an icon-only button (a finding ux_check will make)
+        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
+        s.tree = [button("e1", "Allow"), button("e2", "Don’t Allow"), button("e3", "", "gear", rect=(340, 60, 44, 44))]
+        s.last_alert = ui.Alert("“Example” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
+                                (60.0, 300.0, 300.0, 200.0))
+
+        async def running():
+            return [APP]
+        s.device.foreground_apps = running
+        # the journey has the prompt as its current screen (the fake's answers don't list it, so it is told directly)
+        jr.see(chr(10).join(["Screen 400x800 pt · 3 elements", *(e.line() for e in s.tree)]))
+        prompt = jr.current
+        assert prompt is not None and any(t == '"Allow"' for _, t in prompt.signature)
+
+        async def slow_list():  # meanwhile the journey moves on to another screen of the app
+            jr.see(chr(10).join(['Screen 400x800 pt · 2 elements', 'e1 button "Settings" @10,100 100x40',
+                                 'e2 button "Profile" @10,200 100x40']))
+            await asyncio.sleep(0.01)
+            return [APP]
+        s.device.foreground_apps = slow_list
+        await d.run_tool("a", "ux_check", {}, scope=mine)
+        assert jr.current is not prompt  # the journey did move on
+        icon = [f for f in jr.findings if f.get("kind") == "icon_only"]
+        assert icon and all(f["screen_index"] == prompt.index for f in icon)
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_stop_during_a_network_stress_while_a_recording_starts_does_not_deadlock():
     """Codex, PR #7 cycle 3: journey started with no recording; network stress waits for the phone; record starts; stop
     comes (it takes the recording lock, then waits for the journey lock). The stress's own look must not wait for the

@@ -3211,7 +3211,9 @@ class Daemon(journey_tool.JourneyTools):
         app = seen.app
         title = uxcheck.title_of(seen.items)
         screen = f'"{app[0] if app else "the screen"}"' + (f" ({ui.clip(title)[1:-1]})" if title else "")
-        uxcheck.tell_journey(client_id, result, screen)
+        # the findings go on the journey's screen these elements are, not on whatever screen another call has made
+        # current since (Codex, PR #7 cycle 5)
+        uxcheck.tell_journey(client_id, result, screen, "\n".join(e.line() for e in seen.items if e.ref))
         text = uxcheck.report(screen, result, rules)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
 
