@@ -268,26 +268,92 @@ async def doctor_fix(problems: int) -> int:
     usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"]
     if not usb:
         return problems + fail("--fix needs the iPhone on USB. Plug it in and unlock it, then run it again.")
-    udid = store.load_state().get("udid")
-    udid = udid if udid in [d.serial for d in usb] else usb[0].serial
-    phone = UsbPhone(udid)
+    phone = UsbPhone(configured_phone([d.serial for d in usb]))
     try:
         return problems + await run_fixes(phone, lambda kind, msg: {"ok": ok, "note": note, "fail": fail}[kind](msg))
     finally:
         await phone.close()
 
 
+def configured_phone(usb: list[str]) -> str:
+    """The phone doctor means among those on USB: the stored one when it is plugged in, else the first."""
+    udid = store.load_state().get("udid")
+    return udid if udid in usb else usb[0]
+
+
+async def lockdown_needs(udid: str, connect=None) -> list[str]:
+    """What the phone on USB says only a person can clear (needs.from_lockdown). Reads nothing it can't, and asks for
+    no pairing: an untrusted computer is told, not paired."""
+    from pymobiledevice3.exceptions import (NotPairedError, PairingDialogResponsePendingError, PasswordRequiredError,
+                                            UserDeniedPairingError)
+
+    from . import needs
+    if connect is None:
+        from pymobiledevice3.lockdown import create_using_usbmux
+
+        def connect(serial):
+            return create_using_usbmux(serial=serial, autopair=False)
+    try:
+        lockdown = await asyncio.wait_for(connect(udid), 10)
+    except (NotPairedError, PairingDialogResponsePendingError, UserDeniedPairingError):
+        return needs.from_lockdown(False, False, None)
+    except PasswordRequiredError:
+        return needs.from_lockdown(True, True, None)
+    except Exception:  # can't be read: not listed
+        return []
+    if not lockdown.paired:  # autopair=False hands back an unpaired client instead of raising
+        return needs.from_lockdown(False, False, None)
+    try:
+        mode = await asyncio.wait_for(lockdown.get_developer_mode_status(), 10)
+    except Exception:  # an iOS without the setting, or no answer
+        mode = None
+    return needs.from_lockdown(True, False, mode if isinstance(mode, bool) else None)
+
+
+async def needs_person(usb: list[str]) -> list[str]:
+    """The things only the phone's owner can clear, as far as they can be read: from the running daemon when there
+    is one (it owns the phone), else from the phone on USB."""
+    from . import client, needs
+    status = client.healthy(store.read_serve_info())
+    if status is not None:
+        return needs.from_state(status.get("state"), status.get("detail"))
+    return await lockdown_needs(configured_phone(usb)) if usb else []
+
+
+def print_needs(found: list[str]) -> None:
+    if found:
+        print("\nNeeds a person:")
+        for item in found:
+            print(f"  - {item}", flush=True)
+
+
+def report_checkout(package: Path | None = None) -> int:
+    """doctor's line on where Tapwright runs from (see checkout.py). Returns the problems it found."""
+    from . import checkout
+    verdict = checkout.check(package or Path(__file__).resolve().parent)
+    if verdict is None:
+        return 0
+    kind, message = verdict
+    {"ok": ok, "note": note, "fail": fail}[kind](message)
+    return 1 if kind == "fail" else 0
+
+
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
+    problems = 0
+    ok(f"Python {sys.version.split()[0]}, pymobiledevice3 {version('pymobiledevice3')}")
+    problems += report_checkout()
+    if problems:  # before the signing modules are imported: a conflicted one would raise SyntaxError first
+        return problems
     from pymobiledevice3 import usbmux
 
     from . import repair, signing
-    problems = 0
-    ok(f"Python {sys.version.split()[0]}, pymobiledevice3 {version('pymobiledevice3')}")
+    usb: list[str] = []
     try:
         devices = await usbmux.list_devices()
-        ok(f"device service reachable; on USB: {[d.serial for d in devices if d.connection_type == 'USB'] or 'none'}")
+        usb = [d.serial for d in devices if d.connection_type == "USB"]
+        ok(f"device service reachable; on USB: {usb or 'none'}")
     except Exception as e:
         problems += fail(f"device service unreachable ({e}). Windows: install Apple Devices (Microsoft Store); "
                          "Linux: usbmuxd")
@@ -322,7 +388,10 @@ async def doctor(a) -> int:
         problems = await doctor_fix(problems)
     elif problems:
         note("tapwright doctor --fix repairs what it can (phone on USB)")
-    print(f"\n{problems} problem(s)." if problems else "\nAll set.")
+    waiting = await needs_person(usb) if not a.fix else []
+    print_needs(waiting)
+    print(f"\n{problems} problem(s)." if problems else
+          "\nSet up, but the phone needs a person (above)." if waiting else "\nAll set.")
     return 1 if problems else 0
 
 

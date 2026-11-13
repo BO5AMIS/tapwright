@@ -23,7 +23,8 @@ from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, aio, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, ocr, performance, ui)
+from . import (actionlog, aio, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
+               performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -79,6 +80,9 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# True while a replay's fresh start runs: its calls are real steps of a recording in progress (the app restart), but the
+# first-answer note goes on the replay's own answer, not on theirs
+_GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_greeting_held", default=False)
 # Set to a list by the recording branch of run_tool; a compare_screen call puts what it found there (the folder, the
 # bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
 # change it.
@@ -339,6 +343,10 @@ def _checked(name: str, args: dict) -> dict:
     if name == "rotate" and args.get("to") not in ("portrait", "landscape_left", "landscape_right"):
         raise Refused("bad_params", f"to must be portrait, landscape_left or landscape_right, not {args.get('to')!r}")
     if name == "wait_for":
+        if args.get("network_idle"):  # AGENT-TOOLS §5.1: Tapline's; Tapwright can't see the app's requests
+            raise Refused("unsupported", "Tapwright can't see the app's network requests, so it can't wait for "
+                                         "network_idle; wait_for a text, id or label the loaded screen shows, or use "
+                                         "Tapline")
         given = [k for k in WAIT_FOR_KINDS if args.get(k) is not None]
         if len(given) != 1:
             raise Refused("bad_params", "wait_for needs exactly one of text, id or label")
@@ -721,6 +729,7 @@ class Daemon:
         # {agent: (the app, when, the person generation then)}: see _recheck_later and _check_again
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
+        self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
@@ -1043,6 +1052,10 @@ class Daemon:
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
+        top_level = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
+        greets = top_level and not _GREETING_HELD.get()
+        if top_level and name in params.ALLOWED:
+            params.check(name, args)
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
         # While a client records, or starts or stops a recording, its outer calls run one at a time (a batch's steps are
@@ -1053,17 +1066,31 @@ class Daemon:
         locks = outer and (client_id in self._recording or name == "record")
         try:
             if not locks:
-                return await self._run_tool_policed(client_id, name, args, scope)
+                answer = await self._run_tool_policed(client_id, name, args, scope)
+                return self._first_answer(client_id, answer) if greets else answer
             async with self._record_locks.setdefault(client_id, asyncio.Lock()):
                 rec = self._recording.get(client_id)
                 btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
                 try:
-                    return await self._run_tool_policed(client_id, name, args, scope)
+                    answer = await self._run_tool_policed(client_id, name, args, scope)
                 finally:
                     _BASELINES.reset(btoken)
+            return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+
+    def _first_answer(self, client_id: str, answer: dict) -> dict:
+        """The first answer an agent gets carries what only the phone's owner can clear (needs.py), as Note: lines. (A
+        refusal says its own: `locked` already names the passcode or the unlock.)"""
+        if client_id in self._greeted:
+            return answer
+        self._greeted.add(client_id)
+        # (the passcode prompt is a PhoneLocked too, and says its own note)
+        locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
+        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
+                 if item not in answer["text"]]
+        return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name in BATCH_TOOLS:
@@ -1618,20 +1645,13 @@ class Daemon:
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
         if data.get("fresh", True) and data.get("app"):
-            # a known start: the app closed and opened again (Tapline reloads its JS instead)
-            await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
-            await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
-            # a fresh start takes the app a while (a development build loads its bundle): wait for what step 1 aims
-            # at, up to FRESH_WAIT. If it never comes, step 1 says not_found, which is the honest answer.
-            aim = data["steps"][0].get("target")
-            kind = next((k for k in ("id", "label", "text") if isinstance(aim, dict) and aim.get(k)), None)
-            if kind is not None:
-                try:
-                    await self.run_tool(client_id, "wait_for", {kind: aim[kind], "timeout": FRESH_WAIT, "look": False},
-                                        scope)
-                except Refused as e:
-                    if e.code != "timeout":
-                        raise
+            # (these calls are the replay's own: the first-answer note goes on the replay's answer. They are not marked
+            # nested: a recording in progress saves the app restart, or a replay of it starts in the wrong app)
+            held = _GREETING_HELD.set(True)
+            try:
+                await self._fresh_start(client_id, data, scope)
+            finally:
+                _GREETING_HELD.reset(held)
         points = [n for n, step in enumerate(data["steps"], 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
@@ -1639,12 +1659,33 @@ class Daemon:
             notes.append("Note: the app was closed and opened again first (the script's \"fresh\").")
         return await self._batch(client_id, data["steps"], scope, args, notes)
 
+    async def _fresh_start(self, client_id: str, data: dict, scope: "Scope | None") -> None:
+        """A script's fresh start: the app closed and opened, then step 1's target waited for."""
+        # a known start: the app closed and opened again (Tapline reloads its JS instead)
+        await self.run_tool(client_id, "close_app", {"app": data["app"]}, scope)
+        await self.run_tool(client_id, "open_app", {"app": data["app"], "look": False}, scope)
+        # a fresh start takes the app a while (a development build loads its bundle): wait for what step 1 aims
+        # at, up to FRESH_WAIT. If it never comes, step 1 says not_found, which is the honest answer.
+        aim = data["steps"][0].get("target")
+        kind = next((k for k in ("id", "label", "text") if isinstance(aim, dict) and aim.get(k)), None)
+        if kind is not None:
+            try:
+                await self.run_tool(client_id, "wait_for", {kind: aim[kind], "timeout": FRESH_WAIT, "look": False},
+                                    scope)
+            except Refused as e:
+                if e.code != "timeout":
+                    raise
+
     async def _dry_batch(self, client_id: str, steps: list[dict], scope: "Scope | None") -> dict:
         """`run` with dry_run (§11.4): every step's parameters are checked already; step 1 is resolved and checked like a
         dry run of its own, and nothing touches the phone. Later steps depend on what step 1 does, so they aren't."""
         first, n = steps[0], len(steps)
         if first["tool"] in DRY_TOOLS:
-            answer = await self.run_tool(client_id, first["tool"], {**batch.args_of(first), "dry_run": True}, scope)
+            nested = _NESTED.set(True)  # the dry run's own call: the first-answer note goes on the run's answer
+            try:
+                answer = await self.run_tool(client_id, first["tool"], {**batch.args_of(first), "dry_run": True}, scope)
+            finally:
+                _NESTED.reset(nested)
             would = answer["text"].splitlines()[0]
             what = "w" + would[1:] if would.startswith("Would ") else would
         else:

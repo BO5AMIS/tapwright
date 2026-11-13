@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.1 (2026-11-13)
+
+Small fixes from an app tester's pass.
+
+- `tapwright doctor` checks where Tapwright runs from. In a git checkout with uncommitted changes it warns; with
+  unresolved merge markers (`<<<<<<<`) in the package it fails. An installed package is fine, and no git means no
+  check. The setup docs and the agent guide now say that QA and unattended runs use a pinned release in their own
+  venv, never a development checkout.
+- A "needs a person" list: `doctor` shows, under `Needs a person:`, what only the phone's owner can clear and can
+  be read (the XCTest passcode prompt, a locked phone, Developer Mode off, a computer the phone doesn't trust), with
+  what to do. The first answer each agent gets carries the same as `Note:` lines.
+- A tool called with an argument it doesn't take is now refused over the HTTP API too: `bad_params: audit doesn't
+  take labels, ocr; it takes types.` The same holds for the steps of `run` and scripts.
+- `audit`: a finding whose element isn't in the screen's tree is named by XCTest's own label or id and frame
+  (`an element "Total" at @16,300 120x20`) before it falls back to "the screen".
+- The live view's page for a link without a valid key now says what to do (run `tapwright view`, or ask the agent to
+  use its `viewer` tool), instead of one line a person couldn't act on.
+
 ## 1.3.0, "the Diagnostics Update" (2026-11-13)
 
 A failure now comes with its cause: the app's log, its crash, and how it performed. The interface is AGENT-TOOLS

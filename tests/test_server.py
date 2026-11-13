@@ -402,3 +402,15 @@ def test_quality_reaches_the_video_hub_and_closing_closes_it():
     assert d.video.quality == "light"
     asyncio.run(d.close())
     assert not d.video.live
+
+
+def test_a_link_without_a_valid_key_says_how_to_open_the_live_view():
+    """2026-11-12: an agent opened `?token=SECRET` and the owner saw only 'Open the link that tapwright view prints'."""
+    app, _ = app_and_daemon()
+    with TestClient(app) as c:
+        r = c.get("/?token=SECRET", follow_redirects=False)
+        assert r.status_code == 401
+        assert "This link has no valid key" in r.text and "tapwright view" in r.text and "viewer" in r.text
+        assert "SECRET" not in r.text and TOKEN not in r.text
+        # (CodeRabbit, PR #5) a link with a valid key does open it, so the page must not say a shared link never works
+        assert "never works" not in r.text and "keep" in r.text.lower() and "private" in r.text.lower()

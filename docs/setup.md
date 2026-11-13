@@ -10,6 +10,10 @@ Once per phone, with the phone on USB. About ten minutes.
 - Linux: `usbmuxd` (`sudo apt install usbmuxd`).
 - macOS: nothing else.
 
+For QA or any unattended run, install a pinned release in its own virtual environment
+(`pip install tapwright==<version>`, or the wheel), and never run from a development checkout:
+a half-merged working tree breaks every call. `tapwright doctor` warns when it finds this.
+
 `tapwright doctor` checks these at any time.
 
 ## 2. A signing identity

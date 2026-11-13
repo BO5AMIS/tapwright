@@ -4,6 +4,7 @@ import dataclasses
 import base64
 import io
 import re
+import time
 
 import pytest
 from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button, el, image_bytes
@@ -316,11 +317,16 @@ def rates(session) -> list[int]:
             if isinstance(c, tuple) and c[0] == "settings" and "mjpegServerFramerate" in c[1]]
 
 
-async def until(check, tries: int = 300) -> None:
-    for _ in range(tries):
+async def until(check, seconds: float = 3.0) -> None:
+    # a deadline, not a count of sleeps: before Python 3.13 the Windows clock ticks every 15.6 ms and asyncio.sleep(0.01)
+    # can return at once, so 300 sleeps were over in 0.4 s
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         if check():
             return
         await asyncio.sleep(0.01)
+    if check():
+        return
     raise AssertionError("never happened")
 
 

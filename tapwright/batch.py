@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import compare, performance, ui
+from . import compare, params, performance, ui
 from . import shot as shotlib
 from .control import Refused
 
@@ -15,6 +15,7 @@ EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
               "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance")
 EXPECT_KINDS = ("text", "id", "label")
+STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot")  # besides its tool's own arguments (a step's look and screenshot are ignored, §9.1)
 FORMAT, VERSION = "agent-tools-script", 1
 
 
@@ -32,6 +33,7 @@ def check_steps(steps: object, *, script: bool = False) -> list[dict]:
         if step["tool"] not in STEP_TOOLS:
             raise Refused("bad_params", f"step {n}: {step['tool']!r} can't be a step; a step is one of "
                                         f"{', '.join(STEP_TOOLS)}")
+        params.check(step["tool"], {k: v for k, v in step.items() if k not in STEP_KEYS}, f"step {n}: ")
         target = step.get("tap") if step["tool"] == "performance" else step.get("target")
         if script and isinstance(target, dict) and "ref" in target:
             raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "

@@ -504,6 +504,9 @@ class VirtualLoop(asyncio.SelectorEventLoop):
     def __init__(self) -> None:
         super().__init__()
         self.t = 0.0
+        # the loop fires every timer due within one clock tick at once; before Python 3.13 that tick is 15.6 ms on
+        # Windows, which put frames 4 ms apart at the same instant. Fake time ticks as finely as it is asked.
+        self._clock_resolution = 1e-9
         self._selector = _VirtualSelector(self._selector, self)
 
     def time(self) -> float:

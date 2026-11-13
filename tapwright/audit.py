@@ -2,6 +2,7 @@
 lines, in the format both tools share, plus `duplicate_id` from the tree."""
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from . import ui
@@ -50,20 +51,48 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     place and label), else a line made from XCTest's attributes, without a ref. Empty when there is none."""
     if not attrs:
         return ""
-    ident, label = str(attrs.get("name") or ""), str(attrs.get("label") or "")
-    rect = attrs.get("rect") or {}
-    box = tuple(round(float(rect.get(k, 0) or 0)) for k in ("x", "y", "width", "height"))
+    ident = str(attrs.get("name") or attrs.get("identifier") or "")
+    label = str(attrs.get("label") or "")
+    box = _box(attrs.get("rect") or attrs.get("frame"))
     for e in items:
         if ident and (e.identifier == ident or e.name == ident):
             return e.line()
     for e in items:
-        if tuple(round(v) for v in e.rect) == box and (not label or label in (e.label, e.value, e.text)):
+        if any(box[2:]) and tuple(round(v) for v in e.rect) == box and (not label or label in (e.label, e.value, e.text)):
             return e.line()
+    # the tree has no such element: say what XCTest itself says of it (its label or id, and its frame in points)
     kind = str(attrs.get("type") or "").removeprefix("XCUIElementType")
-    role = ui.ROLES.get(kind, kind.lower() or "element")
-    named = f' "{label}"' if label else ""
-    shown = f" id={ident}" if ident else ""
+    # what the app's own text says is shown as element lines show text: one line, quoted and capped (review 1.3.1:
+    # a raw label could add a line of its own to the answer)
+    named = f" {ui.clip(label)}" if label else ""
+    plain_id = " ".join(str(ident).split())[:ui.TEXT_LIMIT] if ident else ""
+    shown = f" id={plain_id}" if plain_id else ""
+    if not kind:
+        if not (label or ident or any(box[2:])):
+            return ""
+        return f"an element{named}{shown} at @{box[0]},{box[1]} {box[2]}x{box[3]}" if any(box[2:]) else f"an element{named}{shown}"
+    role = ui.ROLES.get(kind, kind.lower())
     return f"{role}{named}{shown} @{box[0]},{box[1]} {box[2]}x{box[3]}" if any(box[2:]) else f"{role}{named}{shown}"
+
+
+_NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+_FRAME = re.compile(rf"\s*\{{\s*\{{\s*{_NUMBER}\s*,\s*{_NUMBER}\s*\}}\s*,\s*\{{\s*{_NUMBER}\s*,\s*{_NUMBER}\s*\}}\s*\}}\s*")
+
+
+def _box(rect: object) -> tuple[int, int, int, int]:
+    """XCTest's frame as whole points (x, y, w, h): a dict with x, y, width, height, or a "{{x, y}, {w, h}}" string.
+    Zeros when it is neither."""
+    try:
+        if isinstance(rect, dict):
+            return tuple(round(float(rect.get(k, 0) or 0)) for k in ("x", "y", "width", "height"))  # type: ignore[return-value]
+        if isinstance(rect, str):
+            frame = _FRAME.fullmatch(rect)  # the whole "{{x, y}, {w, h}}", or none of it
+            if frame is not None:
+                x, y, w, h = (round(float(n)) for n in frame.groups())
+                return x, y, w, h
+    except (TypeError, ValueError, OverflowError):  # (an infinite or absurd number is no frame)
+        pass
+    return 0, 0, 0, 0
 
 
 def duplicates(items: list[ui.Element]) -> list[tuple[str, str]]:
