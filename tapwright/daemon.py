@@ -160,6 +160,14 @@ def _outside(bundle: str | None, name: str | None, given: str, alert: bool = Fal
             "touched. Go back with open_app.")
 
 
+class UxRead(NamedTuple):
+    """What one ux_check turn read (Daemon._ux_check): checked, filed and shown from this, never from the shared view."""
+    items: list
+    alert_now: "tuple[str, tuple[str, ...]] | None"
+    screen: tuple
+    app: "tuple[str, str] | None"
+
+
 class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
@@ -3159,7 +3167,7 @@ class Daemon(journey_tool.JourneyTools):
             except DeviceError:
                 return None
 
-        async def turn() -> tuple[str | None, list | DeviceError, str | None]:
+        async def turn() -> tuple[str | None, list | DeviceError, str | None, UxRead]:
             # One turn of the phone's queue: the app in front, the tree, the audit, and the app in front again. No
             # action or person's input comes between them, so the elements checked are the given app's when both reads
             # name it (Codex, PR #7 cycle 3: reads in separate turns let another client open an unlisted app for the
@@ -3172,13 +3180,16 @@ class Daemon(journey_tool.JourneyTools):
                 raise
             except DeviceError as e:
                 found = e
-            return first, found, (await front() if given is not None else None)
+            # What this turn read, kept for this call: the agent's view is shared with its other calls, and a look of
+            # theirs can replace it before this one is done (Codex, PR #7 cycle 4)
+            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None))
+            return first, found, (await front() if given is not None else None), seen
         for attempt in (1, 2):
-            first, issues, last = await self._read(turn)
+            first, issues, last, seen = await self._read(turn)
             if given is None or (first == last and first in given):
                 break
-            if first == last == SPRINGBOARD and await self._prompt_of_given(given, view, read=False):
-                break  # a given app's own permission prompt
+            if first == last == SPRINGBOARD and await self._prompt_of_given(given, seen, read=False):
+                break  # a given app's own permission prompt (as this turn read it)
             if attempt == 1 and first == last == SPRINGBOARD:
                 # a notification banner over the app makes WebDriverAgent say SpringBoard: _front waits it out, and
                 # the turn is read again only when a given app is in front then
@@ -3194,11 +3205,11 @@ class Daemon(journey_tool.JourneyTools):
             notes.append(f"the phone's accessibility audit isn't available here ({issues}), so cut-off text, contrast and "
                          "target size were not checked.")
         else:
-            rows = audit.rows_of(issues, view.items, list(self.UX_AUDIT))
+            rows = audit.rows_of(issues, seen.items, list(self.UX_AUDIT))
         rules = uxcheck.rules_in_force()
-        result = uxcheck.check(view.items, self.session.screen, client_id, rules, rows)
-        app = getattr(self.session, "app", None)
-        title = uxcheck.title_of(view.items)
+        result = uxcheck.check(seen.items, seen.screen, client_id, rules, rows)
+        app = seen.app
+        title = uxcheck.title_of(seen.items)
         screen = f'"{app[0] if app else "the screen"}"' + (f" ({ui.clip(title)[1:-1]})" if title else "")
         uxcheck.tell_journey(client_id, result, screen)
         text = uxcheck.report(screen, result, rules)

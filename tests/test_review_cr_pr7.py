@@ -89,6 +89,40 @@ def test_ux_check_checks_nothing_of_an_app_that_was_in_front_for_the_read_and_le
     run(go)
 
 
+def test_ux_check_of_a_given_apps_prompt_checks_what_its_own_turn_read_not_the_shared_view(monkeypatch):
+    """Codex, PR #7 cycle 4: on a given app's permission prompt, the prompt check waits for the phone's process list
+    outside the queue; meanwhile a look of the same agent can put another app's elements in its shared view. The check
+    and the findings use what ux_check's own turn read."""
+    from tapwright import daemon as daemon_module, ui
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        mine = Scope((APP,))
+        s.app_names[APP] = "Example"
+        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
+        s.tree = [button("e1", "Allow"), button("e2", "Don’t Allow")]
+        s.last_alert = ui.Alert("“Example” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
+                                (60.0, 300.0, 300.0, 200.0))
+        kept, filed = [], []
+        real_check = uxcheck.check
+        monkeypatch.setattr(uxcheck, "check", lambda *a, **k: kept.append(list(a[0])) or real_check(*a, **k))
+        monkeypatch.setattr(uxcheck, "tell_journey", lambda *a, **k: filed.append(a))
+
+        async def slow_list():  # while the process list is asked for, a look of the agent reads another app's screen
+            d.control.client("a").items = [button("e9", "Secret inbox", "inbox")]
+            await asyncio.sleep(0.01)
+            return [APP]
+        s.device.foreground_apps = slow_list
+        await d.run_tool("a", "ux_check", {}, scope=mine)
+        assert kept and all(e.label != "Secret inbox" for items in kept for e in items)
+        assert {e.label for e in kept[-1]} == {"Allow", "Don’t Allow"}  # the prompt its own turn read
+        assert all("Secret inbox" not in repr(f) for f in filed)
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_stop_during_a_network_stress_while_a_recording_starts_does_not_deadlock():
     """Codex, PR #7 cycle 3: journey started with no recording; network stress waits for the phone; record starts; stop
     comes (it takes the recording lock, then waits for the journey lock). The stress's own look must not wait for the
