@@ -7,7 +7,7 @@ own sign-in:
 - `{"to": "issue", "repo": "owner/name", "confirm": true}`: the report's pictures go, as one commit, to the repository's
   `qa-reports` branch (made from the default branch if it isn't there) and an issue links them.
 A public repository is refused unless `public: true` is also given.
-Only report.md, report.html, journey.gif, filmstrip.jpg and the findings' pictures are uploaded (not every screenshot), as
+Only report.md, report.html, journey.gif, filmstrip.jpg, the findings' pictures and the screens report.md links are uploaded, as
 one commit through the git data API (blobs, a tree, a commit, a ref), so a PR branch gets one commit, not one per file.
 `gh` is run through `run_gh`, one place, so tests replace it."""
 from __future__ import annotations
@@ -26,6 +26,7 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 BRANCH_NAME = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]*")
 BRANCH = "qa-reports"
 FILES = ("report.md", "report.html", "journey.gif", "filmstrip.jpg")  # and findings/*.jpg
+SCREEN_LINK = re.compile(r"\]\((screens/[A-Za-z0-9_.-]+\.jpg)\)")  # a screen picture report.md links
 GH_TIMEOUT = 120.0
 KEYS = ("to", "repo", "pr", "confirm", "public", "fork")
 NEED_CONFIRM = ("export writes to the user's GitHub repository. Ask your user first whether the report may be exported "
@@ -88,11 +89,20 @@ def _json(args: list[str], stdin: str | None = None) -> dict:
 
 
 def files_of(folder: Path) -> list[Path]:
-    """What is uploaded: the report's two documents, the GIF, the filmstrip and the findings' pictures."""
+    """What is uploaded: the report's two documents, the GIF, the filmstrip, the findings' pictures and the screen
+    pictures report.md links (only those: the documents must not show broken images)."""
     keep = [folder / name for name in FILES if (folder / name).is_file()]
     findings = folder / "findings"
     if findings.is_dir():
         keep += sorted(p for p in findings.glob("*.jpg") if p.is_file())
+    try:
+        text = (folder / "report.md").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for name in sorted(set(SCREEN_LINK.findall(text))):
+        p = folder / name
+        if p.is_file():
+            keep.append(p)
     return keep
 
 

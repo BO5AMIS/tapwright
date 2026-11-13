@@ -1292,3 +1292,11 @@ def test_codex_pr7_c1_background_resumes_the_running_app_and_relaunch_keeps_the_
         await d.run_tool("a", "journey", {"stop": True, "reached": True})
         await finish(stop, task)
     run(go)
+
+
+def test_cr_export_uploads_the_screen_pictures_the_report_links_and_only_those(report_folder):
+    (report_folder / "screens/002.jpg").write_bytes(b"\x89data")
+    (report_folder / "report.md").write_text("1. Home\n   ![screen 1](screens/001.jpg)\n", "utf-8")
+    names = [p.relative_to(report_folder).as_posix() for p in journey_export.files_of(report_folder)]
+    assert "screens/001.jpg" in names and "screens/002.jpg" not in names
+    assert "report.md" in names and "findings/finding-1.jpg" in names
