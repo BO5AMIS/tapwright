@@ -47,3 +47,29 @@ def test_ux_check_refuses_a_screen_of_an_app_that_came_forward_during_the_read_a
     run(go)
 
 
+# ---- 2. double_tap: the second touch is refused after the first went out ----
+def test_a_double_tap_refused_at_the_second_touch_still_advances_the_screen_generation():
+    class Linking(DescribingSession):
+        async def tap(self, target, hold_ms=60):
+            done = await super().tap(target, hold_ms)
+            self.foreground, self.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")
+            return done
+
+    async def go():
+        session = Linking()
+        session.tree = [button("e1", "Log meal", "log-meal")]
+        session.foreground = APP
+        d = make(session)
+        stop, task = await started(d)
+        scope = Scope((APP,))
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        session.tap_points.clear()
+        before = d.control.generation
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 200, "y": 500}}, scope=scope)
+        assert e.value.code == "not_allowed" and len(session.tap_points) == 1  # one touch went out
+        assert d.control.generation > before  # so every client's refs from before it are stale
+        await finish(stop, task)
+    run(go)
+
+

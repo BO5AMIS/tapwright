@@ -4236,17 +4236,21 @@ class Daemon(journey_tool.JourneyTools):
             # The first touch may also have opened another app (a link into Safari): the app in front is read again, and in
             # personal mode a second touch is made only on a given app's screen; the per-app policy is that of the app
             # really in front, since Session.refresh leaves `session.app` as the last look had it (Codex, PR #7 cycle 1)
-            front = await self.session.foreground_bundle_id()  # (not _read: this runs inside the touch's own turn in the queue)
-            given = _GIVEN.get()
-            if given is not None and front not in given:
-                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), ", ".join(given.values())))
-            items = (await self.session.refresh()).items
-            if target.kind == "point":
-                under = self._element_at((target.x, target.y), items)
-            else:
-                found = ui.resolve(items, target)
-                under = self._element_at(found, items) if isinstance(found, tuple) else found
-            self._police("tap", {}, under, front)
+            try:
+                front = await self.session.foreground_bundle_id()  # (not _read: this runs inside the touch's own turn in the queue)
+                given = _GIVEN.get()
+                if given is not None and front not in given:
+                    raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), ", ".join(given.values())))
+                items = (await self.session.refresh()).items
+                if target.kind == "point":
+                    under = self._element_at((target.x, target.y), items)
+                else:
+                    found = ui.resolve(items, target)
+                    under = self._element_at(found, items) if isinstance(found, tuple) else found
+                self._police("tap", {}, under, front)
+            except Refused:
+                self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
+                raise
             await self.session.tap(target, hold_ms=hold_ms)
         return done
 
