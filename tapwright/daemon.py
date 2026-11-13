@@ -889,6 +889,7 @@ class Daemon:
             return
         clear = getattr(self.session.device, "clear_leftover", None)
         if clear is None:
+            self.log("network: a condition may have been left on the phone, and this device can't clear one")
             return
         try:
             async with self._network_lock:

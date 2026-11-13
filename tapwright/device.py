@@ -448,6 +448,16 @@ class Device:
                 self._network_holds.discard(hold)
                 raise
 
+    async def clear_leftover(self) -> None:
+        """Ask the phone to end a condition that an earlier process left (the daemon was killed or crashed, and its
+        marker file says so). A condition ends with the connection that holds it, so this is a safety net: a new
+        instruments connection says `clear`, whoever set the condition. Raises when the phone can't be asked."""
+        from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        async with self._network_lock:
+            async with DvtProvider(self.rsd) as dvt, ConditionInducer(dvt) as inducer:
+                await inducer.clear()
+
     async def clear_network(self) -> None:
         """The phone's network back to normal: every connection that holds a condition is closed. Never raises."""
         async with self._network_lock:
