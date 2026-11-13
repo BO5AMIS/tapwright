@@ -356,19 +356,35 @@ def _no_trait(node: ET.Element, kind: str, label: str, value: str, identifier: s
     if kind != "Other" or identifier or not (label or value):
         return None
     role, checked = "", None
-    kept = [[p.strip() for p in whole.split(",") if p.strip()] for whole in (label, value)]
-    for parts in kept:
-        for p in parts:
-            role = role or _RN_ROLES.get(p.casefold(), "")
+    sources = [[p.strip() for p in whole.split(",") if p.strip()] for whole in (label, value)]
+    at = [next((i for i, p in enumerate(parts) if p.casefold() in _RN_ROLES), None) for parts in sources]
+    for parts, i in zip(sources, at):
+        if i is not None:
+            role = role or _RN_ROLES[parts[i].casefold()]
     if not role:
         return None
-    for parts in kept:
-        for p in parts:
+    words = {*_RN_ROLES, *_RN_STATES}
+    kept: list[list[str]] = []
+    for n, (parts, i) in enumerate(zip(sources, at)):
+        # React Native says the role after the label and the state after the role: the words before the role token
+        # are the label ("Selected, checkbox, unchecked" is an option named Selected, not checked). A label without
+        # the role token stays whole; a value without it holds only state words (CodeRabbit, PR #8).
+        if i is None and n == 0:
+            kept.append(parts)
+            continue
+        head, tail = (parts[:i], parts[i + 1:]) if i is not None else ([], parts)
+        for p in tail:
             if p.casefold() in _RN_STATES and checked is None:
                 checked = _RN_STATES[p.casefold()]
-    words = {*_RN_ROLES, *_RN_STATES}
-    kept = [[p for p in parts if p.casefold() not in words] for parts in kept]
+        kept.append(head + [p for p in tail if p.casefold() not in words])
     return _NoTrait(role, ", ".join(kept[0]), ", ".join(kept[1]), checked)
+
+
+def rn_label(label: str) -> str:
+    """The label of an `Other` as `elements` words it: without React Native's role and state words ("Weekly, radio
+    button" is "Weekly"). Anything else comes back as it is."""
+    found = _no_trait(ET.Element("Other"), "Other", label, "", "")
+    return found.label if found else label
 
 
 def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:

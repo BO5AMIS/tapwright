@@ -434,6 +434,26 @@ def test_a_react_native_checkbox_and_the_state_words():
     assert (e.role, e.label, e.value, e.checked) == ("checkbox", "Remember me", "", True)
 
 
+def test_a_state_word_before_the_role_is_part_of_the_label_not_the_state():
+    """CodeRabbit, PR #8: an option named "Selected" (an RN checkbox, unchecked) was checked=true with no label."""
+    def option(label: str, value: str = "") -> ui.Element:
+        n = node("Other", label, value=value, rect=(16, 400, 398, 44),
+                 children=[node("StaticText", "Selected", rect=(56, 410, 120, 24))])
+        return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[n])), SCREEN)[0]
+    e = option("Selected, checkbox, unchecked")
+    assert (e.role, e.label, e.checked) == ("checkbox", "Selected", False)
+    assert e.line() == 'e1 checkbox "Selected" checked=false @16,400 398x44 [tap]'
+    e = option("Checked, radio button")
+    assert (e.role, e.label, e.checked) == ("radio", "Checked", None)
+    e = option("Selected, radio button, selected")
+    assert (e.label, e.checked) == ("Selected", True)
+    e = option("Selected", value="checkbox, checked")  # the label has no role token: it stays whole
+    assert (e.role, e.label, e.checked) == ("checkbox", "Selected", True)
+    e = option("Selected, checkbox", value="unchecked")
+    assert (e.label, e.checked) == ("Selected", False)
+    assert ui.rn_label("Selected, checkbox, unchecked") == "Selected" and ui.rn_label("Total, 3 items") == "Total, 3 items"
+
+
 def _screen_of(*children: ET.Element) -> list[ui.Element]:
     return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=children)), SCREEN)
 
