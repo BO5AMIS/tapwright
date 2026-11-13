@@ -700,6 +700,7 @@ PID_RETRY = 0.25  # the same while no sample has shown the app's process (it is 
 METER_START = 15.0  # seconds the instruments service may take to start sampling
 METER_TEARDOWN = 3.0  # seconds one instrument may take to close before it is abandoned
 METER_STOP = 15.0  # seconds stop() waits for the sampling task to end
+PROCLIST_WAIT = 5.0  # seconds the phone's process list may take to answer for one batch of samples
 MB = 1024 * 1024
 
 
@@ -717,7 +718,10 @@ class AppMeter:
         self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
         self._failed: Exception | None = None
-        self._epoch = 0  # counts the windows begun: a sample taken before the current one is not kept
+        self._arrived = 0  # how many batches of samples have come, in order (a clock's turns are too coarse to tell them apart)
+        self._boundary = 0  # how many had come when the window began: those, and no later one, are from before it
+        self._skip_frame = False  # the first frame rate after the window began covers a second that began before it
+        self._rows: asyncio.Queue = asyncio.Queue()  # (its number in the order of arrival, the rows) of each batch
         self._fresh_after: float | None = None  # a launch's window keeps only a process started at or after this (epoch s)
         self._seen: set[int] = set()  # the pids of the app's processes sampled so far
         self._stale: set[int] = set()  # ... as the window began: not the new process, whatever their start times say
@@ -739,16 +743,18 @@ class AppMeter:
 
     async def begin_window(self, fresh: bool = False) -> None:
         """The measured window begins now: what the instruments gave until now (their set-up, the app that was running
-        before a launch) is dropped, and a sample taken before this moment is never kept, even one still on its way.
-        `fresh`: the window is a cold start, so only a process that started after this moment is the app's."""
+        before a launch) is dropped. A batch is kept only if it arrived after this moment, whatever was waiting for the
+        process list or queued behind it (each arrival is stamped by the reader, which never waits for the list), and
+        the first frame rate after it is not kept (it covers a second that began before it).
+        `fresh`: the window is a cold start, so only a process shown to have started after this moment is the app's."""
         from .performance import Measurement
-        self._epoch += 1
+        for _ in range(3):  # what the instruments have already delivered is read and stamped before the boundary
+            await asyncio.sleep(0)
+        self._boundary = self._arrived
         self.measurement = Measurement()
         self._fresh_after = time.time() - START_SLACK if fresh else None
         self._stale = set(self._seen) if fresh else set()
-        for _ in range(3):  # samples already queued are taken (and dropped) before the first of the window
-            await asyncio.sleep(0)
-        self.measurement = Measurement()
+        self._skip_frame = True
 
     async def stop(self):
         """End the sampling; the Measurement of what was seen. Bounded: an instrument that can't close (a tunnel that
@@ -793,7 +799,7 @@ class AppMeter:
                 info = await self._enter(stack, DeviceInfo(dvt))
                 tap = await Sysmontap.create(dvt, SAMPLE_MS)
                 await self._enter(stack, tap)
-                jobs = [asyncio.create_task(self._processes(tap, info))]
+                jobs = [asyncio.create_task(self._rows_in(tap)), asyncio.create_task(self._processes(info))]
                 try:
                     graphics = Graphics(dvt)
                     await self._enter(stack, graphics)
@@ -822,19 +828,32 @@ class AppMeter:
             return True
         if pid in self._stale:
             return False
-        return started is None or started >= self._fresh_after
+        return started is not None and started >= self._fresh_after  # no start time: nothing shows it is a new one
 
-    async def _processes(self, tap, info) -> None:
+    async def _rows_in(self, tap) -> None:
+        """Take each batch from sysmontap the moment it comes and number it, whatever the process list is doing: a batch
+        that waits behind a slow list keeps its place in the order of arrival, and so can be told from the window's."""
+        async for rows in tap.iter_processes():
+            self._arrived += 1
+            self._rows.put_nowait((self._arrived, rows))
+
+    async def _processes(self, info) -> None:
         """Each batch of rows is kept only for processes the phone's list shows as the app's right after the batch came
         (pid, bundle id and start time as listed then), so a pid that went to another process is never sampled as the
-        app, and in a launch's window only for a process that started in it. A list that can't be had drops the batch."""
-        async for rows in tap.iter_processes():
-            epoch = self._epoch
+        app, and in a launch's window only for a process that started in it. A batch that arrived before the window
+        is dropped. A list that can't be had drops the batch, and it is counted (`lost`): the numbers are then only
+        part of the window."""
+        while True:
+            arrived, rows = await self._rows.get()
+            if arrived <= self._boundary:
+                continue  # from before the window
             try:
-                listed = await info.proclist()
+                listed = await aio.wait_for(info.proclist(), PROCLIST_WAIT)
             except Exception:
-                continue  # whose pid it is can't be said: this batch isn't kept
-            if epoch != self._epoch:
+                if arrived > self._boundary:
+                    self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
+                continue
+            if arrived <= self._boundary:
                 continue  # the window began while the list was asked for: the batch is from before it
             mine = {p["pid"]: _started_of(p) for p in listed
                     if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
@@ -849,4 +868,7 @@ class AppMeter:
 
     async def _frames(self, graphics) -> None:
         async for fps in graphics.fps():
+            if self._skip_frame:  # covers the second before it came: part of it was before the window
+                self._skip_frame = False
+                continue
             self.measurement.fps.append(float(fps))

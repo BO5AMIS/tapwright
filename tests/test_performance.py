@@ -156,7 +156,10 @@ def test_the_apps_own_process_is_the_only_one_sampled():
     async def go():
         device_module.PID_RETRY = 0
         meter = device_module.AppMeter(FakeSession().device, "com.example.app")
-        await meter._processes(Tap(samples), Info())
+        worker = asyncio.create_task(meter._processes(Info()))
+        await meter._rows_in(Tap(samples))
+        await asyncio.sleep(0.05)  # the batches are taken one by one
+        worker.cancel()
         assert meter.measurement.memory_mb == [120.0, 140.0]
         assert meter.measurement.cpu_pct == [12.5]
     saved = device_module.PID_RETRY
@@ -367,4 +370,38 @@ def test_the_action_log_has_the_numbers_and_nothing_personal(tmp_path):
         got = [e for e in entries if e["tool"] == "performance"]
         assert len(got) == 1 and got[0]["ok"] is True
         assert got[0]["measured"]["memory_peak"] == 190.0 and got[0]["measured"]["drops"] == 3
+    run(go)
+
+
+def test_a_still_screen_of_a_partial_window_fails_its_frame_limits_and_a_fully_sampled_one_passes():
+    """CodeRabbit and Codex, PR #4 cycle 2: fps_min and drops took the still-screen shortcut before the partial check."""
+    stopped = performance.summarize(Measurement(fps=[0.0], failed="service stopped"), 2.0)
+    assert stopped.still and stopped.partial
+    assert performance.failures(stopped, {"fps_min": 30, "drops": 0}) == [
+        "frames: only part of the window was measured, so it can't be checked"] * 2
+    whole = performance.summarize(Measurement(fps=[0.0, 0.0]), 2.0)
+    assert whole.still and not whole.partial and performance.failures(whole, {"fps_min": 30, "drops": 0}) == []
+
+
+def test_samples_lost_to_a_process_list_that_could_not_be_read_fail_memory_and_cpu_limits_only():
+    """Codex, PR #4 cycle 2: batches the phone couldn't say whose they were were skipped without a trace, and the one
+    sample left passed memory_mb."""
+    r = performance.summarize(Measurement(memory_mb=[100.0], cpu_pct=[10.0], fps=[60.0], lost=3), 2.0)
+    assert r.samples_lost and not r.partial
+    assert performance.failures(r, {"memory_mb": 300, "cpu_percent": 50, "fps_min": 30, "drops": 0}) == [
+        "memory: only part of the window was measured, so it can't be checked",
+        "CPU: only part of the window was measured, so it can't be checked"]
+    over = performance.summarize(Measurement(memory_mb=[400.0], lost=1), 2.0)
+    assert performance.failures(over, {"memory_mb": 300}) == ["memory peaked at 400 MB, over 300 MB"]
+    assert not performance.summarize(Measurement(memory_mb=[1.0]), 1.0).samples_lost
+
+
+def test_lost_samples_are_said_in_the_answer():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.measurement = Measurement(memory_mb=[100.0], cpu_pct=[5.0], lost=2)
+        r = await d.run_tool("a", "performance", {"seconds": 1})
+        assert "Note: " + performance.SAMPLES_LOST.format(n=2) in r["text"].splitlines()
+        await finish(stop, task)
     run(go)

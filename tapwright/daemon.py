@@ -2641,6 +2641,8 @@ class Daemon:
             _NESTED.reset(token)
         if found.failed:  # sampling broke during the window: what was gathered is only part of it
             notes = [*notes, performance.SAMPLING_STOPPED.format(why=found.failed)]
+        if found.lost:
+            notes = [*notes, performance.SAMPLES_LOST.format(n=found.lost)]
         reading = performance.summarize(found, clock() - began, opened, unsettled)
         self._performed[client_id] = reading
         self._measured = {k: round(v, 2) if isinstance(v, float) else v for k, v in dataclasses.asdict(reading).items()

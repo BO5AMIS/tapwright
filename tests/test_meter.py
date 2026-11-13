@@ -39,6 +39,8 @@ class World:
         self.batches: asyncio.Queue = asyncio.Queue()
         self.frames: asyncio.Queue = asyncio.Queue()
         self.hang_on_close = False  # graphics never finishes closing, as a tunnel that can't drain
+        self.gate: asyncio.Event | None = None  # while set up, proclist waits for it
+        self.waiting = False  # proclist is waiting at the gate
         self.closed: list[str] = []
 
     def row(self, pid: int, mb: float, cpu: float = 10.0) -> dict:
@@ -70,6 +72,10 @@ def world(monkeypatch):
             w.closed.append("info")
 
         async def proclist(self):
+            if w.gate is not None:
+                w.waiting = True
+                await w.gate.wait()
+                w.waiting = False
             if w.proc_error is not None:
                 raise w.proc_error
             return [dict(p) for p in w.procs]
@@ -134,6 +140,7 @@ def test_a_launch_measures_the_new_process_not_the_old_one_or_the_setup(world):
         world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
         await meter.begin_window(fresh=True)
         world.batches.put_nowait([world.row(7, 520, 95.0)])  # a late sample of the old process
+        world.frames.put_nowait(5.0)  # and a late frame rate of the set-up, which arrives after the window began
         world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)},
                        {"pid": 8, "bundleIdentifier": APP, "startDate": when(0)}]
         world.batches.put_nowait([world.row(7, 530, 99.0), world.row(8, 100, 20.0)])
@@ -141,6 +148,7 @@ def test_a_launch_measures_the_new_process_not_the_old_one_or_the_setup(world):
         world.frames.put_nowait(60.0)
         await settle(lambda: len(meter.measurement.memory_mb) == 2 and meter.measurement.fps)
         found = await meter.stop()
+        # (the first frame rate after the window began covers a second that began before it: it is not kept)
         assert found.memory_mb == [100.0, 110.0] and found.cpu_pct == [20.0, 30.0] and found.fps == [60.0]
     run(go)
 
@@ -196,4 +204,58 @@ def test_stop_returns_when_an_instrument_cannot_close(world, monkeypatch):
         found = await meter.stop()
         assert time.monotonic() - began < 1.5 and found.memory_mb == [120.0]
         assert "tap" in world.closed and "dvt" in world.closed  # the others were closed all the same
+    run(go)
+
+
+def test_batches_queued_or_waiting_for_the_process_list_when_the_window_begins_are_not_the_windows(world):
+    """Codex, PR #4 cycle 2: two set-up batches (800 MB) were queued, the first held in the process list; the first was
+    dropped by its epoch, but the second was taken afterwards under the new epoch and failed memory_mb=300."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.gate = asyncio.Event()
+        world.batches.put_nowait([world.row(7, 800)])
+        world.batches.put_nowait([world.row(7, 800)])
+        await settle(lambda: world.waiting)  # the first is held in the process list, the second is queued behind it
+        await meter.begin_window(fresh=False)
+        world.gate.set()
+        await asyncio.sleep(0.05)
+        world.batches.put_nowait([world.row(7, 150)])
+        await settle(lambda: meter.measurement.memory_mb)
+        assert (await meter.stop()).memory_mb == [150.0]
+    run(go)
+
+
+def test_a_process_without_a_start_time_that_was_not_sampled_before_the_window_is_not_a_new_one(world):
+    """CodeRabbit, PR #4: an old process the phone lists without a startDate, and that no sample had shown before the
+    launch's window, was taken for the new process."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP}]  # the old process: no startDate, never sampled
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        await meter.begin_window(fresh=True)
+        world.batches.put_nowait([world.row(7, 500)])
+        await asyncio.sleep(0.1)
+        world.procs = [{"pid": 7, "bundleIdentifier": APP}, {"pid": 8, "bundleIdentifier": APP, "startDate": when(0)}]
+        world.batches.put_nowait([world.row(7, 510), world.row(8, 100)])
+        await settle(lambda: meter.measurement.memory_mb)
+        assert (await meter.stop()).memory_mb == [100.0]  # only the process that is shown to have started in the window
+    run(go)
+
+
+def test_batches_lost_to_a_process_list_that_cannot_be_read_are_counted(world):
+    """Codex, PR #4 cycle 2: they were skipped without a trace, so one surviving sample passed memory_mb."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.batches.put_nowait([world.row(7, 100)])
+        await settle(lambda: meter.measurement.memory_mb == [100.0])
+        world.proc_error = RuntimeError("process list unavailable")
+        world.batches.put_nowait([world.row(7, 300)])
+        world.batches.put_nowait([world.row(7, 310)])
+        await settle(lambda: meter.measurement.lost == 2)
+        found = await meter.stop()
+        assert found.memory_mb == [100.0] and found.lost == 2
     run(go)
