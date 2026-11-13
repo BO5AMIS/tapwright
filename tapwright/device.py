@@ -9,6 +9,7 @@ over:
     without mDNS. Whether iOS accepts that over a VPN is what `tapwright probe` measures.
 """
 import asyncio
+import dataclasses
 import json
 import os
 import posixpath
@@ -16,8 +17,9 @@ import re
 import sys
 import time
 
-from . import store
-from .diagnostics import CrashSearch, crash_pattern, only_mine
+from . import aio, store
+from . import diagnostics
+from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
@@ -337,13 +339,32 @@ class Device:
         return len(pids)
 
     # ---- diagnostics (AGENT-TOOLS §15) ----
-    async def app_pids(self, bundle_id: str) -> list[int]:
-        """The pids of that app's running processes, from iOS's process list (empty: it isn't running)."""
+    async def processes(self) -> list["Proc"]:
+        """Every process iOS lists: its pid, its bundle id and when it started (a pid is reused, so a pid alone says
+        nothing about which process it is)."""
         from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info:
-            procs = await info.proclist()
-        return [p["pid"] for p in procs if p.get("bundleIdentifier") == bundle_id and isinstance(p.get("pid"), int)]
+            raw = await info.proclist()
+        return [Proc(p["pid"], _started_of(p), p.get("bundleIdentifier") or None)
+                for p in raw if isinstance(p.get("pid"), int)]
+
+    async def app_processes(self, bundle_id: str) -> list["Proc"]:
+        """That app's running processes, each with its start time (empty: it isn't running)."""
+        return [p for p in await self.processes() if p.bundle == bundle_id]
+
+    async def phone_time_ms(self) -> int | None:
+        """The phone's own clock now, epoch ms: the log entries' times are on it, not on this computer's."""
+        value = await self.rsd.get_value(key="TimeIntervalSince1970")
+        return int(float(value) * 1000) if value is not None else None
+
+    async def process_holder(self, pid: int) -> "Proc | None":
+        """Whatever process has that pid now, whoever's it is (None: nothing does)."""
+        return next((p for p in await self.processes() if p.pid == pid), None)
+
+    async def app_pids(self, bundle_id: str) -> list[int]:
+        """The pids of that app's running processes, from iOS's process list (empty: it isn't running)."""
+        return [p.pid for p in await self.app_processes(bundle_id)]
 
     async def app_log_stream(self, pid: int):
         """The unified log entries of one process, as they come: (epoch ms, os_trace level byte, text, pid). The
@@ -362,10 +383,12 @@ class Device:
         and, when a report names one, its bundle id is `bundle_id`. Each report is read on its own: one that can't be
         parsed (half written, as the app has just died) is counted in `unreadable` and passed over, never taken for
         "no crash". Errors of the phone's file service are not caught here."""
+        from pycrashreport.crash_report import get_crash_report_from_buf
         from pymobiledevice3.services.crash_reports import CrashReportsManager
         pattern = re.compile(crash_pattern(executable))
         found: list = []
-        unreadable = 0
+        unreadable = too_big = scanned = 0
+        incomplete = False
         async with CrashReportsManager(self.rsd) as manager:
             candidates = []
             async for entry in manager.afc.dirlist("/", depth=1):
@@ -373,23 +396,38 @@ class Device:
                     continue
                 stat = await manager.afc.stat(entry)
                 if stat.get("st_ifmt") == "S_IFREG":
-                    candidates.append((stat["st_mtime"].timestamp(), entry))
-            for _, path in sorted(candidates, reverse=True)[:count + 10]:
+                    candidates.append((stat["st_mtime"].timestamp(), entry, _size_of(stat)))
+            # Two installed apps can share an executable name, so the count is of this app's own reports: the search
+            # goes on past other apps' files, up to CRASH_SCAN files, and says so when that was not enough
+            ordered = sorted(candidates, reverse=True)
+            for _, path, size in ordered[:CRASH_SCAN]:
                 if len(found) >= count:
                     break
+                scanned += 1
+                data = None
                 try:
-                    report = await manager.parse(path)
+                    data = await _read_capped(manager.afc, path, size)
+                    report = get_crash_report_from_buf(data.decode(), filename=path)
+                except CrashTooBig:
+                    # skipped counts are of this app's reports only: another app's file is not mentioned, so the
+                    # file's own header has to name the app (a report that can't be identified stays silent)
+                    if bundle_id and diagnostics.names_app(await _head_of(manager.afc, path), bundle_id):
+                        too_big += 1
+                    continue
                 except (ValueError, KeyError, TypeError, AttributeError, IndexError):  # not a readable report
-                    unreadable += 1
+                    if bundle_id and data is not None and diagnostics.names_app(data[:CRASH_HEAD], bundle_id):
+                        unreadable += 1
                     continue
                 found += only_mine([report], executable, bundle_id)
-        return CrashSearch(found, unreadable)
+            incomplete = len(found) < count and len(ordered) > CRASH_SCAN
+        return CrashSearch(found, unreadable, too_big, incomplete, scanned)
 
     async def crash_file(self, filename: str) -> bytes:
-        """The whole of one crash report, as it is on the phone."""
+        """The whole of one crash report, as it is on the phone (CrashTooBig when it is over the byte cap)."""
         from pymobiledevice3.services.crash_reports import CrashReportsManager
         async with CrashReportsManager(self.rsd) as manager:
-            return await manager.afc.get_file_contents(filename)
+            stat = await manager.afc.stat(filename)
+            return await _read_capped(manager.afc, filename, _size_of(stat))
 
     # ---- network conditions (AGENT-TOOLS §16.4) ----
     async def set_network(self, mode: str) -> str:
@@ -398,6 +436,7 @@ class Device:
         until clear_network, a reconnect or close. The identifier of the profile used. DeviceError when the phone
         can't."""
         async with self._network_lock:
+            replaced = bool(self._network_holds)
             await self._stop_holds()
             hold = NetworkHold(self, mode)
             self._network_hold = hold
@@ -408,7 +447,19 @@ class Device:
                 if self._network_hold is hold:
                     self._network_hold = None
                 self._network_holds.discard(hold)
+                if replaced:  # the condition that was on is gone with nothing in its place: the daemon is told
+                    self._network_ended(f"{mode} could not replace it, so the phone is back to normal")
                 raise
+
+    async def clear_leftover(self) -> None:
+        """Ask the phone to end a condition that an earlier process left (the daemon was killed or crashed, and its
+        marker file says so). A condition ends with the connection that holds it, so this is a safety net: a new
+        instruments connection says `clear`, whoever set the condition. Raises when the phone can't be asked."""
+        from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        async with self._network_lock:
+            async with DvtProvider(self.rsd) as dvt, ConditionInducer(dvt) as inducer:
+                await inducer.clear()
 
     async def clear_network(self) -> None:
         """The phone's network back to normal: every connection that holds a condition is closed. Never raises."""
@@ -629,9 +680,112 @@ class Device:
             await self.tunnel.aclose()
 
 
-PID_REFRESH = 2.0  # seconds between looks at which process ids the app has (it has new ones after a launch)
+START_SLACK = 1.0  # seconds two readings of one process's start time may differ
+
+
+@dataclasses.dataclass(frozen=True)
+class Proc:
+    """One process of the phone: the pid, when it started (epoch seconds; None when iOS didn't say) and its bundle id."""
+    pid: int
+    started: float | None = None
+    bundle: str | None = None
+
+    def same_life(self, other: "Proc") -> bool:
+        """Is `other` this very process (not another that got its pid later)? The pid and, when both start times are
+        known, the start time. When one isn't known the pid alone has to do."""
+        if self.pid != other.pid:
+            return False
+        return self.started is None or other.started is None or abs(self.started - other.started) <= START_SLACK
+
+
+def _started_of(proc: dict) -> float | None:
+    """The `startDate` of an entry of iOS's process list, as epoch seconds (None when it has none or can't be read)."""
+    when = proc.get("startDate")
+    try:
+        return float(when.timestamp()) if hasattr(when, "timestamp") else (float(when) if when is not None else None)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+CRASH_MAX_BYTES = CRASH_MAX_MB * 1024 * 1024  # no crash file is read beyond this (AGENT-TOOLS §15.2 words it in MB)
+CRASH_CHUNK = 256 * 1024  # bytes asked of the phone's file service at a time
+CRASH_SCAN = 40  # crash files of one executable name looked at in one search
+CRASH_HEAD = 64 * 1024  # bytes of a report's start that say whose it is (its header line, or the old `Identifier:` line)
+CRASH_CLOSE_WAIT = 2.0  # seconds a close of a file on the phone may take: a service that stopped answering is left
+
+
+class CrashTooBig(DeviceError):
+    """A crash file over CRASH_MAX_BYTES: it is not read."""
+
+
+def _size_of(stat: dict) -> int:
+    try:
+        return int(stat.get("st_size", 0))
+    except (TypeError, ValueError):
+        return CRASH_MAX_BYTES + 1  # a size that can't be read is not trusted to be small
+
+
+async def _close_file(afc, handle) -> None:
+    """Close a file of the phone, waiting at most CRASH_CLOSE_WAIT: this runs when a read was cancelled too, and a file
+    service that stopped answering would hold the cancel (and whoever joins it) for ever. A close that fails is no
+    matter. The abandoned close is cancelled and its error read."""
+    closing = asyncio.ensure_future(afc.fclose(handle))
+    try:
+        await asyncio.wait({closing}, timeout=CRASH_CLOSE_WAIT)
+    finally:
+        if not closing.done():
+            closing.cancel()
+        closing.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+
+async def _head_of(afc, path: str) -> bytes:
+    """The first CRASH_HEAD bytes of a file of the phone (nothing when they can't be read)."""
+    try:
+        handle = await afc.fopen(path)
+        if not handle:
+            return b""
+        try:
+            return await afc.fread(handle, CRASH_HEAD)
+        finally:
+            await _close_file(afc, handle)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return b""
+
+
+async def _read_capped(afc, path: str, size: int) -> bytes:
+    """A file of the phone, read in chunks and never beyond CRASH_MAX_BYTES: the size from the listing is checked
+    first, and the reads are counted too, since a file can grow after it was looked at."""
+    if size > CRASH_MAX_BYTES:
+        raise CrashTooBig(f"{posixpath.basename(path)} is {size} bytes, over {CRASH_MAX_BYTES}")
+    handle = await afc.fopen(path)
+    if not handle:
+        raise DeviceError(f"couldn't open {path}")
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            ask = min(CRASH_CHUNK, CRASH_MAX_BYTES + 1 - total)
+            chunk = await afc.fread(handle, ask)
+            total += len(chunk)
+            if total > CRASH_MAX_BYTES:
+                raise CrashTooBig(f"{posixpath.basename(path)} grew over {CRASH_MAX_BYTES} bytes while it was read")
+            chunks.append(chunk)
+            if len(chunk) < ask:  # the end of the file
+                break
+    finally:
+        await _close_file(afc, handle)
+    return b"".join(chunks)
+
+
+PID_REFRESH = 2.0 # seconds between looks at which process ids the app has (it has new ones after a launch)
 PID_RETRY = 0.25  # the same while no sample has shown the app's process (it is starting)
 METER_START = 15.0  # seconds the instruments service may take to start sampling
+METER_TEARDOWN = 3.0  # seconds one instrument may take to close before it is abandoned
+METER_STOP = 15.0  # seconds stop() waits for the sampling task to end
+PROCLIST_WAIT = 5.0  # seconds the phone's process list may take to answer for one batch of samples
+FINAL_WAIT = 2.0  # seconds stop() lets batches waiting for the process list finish before it counts them as lost
 MB = 1024 * 1024
 
 
@@ -649,6 +803,15 @@ class AppMeter:
         self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
         self._failed: Exception | None = None
+        self._arrived = 0  # how many batches of samples have come, in order (a clock's turns are too coarse to tell them apart)
+        self._boundary = 0  # how many had come when the window began: those, and no later one, are from before it
+        self._skip_frame = False  # the first frame rate after the window began covers a second that began before it
+        self._rows: asyncio.Queue = asyncio.Queue()  # (its number in the order of arrival, the rows) of each batch
+        self._fresh_after: float | None = None  # a launch's window keeps only a process started at or after this (epoch s)
+        self._seen: set[int] = set()  # the pids of the app's processes sampled so far
+        self._stale: set[int] = set()  # ... as the window began: not the new process, whatever their start times say
+        self._info = None  # the instruments' process list, once they are open
+        self._done = 0  # the arrival number of the last batch that was dealt with (kept, dropped or counted lost)
 
     async def start(self) -> None:
         """Begin sampling. However this ends (too slow, a service that won't start, or the call cancelled while it
@@ -656,7 +819,7 @@ class AppMeter:
         self._task = asyncio.create_task(self._run(), name="app-meter")
         try:
             try:
-                await asyncio.wait_for(self._ready.wait(), METER_START)
+                await aio.wait_for(self._ready.wait(), METER_START)  # (not asyncio.wait_for: on 3.10 it can drop a cancel)
             except asyncio.TimeoutError:
                 raise DeviceError("the phone's instruments service didn't start sampling in time") from None
             if self._failed is not None:
@@ -665,13 +828,82 @@ class AppMeter:
             await asyncio.shield(self.stop())
             raise
 
+    async def begin_window(self, fresh: bool = False) -> None:
+        """The measured window begins now: what the instruments gave until now (their set-up, the app that was running
+        before a launch) is dropped. A batch is kept only if it arrived after this moment, whatever was waiting for the
+        process list or queued behind it (each arrival is stamped by the reader, which never waits for the list), and
+        the first frame rate after it is not kept (it covers a second that began before it).
+        `fresh`: the window is a cold start, so only a process shown to have started after this moment is the app's."""
+        from .performance import Measurement
+        old: set[int] | None = set()
+        if fresh:  # the app's processes listed now are the old ones, whatever their start times say
+            old = await self._listed_pids()
+        for _ in range(3):  # what the instruments have already delivered is read and stamped before the boundary
+            await asyncio.sleep(0)
+        self._boundary = self._arrived
+        self.measurement = Measurement()
+        self._fresh_after = time.time() - START_SLACK if fresh else None
+        if old is None:  # the list couldn't be had: only what was sampled is known to be old, and the numbers say so
+            self._stale = set(self._seen)
+            self.measurement.lost += 1
+        else:
+            self._stale = old | set(self._seen)
+        self._skip_frame = True
+
+    async def _listed_pids(self) -> set[int] | None:
+        """The pids of the app's processes the phone lists now (None when the list can't be had)."""
+        if self._info is None:
+            return None
+        try:
+            listed = await aio.wait_for(self._info.proclist(), PROCLIST_WAIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        return {p["pid"] for p in listed if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
+
     async def stop(self):
-        """End the sampling; the Measurement of what was seen."""
+        """End the sampling; the Measurement of what was seen. Bounded: an instrument that can't close (a tunnel that
+        can't drain) doesn't hold the call."""
         task, self._task = self._task, None
         if task is not None:
+            await self._finish_pending(task)
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            done, _ = await asyncio.wait({task}, timeout=METER_STOP)
+            if not done:
+                self.device.log("performance: the instruments didn't close in time; leaving them")
+            elif not task.cancelled():
+                task.exception()  # collected, so it isn't logged as never retrieved
+            pending = self._arrived - max(self._done, self._boundary)  # in the window, and never dealt with
+            if pending > 0 and self.measurement.failed is None:
+                self.measurement.lost += pending  # not sampled: the numbers cover only part of the window
         return self.measurement
+
+    async def _finish_pending(self, task: asyncio.Task) -> None:
+        """Batches that came in the window and wait for the process list (or behind one that does) get FINAL_WAIT
+        seconds to be dealt with; what is still waiting then is counted as lost by stop()."""
+        for _ in range(3):  # what the instruments have already delivered is read and stamped first
+            await asyncio.sleep(0)
+        deadline = time.monotonic() + FINAL_WAIT
+        while not task.done() and self._arrived > max(self._done, self._boundary) and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+
+    async def _enter(self, stack, cm):
+        """Open an instrument and register its close, which waits at most METER_TEARDOWN (a close that hangs is
+        abandoned, cancelled and said so, and the next instrument is closed all the same)."""
+        opened = await cm.__aenter__()
+
+        async def close() -> None:
+            try:
+                await aio.wait_for(cm.__aexit__(None, None, None), METER_TEARDOWN)
+            except asyncio.TimeoutError:
+                self.device.log(f"performance: closing {type(cm).__name__} took over {METER_TEARDOWN:g} s; abandoned")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # a close that fails: the rest are still closed
+                self.device.log(f"performance: closing {type(cm).__name__} failed: {e}")
+        stack.push_async_callback(close)
+        return opened
 
     async def _run(self) -> None:
         from contextlib import AsyncExitStack
@@ -682,14 +914,15 @@ class AppMeter:
         from .performance import SAMPLE_MS
         try:
             async with AsyncExitStack() as stack:
-                dvt = await stack.enter_async_context(DvtProvider(self.device.rsd))
-                info = await stack.enter_async_context(DeviceInfo(dvt))
+                dvt = await self._enter(stack, DvtProvider(self.device.rsd))
+                info = await self._enter(stack, DeviceInfo(dvt))
+                self._info = info
                 tap = await Sysmontap.create(dvt, SAMPLE_MS)
-                await stack.enter_async_context(tap)
-                jobs = [asyncio.create_task(self._processes(tap, info))]
+                await self._enter(stack, tap)
+                jobs = [asyncio.create_task(self._rows_in(tap)), asyncio.create_task(self._processes(info))]
                 try:
                     graphics = Graphics(dvt)
-                    await stack.enter_async_context(graphics)
+                    await self._enter(stack, graphics)
                     jobs.append(asyncio.create_task(self._frames(graphics)))
                 except Exception as e:  # frames are left out; memory and CPU still count
                     self.device.log(f"performance: no frame rate ({e})")
@@ -709,25 +942,60 @@ class AppMeter:
         finally:
             self._ready.set()
 
-    async def _processes(self, tap, info) -> None:
-        pids: set[int] = set()
-        looked = -PID_REFRESH
+    def _is_new(self, pid: int, started: float | None) -> bool:
+        """In a launch's window: is this process one that started after the window began?"""
+        if self._fresh_after is None:
+            return True
+        if pid in self._stale:
+            return False
+        return started is not None and started >= self._fresh_after  # no start time: nothing shows it is a new one
+
+    async def _rows_in(self, tap) -> None:
+        """Take each batch from sysmontap the moment it comes and number it, whatever the process list is doing: a batch
+        that waits behind a slow list keeps its place in the order of arrival, and so can be told from the window's."""
         async for rows in tap.iter_processes():
-            now = time.monotonic()
-            ours = [r for r in rows if r.get("pid") in pids]  # only the app's own process, whatever else is listed
-            if now - looked >= (PID_REFRESH if ours else PID_RETRY):  # new process ids come with a launch
-                pids = {p["pid"] for p in await info.proclist() if p.get("bundleIdentifier") == self.bundle_id}
-                looked = now
-                ours = [r for r in rows if r.get("pid") in pids]
-            memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
-            cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
-            if memory:
-                self.measurement.memory_mb.append(sum(memory) / MB)
-            if cpu:
-                self.measurement.cpu_pct.append(float(sum(cpu)))
+            self._arrived += 1
+            self._rows.put_nowait((self._arrived, rows))
+
+    async def _processes(self, info) -> None:
+        """Each batch of rows is kept only for processes the phone's list shows as the app's right after the batch came
+        (pid, bundle id and start time as listed then), so a pid that went to another process is never sampled as the
+        app, and in a launch's window only for a process that started in it. A batch that arrived before the window
+        is dropped. A list that can't be had drops the batch, and it is counted (`lost`): the numbers are then only
+        part of the window."""
+        while True:
+            arrived, rows = await self._rows.get()
+            await self._take(info, arrived, rows)
+            self._done = arrived  # (a cancel in the middle leaves it as it was: stop() counts that batch as lost)
+
+    async def _take(self, info, arrived: int, rows: list) -> None:
+        """One batch of rows: kept, dropped (from before the window) or counted as lost."""
+        if arrived <= self._boundary:
+            return  # from before the window
+        try:
+            listed = await aio.wait_for(info.proclist(), PROCLIST_WAIT)
+        except Exception:
+            if arrived > self._boundary:  # (a batch from before the window, lost late, is not the window's loss)
+                self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
+            return
+        if arrived <= self._boundary:
+            return  # the window began while the list was asked for: the batch is from before it
+        mine = {p["pid"]: _started_of(p) for p in listed
+                if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
+        ours = [r for r in rows if r.get("pid") in mine and self._is_new(r["pid"], mine[r["pid"]])]
+        self._seen.update(r["pid"] for r in rows if r.get("pid") in mine)
+        memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
+        cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
+        if memory:
+            self.measurement.memory_mb.append(sum(memory) / MB)
+        if cpu:
+            self.measurement.cpu_pct.append(float(sum(cpu)))
 
     async def _frames(self, graphics) -> None:
         async for fps in graphics.fps():
+            if self._skip_frame:  # covers the second before it came: part of it was before the window
+                self._skip_frame = False
+                continue
             self.measurement.fps.append(float(fps))
 
 
@@ -777,6 +1045,26 @@ class NetworkHold:
         if task is not None:
             task.cancel()
 
+    async def _wait_for_release_or_loss(self, dvt) -> None:
+        """Wait until stop() is asked for, or until the condition's own connection closes. pymobiledevice3 closes it
+        in a background reader (the phone ended the session, the tunnel under it dropped): nothing raises here by
+        itself, and the condition is gone with it, so the wait ends in an error that says so."""
+        waiter = getattr(getattr(dvt, "_dtx", None), "wait_disconnected", None)
+        if waiter is None:  # a library without the signal: stop() is the only way out, and the idle clear the backstop
+            await self._release.wait()
+            return
+        released = asyncio.ensure_future(self._release.wait())
+        lost = asyncio.ensure_future(waiter())
+        try:
+            await asyncio.wait({released, lost}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for pending in (released, lost):
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(released, lost, return_exceptions=True)
+        if lost.done() and not lost.cancelled() and not self._release.is_set():
+            raise ConnectionLost("the connection closed")
+
     async def _run(self) -> None:
         from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
@@ -790,7 +1078,7 @@ class NetworkHold:
                 await inducer.set(profile)
                 if not self._ready.done():
                     self._ready.set_result(profile)
-                await self._release.wait()
+                await self._wait_for_release_or_loss(dvt)
                 try:
                     await inducer.clear()
                 except Exception as e:  # the connection closing ends the condition anyway

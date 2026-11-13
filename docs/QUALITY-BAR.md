@@ -139,7 +139,7 @@ earlier run without the skill, before v1.5, took about 110 calls and passed 9 po
 
 ## Calls per check (K): no more than on Android
 
-Group A asks whether an agent can use the tool at all; this group asks what an everyday check costs. The JLD
+Group A asks whether an agent can use the tool at all; this group asks what an everyday check costs. The
 tester's iPhone lanes took about 1.5 times the calls of their Android lanes (2026-11-12). The bar is that a check
 costs no more calls on the iPhone than on Android.
 

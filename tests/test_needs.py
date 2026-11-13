@@ -24,8 +24,9 @@ def test_the_daemons_state_names_the_passcode_prompt_and_the_locked_phone():
 
 def test_the_phone_on_usb_is_asked_only_what_it_can_say():
     class Phone:
-        def __init__(self, mode):
+        def __init__(self, mode, paired=True):
             self.mode = mode
+            self.paired = paired
 
         async def get_developer_mode_status(self):
             return self.mode
@@ -44,6 +45,45 @@ def test_the_phone_on_usb_is_asked_only_what_it_can_say():
     assert found(NotPairedError()) == [needs.NOT_TRUSTED]
     assert found(PasswordRequiredError()) == [needs.LOCKED]
     assert found(OSError("no answer")) == []
+    # (Codex P2, PR #5) autopair=False hands back an unpaired client instead of raising: that phone needs Trust
+    assert found(Phone(True, paired=False)) == [needs.NOT_TRUSTED]
+    assert found(Phone(None, paired=False)) == [needs.NOT_TRUSTED]
+
+
+def test_doctor_inspects_the_configured_phone_when_several_are_on_usb(monkeypatch):
+    """CodeRabbit, PR #5: the first phone of the list was checked, not the one doctor reports as configured."""
+    from tapwright import client, store
+    asked = []
+
+    async def lockdown(udid, connect=None):
+        asked.append(udid)
+        return []
+    monkeypatch.setattr(client, "healthy", lambda info: None)
+    monkeypatch.setattr(store, "read_serve_info", lambda: None)
+    monkeypatch.setattr(cli, "lockdown_needs", lockdown)
+    monkeypatch.setattr(store, "load_state", lambda: {"udid": "B"})
+    run(lambda: cli.needs_person(["A", "B"]))
+    monkeypatch.setattr(store, "load_state", lambda: {"udid": "Z"})  # not plugged in: the first, as doctor --fix does
+    run(lambda: cli.needs_person(["A", "B"]))
+    monkeypatch.setattr(store, "load_state", lambda: {})
+    run(lambda: cli.needs_person(["A", "B"]))
+    assert asked == ["B", "A", "A"]
+
+
+def test_doctor_checks_where_it_runs_from_before_it_loads_the_signing_modules(monkeypatch, capsys):
+    """CodeRabbit, PR #5: a signing.py with merge markers raised SyntaxError at doctor's import, before the check
+    that names the conflict could run. A failed check ends doctor there."""
+    from types import SimpleNamespace
+    seen = []
+
+    def checkout(package=None):
+        seen.append("checkout")
+        cli.fail("unresolved merge markers in tapwright/signing.py")
+        return 1
+    monkeypatch.setattr(cli, "report_checkout", checkout)
+    assert run(lambda: cli.doctor(SimpleNamespace(fix=False))) == 1
+    out = capsys.readouterr().out
+    assert seen == ["checkout"] and "unresolved merge markers" in out and "device service" not in out
 
 
 def test_doctor_lists_them_under_a_heading(capsys):
@@ -71,6 +111,30 @@ def test_the_first_answer_to_an_agent_carries_them_once():
             await d.run_tool("c", "tap", {"target": {"x": 1, "y": 1}})
         assert str(e.value) == "the phone is locked; ask the user to unlock it"
         await finish(stop, task)
+    run(go)
+
+
+def test_a_phone_locked_at_connect_is_told_on_the_first_answer_even_though_the_state_is_connecting(tmp_path):
+    """CodeRabbit, PR #5: a PhoneLocked at connect leaves the state connecting/reconnecting, not locked, and the first
+    answer (a `record` start succeeds in that state) said nothing about it. The passcode prompt keeps its own note."""
+    from tapwright.device import PhoneLocked
+
+    async def go():
+        for stuck, note, other in ((PhoneLocked("the phone is locked"), needs.LOCKED, needs.PASSCODE),
+                                   (PasscodeNeeded(), needs.PASSCODE, needs.LOCKED)):
+            s = FakeSession()
+            s.stuck = stuck
+            d = make(s)
+            stop, task = await started(d, until=())
+            for _ in range(300):
+                if d.stuck is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert d.state != "locked" and d.stuck is not None
+            answer = await d.run_tool("a", "record", {"start": True})
+            lines = answer["text"].splitlines()
+            assert f"Note: {note}" in lines and f"Note: {other}" not in lines, answer["text"]
+            await finish(stop, task)
     run(go)
 
 

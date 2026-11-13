@@ -81,6 +81,15 @@ def test_an_issue_that_matches_no_tree_element_is_named_by_xctests_own_label_and
     assert "1. contrast: the screen: " in audit.report('"App"', [nothing], items, ["contrast"])
 
 
+def test_a_frame_string_is_read_whole_with_exponent_numbers_and_a_malformed_one_is_no_frame():
+    """CodeRabbit, PR #5: "{{16, 3e2}, {120, 20}}" read as (16, 3, 2, 120)."""
+    assert audit._box("{{16, 3e2}, {120, 20}}") == (16, 300, 120, 20)
+    assert audit._box("{{16.5, -2E1}, {1.2e2, 20}}") == (16, -20, 120, 20)
+    assert audit._box("{{16, 300}, {120, 20}}") == (16, 300, 120, 20)
+    for bad in ("{{1, 2}, {3, 4}, {5, 6}}", "{{1, 2}, {3}}", "16 300 120 20", "{{1, 2}, {3, x}}", "{{1e999, 2}, {3, 4}}"):
+        assert audit._box(bad) == (0, 0, 0, 0), bad
+
+
 def test_an_xctest_label_is_one_quoted_capped_line_and_an_absurd_frame_is_no_frame():
     """Review 1.3.1: a raw label could add a line of its own (a `Note:`) to the answer, and an infinite frame made
     audit fail."""

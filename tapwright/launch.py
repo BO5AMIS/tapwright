@@ -15,7 +15,10 @@ TEXT_SIZES = {
     "ax2": "UICTContentSizeCategoryAccessibilityL", "ax3": "UICTContentSizeCategoryAccessibilityXL",
     "ax4": "UICTContentSizeCategoryAccessibilityXXL", "ax5": "UICTContentSizeCategoryAccessibilityXXXL",
 }
-LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")  # BCP 47, loosely: ar, en-GB, zh-Hans-CN
+# BCP 47, loosely: ar, en-GB, zh-Hans-CN, en-US-u-ca-gregory (extension), en-x-test (private use). A singleton (one
+# letter or digit) must be followed by its subtags
+LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*(-[A-WY-Za-wy-z0-9](-[A-Za-z0-9]{2,8})+)*"
+                      r"(-[Xx](-[A-Za-z0-9]{1,8})+)?")
 REGION = re.compile(r"[A-Za-z]{2}")  # ISO 3166-1 alpha-2: QA
 DEFAULT_LANGUAGE = "en"  # the language a region alone is paired with (the phone's own isn't asked for)
 KEYS = ("language", "region", "text_size")

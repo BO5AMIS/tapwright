@@ -18,6 +18,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("TAPWRIGHT_HOME") or Path.home() / ".tapwright")
 SECRETS = HOME / "signing"  # private key, certificate, profile: never leave this machine
 STATE = HOME / "state.json"
+NETWORK_FILE = HOME / "network.json"  # present while a `network` condition is on: a crashed daemon's is cleared at the next start
 SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, token (kept after it stops)
 
 # Where the WebDriverAgent runner comes from: (repo, release tag, SHA-256, cache folder).
