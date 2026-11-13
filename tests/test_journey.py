@@ -376,9 +376,9 @@ def test_a_failed_start_leaves_no_journey_and_no_folder(reports):
         d = daemon()
         stop, task = await started(d)
         d.session.fail["look"] = Refused("reconnecting", "lost")  # the start's own look fails
-        d.session.fail["look"] = ConnectionError("x")
-        with pytest.raises(Exception):
+        with pytest.raises(Refused) as e:
             await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        assert e.value.code == "reconnecting"
         assert d._journeys == {} and not [p for p in reports.iterdir()]
         await finish(stop, task)
     run(go)
@@ -540,7 +540,7 @@ def test_stress_rotate_goes_there_and_back_and_network_sets_the_condition_until_
         d.session.calls.clear()
         r = await d.run_tool("a", "journey", {"stress": "rotate"})
         assert r["text"].splitlines()[0] == "Stress: rotate."
-        assert d.session.actions().count("rotate") == 0 or True
+        assert [c for c in d.session.actions() if c.startswith("rotate")] == ["rotate:landscape_left", "rotate:portrait"]
         r = await d.run_tool("a", "journey", {"stress": "network", "mode": "3g", "survives": {"text": "Today"}})
         assert r["text"].splitlines()[0] == 'Stress: network 3g; it survived: text "Today" is still on screen.'
         assert d._network == "3g"
