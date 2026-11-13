@@ -374,7 +374,11 @@ class JourneyTools:
             if kind == "background":
                 await run("press_button", {"name": "home", "look": False})
                 await self.control.sleep(d.STRESS_BACKGROUND_S)
-                await run("open_app", {"app": bundle, "look": False})
+                resume = d._RESUME.set(True)  # the same process, in front again: its language and text size stay
+                try:
+                    await run("open_app", {"app": bundle, "look": False})
+                finally:
+                    d._RESUME.reset(resume)
             elif kind == "network":
                 await run("network", {"mode": mode})
                 jr.network_set = mode != "normal"
@@ -392,7 +396,9 @@ class JourneyTools:
                     await run("rotate", {"to": "portrait", "look": False})
             else:  # relaunch
                 await run("close_app", {"app": bundle})
-                await run("open_app", {"app": bundle, "look": False})
+                # a new start is a launch with the journey's conditions (the tool's own call skips the gate that adds them)
+                await run("open_app", {"app": bundle, "look": False,
+                                       **{k: v for k, v in jr.conditions.items() if k in launchlib.KEYS}})
         looked = await run("look", {"screenshot": False})
         jr.see(looked["text"])
         line = f"Stress: {label}"

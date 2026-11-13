@@ -1262,3 +1262,24 @@ def test_codex_pr7_c1_a_call_made_while_a_stress_moment_waits_for_the_phone_stil
         assert r["text"].splitlines()[0] == "Stress: network 3g."
         await finish(stop, task)
     run(go)
+
+
+def test_codex_pr7_c1_background_resumes_the_running_app_and_relaunch_keeps_the_journeys_conditions(reports):
+    async def go():
+        d = daemon(FOOD)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        await d.run_tool("a", "journey", {"start": True, "goal": "g", "conditions": {"language": "ar"}})
+        assert d.session.launch_args[-1] == ["-AppleLanguages", "(ar)"] and "com.example.app" in d._overridden
+        d.session.closed.clear()
+        d.session.launch_args.clear()
+        await d.run_tool("a", "journey", {"stress": "background"})
+        assert d.session.closed == []  # the app was not closed to be started again with the defaults
+        assert d.session.launch_args == [[]] and "com.example.app" in d._overridden  # brought to the front as it is
+        d.session.launch_args.clear()
+        await d.run_tool("a", "journey", {"stress": "relaunch"})
+        assert d.session.closed and set(d.session.closed) == {"com.example.app"}  # (a launch with conditions closes it first, too)
+        assert d.session.launch_args == [["-AppleLanguages", "(ar)"]]  # a new start with the journey's conditions
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        await finish(stop, task)
+    run(go)

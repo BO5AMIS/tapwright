@@ -87,6 +87,10 @@ _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested
 # True inside a journey tool's own call (a stress moment, the conditions): only that task's calls skip the journey's gate and
 # count. A shared counter on the journey let an independent call of the same client, made meanwhile, skip them too.
 _JOURNEY_OWN: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_journey_own", default=False)
+# True while a journey's `background` stress brings its app back: the running process is brought to the front as it is
+# (WebDriverAgent does that for a launch with no arguments), never closed and started again with the phone's defaults, and
+# the launch arguments it runs with stay on record (Codex, PR #7 cycle 1).
+_RESUME: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_resume_app", default=False)
 # True while a journey's `double_tap` stress makes its tap: the touch goes out twice, DOUBLE_TAP_GAP apart (§17.4)
 _DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
 DOUBLE_TAP_GAP = 0.08  # seconds between the two touches of a double tap
@@ -3025,7 +3029,8 @@ class Daemon(journey_tool.JourneyTools):
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
         # an app this daemon launched with them still runs with them: WebDriverAgent would bring that process forward as
         # it is, so a plain open (or text_size: system) closes it and launches it again with the defaults (Codex, PR #6)
-        back = not extra and bundle_id in self._overridden
+        resume = _RESUME.get() and not extra  # (a journey brings its app back from the background: the process stays as it is)
+        back = not extra and not resume and bundle_id in self._overridden
         try:
             if extra or back:
                 try:
@@ -3043,7 +3048,7 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
         if extra:
             self._overridden.add(bundle_id)
-        else:
+        elif not resume:
             self._overridden.discard(bundle_id)
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
