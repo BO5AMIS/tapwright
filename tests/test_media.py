@@ -1,6 +1,7 @@
 """`media`: test pictures for photo pickers (AGENT-TOOLS §17.6), the computer's side, with a fake runner."""
 import asyncio
 import base64
+import pathlib
 
 import pytest
 
@@ -225,7 +226,8 @@ RUNNER_PROMPT = ui.Alert("“WebDriverAgentRunner-Runner” Would Like Full Acce
                          ("Limit Access…", "Allow Full Access", "Don’t Allow"), (60.0, 300.0, 300.0, 200.0))
 NEEDS_A_PERSON = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person answers "
                   "it on the phone (to add pictures: \"Allow\" or \"Limit Access…\"; never needed: full access), then "
-                  "call media again.")
+                  "call media again. Until they answer (2 minutes at most) the runner answers no other call: ask "
+                  "your user now, and wait for them.")
 
 
 @pytest.fixture
@@ -501,5 +503,56 @@ def test_pictures_a_short_answer_did_make_stay_recorded(pictures):
         e = await refused(d, {"add": pictures, "confirm": True})
         assert e.code == "internal"
         assert [x["id"] for x in media.load()["a"]] == ["ONLY/L0/001"]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- Codex, PR #8 ----
+def test_the_first_add_says_a_person_is_needed_from_the_access_alone_while_the_runner_is_held(pictures, quick):
+    """The runner's add waits for iOS's prompt with its whole queue, so no alert can be read meanwhile: the access says
+    the prompt comes (add not decided yet), and media answers needs_a_person at once. The add goes on, and is picked up
+    by the next call once the person answers."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+
+        async def held(timeout=5.0):  # the runner's queue is busy with the add: an alert read gets no answer
+            await asyncio.sleep(3600)
+        s.peek_alert = held
+        began = asyncio.get_running_loop().time()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "not_allowed" and str(e) == NEEDS_A_PERSON
+        assert asyncio.get_running_loop().time() - began < 2.0
+        s.photo_access = {"add": "authorized", "full": "notDetermined"}  # the person allowed it
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1  # sent once
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_cut_short_add_is_picked_up_only_by_the_same_pictures_not_by_a_file_of_the_same_name(tmp_path, pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        first = pictures[0]
+        other = tmp_path / "second" / pathlib.Path(first).name
+        other.parent.mkdir()
+        data = pathlib.Path(first).read_bytes()
+        other.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))  # same name, other bytes
+        e = await refused(d, {"add": [first], "confirm": True})
+        assert e.code == "not_allowed"
+        s.photo_access = {"add": "authorized", "full": "notDetermined"}
+        s.photos_gate.set()
+        await d.run_tool("a", "media", {"add": [str(other)], "confirm": True})
+        adds = [c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]
+        assert len(adds) == 2  # the second picture was sent, not taken for the first
         await finish(stop, task)
     run(go)

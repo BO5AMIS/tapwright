@@ -654,7 +654,8 @@ MEDIA_KEEP = 600.0  # seconds a cut-short add stays the one a repeated media cal
 RUNNER_NAME = "WebDriverAgentRunner"  # what iOS's own prompts call the runner ("“WebDriverAgentRunner-Runner” Would Like …")
 NEEDS_PHOTO_ANSWER = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person "
                       "answers it on the phone (to add pictures: \"Allow\" or \"Limit Access…\"; never needed: full "
-                      "access), then call media again.")
+                      "access), then call media again. Until they answer (2 minutes at most) the runner answers no other "
+                      "call: ask your user now, and wait for them.")
 NEEDS_ALERT_ANSWER = ("needs_a_person: iOS is showing an alert on the phone while the runner waits for access to Photos. "
                       "A person answers it on the phone, then call media again.")
 PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own system prompt is in front
@@ -772,7 +773,7 @@ class Daemon(journey_tool.JourneyTools):
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
-        self._media_adds: dict[str, tuple[list[str], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short
+        self._media_adds: dict[str, tuple[tuple[tuple[str, str], ...], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short, by its pictures (name, SHA-256), in order
         self._closing: set[asyncio.Future] = set()  # WebDriverAgent terminates after a close_app's kill, left to finish
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
         # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
@@ -3138,7 +3139,6 @@ class Daemon(journey_tool.JourneyTools):
         bundle_id, shown = await self._app(a["app"], partial=False)
         began = time.monotonic()
         way, found = await self._end_app(bundle_id)
-        self._launched_with.pop(bundle_id, None)  # (closed: the process is gone, and its launch conditions with it)
         if found:
             if not await self._tell_runner_closed(bundle_id):
                 way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left to finish"
@@ -3152,6 +3152,9 @@ class Daemon(journey_tool.JourneyTools):
                     raise Refused("not_found", f"couldn't close {bundle_id}: {e}; call apps for the installed "
                                                "apps") from None
                 raise
+        # closed (iOS ended it, or WebDriverAgent's terminate did): the process is gone, and its launch conditions with
+        # it. A close that failed leaves the app running as it was launched, so they are kept (Codex, PR #8).
+        self._launched_with.pop(bundle_id, None)
         self.log(f"closed {bundle_id} through {way} in {time.monotonic() - began:.1f} s")
         return f"Closed {shown}."
 
@@ -3371,7 +3374,10 @@ class Daemon(journey_tool.JourneyTools):
                                              "user to allow WebDriverAgentRunner in Settings > Privacy & Security > "
                                              "Photos, then try again.")
             names = [name for name, _ in pictures]
-            await self._media_adding(client_id, pictures, names)
+            # iOS asks the person on the first add (add access not decided yet), and the runner's add waits for the
+            # answer with the runner's whole queue: nothing else it is asked, an alert read included, is answered
+            # meanwhile. So the prompt is known from the access, before anything is sent (Codex, PR #8).
+            await self._media_adding(client_id, pictures, names, asks=access.get("add") == "notDetermined")
             return _answer([medialib.added_text(names)], notes)
         held, earlier = medialib.held_by(client_id, self._media_earlier, everything)
         if not held:
@@ -3396,7 +3402,8 @@ class Daemon(journey_tool.JourneyTools):
         medialib.drop([e["id"] for e in held])
         return _answer([lead + medialib.removed_text(names[:deleted], len(held))], notes)
 
-    async def _media_adding(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str]) -> None:
+    async def _media_adding(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str],
+                            asks: bool = False) -> None:
         """The add, once. iOS asks the person whether the runner may use Photos and the runner's request waits for the
         answer, so the request runs as a task of its own and this call watches for a system alert in front: when one
         is up it stops waiting at once (needs_a_person), and nobody is held up behind it (`alert` can read the text).
@@ -3404,7 +3411,9 @@ class Daemon(journey_tool.JourneyTools):
         the next media call with the same pictures picks it up instead of adding them again."""
         kept = self._media_adds.get(client_id)
         now = self.control.clock()
-        if kept is not None and kept[0] == names and now - kept[2] < MEDIA_KEEP:
+        # the same pictures, in the same order: by their bytes, not their file names (Codex, PR #8)
+        same = tuple((name, hashlib.sha256(data).hexdigest()) for name, data in pictures)
+        if kept is not None and kept[0] == same and now - kept[2] < MEDIA_KEEP:
             task = kept[1]
         else:
             async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
@@ -3412,7 +3421,12 @@ class Daemon(journey_tool.JourneyTools):
             await self.control.agent(gate)
             task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
             task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
-            self._media_adds[client_id] = (names, task, now)
+            self._media_adds[client_id] = (same, task, now)
+        if asks and not task.done():
+            # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
+            await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)
+            if not task.done():
+                raise Refused("not_allowed", NEEDS_PHOTO_ANSWER)
         while True:
             done, _ = await asyncio.wait({task}, timeout=MEDIA_WATCH)
             if done:
