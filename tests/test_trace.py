@@ -107,7 +107,9 @@ def test_a_traced_tap_and_a_read_write_ordered_lines(tmp_path):
     trace.enable(path)
 
     async def go():
-        d = make(TracedSession())
+        # the changed frame comes on the feeder's next tick, which Windows stretches to ~16 ms: more than make()'s
+        # 10 ms first-frame wait, so the stream read as stalled and no `frame` phase was noted (Windows CI, PR #9)
+        d = make(TracedSession(), settle_first_frame=0.2)
         stop, task = await started(d)
         feeder = d.session.feeder = FrameFeeder(d.hub).start(then=b"before the touch")
         await d.run_tool("a", "look", {})
