@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-??) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -137,6 +137,8 @@ Settled in 0.31 s.
 - **A tap that changes nothing (v1.13).** After `No visible change.` from a `tap`, `long_press` or `double_tap`, the
   answer adds one note: `Note: the tap was delivered, and nothing on screen changed within <N> s.` `<N>` is how long
   the screen was watched, to one decimal: at least 0.3 s in Tapwright, at least 0.5 s in Tapline.
+  - The note names the action (1.13.1): `the tap was delivered…`, `the long press was delivered…`, `the double tap was
+    delivered…`.
   - Each tool may add one clause after it.
   - Tapwright: a hint by what was touched (a text field: `type_text` types into it; a point with no element; else
     wait for what you expect, then try once more, then report it).
@@ -325,6 +327,11 @@ text items.
   without a new field: `disabled`, `off_screen`, `covered`, `under_tab_bar`,
   `behind_alert` or `no_action`. For example:
   `Error not_actionable: covered: e47 button "Save" is covered by e45 button "Cancel"; close it or pass force: true.`
+- **`off_screen` after §16.2 (1.13.1).** The scroll advice for `off_screen` in the next bullet is superseded by §16.2:
+  `tap`, `long_press`, `toggle` and `type_text` scroll an off-screen target into view themselves. `off_screen` now means
+  that no scroll can bring the element on screen. The message says what to do then: it lies in a part of the screen that
+  nothing scrolls (behind a fixed bar, or outside every list), so look at the screen, then target something else or
+  report it.
 - **Where scrolling is the fix (v1.6),** the message names the one call that does it, in these
   words: `(scroll with this target and to: "target")`. That is `off_screen`, `under_tab_bar`,
   and `covered` by a bar. Tapline:
@@ -415,7 +422,7 @@ text items.
 |---|---|---|---|
 | `not_found` | nothing matches the target, or the ref isn't on the last list | look, then pick another target | both |
 | `ambiguous` | several matches and no `index` | use one of the candidates' refs, or add `index` | both. **Change Tapwright:** it picks silently today |
-| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (`scroll` with `to: "target"`, close the alert), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
+| `not_actionable` | the element can't take the action as a real touch would: `disabled`, `off_screen`, `covered` (by what), `under_tab_bar`, `behind_alert`; or it doesn't take that action at all: `no_action` | fix the cause (`scroll` with `to: "target"`, close the alert; for `off_screen` see §16.2: when no scroll can bring it on screen, look, then target something else or report it), or pass `force: true`; for `no_action`, pick another element or tool | both. Tapwright today: none. Plan: `disabled`, `behind_alert` and `no_action` first; `covered` is a gap |
 | `stale` | a `ref` from a list made before a person acted, from the viewer or (v1.5) with a finger on the phone | look again | both. **Change Tapline:** the host remembers "a person acted since the agent's last list". A look, or an action answer carrying a full list, clears it, and the next answer gets `Note: a person used the app since your last look.` (Tapwright says "the phone"). `id`, `label` and `text` targets keep working |
 | `busy` | a person drove for the whole ~30 s wait | wait a few seconds, retry | both (VIEWER-PROTOCOL "Control") |
 | `paused` | the user paused the agent | ask the user to resume | both |
@@ -442,7 +449,7 @@ text items.
 | `tap` | `target`, `force`, `look`, `screenshot` | **Change Tapline:** `press` becomes `tap`, to match the viewer protocol, Appium and Maestro, and "what a real tap would do" |
 | `long_press` | `target`, `seconds` (default 1.0), `force`, `look`, `screenshot` | Tapline ignores `seconds` and calls the handler |
 | `type_text` | `text`, `target`, `replace` (default **true**), `submit`, `force`, `look`, `screenshot` | answers `Typed into <el>. Value is now "…"`. Without a target: the focused field, else the only field, else `ambiguous`. **Change Tapwright:** `replace` defaults to false today, and it doesn't echo the value |
-| `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start`, `end` or `target`), `target`, `look`, `screenshot` | "down shows what's below". **`to: "target"` (v1.6)** scrolls the scroll views that hold the `target` element until its whole rect is on screen and clear of the bars, 8 pt inside the edge it came in over (an element larger than that space is brought to its start). It answers `Scrolled <scroll view line> to <element line>.` and the changes; when it stops before the element is clear, the first line says `toward` in place of `to`, so it never reads like success. An element that is clear already: nothing is scrolled, the first line is `<element line> is already on screen.`, and the change block follows. Likewise `to: "start"` or `"end"` with the scroll view already there: nothing is dragged, and the first line is `<scroll view line> is already at its start.` (or `end`), with the usual answer after it. Without a target, with a point as target, or with a `direction`, it is `bad_params`. When it stops before the element is clear: `Note: it doesn't scroll further: the target is as far into view as it gets.` (the end of the scroll view), or for Tapwright's drags `Note: the target wasn't reached in 12 s; scroll again to go on.` A tap still doesn't scroll by itself. A row a lazy list hasn't made yet is `not_found`. **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
+| `scroll` | `direction` (default `down`), `amount` (0.1–1.0 of the scroll area, default 0.8), `to` (`start`, `end` or `target`), `target`, `look`, `screenshot` | "down shows what's below". **`to: "target"` (v1.6)** scrolls the scroll views that hold the `target` element until its whole rect is on screen and clear of the bars, 8 pt inside the edge it came in over (an element larger than that space is brought to its start). It answers `Scrolled <scroll view line> to <element line>.` and the changes; when it stops before the element is clear, the first line says `toward` in place of `to`, so it never reads like success. An element that is clear already: nothing is scrolled, the first line is `<element line> is already on screen.`, and the change block follows. Likewise `to: "start"` or `"end"` with the scroll view already there: nothing is dragged, and the first line is `<scroll view line> is already at its start.` (or `end`), with the usual answer after it. Without a target, with a point as target, or with a `direction`, it is `bad_params`. When it stops before the element is clear: `Note: it doesn't scroll further: the target is as far into view as it gets.` (the end of the scroll view), or for Tapwright's drags `Note: the target wasn't reached in 12 s; scroll again to go on.` (Superseded in 1.13.1 by §16.2: `tap`, `long_press`, `toggle` and `type_text` scroll an off-screen target into view themselves.) A row a lazy list hasn't made yet is `not_found`. **Change Tapline:** `amount` is in points today. **Change Tapwright:** `amount` is a share of the screen today; it adds `target` (scroll inside that element) and `to` (repeat until nothing changes) |
 | `toggle` | `target`, `value`, `force`, `look`, `screenshot` | **Change Tapwright:** new. It reads the switch's value and taps only if it differs |
 | `back` | `look`, `screenshot` | **Change Tapwright:** new. It taps the navigation bar's back button, else swipes from the left edge, else `unsupported`. When a sheet, modal or popover is open on top, `back` closes that first, as "up one screen", and its first line is `Closed the sheet.` (v1.4). Tapwright taps outside a popover, on its dismiss region; Tapline calls the top Modal's `onRequestClose`. A sheet without one that closes on a tap on its backdrop gets that tap from both tools (v1.6); one with neither answers `no_action`, and the message names the sheet |
 | `open_url` | `url`, `look`, `screenshot` | Tapline opens it inside the app; Tapwright opens it on the phone, so another app may take it (the answer says which app came up) |
@@ -611,7 +618,7 @@ Error not_actionable: Ran 1 of 4 steps; stopped at step 2 (tap "Delete"): covere
 answer line and its time: `  1. Tapped e3 button "Save" id=save. (0.2 s)`.
 
 **A skipped step (v1.13)** is said after line 1, in the form `trace` uses, whether or not `trace` is on:
-`  3. skipped (if: "Not now" isn't on screen).` or, for `optional`, `  3. skipped (optional: "Not now" isn't on screen).`
+`  3. skipped (if: "Not now" isn't on screen).`, for `if` with `gone` (1.13.1) `  3. skipped (if: "Loading" is on screen).`, or, for `optional`, `  3. skipped (optional: "Not now" isn't on screen).`
 
 **Limits:** at most 50 steps (`bad_params` above that); the batch as a whole times out at 120 s (`timeout`,
 with `Ran <k> of <n>` in the message). Time spent waiting for a person's OK (§11.3) or for a "needs a person"
@@ -724,8 +731,8 @@ Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy a
 - An allow lets exactly one matching call through within 120 s: the same tool on the same element of the
   same app. Its answer ends `Note: allowed by a person (in the live view).` After an expiry the retry answers
   needs_confirmation again, with `Nobody answered.` added. After a refusal, for 60 s the same touch asks no
-  one: it answers `needs_confirmation: … and they declined it just now. Don't ask again by repeating the call:
-  ask your user what they want.`; after that a retry asks again, with `They declined.` added.
+  one: it answers `needs_confirmation:` today's first sentence, then `They declined.`, then `Ask your user what to do.`
+  (1.13.1; no advice to make the same call again); after that a retry asks again, with `They declined.` added.
 - On the phone's side the live view is the only place a request is answered, for both tools: a prompt on the phone
   could be pressed by an agent. (v1.13) The host's dialog below is drawn by the host, not on the phone.
 
@@ -736,7 +743,7 @@ elicitation (`elicitation/create`, form mode), when the client's capabilities sa
 - **One required field,** `answer`, with the choices `Allow once` and `Don't allow` and no default. Only `accept` with
   `Allow once` allows. `accept` without it, `decline`, `cancel` or an error is Don't allow.
 - **The first answer from either place wins.** When the live view answers first, the elicitation is aborted; when the
-  dialog answers first, the viewer gets `confirm_done`.
+  dialog answers first, the viewer gets `confirm_closed`.
 - One dialog at a time per server; a second request waits behind the first.
 - **Blocked words never reach a dialog:** a blocked touch is refused as in §11.2.
 - **With a dialog, the call waits** for the answer, up to the 120 s, instead of answering `needs_confirmation` at once.
@@ -745,7 +752,8 @@ elicitation (`elicitation/create`, form mode), when the client's capabilities sa
     `Note: allowed by a person (in the live view).` If not: `Error not_allowed: needs_confirmation: the screen
     changed while waiting for the OK; ask again.`
   - **Refused or expired:** `Error not_allowed: needs_confirmation: …` as above, with `They declined.` or `Nobody
-    answered.` added; after a refusal the 60 s rule above holds.
+    answered.` added; a declined answer is today's first sentence, `They declined.`, then `Ask your user what to do.`,
+    with no advice to make the same call again (1.13.1). After a refusal the 60 s rule above holds.
   - In `run`, `drive` and routes, the step waits the same way, and a refusal stops the batch there.
 - **A host with no dialog** answers at once, as in §11.2. The agent repeats the call once the person allows it in the
   live view, and the answer ends `Note: allowed by a person (in the live view).`
@@ -853,10 +861,11 @@ Shorter answers, for an agent that knows its way around.
 - The answer is: its first line; the `Place:` line when known (§18.1); then the change block, at most 12 lines. When
   the block is cut, the last line is `…<n> more: look shows them.`
 - A cut change block keeps its `+` text lines ahead of its `~` and `↕` lines.
-- A new screen shows its headers, its actionable elements (buttons, inputs, switches, links, tabs) and every text
+- A new screen shows its headers, its actionable elements (buttons, inputs, switches, links, tabs, list rows (`cell`), radios and checkboxes) and every text
   element that is new since the last screen, together at most 12 lines, newest text first, then the same `…<n> more`
   line. New text stays because it is what says an action failed: "Wrong password", "Card declined", an empty state's
   text.
+- Tapline counts any pressable element as actionable, which includes its rows (1.13.1).
 - Never cut: the `Alert:`, `Network:`, `Keyboard:` and `Place:` lines, notes, errors and `Reflex:` lines.
 - `look` is never brief.
 
@@ -866,6 +875,10 @@ Shorter answers, for an agent that knows its way around.
 
 Parameters:
 - `name` (required): `^[A-Za-z0-9][\w.-]{0,60}$`, as script names.
+  - **Names are ASCII (1.13.1).** In every name rule, `\w` means ASCII `[A-Za-z0-9_]`.
+  - **A name that differs from an existing one only in case is refused** (`bad_params`, naming the existing one), before
+    anything is written: `home` and `HOME` are one file on Windows and macOS. This holds for scripts, references,
+    routes and places alike.
 - `update`: save the screen as the reference again.
 - `width`: px, as `look`'s. A reference is compared only at the size it was saved at.
 - `threshold`: the share of the screen, in percent (0–100, default **0.5**), that may change and still match.
@@ -885,6 +898,10 @@ Answers:
 - First call, or `update: true`: `Saved the reference "<name>" (600x1304 px).`
 - No changed pixel, or within the threshold: `Matches the reference "<name>": 0.12% changed.` (0 changed:
   `0% changed`.) No picture.
+- **A change under the threshold is still named (1.13.1).** The threshold stays whole-screen, and it is still the pass
+  bar. Under it, the answer names each changed cluster that is at least 0.1% of the screen, and every changed cluster
+  that overlaps a text element, whatever its size:
+  `Matches the reference "k-explore" (0.33% changed, under the 0.5% threshold): changed at e9 text "from €1,362", …`
 - Above the threshold, `isError` false (it is a finding, not a failure of the call):
   ```
   Differs from the reference "checkout": 3.4% changed, in 2 regions (points):
@@ -908,6 +925,9 @@ Answers:
   `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (compare_screen "home"): 3.4% changed from the
   reference "home" (threshold 0.5%), in 2 regions (points): @16,329 193x48, @16,620 398x44.`
   For `matches` on an action step the reason begins `its action ran, but`, as for other expectations.
+- **A match with names stays a match (1.13.1).** In `run` and `replay` a change under the threshold holds, so no script
+  breaks, and the step's line carries the names. `session_report` (§16.1) may count "matched with text changes" as a
+  line to look at.
 - A missing reference: `… stopped at step 4 (compare_screen "home"): no reference "home" yet; save one with
   compare_screen { name: "home" }.`
 - `record` folds a `compare_screen` called right after an action into that step's `expect: {"matches": "<name>"}`
@@ -1044,6 +1064,9 @@ next one unnecessary.
   - 9 runs of 3 or more actions with no answer read in between (calls 101–104, …): one run each
   ```
   At most 5 call numbers per flag, then `…`. A flag with nothing to show is left out; with no waste: `Waste: none.`
+- **A retry whose failed target was an id (1.13.1).** When a retry after `not_found` had failed with an id (`{id: "save"}`,
+  then `{text: "Save"}` finds the element), the retry flag ends `: target what the latest look shows (its id there, when
+  it has one)` in place of `: use its id first`.
 - A scroll hunt is exact when the element was in the tree's off-screen list before the first scroll; otherwise the
   flag says `(maybe)`.
 - **Seconds (v1.13).** Every entry of the action log, reads too, carries `"ms"`, the call's time in the tool (§12). The
@@ -1056,6 +1079,7 @@ next one unnecessary.
 - **New waste flags (v1.13),** in the same list and with the same limit of 5 call numbers:
   - `- 5 calls in a row on a way the map knows (calls 12–16): drive {"to": "language"} is one call`
   - `- 14 calls each from a new process (calls 1–14): load the MCP server once; each call paid about 2 s`
+  - (1.13.1) A flag starts at 3 calls in a row on a way the map knows, and at 5 thin calls each from a new process.
 
 ### 16.2 Off-screen targets and closest matches
 
@@ -1064,7 +1088,9 @@ next one unnecessary.
   line says so: `Scrolled to it, then tapped e41 button "Save" id=save.` `dry_run` answers
   `Would scroll to it, then tap e41 button "Save" id=save at 215,640.` (the point it expects after the scroll).
 - When no scroll can bring it on screen (it isn't inside a scroll view, or a scroll ends with it still covered), the
-  action is refused as before, `not_actionable: off_screen`, and the message says why.
+  action is refused as before, `not_actionable: off_screen`, and the message says why (1.13.1): it lies in a part of the
+  screen that nothing scrolls (behind a fixed bar, or outside every list), so look at the screen, then target something
+  else or report it. This is the only meaning `off_screen` has now.
 - An element a list hasn't made yet (a lazy row) isn't in the tree: it stays `not_found`.
 - `not_found` adds up to 3 closest matches, each as an element line with its ref and, when off screen, where:
   `Closest: e12 button "Save draft" id=save-draft, e30 text "Saved" (off screen, below).` Close means: the same words
@@ -1196,6 +1222,9 @@ one OK never covers two touches, and otherwise each touch is checked), `rotate` 
   relaunch`; `background` and `rotate` ask the person (a needs-a-person line, "switch to another app and back, then say
   done"), or are done by Tapwright when it drives the same phone. None is faked with an in-app event. When the person
   has done it, the agent calls `journey` with `stress` and `done: true`, and the tool checks `survives` then.
+- **A double tap's second tap needs the same element (1.13.1).** It answers `changed` and doesn't tap again when the
+  control's id, label or text changed after the first tap: the safety check only saw the first, and a recycled row can
+  turn "Continue" into "Delete account".
 
 ### 17.5 The visual report
 
@@ -1261,7 +1290,7 @@ A **place** is a screen the tool can recognise again. Each place has a key, a na
   the tool's threshold of parts agree (each tool tunes its own). The navigation title breaks a tie, compared per
   language as the hashes of §18.9.
 - **Never in a key or a name:** a list row's text, a param's value, typed text, anything from a secure field.
-- **The name.** Names are ASCII, `[a-z0-9_]`, lower case with `_` for spaces; a second place with the same name gets
+- **The name.** Names are ASCII, `[a-z0-9_]`, lower case with `_` for spaces (the case rule of §14.1 holds); a second place with the same name gets
   `_2`. A navigation title can be private ("Chat with Sara", "Order #10432"), and a name ends up in the map, in
   `map`'s listing and in every `Place:` line, so a name never comes from content:
   - **Tapline** names a place from its route only: the last route name, skipping groups such as `(tabs)`. When the
@@ -1302,6 +1331,10 @@ A **road** is one move that left a place and arrived at another, as it was seen:
     isn't stored, so the road couldn't be driven again. Typed paths belong in routes, which have variables (§18.5);
   - anything a `replay` does (§18.9).
 - `move` targets by `id`, else `label`, else `text`, never by `ref`. A point only for something with no element.
+- **A road's `move` is a step as `run` takes it (1.13.1)**, so both tools can read each other's roads and replay them with
+  no translation. The shapes: a swipe is `{"tool": "swipe", "x0", "y0", "x1", "y1", "seconds"?}`, in points; tap,
+  long_press and toggle carry `target` (id, label or text, never a ref); back is `{"tool": "back"}`; open_url carries the
+  cut-down link. Nothing from the screen is stored.
   `names` keeps every name the element had, for repair (§18.4).
 - A list row is saved only by its id. A row with no id is saved as `{"row": true}`: the road exists, but `drive`
   can't replay it and stops there with `off_route` (the driver chooses the row).
@@ -1373,6 +1406,7 @@ Place: language.
 <the destination's screen, as an action's answer shows a new screen>
 ```
 - How it travelled is always said: `by link`, `by 3 taps`, `by link then 1 tap`, and `, 1 reflex` when one fired.
+- (1.13.1) A route's drive line names the route and not its steps: `Arrived at home by route sign_in in 3.2 s.`
 - Unproven roads driven cleanly: `Note: 2 roads proven again for build 1.5.0 (220).`
 - With `then`, the steps follow as in `run`'s answer (§9.3).
 - A person's input pauses a drive between moves, as it pauses any call (Tapline: 3 s of quiet). `paused` and
@@ -1451,6 +1485,7 @@ A reflex is a rule the tool applies by itself when its moment comes, between the
 - **Never reflexes:** a permission prompt (how it is answered is the test's decision), a policy-flagged action, a
   person's OK.
 - **Off** in a user's-eyes journey unless its start allows `reflexes` (§17.1): there the interruption is a finding.
+- **When they are checked (1.13.1):** at place changes, and before answering a failure. Not between every `run` step.
 
 ### 18.8 `map`
 
@@ -1527,6 +1562,7 @@ For hosts that can't keep an MCP connection: `tapwright call <tool> '<json>'` an
 - Tapwright asks each Tapline port (7210–7219) until one has the app, and keeps that port.
 - Tapwright uses it only when `seenAt` is later than its own last touch and `inFront` is true; otherwise its own
   signature. A place found this way is stored with its route key.
+- (1.13.1) `seenAt` is the host's clock when the event arrived. A place found up front isn't saved until it is visited.
 
 ### 18.12 How travel is reported, and journeys
 
@@ -1534,7 +1570,8 @@ For hosts that can't keep an MCP connection: `tapwright call <tool> '<json>'` an
   `Road repaired`. A report (§17.5) keeps these, so it can tell a user's path from a shortcut.
 - In a user's-eyes journey (§17.1), `drive` may use only roads, and only roads made of taps a person could make:
   no jumps, no reflexes, no fast animations, unless the journey's start allows them (`allow` gains `drive`,
-  `reflexes`, `fast_animations`). An interruption is then a finding, as §17 says.
+  `reflexes`, `fast_animations`). An interruption is then a finding, as §17 says. (1.13.1) `drive` lifts roads-only (jumps
+  are allowed); `reflexes` lifts the reflex ban; `fast_animations` lifts the animation ban.
 - In such a journey each move is aimed by the visible text it had (`names.text`), since a person can't see ids. A road
   with no visible text can't be driven there and stops with `off_route`: `it has no text a person could read`.
 
