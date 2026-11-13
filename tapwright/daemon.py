@@ -657,7 +657,9 @@ def _key(e: ui.Element) -> tuple:
 
 def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element],
               matches: list[ui.Element], on_screen: list[ui.Element],
-              inside: "Callable[[ui.Element, bool], bool] | None" = None) -> ui.Element | None:
+              inside: "Callable[[ui.Element, bool], bool] | None" = None,
+              seen: tuple[float, float, float, float] | None = None,
+              earlier: list[ui.Element] | None = None) -> ui.Element | None:
     """The match on screen after a scroll that is the element `hit` was before it, or None when that can't be told.
 
     The scroll's shift is measured on the elements that moved with it and that nothing else resembles: an element seen
@@ -667,7 +669,9 @@ def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element]
     cycles 3 and 4). `inside(element, after)` says whether an element lies in the scroll view that holds `hit`, before
     the scroll (False) or after it (True): an element elsewhere, in a pane that scrolls with it but by another amount,
     says nothing either (cycle 5). `hit`, moved by that shift, must then lie on exactly one match on screen, in that
-    scroll view."""
+    scroll view. And the shift is checked on the matches too: every match the first look saw (`earlier`) in that view
+    that the shift puts in its visible part (`seen`) must be there now, since a list drops only rows out of sight. An
+    element that moved on its own (a header animating, cycle 7) gives a shift that fails this."""
     def once(items):
         seen: dict[tuple, list[ui.Element]] = {}
         for e in items:
@@ -690,6 +694,16 @@ def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element]
     dx, dy = shifts[0]
     if any(abs(x - dx) > FOLLOW_TOLERANCE or abs(y - dy) > FOLLOW_TOLERANCE for x, y in shifts):
         return None  # the elements disagree (rows laid out again): the shift is unknown
+    if seen is not None:
+        sx, sy, sw, sh = seen
+        shown = [m for m in matches if any(m is e for e in on_screen)]
+        for b in (earlier if earlier is not None else [hit]):
+            if inside is not None and not inside(b, False):
+                continue
+            px, py = b.center[0] + dx, b.center[1] + dy
+            if sx <= px < sx + sw and sy <= py < sy + sh and not any(
+                    abs(m.x - b.x - dx) <= FOLLOW_TOLERANCE and abs(m.y - b.y - dy) <= FOLLOW_TOLERANCE for m in shown):
+                return None  # a match the shift puts in sight isn't there: the shift is wrong
     spot = [m for m in matches if any(m is e for e in on_screen) and (inside is None or inside(m, True))
             and abs(m.x - hit.x - dx) <= FOLLOW_TOLERANCE and abs(m.y - hit.y - dy) <= FOLLOW_TOLERANCE]
     return spot[0] if len(spot) == 1 else None
@@ -3900,6 +3914,8 @@ class Daemon:
                 holder = ui.scroll_of(shown, e)
                 if holder is None:
                     cx, cy = e.center
+                    if 0 <= cx < s.screen[0] and 0 <= cy < s.screen[1]:
+                        return False  # on screen and outside every scroll view: a bar or a header (cycle 7)
                     scrolls = [v for v in shown if v.role == "scroll"]
                     if 0 <= cx < s.screen[0]:
                         lined = [v for v in scrolls if v.x <= cx <= v.x + v.width]
@@ -3909,7 +3925,8 @@ class Daemon:
                         return False
                     holder = lined[0]
                 return holder.rect == area.rect
-            final = _followed(hit, before, after, ui.candidates(after, target), view.items, inside)
+            final = _followed(hit, before, after, ui.candidates(after, target), view.items, inside, view_rect,
+                              ui.candidates(before, target))
             if final is None:
                 raise Refused("stale", f"index {target.index} can't be sure to name "
                                        f"{hit.line(ref=False, actions=False)} after the scroll: nothing that moved with "

@@ -183,6 +183,47 @@ def test_an_off_screen_element_of_a_stacked_pane_does_not_measure_the_shift():
     run(go)
 
 
+# ---- cycle 7: an element on screen outside the list proves nothing, even alone in its column ----
+def test_a_header_on_screen_outside_the_list_does_not_measure_the_shift():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        lst = el("e1", "scroll", "", "list", rect=(0, 400, 400, 400))
+        acct = lambda y: el("", "button", "Account", "", rect=(10, y, 100, 40))
+        header = lambda y: el("e2", "text", "Header", "", rect=(10, y, 100, 30))
+        s.tree, s.offscreen = [lst, header(350)], [acct(950), acct(1000)]
+        real = s.scroll
+
+        async def scroll(x0, y0, x1, y1):  # the list moves by -248; the header animates up by -298
+            s.tree = [lst, header(52), acct(702), acct(752)]
+            s.tree[2].ref, s.tree[3].ref = "e3", "e4"
+            s.offscreen = []
+            return await real(x0, y0, x1, y1)
+        s.scroll = scroll
+        await d.run_tool("a", "look", {"screenshot": False})
+        taps = len(s.tap_points)
+        with pytest.raises(Refused) as e:  # it tapped B at 722 when the header counted
+            await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 1}, "look": False})
+        assert e.value.code == "stale" and len(s.tap_points) == taps
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_shift_that_leaves_a_match_missing_from_sight_is_wrong():
+    """The second check: even an element taken for a part of the list (a header over it that animates on its own)
+    can't pull the tap to another row, since its shift puts B where no Account is."""
+    acct = lambda y, ref="": el(ref, "button", "Account", "", rect=(10, y, 100, 40))
+    head0, head1 = el("", "text", "Header", rect=(10, 450, 100, 30)), el("", "text", "Header", rect=(10, 152, 100, 30))
+    b0, c0, b1, c1 = acct(950), acct(1000), acct(702, "e3"), acct(752, "e4")
+    seen = (0.0, 400.0, 400.0, 400.0)
+    # the header moved by -298, the list by -248: B would be at 652, where nothing is
+    assert _followed(c0, [head0, b0, c0], [head1, b1, c1], [b1, c1], [head1, b1, c1], None, seen, [b0, c0]) is None
+    # with the header moving by -248 with the list, C is at 752
+    head1 = el("", "text", "Header", rect=(10, 202, 100, 30))
+    assert _followed(c0, [head0, b0, c0], [head1, b1, c1], [b1, c1], [head1, b1, c1], None, seen, [b0, c0]) is c1
+
+
 # ---- cycle 3: an ended agent is not forgotten after others end ----
 def test_an_ended_agent_stays_ended_after_hundreds_of_others_end():
     async def go():
