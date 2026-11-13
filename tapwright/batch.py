@@ -367,6 +367,90 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element],
     return saved
 
 
+def any_title(_text: str | None) -> bool:
+    """A `titled` that holds for every text: every label or text is then passed over for the id, else the point."""
+    return True
+
+
+def ignore_fallback(entry: object, items: list[ui.Element]) -> dict | None:
+    """What an `ignore` entry is saved as when its label or text turns out to be a title: the id of the element it
+    finds, else that element's rectangle; None when it finds no one element."""
+    if not isinstance(entry, dict) or entry.get("ref") is None and not any(entry.get(k) for k in ("id", "label", "text")):
+        return None
+    try:
+        found = ui.resolve(items, ui.parse_target(entry))
+    except Refused:
+        return None
+    if not isinstance(found, ui.Element):
+        return None
+    aim = recorded_target({"ref": found.ref}, items, any_title)
+    if aim is not None and "x" not in aim:
+        return aim
+    return {"x": round(found.x, 1), "y": round(found.y, 1), "width": round(found.width, 1), "height": round(found.height, 1)}
+
+
+def without_titles(steps: list[dict], fallbacks: list[tuple[dict, dict | None]],
+                   titled: Callable[[str | None], bool]) -> list[dict]:
+    """A recording's steps as they are saved, checked once more against every title the recording has seen (Codex, PR #10
+    cycle 5: a title can be learned after the step that names it, from the screen the step opened). A selector, at any
+    depth (`target`, a `performance` step's `tap`, an `ignore` list, an expectation's), whose label or text is a title is
+    replaced by its `fallbacks` entry (the element's own id, else its point, worked out when it was captured: `(selector,
+    fallback)` pairs matched by identity), and dropped when it has none; a step that waits for a title, and an
+    expectation on one, are dropped. A step with no selector left to aim by is dropped too."""
+    held = {id(selector): fallback for selector, fallback in fallbacks}
+
+    def names_title(selector: object) -> bool:
+        return isinstance(selector, dict) and any(isinstance(selector.get(k), str) and selector[k] and titled(selector[k])
+                                                  for k in ("label", "text"))
+
+    def ignores(entries: list) -> list:
+        out = []
+        for entry in entries:
+            if not names_title(entry):
+                out.append(entry)
+            elif held.get(id(entry)) is not None:
+                out.append(held[id(entry)])
+        return out
+
+    def expectation(expect: dict) -> dict | None:
+        if any(names_title({k: expect.get(k)}) for k in ("label", "text")):
+            expect = {k: v for k, v in expect.items() if k not in EXPECT_KINDS and k not in ("gone", "timeout")}
+            if "matches" not in expect:
+                return None
+        if isinstance(expect.get("ignore"), list):
+            expect = {**expect, "ignore": ignores(expect["ignore"])}
+            if not expect["ignore"]:
+                del expect["ignore"]
+        return expect
+
+    out = []
+    for step in steps:
+        if step.get("tool") == "wait_for" and names_title(step):
+            continue
+        step = dict(step)
+        dropped = False
+        for key in ("target", "tap"):
+            if key in step and names_title(step[key]):
+                if held.get(id(step[key])) is None:
+                    dropped = True
+                    break
+                step[key] = held[id(step[key])]
+        if dropped:
+            continue
+        if isinstance(step.get("ignore"), list):
+            step["ignore"] = ignores(step["ignore"])
+            if not step["ignore"]:
+                del step["ignore"]
+        if isinstance(step.get("expect"), dict):
+            kept = expectation(step["expect"])
+            if kept is None:
+                del step["expect"]
+            else:
+                step["expect"] = kept
+        out.append(step)
+    return out
+
+
 def _names_private(entry: object, titled: Callable[[str | None], bool] | None) -> bool:
     """Is this ignore a label or text selector that holds a navigation title or an account's value?"""
     if not isinstance(entry, dict) or entry.get("ref") or entry.get("x") is not None:

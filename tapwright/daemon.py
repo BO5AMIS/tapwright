@@ -2216,7 +2216,7 @@ class Daemon(journey_tool.JourneyTools):
             routes.recorded_text("", args["as"])  # a name that can't be a variable is refused before the text is typed
         items = self.control.client(client_id).items
         if name == "performance":  # its `tap` is saved by id, label or text like a target
-            return batch.recorded_target(args.get("tap"), items, titled)
+            return self._aimed(client_id, args.get("tap"), items)
         if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
             field = None
             try:
@@ -2230,7 +2230,21 @@ class Daemon(journey_tool.JourneyTools):
             self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
         if name == "tap" and self._native_back_of(args.get("target"), items):
             self._recording[client_id]["back_next"] = True  # the step is `back`: its label is a title (never saved)
-        return batch.recorded_target(args.get("target"), items, titled)
+        return self._aimed(client_id, args.get("target"), items)
+
+    def _aimed(self, client_id: str, target: object, items: list[ui.Element]) -> dict | None:
+        """The selector a recorded step is saved with. The native Back's label is a title, so whatever touches it (a
+        long press, a performance tap) is saved by its id or point; the element's id-or-point fallback is kept beside the
+        selector, so the save-time check (batch.without_titles) can swap in a title learned later (Codex, PR #10 cycle 5)."""
+        back = isinstance(target, dict) and self._native_back_of(target, items)
+        aimed = batch.recorded_target(target, items, batch.any_title if back else self._title_test())
+        if aimed is not None:
+            self._recording[client_id].setdefault("fallbacks", []).append((aimed, batch.recorded_target(target, items, batch.any_title)))
+        return aimed
+
+    def _untitled(self, rec: dict) -> list[dict]:
+        """The recording's steps, checked at save time against every title the recording has seen (batch.without_titles)."""
+        return batch.without_titles(rec["steps"], rec.get("fallbacks", []), self._title_test())
 
     def _title_test(self) -> "Callable[[str | None], bool]":
         """Is this text a navigation title: the one the screen shows now, or one the map holds a hash of (any place of
@@ -2282,7 +2296,11 @@ class Daemon(journey_tool.JourneyTools):
         """While this agent records: the `ignore` list its step will be saved with, worked out before the call."""
         if not isinstance(args.get("ignore"), list):
             return None
-        return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items, self._title_test())
+        items = self.control.client(client_id).items
+        saved = batch.recorded_ignore(args["ignore"], items, self._title_test())
+        for given, entry in zip(args["ignore"], saved):  # (what each entry becomes if its label proves to be a title)
+            self._recording[client_id].setdefault("fallbacks", []).append((entry, batch.ignore_fallback(given, items)))
+        return saved
 
     def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
                         picture: bytes | None,
@@ -2517,6 +2535,11 @@ class Daemon(journey_tool.JourneyTools):
                 # (a backstop: the steps' selectors were chosen without an account's value, §18.6; what is left of the
                 # screen's words in them, a typed text or an expectation, is redacted, never a key, a tool or a format,
                 # and the result must still be a script that loads: Codex, PR #10 cycle 3)
+                try:  # the screen the recording ends on is read, so its title is known to the save-time check
+                    await self._route_place(scope)
+                except (Refused, OSError, DeviceError):
+                    pass
+                rec["steps"] = self._untitled(rec)
                 saved = batch.saved_script(batch.script(rec["name"], rec["app"], rec["steps"]), self._redact, path)
                 pathlib.Path(path).write_text(json.dumps(saved,
                                                          ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -2557,6 +2580,7 @@ class Daemon(journey_tool.JourneyTools):
         """`record` with `stop` for a route: the steps, from the place it started to the place it ends at, as a file in the
         app's map folder (§18.5)."""
         bundle, end = await self._route_place(scope)
+        rec["steps"] = self._untitled(rec)  # (the end place is read now: its title is known)
         route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], rec["steps"])
         # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
         # checked as a script before it is saved)
@@ -3870,7 +3894,7 @@ class Daemon(journey_tool.JourneyTools):
             return None  # a field that shows an account's value (or the placeholder an agent may have aimed by) is no name for a road
         data = self.maps.data(root, bundle)
         held = box.get("held") or frozenset()
-        if (name in roads.TARGETED and element is not None and element.role != "cell"
+        if (name == "tap" and element is not None and element.role != "cell"
                 and ui.is_back(element, box.get("back"))
                 and (element.name == "BackButton"
                      or places.is_title(data, between, element.label, element.text, element.value, held=held))):

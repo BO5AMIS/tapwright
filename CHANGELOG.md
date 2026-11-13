@@ -12,6 +12,11 @@
   title (a chat renamed) doesn't hide it. A recording (script, route) saves such a tap as `back`; any other tap whose
   label or text is a title is saved by its id, else by its point, and a `wait_for` on a title is not kept as a step's
   expectation, so no title is in a script, a route or a map in plain text. A tap is saved as `back` only when its element is exactly the button `back` would press (a button of a real navigation bar, `ui.back_button`'s own choice, with no id of its own or iOS's `BackButton`, whatever its label), so a screen the map hasn't seen yet records it as `back` too, and a toolbar's Profile button or a `Menu` button on a screen titled Menu is never `back`; a wait on a title is never kept, even after `performance`; and a `compare_screen` ignore selected by a title is saved by id or rectangle.
+- A recording is checked once more when it is saved, over the whole of it, against every title it has seen: a selector
+  (a target, a `performance` tap, an `ignore` entry) whose label or text turns out to be a title, even one learned from
+  the screen the step opened, is saved by its element's id, else its point, and a wait or expectation on a title is
+  dropped. Only a tap on the native Back becomes `back`: a long press or a performance tap on it is saved by its id or
+  point (or its road isn't learned).
 - A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
   (`<tester2's password>`) in everything that leaves Tapwright, in any form (escaped, collapsed, cut): text answers and
   errors, change lists (a `(was …)` cut no longer keeps a password's end), alerts, the audit's element lines (`id=`) and
@@ -33,6 +38,12 @@
   holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
   that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
   is redacted in that form too.
+  Every shape of a value is redacted (one generator: as it is, collapsed, without direction marks, JSON-escaped, Python
+  `repr`/`ascii` with and without quotes, URL-encoded), so a `%r` in a log message or a traceback shows none. A value ever
+  loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
+  current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
+  sanitized copy in the same format. The map writer redacts only content fields (never the format, a hash, a key or a
+  name), and a redacted map that wouldn't read never replaces the file.
 - `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
   console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
   sent.
