@@ -1086,7 +1086,10 @@ class Daemon:
         if client_id in self._greeted:
             return answer
         self._greeted.add(client_id)
-        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail) if item not in answer["text"]]
+        # (the passcode prompt is a PhoneLocked too, and says its own note)
+        locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
+        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
+                 if item not in answer["text"]]
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:

@@ -268,13 +268,17 @@ async def doctor_fix(problems: int) -> int:
     usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"]
     if not usb:
         return problems + fail("--fix needs the iPhone on USB. Plug it in and unlock it, then run it again.")
-    udid = store.load_state().get("udid")
-    udid = udid if udid in [d.serial for d in usb] else usb[0].serial
-    phone = UsbPhone(udid)
+    phone = UsbPhone(configured_phone([d.serial for d in usb]))
     try:
         return problems + await run_fixes(phone, lambda kind, msg: {"ok": ok, "note": note, "fail": fail}[kind](msg))
     finally:
         await phone.close()
+
+
+def configured_phone(usb: list[str]) -> str:
+    """The phone doctor means among those on USB: the stored one when it is plugged in, else the first."""
+    udid = store.load_state().get("udid")
+    return udid if udid in usb else usb[0]
 
 
 async def lockdown_needs(udid: str, connect=None) -> list[str]:
@@ -297,6 +301,8 @@ async def lockdown_needs(udid: str, connect=None) -> list[str]:
         return needs.from_lockdown(True, True, None)
     except Exception:  # can't be read: not listed
         return []
+    if not lockdown.paired:  # autopair=False hands back an unpaired client instead of raising
+        return needs.from_lockdown(False, False, None)
     try:
         mode = await asyncio.wait_for(lockdown.get_developer_mode_status(), 10)
     except Exception:  # an iOS without the setting, or no answer
@@ -311,7 +317,7 @@ async def needs_person(usb: list[str]) -> list[str]:
     status = client.healthy(store.read_serve_info())
     if status is not None:
         return needs.from_state(status.get("state"), status.get("detail"))
-    return await lockdown_needs(usb[0]) if usb else []
+    return await lockdown_needs(configured_phone(usb)) if usb else []
 
 
 def print_needs(found: list[str]) -> None:
@@ -335,12 +341,14 @@ def report_checkout(package: Path | None = None) -> int:
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
-    from pymobiledevice3 import usbmux
-
-    from . import repair, signing
     problems = 0
     ok(f"Python {sys.version.split()[0]}, pymobiledevice3 {version('pymobiledevice3')}")
     problems += report_checkout()
+    if problems:  # before the signing modules are imported: a conflicted one would raise SyntaxError first
+        return problems
+    from pymobiledevice3 import usbmux
+
+    from . import repair, signing
     usb: list[str] = []
     try:
         devices = await usbmux.list_devices()
