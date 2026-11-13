@@ -1,39 +1,52 @@
-"""Fixes from Codex's third review of PR #6 (1.4.0): an indexed target that keeps its element when a row before it
-leaves the tree during the scroll, and an ended agent that stays ended however many end after it."""
+"""Fixes from Codex's third and fourth reviews of PR #6 (1.4.0): an indexed target that keeps its element through the
+scroll (a row before it can leave the tree, a match can stay put outside the list, rows can be replaced), and an ended
+agent that stays ended however many end after it."""
 import pytest
 from fakes import el
 from test_daemon import finish, make, run, started
 
 from tapwright.control import Refused
+from tapwright.daemon import _followed
 
 
-def _accounts(d, before, after, after_off=()):
-    """A form holding Account rows: `before` and `after` are (y, identifier) of the rows off screen at the start and of
-    those on screen once it has scrolled (`after_off`: still off screen then)."""
+def _form(d, before, after):
+    """A form in a scroll view. `before` and `after` are its elements, (label, y, identifier), at the start and once it
+    has scrolled: those whose middle is on the 800 pt screen are in the tree, the rest off screen."""
     s = d.session
-    s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800)),
-              el("e2", "button", "Account", "", rect=(10, 100, 100, 40))]
-    s.offscreen = [el("", "button", "Account", ident, rect=(10, y, 100, 40)) for y, ident in before]
+    view = el("e1", "scroll", "", "form", rect=(0, 0, 400, 800))
+
+    def lay(rows):
+        tree, off = [view], []
+        for label, y, ident in rows:
+            e = el("", "button", label, ident, rect=(10, y, 100, 40))
+            (tree if 0 <= y + 20 < 800 else off).append(e)
+        for n, e in enumerate(tree[1:], 2):
+            e.ref = f"e{n}"
+        s.tree, s.offscreen = tree, off
+    lay(before)
     real = s.scroll
 
     async def scroll(x0, y0, x1, y1):
-        s.tree = [s.tree[0], *(el(f"e{3 + i}", "button", "Account", ident, rect=(10, y, 100, 40))
-                               for i, (y, ident) in enumerate(after))]
-        s.offscreen = [el("", "button", "Account", ident, rect=(10, y, 100, 40)) for y, ident in after_off]
+        lay(after)
         return await real(x0, y0, x1, y1)
     s.scroll = scroll
 
 
-# ---- P2: a match before the target leaves the tree as the list scrolls ----
+async def _tap(d, index):
+    await d.run_tool("a", "look", {"screenshot": False})
+    await d.run_tool("a", "tap", {"target": {"label": "Account", "index": index}, "look": False})
+    return d.session.tap_points[-1]
+
+
+# ---- cycle 3: a match before the target leaves the tree as the list scrolls ----
 def test_an_indexed_tap_keeps_its_element_when_the_rows_before_it_leave_the_tree():
     async def go():
         d = make()
         stop, task = await started(d)
-        # A at 100 (on screen), B at 1000, C at 1050; after the scroll B and C are at 300 and 350, and A is gone
-        _accounts(d, before=[(1000, ""), (1050, "")], after=[(300, ""), (350, "")])
-        await d.run_tool("a", "look", {"screenshot": False})
-        await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 1}, "look": False})
-        assert d.session.tap_points[-1][1] == 320  # B (300 to 340), not C (350 to 390)
+        # A at 100 (on screen), the Billing heading, B and C below; the form moves up by 700 and A leaves the tree
+        _form(d, [("Account", 100, ""), ("Billing", 950, ""), ("Account", 1000, ""), ("Account", 1050, "")],
+              [("Billing", 250, ""), ("Account", 300, ""), ("Account", 350, "")])
+        assert (await _tap(d, 1))[1] == 320  # B (300 to 340), not C
         await finish(stop, task)
     run(go)
 
@@ -42,46 +55,69 @@ def test_an_indexed_tap_follows_its_element_by_its_own_identifier():
     async def go():
         d = make()
         stop, task = await started(d)
-        # evenly spaced rows: where they lie can't tell them apart, but B's identifier can
-        _accounts(d, before=[(1000, "acct-b"), (1050, "acct-c"), (1100, "acct-d")],
-                  after=[(300, "acct-b"), (350, "acct-c"), (400, "acct-d")])
-        await d.run_tool("a", "look", {"screenshot": False})
-        await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 1}, "look": False})
-        assert d.session.tap_points[-1][1] == 320  # acct-b
+        # evenly spaced rows and nothing else that moves: B's identifier tells
+        _form(d, [("Account", 100, ""), ("Account", 1000, "acct-b"), ("Account", 1050, "acct-c")],
+              [("Account", 300, "acct-b"), ("Account", 350, "acct-c")])
+        assert (await _tap(d, 1))[1] == 320
         await finish(stop, task)
     run(go)
 
 
-def test_an_indexed_tap_that_cant_tell_its_element_after_the_scroll_touches_nothing():
+# ---- cycle 4: a match that stays put outside the list ----
+def test_an_indexed_tap_is_not_drawn_to_a_match_that_did_not_move():
     async def go():
         d = make()
         stop, task = await started(d)
-        # A at 100, B at 1000, C at 1050; after the scroll A is gone and the rows were laid out again (300 and 330):
-        # no shift puts them where the first look saw them, so the element can't be told
-        _accounts(d, before=[(1000, ""), (1050, "")], after=[(300, ""), (330, "")])
+        # A at 100 is outside the list and stays; the list moves up by 248: B at 752, C at 802 (off screen)
+        _form(d, [("Account", 100, ""), ("Billing", 950, ""), ("Account", 1000, ""), ("Account", 1050, "")],
+              [("Account", 100, ""), ("Billing", 702, ""), ("Account", 752, ""), ("Account", 802, "")])
+        assert (await _tap(d, 1))[1] == 772  # B, not A at 120
+        await finish(stop, task)
+    run(go)
+
+
+# ---- nothing tells: refused, nothing touched ----
+@pytest.mark.parametrize("after", [
+    # rows only, no other element: the shift can't be measured (rows can be replaced as a list scrolls)
+    [("Account", 300, ""), ("Account", 350, ""), ("Account", 400, "")],
+    # the elements that moved disagree (the list was laid out again)
+    [("Billing", 250, ""), ("Totals", 420, ""), ("Account", 300, ""), ("Account", 350, "")],
+])
+def test_an_indexed_tap_that_cant_tell_its_element_after_the_scroll_touches_nothing(after):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        _form(d, [("Account", 100, ""), ("Billing", 950, ""), ("Account", 1000, ""), ("Account", 1050, ""),
+                  ("Totals", 1100, "")], after)
         await d.run_tool("a", "look", {"screenshot": False})
         taps = len(d.session.tap_points)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 1}, "look": False})
-        assert e.value.code == "stale" and "nothing was touched" in str(e.value)
+        assert e.value.code == "stale" and "wasn't touched" in str(e.value)
         assert len(d.session.tap_points) == taps
         await finish(stop, task)
     run(go)
 
 
-def test_evenly_spaced_rows_with_one_dropped_can_not_be_told_apart():
-    from tapwright.daemon import _lined_up
-    rows = [el("", "button", "Account", "", rect=(10, y, 100, 40)) for y in (100, 150, 200, 250)]
-    now = [el(f"e{i}", "button", "Account", "", rect=(10, y, 100, 40)) for i, y in enumerate((100, 150, 200))]
-    # the first row has gone and every row moved up by 50, or none did and the last has gone: both fit
-    assert _lined_up(rows[1], rows, now, now) is None
-    # rows spaced unevenly: only one shift fits
-    rows = [el("", "button", "Account", "", rect=(10, y, 100, 40)) for y in (100, 150, 230, 250)]
-    now = [el(f"e{i}", "button", "Account", "", rect=(10, y, 100, 40)) for i, y in enumerate((100, 180, 200))]
-    assert _lined_up(rows[1], rows, now, now) is now[0]
+def test_replaced_rows_of_the_same_count_are_not_taken_for_the_target():
+    """Codex, cycle 4: before A B C D at 100..250, after B C D E at 100..250 (shift -50). Rows only: refused, where
+    matching the rows one for one picked C."""
+    rows = lambda ys: [el(f"e{i}", "button", "Account", "", rect=(10, y, 100, 40)) for i, y in enumerate(ys)]
+    before, after = rows((100, 150, 200, 250)), rows((100, 150, 200, 250))
+    assert _followed(before[1], before, after, after, after) is None
+    # with a heading that moved by -50 too, B is the row at 100
+    head0, head1 = el("", "text", "Plans", rect=(10, 60, 100, 30)), el("", "text", "Plans", rect=(10, 10, 100, 30))
+    assert _followed(before[1], [head0, *before], [head1, *after], after, after) is after[0]
 
 
-# ---- P2: an ended agent is not forgotten after others end ----
+def test_a_horizontal_list_is_followed_by_its_shift_across():
+    cards = lambda xs: [el(f"e{i}", "button", "Open", "", rect=(x, 300, 120, 80)) for i, x in enumerate(xs)]
+    before, after = cards((10, 500, 640)), cards((10, 160, 300))  # the first card is fixed; the rest moved by -340
+    tag0, tag1 = el("", "text", "Deals", rect=(470, 260, 80, 20)), el("", "text", "Deals", rect=(130, 260, 80, 20))
+    assert _followed(before[1], [tag0, *before], [tag1, *after], after, after) is after[1]
+
+
+# ---- cycle 3: an ended agent is not forgotten after others end ----
 def test_an_ended_agent_stays_ended_after_hundreds_of_others_end():
     async def go():
         d = make()

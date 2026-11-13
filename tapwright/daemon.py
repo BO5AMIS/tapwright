@@ -648,38 +648,45 @@ REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "clos
             "open_url": ("url",), "compare_screen": ("name",)}
 
 
-LINED_UP = 2.0  # points: how far a match may lie from where the scroll's shift puts one the first look saw
+FOLLOW_TOLERANCE = 2.0  # points: how far apart two measures of the scroll's shift (or a row and its spot) may be
 
 
-def _lined_up(hit: ui.Element, before: list[ui.Element], after: list[ui.Element],
-              on_screen: list[ui.Element]) -> ui.Element | None:
+def _key(e: ui.Element) -> tuple:
+    return e.role, e.label, e.identifier, e.value, round(e.width), round(e.height)
+
+
+def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element],
+              matches: list[ui.Element], on_screen: list[ui.Element]) -> ui.Element | None:
     """The match on screen after a scroll that is the element `hit` was before it, or None when that can't be told.
 
-    A scroll moves a list's rows together. A match taken as `hit` gives the shift (where it is now, less where `hit`
-    was); with the right one, every match now that falls among the matches the first look saw (`before`) lies where
-    one of them lay, shifted. Matches past them are rows rendered since, and matches the first look saw may be gone
-    (a virtualized list drops the rows it has scrolled past). A shift that puts every match now on one the first look
-    saw, one for one, wins (a list that keeps all its rows: evenly spaced ones also fit a shift of one row, which
-    pushes the last row past them). Else exactly one match on screen must fit: none, or several (evenly spaced rows in
-    a list that drops and adds them), and the element can't be told."""
-    if not before:
-        return None
-    lo_x, hi_x = min(b.x for b in before) - LINED_UP, max(b.x for b in before) + LINED_UP
-    lo_y, hi_y = min(b.y for b in before) - LINED_UP, max(b.y for b in before) + LINED_UP
-    fits, whole = [], []
-    for c in after:
-        if not any(c is e for e in on_screen):
+    The scroll's shift is measured on the elements that moved with it and that nothing else resembles: an element seen
+    once before and once after (role, label, identifier, value and size), that isn't one of the matches and that has
+    moved. They must all agree. Elements that didn't move (a bar or a header outside the list) say nothing, and the
+    matches themselves never vouch for a shift: a row can be dropped or replaced as the list scrolls (Codex, PR #6
+    cycles 3 and 4). `hit`, moved by that shift, must then lie on exactly one match on screen."""
+    def once(items):
+        seen: dict[tuple, list[ui.Element]] = {}
+        for e in items:
+            seen.setdefault(_key(e), []).append(e)
+        return {k: v[0] for k, v in seen.items() if len(v) == 1}
+    was, now = once(before), once(after)
+    taken = {_key(e) for e in matches} | {_key(hit)}
+    shifts = []
+    for k, a in was.items():
+        b = now.get(k)
+        if b is None or k in taken:
             continue
-        dx, dy = c.x - hit.x, c.y - hit.y
-        placed = [any(abs(a.x - dx - b.x) <= LINED_UP and abs(a.y - dy - b.y) <= LINED_UP for b in before)
-                  for a in after]
-        if all(p or not (lo_x <= a.x - dx <= hi_x and lo_y <= a.y - dy <= hi_y) for a, p in zip(after, placed)):
-            fits.append(c)
-            if len(after) == len(before) and all(placed):
-                whole.append(c)
-    if len(whole) == 1:
-        return whole[0]
-    return fits[0] if len(fits) == 1 else None
+        dx, dy = b.x - a.x, b.y - a.y
+        if abs(dx) > FOLLOW_TOLERANCE or abs(dy) > FOLLOW_TOLERANCE:
+            shifts.append((dx, dy))
+    if not shifts:
+        return None  # nothing moved that can be told apart: the shift is unknown
+    dx, dy = shifts[0]
+    if any(abs(x - dx) > FOLLOW_TOLERANCE or abs(y - dy) > FOLLOW_TOLERANCE for x, y in shifts):
+        return None  # the elements disagree (rows laid out again): the shift is unknown
+    spot = [m for m in matches if any(m is e for e in on_screen)
+            and abs(m.x - hit.x - dx) <= FOLLOW_TOLERANCE and abs(m.y - hit.y - dy) <= FOLLOW_TOLERANCE]
+    return spot[0] if len(spot) == 1 else None
 
 
 async def _first(timeout: float, *events: asyncio.Event) -> None:
@@ -3865,25 +3872,24 @@ class Daemon:
         # `hit` was counted through the screen and what lies past it, so the scroll and the look after it count the
         # same way. An `index` alone doesn't keep the element: a list that drops the rows it has scrolled past (a
         # virtualized one) shifts the count (Codex, PR #6 cycle 3). So an indexed target follows the element itself:
-        # by its identifier when no other match has it, else by where it lies among the matches the first look saw.
+        # by its identifier when nothing else in the tree has it, else by the scroll's shift, measured on what moved
+        # with the list (_followed). When neither tells, nothing is touched.
         follow, before = target, []
         if target.index is not None:
-            before = ui.candidates(sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x)),
-                                  target)
+            before = sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x))
             if hit.identifier and sum(e.identifier == hit.identifier for e in before) == 1:
-                follow = ui.Target(id=hit.identifier)
+                follow = ui.Target(id=hit.identifier)  # (no other element in the tree has it)
         done = await self._scroll_to(view, follow, together=True)
         # The element the target names now: on screen after the scroll, it is the one to touch. The action gets its
         # ref, not the target again: an `index` counted in the visible matches alone would point at another element.
         if before and follow is target:
-            after = ui.candidates(sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x)),
-                                  target)
-            final = _lined_up(hit, before, after, view.items)
-            if final is None and any(any(c is e for e in view.items) for c in after):
-                raise Refused("stale", f"the matches of the target changed as the list scrolled (it adds and drops "
-                                       f"rows as it moves), so index {target.index} can't be sure to name "
-                                       f"{hit.line(ref=False, actions=False)} any more; nothing was touched. Look, "
-                                       f"then target it by its ref.")
+            after = sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x))
+            final = _followed(hit, before, after, ui.candidates(after, target), view.items)
+            if final is None:
+                raise Refused("stale", f"index {target.index} can't be sure to name "
+                                       f"{hit.line(ref=False, actions=False)} after the scroll: nothing that moved with "
+                                       f"the list tells which match it is now, so it wasn't touched. Look, then target "
+                                       f"it by its ref.")
         else:
             try:
                 final = self._anywhere(view, follow, together=True)

@@ -113,9 +113,9 @@ def test_a_tap_on_an_indexed_off_screen_match_taps_that_element_after_the_scroll
     async def go():
         d = make()
         stop, task = await started(d)
-        rows = LongList(d, rows=40, ids=False, labels=lambda i: "Account")
+        rows = LongList(d, rows=40, ids=False, labels=lambda i: "Account" if i % 2 == 0 else f"Row {i}")
         await d.run_tool("a", "look", {"screenshot": False})
-        r = await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 30}, "look": False})
+        r = await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 15}, "look": False})
         assert r["text"].startswith("Scrolled to it, then tapped") or "Tapped" in r["text"], r["text"]
         x, y = d.session.tap_points[-1]
         assert y == 30 * rows.pitch + rows.offset + rows.height / 2  # row 30's centre, not another Account's
@@ -130,12 +130,14 @@ def test_type_text_into_an_indexed_off_screen_input_types_into_that_input():
         s = d.session
         s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800)),
                   el("e2", "input", "Note", "", rect=(10, 100, 300, 44))]
-        s.offscreen = [el("", "input", "Note", "", rect=(10, 1000, 300, 44)),
+        s.offscreen = [el("", "text", "Details", "", rect=(10, 950, 100, 30)),  # a heading that moves with the form
+                       el("", "input", "Note", "", rect=(10, 1000, 300, 44)),
                        el("", "input", "Note", "", rect=(10, 1500, 300, 44))]
         real = s.scroll
 
         async def scroll(x0, y0, x1, y1):  # the form moves up by 700: only the second Note is on screen now
-            s.tree = [s.tree[0], el("e2", "input", "Note", "", rect=(10, 300, 300, 44))]
+            s.tree = [s.tree[0], el("", "text", "Details", "", rect=(10, 250, 100, 30)),
+                      el("e2", "input", "Note", "", rect=(10, 300, 300, 44))]
             s.offscreen = [el("", "input", "Note", "", rect=(10, -600, 300, 44)),
                            el("", "input", "Note", "", rect=(10, 800, 300, 44))]
             return await real(x0, y0, x1, y1)
