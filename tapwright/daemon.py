@@ -3855,6 +3855,16 @@ class Daemon:
             note = getattr(done, "note", "") or "it is as far into view as it gets."
             raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
                                             f"scrolling didn't bring it on screen: {note}")
+        if hit.identifier and (follow is not target or target.id == hit.identifier):
+            # Followed by its real identifier: what is touched must still carry it, and nothing else may. An `id`
+            # lookup falls back to WebDriverAgent's raw name when no identifier matches, so with the element gone
+            # (an app refresh during the scroll) another element whose label mirrors that word would be found
+            # (Codex, PR #6 cycle 9).
+            tree = [*view.items, *getattr(s, "offscreen", [])]
+            if final.identifier != hit.identifier or sum(e.identifier == hit.identifier for e in tree) != 1:
+                raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
+                                       f"scroll (its identifier \"{hit.identifier}\" is gone or no longer its own), "
+                                       f"so nothing was touched. Look, then target what is there.")
         if name != "type_text" and self._police_key(final) != self._police_key(hit):
             # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
             self._policed = None

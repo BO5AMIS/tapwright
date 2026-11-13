@@ -131,6 +131,50 @@ def test_an_identifier_another_element_shares_is_not_followed():
     run(go)
 
 
+# ---- cycle 9: a followed identifier that is gone after the scroll never falls back to a raw name ----
+def _gone(role):
+    """A at 100 (identifier a), B at 1000 (identifier profile), C at 1050 (its label, so its raw name, is profile, and
+    it has no identifier). The form moves up by 700, and an app refresh drops B: C is on screen at 350."""
+    def item(label, ident, rect):
+        return (role, label, ident, rect)
+    before = [FORM, item("Account", "a", (10, 100, 100, 40)), item("Account", "profile", (10, 1000, 100, 40)),
+              item("profile", "", (10, 1050, 100, 40))]
+    after = [FORM, item("Account", "a", (10, -600, 100, 40)), item("profile", "", (10, 350, 100, 40))]
+    return before, after
+
+
+@pytest.mark.parametrize("call", [
+    ("tap", {"target": {"label": "Account", "index": 1}}),
+    ("tap", {"target": {"id": "profile"}}),
+    ("type_text", {"target": {"label": "Account", "index": 1}, "text": "x"}),
+])
+def test_an_element_followed_by_its_identifier_that_is_gone_after_the_scroll_is_not_replaced(call):
+    tool, args = call
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        _screen(d, *_gone("input" if tool == "type_text" else "button"))
+        for e in [*d.session.tree, *d.session.offscreen]:
+            e.name = e.identifier or e.label  # WebDriverAgent's raw name: the identifier, else the label
+        real_scroll = d.session.scroll
+
+        async def scroll(*a):
+            r = await real_scroll(*a)
+            for e in [*d.session.tree, *d.session.offscreen]:
+                e.name = e.identifier or e.label
+            return r
+        d.session.scroll = scroll
+        await d.run_tool("a", "look", {"screenshot": False})
+        taps, typed = len(d.session.tap_points), len(d.session.typed)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", tool, {**args, "look": False})
+        assert e.value.code == "stale" and "nothing was touched" in str(e.value)
+        assert len(d.session.tap_points) == taps and len(d.session.typed) == typed
+        await finish(stop, task)
+    run(go)
+
+
 # ---- cycle 3: an ended agent is not forgotten after others end ----
 def test_an_ended_agent_stays_ended_after_hundreds_of_others_end():
     async def go():
