@@ -1057,6 +1057,45 @@ def test_lines_of_a_replacement_process_stay_out_when_it_exits_and_logs_is_asked
     run(go)
 
 
+def test_a_replacement_process_the_watcher_itself_saw_stays_out_when_it_has_left_before_the_next_look():
+    """Codex, PR #4 cycle 4 (P1): the log watcher's own look found another app holding the app's pid, and left the lines it
+    had read (a secret) unchecked; that app exited during the reader's cleanup, so no later look found a holder, and a
+    logs call found nobody on the pid, vouched for the lines and published them."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        stop, task = await started(d)
+        await opened(d)
+        ring = d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        seen: list[int] = []
+        real = device.process_holder
+
+        async def holder(pid):
+            seen.append(pid)
+            if len(seen) > 1:
+                return await real(pid)
+            await settle(lambda: len(ring.entries) == 2)  # the watcher's look finds the other app after its line was read
+            found = await real(pid)
+            device.holders.clear()  # and that app exits at once: every later look finds nobody on the pid
+            return found
+        device.process_holder = holder
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(seen) >= 1 and 42 in device.stream_closed)
+        await asyncio.sleep(0.15)  # the reader's cleanup and the watcher's last look are done
+        for _ in range(2):
+            shown = (await d.run_tool("a", "logs", {}))["text"]
+            assert "secret" not in shown and f"Latest: {BASE + 1}" in shown
+        assert not any("secret" in e.text for e in ring.entries)
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_step_with_no_boundary_and_no_phone_clock_shows_no_logs():
     async def go():
         d = tuned(make())

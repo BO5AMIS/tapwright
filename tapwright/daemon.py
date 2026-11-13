@@ -1241,6 +1241,10 @@ class Daemon:
                         break
                     if holder is None:
                         await asyncio.wait({reader}, timeout=self.log_drain)
+                    else:  # seen here, so kept here: the other process may be gone by the time anything looks again
+                        self._log_tainted[bundle] = proc
+                        # (what a logs call has vouched for since the watcher's last look stays: it was shown to be the app's)
+                        ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
                     break
             finally:
                 reader.cancel()
