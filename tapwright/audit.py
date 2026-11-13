@@ -58,8 +58,11 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     for e in items:
         if ident and (e.identifier == ident or e.name == ident):
             return e.line()
+    # an RN radio or checkbox has its role and state words in XCTest's raw label ("Weekly, radio button"); the tree's
+    # element has the label without them (CodeRabbit, PR #8)
+    labels = {label, ui.rn_label(label)}
     for e in items:
-        if any(box[2:]) and tuple(round(v) for v in e.rect) == box and (not label or label in (e.label, e.value, e.text)):
+        if any(box[2:]) and tuple(round(v) for v in e.rect) == box and (not label or labels & {e.label, e.value, e.text}):
             return e.line()
     # the tree has no such element: say what XCTest itself says of it (its label or id, and its frame in points)
     kind = str(attrs.get("type") or "").removeprefix("XCUIElementType")

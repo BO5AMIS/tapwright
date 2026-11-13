@@ -147,6 +147,16 @@ def test_the_no_trait_finding_follows_the_asked_types_and_xctests_own_trait_issu
     assert both[0][2] == "Trait missing"
 
 
+def test_xctests_raw_label_of_an_rn_radio_is_the_same_element_as_ours_and_is_reported_once():
+    """CodeRabbit, PR #8: "Weekly, radio button" (no name) didn't match the tree's "Weekly", so the row was doubled."""
+    items = _rn_screen()
+    raw = issue("trait", "Weekly, radio button", rect=(16, 250, 398, 44), element_type="XCUIElementTypeOther",
+                text="Trait missing")
+    rows = audit.rows_of([raw], items, ["trait"])
+    assert [r[1] for r in rows].count('e3 radio "Weekly" @16,250 398x44 [tap]') == 1
+    assert len(rows) == 3 and rows[0][2] == "Trait missing"
+
+
 def test_the_fix_text_follows_our_own_rows_not_the_words_of_xctests():
     items = _rn_screen()
     own = issue("trait", "Back", rect=(10, 10, 40, 40), text="no trait: it says this itself")
