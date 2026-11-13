@@ -1479,7 +1479,7 @@ class Daemon:
             "answer_chars": len(said) if isinstance(said, str) else None,
             "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
             "confirmed": True if self._granted_now and not read else None,
-            "screenshot": True if name == "look" and args.get("screenshot") is True else None,
+            "screenshot": True if name == "look" and args.get("screenshot", True) else None,  # (look's default is on)
             "to": args.get("to") if name == "scroll" else None,
             "labels": True if name == "look" and args.get("labels") else None,
             "ocr": True if name == "look" and args.get("ocr") else None,

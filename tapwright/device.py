@@ -436,6 +436,7 @@ class Device:
         until clear_network, a reconnect or close. The identifier of the profile used. DeviceError when the phone
         can't."""
         async with self._network_lock:
+            replaced = bool(self._network_holds)
             await self._stop_holds()
             hold = NetworkHold(self, mode)
             self._network_hold = hold
@@ -446,6 +447,8 @@ class Device:
                 if self._network_hold is hold:
                     self._network_hold = None
                 self._network_holds.discard(hold)
+                if replaced:  # the condition that was on is gone with nothing in its place: the daemon is told
+                    self._network_ended(f"{mode} could not replace it, so the phone is back to normal")
                 raise
 
     async def clear_leftover(self) -> None:

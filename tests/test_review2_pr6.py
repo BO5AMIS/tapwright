@@ -170,3 +170,85 @@ def test_a_scroll_that_brings_another_element_on_screen_is_checked_by_the_policy
         assert s.tap_points == []  # nothing was touched
         await finish(stop, task)
     run(go)
+
+
+# ---- CodeRabbit: index 2 of four matches keeps its place while the others come on screen ----
+def test_an_indexed_target_among_four_matches_is_the_same_element_after_the_scroll():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800)),
+                  el("e2", "button", "Account", "", rect=(10, 100, 100, 40))]
+        s.offscreen = [el("", "button", "Account", "", rect=(10, y, 100, 40)) for y in (1000, 1050, 1100)]
+        real = s.scroll
+
+        async def scroll(x0, y0, x1, y1):  # B, C and D are on screen now (A above it)
+            s.tree = [s.tree[0]] + [el(f"e{i}", "button", "Account", "", rect=(10, y, 100, 40))
+                                   for i, y in ((3, 300), (4, 350), (5, 400))]
+            s.offscreen = [el("", "button", "Account", "", rect=(10, -600, 100, 40))]
+            return await real(x0, y0, x1, y1)
+        s.scroll = scroll
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 2}, "look": False})
+        assert s.tap_points[-1][1] == 370  # C (350 to 390), not D
+        await finish(stop, task)
+    run(go)
+
+
+# ---- CodeRabbit: a replacement that fails after it stopped the old condition ends it for the daemon ----
+def test_a_failed_replacement_tells_the_daemon_the_old_condition_has_ended(monkeypatch):
+    from tapwright.device import Device
+
+    async def go():
+        class Dtx:
+            async def wait_disconnected(self):
+                await asyncio.Event().wait()
+        _fake_instruments(monkeypatch, Dtx())  # it offers a 3G profile and nothing for `lossy`
+        d = make()
+        stop, task = await started(d)
+        real = Device(log=lambda *a: None)
+        real.rsd, real.via = "tunnel", "USB"
+        real.on_network_end = d._network_over
+        d.session.device = real
+        await d.run_tool("a", "network", {"mode": "3g"})
+        assert d._network == "3g"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("b", "network", {"mode": "lossy"})
+        assert e.value.code == "unsupported"
+        assert d._network is None and not real._network_holds  # the phone is back to normal, and the daemon says so
+        text = (await d.run_tool("a", "look", {"screenshot": False}))["text"]
+        assert "the network condition ended" in text
+        await real.clear_network()
+        await finish(stop, task)
+    run(go)
+
+
+# ---- CodeRabbit: a look that doesn't say `screenshot` takes one, and the log says so ----
+def test_a_look_without_the_screenshot_argument_is_logged_as_a_screenshot_look(tmp_path):
+    from tapwright import report
+    from tapwright.actionlog import ActionLog
+
+    async def go():
+        d = make(actions=ActionLog(tmp_path))
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await finish(stop, task)
+        looks = [e for e in report.read_entries(tmp_path) if e["tool"] == "look"]
+        assert [bool(e.get("screenshot")) for e in looks] == [True, False]
+    run(go)
+
+
+# ---- CodeRabbit: BCP 47 extension and private-use sequences ----
+@pytest.mark.parametrize("code", ["en-US-u-ca-gregory", "en-x-test", "de-DE-u-co-phonebk-x-priv", "ar", "zh-Hans-CN"])
+def test_language_accepts_extension_and_private_use_sequences(code):
+    from tapwright import launch
+    assert launch.check({"language": code}) == {"language": code}
+
+
+@pytest.mark.parametrize("code", ["en-u", "en-x", "en-US-u-", "en-u-c", "e", "en--GB"])
+def test_language_still_refuses_a_singleton_with_nothing_after_it(code):
+    from tapwright import launch
+    with pytest.raises(Refused):
+        launch.check({"language": code})
