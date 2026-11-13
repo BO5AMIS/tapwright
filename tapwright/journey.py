@@ -105,7 +105,8 @@ class Screen:
     index: int
     signature: frozenset
     title: str
-    acted: bool = False
+    acted: bool = False  # something was done here at some visit (the report's "nothing done here")
+    acted_here: bool = False  # ... in the current visit; with scrolls and reads, counted per visit
     scrolls: int = 0
     reads: int = 0
     frame: int | None = None  # the index in Journey.frames of the first picture of it
@@ -192,9 +193,9 @@ class Journey:
             if left is not None:
                 left.scrolls += 1
         if name in ACTING and left is not None:
-            left.acted = True
+            left.acted = left.acted_here = True
         entered = self.see(text)
-        if name == "back" and entered and left is not None and not left.acted:
+        if name == "back" and entered and left is not None and not left.acted_here:
             self.wrong_turns += 1
             if left.scrolls or left.reads >= 2:
                 self.dead_ends += 1
@@ -211,6 +212,7 @@ class Journey:
         for s in self.screens:
             if alike(s.signature, sig) >= SAME_SCREEN:
                 self.current = s
+                s.acted_here, s.scrolls, s.reads = False, 0, 0  # a new visit: wrong turns and dead ends count per visit
                 return True
         self.current = Screen(len(self.screens) + 1, sig, title_of(text))
         self.screens.append(self.current)

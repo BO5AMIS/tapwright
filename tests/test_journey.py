@@ -1346,3 +1346,18 @@ def test_cr_a_start_whose_undo_raises_still_leaves_no_journey_registered(reports
         assert not reports.exists() or not list(reports.iterdir())
         await finish(stop, task)
     run(go)
+
+
+def test_cr_a_later_visit_to_a_known_screen_counts_wrong_turns_and_dead_ends_on_its_own(tmp_path):
+    j = new_journey(tmp_path)
+    home, food = full(("button", "Log meal"), ("text", "Today")), full(("header", "Add food"), ("input", "Search"))
+    j.note_call("look", {}, home, 0, None)
+    j.note_call("tap", {}, food, 0, None)
+    j.note_call("scroll", {}, "Same screen.", 0, None)
+    j.note_call("type_text", {"text": "a"}, "Same screen.", 0, None)  # worked here at the first visit
+    j.note_call("back", {}, home, 0, None)
+    assert (j.wrong_turns, j.dead_ends) == (0, 0)
+    j.note_call("tap", {}, food, 0, None)  # a second visit: nothing done, and it is not a dead end
+    j.note_call("back", {}, home, 0, None)
+    assert (j.wrong_turns, j.dead_ends) == (1, 0)
+    assert j.screens[1].acted  # the report still says something was done there
