@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -453,6 +453,7 @@ text items.
 | `check_layout` | Tapline now; Tapwright later, partly | needs layout data. Tapwright can check tap-target sizes, overlaps and contrast from the accessibility tree and the screenshot, but not truncation |
 | `compare_screen`, `filmstrip` | both (Tapwright since v1.9) | image work: §14 |
 | `record`, `replay` | both (v1.8) | scripts by id, label or text work for both (§9.4) |
+| `journey`, `ux_check`, `media` | both (v1.12) | §17. What each tool can do inside them differs, and the answers say so |
 | `session_report`, `network` | both (v1.11) | §16. Tapline's `network` is an `app_command` |
 | `logs`, `crash`, `performance` | both (v1.10) | diagnostics: §15. What each tool reads differs, and the answers say so |
 | `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
@@ -523,7 +524,7 @@ A step is one tool call written as an object: `{"tool": "<name>", ...its paramet
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
 `wait_for`, `compare_screen` (a check, §14.2), `performance` (v1.10, §15.3), `network` (v1.11, §16.4), and where the tool has them `alert`,
 `press_button`, `rotate`, `open_app`, `close_app`, `app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`, `session_report`,
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`, `session_report`, `journey`, `ux_check`, `media`,
 and where the tool has them `inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
@@ -1016,3 +1017,113 @@ Shared values:
 - QUALITY-BAR gains a calls-per-check section: a fixed list of checks on Wayfare (open a screen, change a setting,
   fill a form, find an item in a long list, check an error state), each scored by calls and seconds. The bar: no more
   calls than the same check on Android.
+
+## 17. Journeys and usability (v1.12)
+
+An app is made or broken by whether a user can find a feature, understand it and finish it easily. This section lets an
+agent test that: go through a feature as a user would, measure the trip, check each screen against the basics, and file
+a visual report. Nothing here is required setup: an agent can start a journey with only a goal.
+
+### 17.1 `journey`
+
+- `start: true` with `goal` (free text: "log breakfast by scanning its barcode") and optional `persona` (free text, or
+  the name of an example persona, §17.2), `conditions` (any of 1.4's `language`, `region`, `text_size`, `network`,
+  applied at the start and undone at the stop), `allow` (shortcuts the journey may use: `open_url`, and in Tapline test
+  `app_command`s) and `eyes` (`"user"`, the default, or `"agent"`).
+- `stop: true` with `reached` (true or false) and optional `why`, `export` (§17.5). Only one journey per agent at a
+  time; starting another while one runs is `bad_params`.
+- Answer to `start`: `Journey started: "<goal>" as <persona or "no persona">, in a user's eyes.` and the screen.
+
+**In a user's eyes** (the default while a journey runs):
+- Only what is visibly on the glass: elements clipped by their scroll view, behind a sheet or under the keyboard are left
+  out, and the header says `more below` / `more above` only where a view can really scroll further (no counts).
+- No ids. An element's line shows its visible text; an icon-only button shows as `e12 button (icon only)`, with its
+  accessibility label apart as `(VoiceOver: "Settings")`. `placeholder` stays (it is on the glass).
+- Targets: `ref`, visible `text` (only text a person can read on the glass: never an icon-only button's VoiceOver label,
+  nor an element clipped out of view), and `{x, y}`. `id` and `label` answer `bad_params: in a journey, ids and labels are
+  hidden; use a ref or the visible text`.
+- No shortcuts: act-after-scroll (§16.2) and `scroll` `to: "target"` are off; `wait_for` looks at the screen only;
+  `open_url` and test `app_command`s are refused unless `allow` names them, and the report lists the ones used.
+- `eyes: "agent"` turns all this off for the rest of the journey (the report says so).
+
+**Measured while it runs** (by the tool, not the agent): taps, screens, typing, scrolls, time (with waits for loading
+apart), wrong turns (a screen entered and left by `back` without acting), dead ends, errors hit, hesitations (two or
+more reads without an action), and the taps from the first screen to the goal.
+
+### 17.2 Personas as guidance
+
+No tool enforces a persona. The skill teaches the agent to build them for the app at hand (who uses it, what they
+already know, what they want, in what situation, which conditions fit) and to agree them with its user. A reference
+file of example personas (first-timer, busy regular, older user with large text, right-to-left speaker, poor
+connection, one-handed on a big phone), a few lines each with the conditions they suggest, is a starting point to copy,
+extend or ignore.
+
+### 17.3 `ux_check`
+
+One screen against the basics. Facts first (each with the element it concerns), then the agent's own judgment:
+- the number of competing choices (actionable elements on screen);
+- whether there is one clear main action (size, position, contrast);
+- main actions out of thumb reach for this screen size (the lower part of the screen);
+- icon-only buttons with no label;
+- cut-off text, contrast and target size (from `audit`);
+- the same action named differently on screens seen in this journey;
+- an error or empty state that doesn't say what to do next.
+
+Answer: `UX check of <screen>: <n> findings.` then one line each `<n>. <kind>: <element line>: <what> (<basis>)`, where the
+basis is `measured`, `best practice: <rule>` or `house rule: <rule>`. Tapline adds the file and line in a development
+build.
+
+**House rules** (optional): `--ux-rules FILE` (JSON, like the policy file: `{"version": 1, "rules": ["core features within
+2 taps of home", {"max_taps_to_goal": 4}, {"way_back": true}]}`). A rule written as text is handed to the agent to judge;
+a rule written as one of the measured keys is checked by the tool: `max_taps_to_goal` (a journey that reaches its goal
+in more taps breaks it) and `way_back` (`true`: every screen in the journey has a visible way back, a back button, a
+close control or a tab bar). An unknown key is `bad_params` when the file is read. Each rule appears in the report.
+
+### 17.4 Stress moments
+
+`journey` with `stress` (during a journey): `background` (the app leaves and comes back), `network` (with `mode`, a 1.4
+condition starting mid-flow), `double_tap` (with a `target`: the same touch twice, 80 ms apart; refused when the safety policy flags the target, since
+one OK never covers two touches, and otherwise each touch is checked), `rotate` and
+`relaunch`, and `survives` (what must still be there after: `{text}` or `{goal_step}`). Answer:
+`Stress: background; it survived: text "2 eggs" is still in the field.` or `…; it didn't survive: …`.
+- **Tapwright** does all of them (`relaunch` closes and opens the app).
+- **Tapline** does `network` and `double_tap`; `relaunch` is a reload in a development build, said as `reload, not a
+  relaunch`; `background` and `rotate` ask the person (a needs-a-person line, "switch to another app and back, then say
+  done"), or are done by Tapwright when it drives the same phone. None is faked with an in-app event. When the person
+  has done it, the agent calls `journey` with `stress` and `done: true`, and the tool checks `survives` then.
+
+### 17.5 The visual report
+
+`journey` `stop` writes one report folder (`report.md`, `report.html`, and its pictures) and answers its summary:
+```
+Journey "log breakfast by scanning its barcode" as a first-timer: reached in 9 taps, 1 min 52 s (34 s waiting), 2 wrong turns, 3 hesitations.
+Findings: 2 high, 3 medium, 1 low. Report: <folder>
+```
+then at most 2 small key pictures. The report holds: the goal, persona and conditions; reached or not; the numbers;
+the path screen by screen with a filmstrip; each finding with its severity, screen, a marked-up screenshot and its
+basis; and a GIF of the journey (360 px wide, taps drawn as rings, at most 3 MB; Tapwright from its live stream,
+Tapline from frames it keeps after each settled action), or a short video where there is one. Pictures stay in files,
+never in the agent's context beyond the stop answer.
+
+**Export** (only when the user asks, since it writes to their GitHub) needs `confirm: true` (the agent says its user
+asked). It uploads `report.md`, `report.html`, the GIF, the filmstrip and the finding pictures in one commit.
+`{"to": "pr", "repo": "...", "pr": 310}` commits them into that PR's branch under `.tapwright/reports/<name>/`
+(Tapline: `.tapline/reports/<name>/`) and comments on the PR with the summary and the pictures linked; when the PR's
+branch lives in another repository (a fork), it is refused unless `fork: true`, and the answer names that repository.
+`{"to": "issue", "repo": "..."}` pushes them to the repository's `qa-reports` branch and opens an issue that links
+them. A public repository is refused unless `public: true` is also given. Both use `gh` with the user's own sign-in,
+and the answer says what was written where.
+
+### 17.6 `media`: test pictures for photo pickers
+
+`media` with `add` (paths of pictures on the computer) and `confirm: true` puts them in the phone's photo library for an
+app's photo picker; `remove: true` deletes only what it added. The skill says to ask the user first whether pictures may
+be added, and whether to remove them afterwards. Without `confirm`, `bad_params` saying so.
+- **Tapwright:** through its own runner on the phone. iOS asks the person once to let the runner add photos; Tapwright
+  adds with add-only access, so it never reads the library. `remove` needs the runner's full access, which iOS asks for
+  once, and iOS asks the person to confirm each delete (Tapwright doesn't tap that for them). Without full access,
+  `remove` answers what to delete by hand (their names, from Recently Added).
+- **Tapline:** through the app's own `expo-media-library` (or `@react-native-camera-roll/camera-roll`), with the app's
+  own permission prompt and delete confirmation. Without either, `unsupported`, naming Tapwright's `media`. Tapline also
+  has `picker: true`: the next image-picker call returns the picture without the library; the report marks it
+  `(picker skipped)`.

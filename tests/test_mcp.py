@@ -178,3 +178,21 @@ def test_the_directory_is_checked_at_startup(tmp_path):
     with pytest.raises(SystemExit) as e:
         mcp_server.check_screenshots_dir(tmp_path / "file" / "shots")
     assert "--screenshots" in str(e.value) and "shots" in str(e.value)
+
+
+def test_file_mode_saves_a_journeys_second_picture_too_and_sends_nothing_inline(monkeypatch, tmp_path):
+    from PIL import Image
+    import io as _io
+    buf = _io.BytesIO()
+    Image.new("RGB", (30, 60)).save(buf, "JPEG")
+    jpeg = base64.b64encode(buf.getvalue()).decode()
+
+    def fake_call(tool, args, client_id, timeout=120.0):
+        return {"text": "Journey done.", "image": jpeg, "image_size": [30, 60], "images": [jpeg]}
+    monkeypatch.setattr(client, "call", fake_call)
+    monkeypatch.setattr(mcp_server, "SHOTS_DIR", tmp_path)
+    out = asyncio.run(mcp_server._tool("journey", stop=True, reached=True))
+    assert [c.type for c in out.content] == ["text"]
+    lines = out.content[0].text.splitlines()
+    assert lines[-1].endswith("-journey_more.jpg (30x60)") and lines[-2].endswith("-journey.jpg (30x60)")
+    assert len(list(tmp_path.iterdir())) == 2

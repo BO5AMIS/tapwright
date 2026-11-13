@@ -23,8 +23,9 @@ from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, aio, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib,
-               launch as launchlib, needs, network, ocr, params, performance, report, store, ui)
+from . import (actionlog, aio, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib, journey,
+               journey_tool, launch as launchlib, media as medialib, needs, network, ocr, params, performance, report,
+               store, ui, uxcheck)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -48,9 +49,9 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
-READ_LOGGED = frozenset({"look", "wait_for", "audit", "apps"})  # (compare_screen writes its own line: _log_compare)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
@@ -83,6 +84,21 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# True inside a journey tool's own call (a stress moment, the conditions): only that task's calls skip the journey's gate and
+# count. A shared counter on the journey let an independent call of the same client, made meanwhile, skip them too.
+_JOURNEY_OWN: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_journey_own", default=False)
+# True while a journey's `background` stress brings its app back: the running process is brought to the front as it is
+# (WebDriverAgent does that for a launch with no arguments), never closed and started again with the phone's defaults, and
+# the launch arguments it runs with stay on record (Codex, PR #7 cycle 1).
+_RESUME: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_resume_app", default=False)
+# True while a journey's `double_tap` stress makes its tap: the touch goes out twice, DOUBLE_TAP_GAP apart (§17.4)
+_DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
+DOUBLE_TAP_GAP = 0.08  # seconds between the two touches of a double tap
+STRESS_BACKGROUND_S = 1.0  # seconds the app stays in the background in a `background` stress moment
+STRESS_ROTATE_S = 0.6  # seconds in landscape in a `rotate` stress moment
+# the calls after which a journey keeps a picture of the screen (§17.5): the actions that can change it
+JOURNEY_FRAMES = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
+                            "alert", "press_button", "rotate", "wait_for", "wait", "run", "replay"})
 # whether the field type_text really typed into is secure, appended by _type_text once it has resolved the field (after
 # any scroll or re-read), so a recording never trusts a guess made before the call (Codex, PR #6)
 _TYPED_SECURE: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar("tapwright_typed_secure", default=None)
@@ -144,6 +160,14 @@ def _outside(bundle: str | None, name: str | None, given: str, alert: bool = Fal
             "touched. Go back with open_app.")
 
 
+class UxRead(NamedTuple):
+    """What one ux_check turn read (Daemon._ux_check): checked, filed and shown from this, never from the shared view."""
+    items: list
+    alert_now: "tuple[str, tuple[str, ...]] | None"
+    screen: tuple
+    app: "tuple[str, str] | None"
+
+
 class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
@@ -190,6 +214,11 @@ NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it 
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
+# iOS draws the Health access sheet (HealthKit) in a separate service inside the app's window, and doesn't let UI
+# automation change it: its switches and "Turn On All" take touches and nothing changes, "Allow" stays disabled
+# (an app tester's RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
+NOTE_HEALTH = ("this is iOS's Health access sheet; iOS doesn't let automation change it. Ask a person to choose and "
+               "tap Allow.")
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
@@ -268,6 +297,14 @@ def step_caption(tool: str, result: str, args: dict) -> str | None:
         text = tool.replace("_", " ")
     text = " ".join(text.split())
     return text if len(text) <= CAPTION_MAX else text[:CAPTION_MAX - 1] + "…"
+
+
+def _health_sheet(items: list) -> bool:
+    """Is iOS's Health access sheet on screen? Its own buttons say so: "Turn On All" (or "Turn Off All") with "Allow"
+    and "Don't Allow"."""
+    said = {" ".join(str(getattr(e, k, "") or "").replace("’", "'").split()).casefold()
+            for e in items for k in ("label", "text")}
+    return bool({"turn on all", "turn off all"} & said) and "allow" in said and "don't allow" in said
 
 
 def _answer(lines: list[str], notes: list[str] | None = None, image: bytes | None = None) -> dict:
@@ -620,7 +657,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash", "session_report")
+READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -641,7 +678,7 @@ _GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 # not on the phone's queue: the first three sleep before they answer, network talks to the instruments service
-SPECIAL = ("wait", "wait_for", "performance", "network")
+SPECIAL = ("wait", "wait_for", "performance", "network", "media")
 REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
@@ -658,7 +695,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon:
+class Daemon(journey_tool.JourneyTools):
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
                  backoff: tuple = (1.0, 2.0, 5.0, 10.0), ready_wait: float = 60.0,
                  stream_linger: float = 30.0, stream_retry: float = 1.0, settle_still: float = STILL,
@@ -760,6 +797,11 @@ class Daemon:
         self._handlers = {"open_app": self._open_app, "close_app": self._close_app, "toggle": self._toggle,
                           "tap": self._tap, "long_press": self._long_press, "back": self._back, "type_text": self._type_text, "scroll": self._scroll,
                           "alert": self._alert, "swipe": self._swipe}
+        self._media_earlier = frozenset(medialib.ledger_ids())  # pictures recorded before this daemon started (media remove)
+        self._journeys: dict[str, journey.Journey] = {}  # {agent: its journey} (AGENT-TOOLS §17): one at a time
+        # an agent's journey start, stop and stress moments run one at a time, each to its end (its bookkeeping too): a
+        # stop that came while a stress set the network would otherwise unregister the journey first (Codex, PR #7)
+        self._journey_locks: dict[str, asyncio.Lock] = {}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
         self._overridden: set[str] = set()  # apps launched with a language, region or text size (§16.3) and not closed since
@@ -1301,11 +1343,42 @@ class Daemon:
 
     # ---- agent tools ----
     async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
-                       policy: "safety.Policy | None" = None) -> dict:
+                       policy: "safety.Policy | None" = None, ux_rules: "uxcheck.Rules | None" = None) -> dict:
         """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
-        `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
+        `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one. `ux_rules` are its house
+        rules (§17.3); None is none."""
+        jr = self._journeys.get(client_id)
+        if jr is None or name == "journey":
+            return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
+        return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy, ux_rules)
+
+    async def _run_tool_in_journey(self, jr: "journey.Journey", client_id: str, name: str, args: dict,
+                                   scope: "Scope | None", policy: "safety.Policy | None",
+                                   ux_rules: "uxcheck.Rules | None" = None) -> dict:
+        """A call by an agent that has a journey running (§17): checked against what a user could do, answered in the
+        user's eyes (ui.USERS_EYES), and counted. The tool's own calls (stress moments, conditions) are `own` (a context
+        variable of the task making them, so a call of the agent's made at the same time is checked and counted)."""
+        own = _JOURNEY_OWN.get()
+        if not own:
+            args = self._journey_gate(jr, name, args)
+        token = ui.USERS_EYES.set(jr.users_eyes)
+        began, outer = self.control.clock(), BATCH.get() is None and not _NESTED.get()
+        try:
+            answer = await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
+        except Refused as e:
+            if not own and name not in BATCH_TOOLS:
+                jr.note_call(name, args, "", self.control.clock() - began, e.code)
+            raise
+        finally:
+            ui.USERS_EYES.reset(token)
+        if not own:
+            await self._journey_after(client_id, jr, name, args, answer, self.control.clock() - began, outer, scope)
+        return answer
+
+    async def _run_tool_plain(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
+                              policy: "safety.Policy | None" = None, ux_rules: "uxcheck.Rules | None" = None) -> dict:
         self.last_request = time.monotonic()
         self._network_seen_by(client_id)
         top_level = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
@@ -1314,11 +1387,15 @@ class Daemon:
             params.check(name, args)
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
+        utoken = uxcheck._RULES.set(ux_rules) if ux_rules is not None else None
         # While a client records, or starts or stops a recording, its outer calls run one at a time (a batch's steps are
         # inside its call): a check's guard, its save and its registration are one step, and the recording a call checks
         # against is the one in force once it holds the lock, read inside it (Codex, PR #3 cycles 6 and 7: a call queued
         # behind a recording's restart checked the old one). Other clients, and a person's input, never wait on it.
-        outer = _BASELINES.get() is None
+        # A journey tool's own calls (its look, its open_app, its network moment) run inside the journey call and
+        # never take this lock: the journey call holds its agent's journey lock, and a stop holding this lock while it
+        # waits for that one would wait forever (Codex, PR #7 cycle 3). Nothing that holds a journey lock waits for this one.
+        outer = _BASELINES.get() is None and not _JOURNEY_OWN.get()
         locks = outer and (client_id in self._recording or name == "record")
         try:
             if not locks:
@@ -1339,6 +1416,8 @@ class Daemon:
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+            if utoken is not None:
+                uxcheck._RULES.reset(utoken)
 
     def _with_network(self, name: str, answer: dict) -> dict:
         """While a network condition is on, every answer's header carries `Network: 3g (Tapwright, whole phone).`
@@ -1362,6 +1441,8 @@ class Daemon:
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        if name == "journey":  # AGENT-TOOLS §17: its own calls go through run_tool, so personal mode and the policy hold
+            return await self._journey_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2436,8 +2517,8 @@ class Daemon:
                 bundle, shown = await self._app(args["app"], partial=name == "open_app")
             if bundle not in given:
                 raise Refused("not_allowed", f"outside_apps: {shown} isn't one of the apps you were given ({names}).")
-        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "filmstrip", "compare_screen",
-                                                                       "performance"):
+        elif name in ACTIONS and name not in SCOPE_FREE or name in ("wait_for", "audit", "ux_check", "filmstrip",
+                                                                       "compare_screen", "performance"):
             # A look needs no question first: its own read says which app is in front, and an answer from
             # another app is withheld below. Touches, and wait_for (it reveals whether a text is there), ask.
             await self.wait_connected()
@@ -2455,7 +2536,7 @@ class Daemon:
             _GIVEN.reset(given_token)
         if name == "alert" and front == PROMPT_FRONT:
             answer = await self._back_from_prompt(client_id, given, answer)
-        if name in ("filmstrip", "performance"):  # asked of the phone before and after filming (_filmstrip): the last read is no guide
+        if name in ("filmstrip", "performance", "media"):  # asked of the phone before and after filming (_filmstrip): the last read is no guide
             return answer
         if name == "apps":  # only its own apps: the rest of the phone is the owner's business
             lines = answer["text"].splitlines()
@@ -2543,6 +2624,10 @@ class Daemon:
             return await self._wait_for(view, args, notes, shot)
         if name == "audit":
             return await self._audit(view, args, notes)
+        if name == "ux_check":
+            return await self._ux_check(client_id, view, notes)
+        if name == "media":
+            return await self._media(client_id, args, notes)
         if name == "performance":
             return await self._performance(client_id, args, notes)
         if name == "network":
@@ -2557,6 +2642,9 @@ class Daemon:
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
+            if given is None or (self.session.app or (None, None))[1] in given:
+                uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
             if args.get("ocr"):
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
@@ -2606,8 +2694,10 @@ class Daemon:
                     # an alert hides the app's elements: say so, not "not found". (When only the `index` is
                     # out of range the alert's own elements matched, and that miss is the answer.)
                     self._refuse_behind_alert(view, force=False)
-                self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
-                if not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
+                eyes = ui.USERS_EYES.get()  # a user doesn't know what lies behind a sheet or past an edge (§17.1)
+                if not eyes:
+                    self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
+                if not eyes and not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
@@ -2953,7 +3043,8 @@ class Daemon:
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
         # an app this daemon launched with them still runs with them: WebDriverAgent would bring that process forward as
         # it is, so a plain open (or text_size: system) closes it and launches it again with the defaults (Codex, PR #6)
-        back = not extra and bundle_id in self._overridden
+        resume = _RESUME.get() and not extra  # (a journey brings its app back from the background: the process stays as it is)
+        back = not extra and not resume and bundle_id in self._overridden
         try:
             if extra or back:
                 try:
@@ -2971,7 +3062,7 @@ class Daemon:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
         if extra:
             self._overridden.add(bundle_id)
-        else:
+        elif not resume:
             self._overridden.discard(bundle_id)
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
@@ -3058,6 +3149,163 @@ class Daemon:
         name = app[0] if app else "the screen"
         text = audit.report(f'"{name}"', issues, view.items, types)
         return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    UX_AUDIT = ("clipped_text", "contrast", "hit_region")  # the audit types ux_check reports (§17.3)
+
+    async def _ux_check(self, client_id: str, view, notes: list) -> dict:
+        """AGENT-TOOLS §17.3: the screen in front against the usability basics (tapwright/uxcheck.py), with the audit's
+        cut-off text, contrast and target size. The tree is read first, as `audit` does."""
+        await self._settle_pending()
+        given = _GIVEN.get()
+        session = self.session
+
+        async def front() -> str | None:
+            try:
+                return await session.foreground_bundle_id() or None
+            except ConnectionLost:
+                raise  # (the read's own reconnect handles it)
+            except DeviceError:
+                return None
+
+        async def turn() -> tuple[str | None, list | DeviceError, str | None, UxRead]:
+            # One turn of the phone's queue: the app in front, the tree, the audit, and the app in front again. No
+            # action or person's input comes between them, so the elements checked are the given app's when both reads
+            # name it (Codex, PR #7 cycle 3: reads in separate turns let another client open an unlisted app for the
+            # tree and come back before the check; CodeRabbit, PR #7).
+            first = await front() if given is not None else None
+            await self._silent_read(view)
+            try:
+                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT])
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                found = e
+            # What this turn read, kept for this call: the agent's view is shared with its other calls, and a look of
+            # theirs can replace it before this one is done (Codex, PR #7 cycle 4)
+            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None))
+            return first, found, (await front() if given is not None else None), seen
+        for attempt in (1, 2):
+            first, issues, last, seen = await self._read(turn)
+            if given is None or (first == last and first in given):
+                break
+            if first == last == SPRINGBOARD and await self._prompt_of_given(given, seen, read=False):
+                break  # a given app's own permission prompt (as this turn read it)
+            if attempt == 1 and first == last == SPRINGBOARD:
+                # a notification banner over the app makes WebDriverAgent say SpringBoard: _front waits it out, and
+                # the turn is read again only when a given app is in front then
+                if (await self._front(given)) in given:
+                    continue
+            # Personal mode: nothing of another app's screen is remembered for naming drift, checked or filed
+            shown = last if first == last else (last or first)
+            raise Refused("not_allowed", _outside(shown, self.session.app_names.get(shown or ""),
+                                                  ", ".join(given.values())))
+        rows: list[tuple[str, str, str]] = []
+        notes = list(notes)
+        if isinstance(issues, DeviceError):
+            notes.append(f"the phone's accessibility audit isn't available here ({issues}), so cut-off text, contrast and "
+                         "target size were not checked.")
+        else:
+            rows = audit.rows_of(issues, seen.items, list(self.UX_AUDIT))
+        rules = uxcheck.rules_in_force()
+        result = uxcheck.check(seen.items, seen.screen, client_id, rules, rows)
+        app = seen.app
+        title = uxcheck.title_of(seen.items)
+        screen = f'"{app[0] if app else "the screen"}"' + (f" ({ui.clip(title)[1:-1]})" if title else "")
+        # the findings go on the journey's screen these elements are, not on whatever screen another call has made
+        # current since (Codex, PR #7 cycle 5)
+        uxcheck.tell_journey(client_id, result, screen, "\n".join(e.line() for e in seen.items if e.ref))
+        text = uxcheck.report(screen, result, rules)
+        return {"text": "\n".join([text, *(f"Note: {n}" for n in notes)]), "image": None, "image_size": None}
+
+    async def _media(self, client_id: str, args: dict, notes: list) -> dict:
+        """AGENT-TOOLS §17.6: put test pictures in the phone's photo library (add-only access), or delete what this
+        daemon added. Deleting needs full access, and Tapwright never asks for it: it deletes only when the person has
+        already given the runner full access themselves (iOS then asks them to confirm each delete), and otherwise names
+        the pictures to delete by hand (Codex, PR #7: the runner's delete route asks iOS for full access when it hasn't
+        been decided)."""
+        add, remove = args.get("add"), args.get("remove")
+        if remove is not None and not (isinstance(remove, bool) or remove == "all"):
+            raise Refused("bad_params", f'remove must be true or "all", not {remove!r}')
+        everything = remove == "all"
+        if add is not None and (not isinstance(add, list) or not all(isinstance(p, str) for p in add)):
+            raise Refused("bad_params", "add must be a list of paths of pictures on this computer")
+        if add and remove:
+            raise Refused("bad_params", "media adds or removes in one call, not both: use add, then a separate call "
+                                        "with remove: true")
+        if not add and not remove:
+            raise Refused("bad_params", "media needs add (the paths of pictures) or remove: true")
+        if args.get("confirm") is not True:
+            raise Refused("bad_params", medialib.NEED_CONFIRM)
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        if self.state == "locked":
+            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+        pictures: list[tuple[str, bytes]] = []
+        if add:
+            try:
+                pictures = await asyncio.to_thread(medialib.read_pictures, add)
+            except ValueError as e:
+                raise Refused("bad_params", str(e)) from None
+        await self.wait_connected()
+        try:
+            version = await self._read(lambda: self.session.runner_version())
+        except DeviceError as e:  # the question got no answer: not an old runner, so ask again
+            raise Refused("internal", f"couldn't ask the runner which version it is ({e}); try again") from None
+        if version < medialib.MIN_TW_VERSION:
+            raise Refused("unsupported", medialib.OLD_RUNNER)
+        access = await self._read(lambda: self.session.photos_access())
+        if add:
+            if access.get("add") in ("denied", "restricted"):
+                raise Refused("unsupported", "the runner may not add to the photo library: iOS has it denied. Ask the "
+                                             "user to allow WebDriverAgentRunner in Settings > Privacy & Security > "
+                                             "Photos, then try again.")
+            names = [name for name, _ in pictures]
+            ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures")
+            if len(ids) != len(names):
+                if ids:  # what it did make stays recorded, so remove can take it
+                    medialib.record(client_id, ids, names[:len(ids)])
+                raise Refused("internal", f"the phone made {len(ids)} pictures for {len(names)} sent. Check Photos > "
+                                          "Recently Added.")
+            medialib.record(client_id, ids, names)
+            return _answer([medialib.added_text(names)], notes)
+        held, earlier = medialib.held_by(client_id, self._media_earlier, everything)
+        if not held:
+            return _answer(["Nothing to remove: this agent has added no pictures that are still recorded (remove: "
+                            '"all" takes every picture Tapwright ever added, another agent\'s too).'], notes)
+        names = [e["name"] for e in held]
+        if access.get("full") in ("denied", "restricted"):
+            return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library "
+                                                        "(iOS has it denied).")], notes)
+        if access.get("full") != "authorized":  # not decided (or unknown): the delete route would ask iOS for it
+            return _answer([medialib.by_hand_text(names, medialib.NEVER_ASKS_FULL)], notes)
+        try:
+            deleted = await self._media_write(lambda: self.session.photos_delete([e["id"] for e in held]),
+                                              "removing the pictures")
+        except DeviceError:  # (only the "full access" refusal gets here: _media_write words the rest)
+            return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library.")], notes)
+        lead = "Pictures from an earlier session: " if earlier else ""
+        if not deleted:
+            return _answer([f"{lead}Removed none of {medialib.pictures(len(held))}: the person declined the delete on "
+                            "the phone, or they were already gone. Ask them to confirm it on the phone, then call "
+                            "again."], notes)
+        medialib.drop([e["id"] for e in held])
+        return _answer([lead + medialib.removed_text(names[:deleted], len(held))], notes)
+
+    async def _media_write(self, call, doing: str):
+        """A write to the phone's photo library, once: sent again after a drop it could be done twice."""
+        try:
+            return await self.control.agent(lambda: self._connected_only(call))  # person-first, like a touch
+        except ConnectionLost as e:
+            self.lost(e)
+            raise Refused("reconnecting", f"the connection dropped while {doing}; it may or may not have happened: "
+                                          "wait a few seconds, then check Photos > Recently Added") from None
+        except Unanswered as e:  # the line is alive, but the phone may have done it (CodeRabbit, PR #7)
+            raise Refused("timeout", f"{e} while {doing}; it may or may not have happened: check Photos > Recently "
+                                     "Added before adding again") from None
+        except DeviceError as e:
+            if "full access" in str(e).lower():
+                raise
+            raise Refused("unsupported", f"the phone couldn't do it while {doing}: {e}") from None
 
     async def _performance(self, client_id: str, args: dict, notes: list) -> dict:
         """PLAN-1.3 item 3: memory, CPU and frames of the app in front while the call runs (`seconds`, around an optional
@@ -3781,7 +4029,7 @@ class Daemon:
         if self._other_app_shown():
             return ""
         hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
-        off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
+        off = [] if ui.USERS_EYES.get() else [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
         return closest.find(target, view.items, off, self.session.screen)
 
     async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> ui.Target | None:
@@ -3917,20 +4165,24 @@ class Daemon:
         return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
-    def _police(self, tool: str, a: dict, element: ui.Element | None) -> str:
+    def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
         """The safety policy's say on a touch of `element` (docs/AGENT-TOOLS.md 11): nothing when it has no word,
         `not_allowed: blocked` for a block word, and for a confirm word `not_allowed: needs_confirmation` (a
         request goes to the live view) unless a person's OK for this very call is waiting. That OK is used up
         here. For a dry run, nothing is asked or used up: the sentence for the answer's end, or "". `force` never
-        skips it, and nothing here touches the phone."""
+        skips it, and nothing here touches the phone. `bundle`: the app the element is in, when that is not the app of the
+        last read (a journey's second touch, after the first may have opened another app)."""
         if element is None:
             return ""
         # an input is matched by its label only: what someone typed into it is data, not what a touch does
-        hit = _POLICY.get().check(self._app_bundle(), element.label if element.role == "input" else element.text)
+        hit = _POLICY.get().check(bundle or self._app_bundle(), element.label if element.role == "input" else element.text)
         if hit is None:
             return ""
         kind, word = hit
         what = f"{element.role} {ui.clip(element.text)}"
+        if _DOUBLE.get():  # two touches under one check would act twice on what the policy holds back
+            raise Refused("not_allowed", f'double_tap on an element the safety policy holds: {what} (policy word '
+                                         f'"{word}"). Do one tap instead; a person\'s OK is for a single touch.')
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
@@ -4030,6 +4282,33 @@ class Daemon:
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
+    async def _press(self, target: ui.Target, hold_ms: int) -> str:
+        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
+        done = await self.session.tap(target, hold_ms=hold_ms)
+        if _DOUBLE.get():
+            await asyncio.sleep(DOUBLE_TAP_GAP)
+            # what is there now: the first touch may have put another screen under the finger (read again, police again).
+            # The first touch may also have opened another app (a link into Safari): the app in front is read again, and in
+            # personal mode a second touch is made only on a given app's screen; the per-app policy is that of the app
+            # really in front, since Session.refresh leaves `session.app` as the last look had it (Codex, PR #7 cycle 1)
+            try:
+                front = await self.session.foreground_bundle_id()  # (not _read: this runs inside the touch's own turn in the queue)
+                given = _GIVEN.get()
+                if given is not None and front not in given:
+                    raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), ", ".join(given.values())))
+                items = (await self.session.refresh()).items
+                if target.kind == "point":
+                    under = self._element_at((target.x, target.y), items)
+                else:
+                    found = ui.resolve(items, target)
+                    under = self._element_at(found, items) if isinstance(found, tuple) else found
+                self._police("tap", {}, under, front)
+            except Refused:
+                self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
+                raise
+            await self.session.tap(target, hold_ms=hold_ms)
+        return done
+
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
         element under a bar that shows. `force` skips all of it. A point is a raw touch."""
@@ -4050,12 +4329,12 @@ class Daemon:
                 under = self._element_at(found, (await s.refresh()).items)
             said = self._police(tool, a, under)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
-            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
+            return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             said = self._police(tool, a, found)  # `force` skips the checks above, never the policy
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
-            done = Noted(ui.without_place(await s.tap(target, hold_ms=hold_ms)))  # at its centre, whatever is drawn there
+            done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
@@ -4064,8 +4343,8 @@ class Daemon:
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         if point is None:
-            return ui.without_place(await s.tap(target, hold_ms=hold_ms))
-        await s.tap(ui.Target(x=point[0], y=point[1]), hold_ms=hold_ms)
+            return ui.without_place(await self._press(target, hold_ms))
+        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
         return f"{verb} {found.line(actions=False, place=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     def _moved_under(self, view, x: float, y: float) -> bool:
@@ -4486,8 +4765,8 @@ class Daemon:
             s.items = read_now.tree.items
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
-            up = changes.update(view.items, read_now.tree.items, app_changed, view.top_ref, view.shown, full, head,
-                                moves_content)
+            seen = ui.on_glass(read_now.tree.items) if ui.USERS_EYES.get() else read_now.tree.items  # (§17.1)
+            up = changes.update(view.items, seen, app_changed, view.top_ref, view.shown, full, head, moves_content)
             return read_now, up
         try:
             snap, up = await self._read(read)
@@ -4510,7 +4789,7 @@ class Daemon:
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
         still = not (moves_content is not False or drifted or view.unlooked)
         off = (changes.off_screen(off_was, view.shown_off, by_place=still, listed=listed_before)
-               if same_app and not full else [])
+               if same_app and not full and not ui.USERS_EYES.get() else [])  # a user sees nothing change off screen
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
@@ -4526,6 +4805,8 @@ class Daemon:
             # a heading of its own (bare `~` lines after a list read as a second, broken block)
             beyond = [changes.OFF_SCREEN, *off] if off else []
             return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
+        if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
+            notes = [*notes, NOTE_HEALTH]  # iOS's own Health access sheet takes touches and changes nothing
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:

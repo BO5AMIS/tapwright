@@ -21,7 +21,7 @@
                      and waste to cut (the agent tool session_report answers the same)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
-                     [--policy FILE | --no-policy]
+                     [--policy FILE | --no-policy] [--ux-rules FILE]
                      connect an agent in one go: register the MCP server and install the skill
   tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated) [--junit OUT] [--update-references]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
@@ -537,7 +537,8 @@ def install(a) -> int:
     from . import connect
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
     try:
-        lines = connect.install(a.client, apps, a.dedicated, a.project, policy=a.policy, no_policy=a.no_policy)
+        lines = connect.install(a.client, apps, a.dedicated, a.project, policy=a.policy, no_policy=a.no_policy,
+                                ux_rules=a.ux_rules)
     except connect.ConnectError as e:
         print(f"tapwright install: {e}")
         return 1
@@ -731,6 +732,9 @@ def main() -> int:
                        help="the safety policy file to register with the server (see tapwright mcp --policy). A rerun "
                             "keeps the entry's earlier --policy, --no-policy and --screenshots unless this replaces them")
     rules.add_argument("--no-policy", action="store_true", help="register the server with no words needing an OK or blocked")
+    p.add_argument("--ux-rules", metavar="FILE",
+                   help="the house rules file to register with the server (see tapwright mcp --ux-rules); a rerun "
+                        "keeps the entry's earlier one unless this replaces it")
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
                    help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")
@@ -747,15 +751,19 @@ def main() -> int:
                             "need an OK)")
     rules.add_argument("--no-policy", action="store_true",
                        help="no words need an OK or are blocked (the same as empty lists)")
+    p.add_argument("--ux-rules", metavar="FILE",
+                   help="the user's house rules for ux_check and journeys, as JSON: rules written as text (the agent "
+                        'judges them) or {"max_taps_to_goal": n} / {"way_back": true} (the tool checks them)')
     a = ap.parse_args()
     if a.cmd == "mcp":
-        from . import mcp_server, policy
+        from . import mcp_server, policy, uxcheck
         apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
         try:
             chosen = policy.NONE if a.no_policy else policy.load(a.policy) if a.policy else None
+            ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
             raise SystemExit(f"tapwright mcp: {e}") from e
-        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen)
+        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules)
         return 0
     if a.cmd == "view":
         return view()

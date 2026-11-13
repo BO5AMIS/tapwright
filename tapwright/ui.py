@@ -6,6 +6,7 @@ An element line looks like:
 Positions and sizes are in points (the phone's coordinate space, what taps use).
 Format and vocabulary: docs/AGENT-TOOLS.md §3.
 """
+import contextvars
 import json
 import math
 import re
@@ -15,6 +16,11 @@ from xml.etree import ElementTree as ET
 
 from .control import TAP_MS, Refused
 from .device import DeviceError
+
+# True while a call runs for an agent that is in a journey in a user's eyes (AGENT-TOOLS §17.1; set by the daemon for
+# that call only): the formatting below then shows only what is on the glass: no ids, icon-only buttons without their
+# label, `more below` instead of counts. One filter here, so every answer that prints an element follows it.
+USERS_EYES: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_users_eyes", default=False)
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
 # or focus attribute, so visibility comes from the rect and a focused input can't be known.
@@ -96,6 +102,7 @@ class Element:
     secure: bool = False  # a password field: its value is never shown
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
+    icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
 
     @property
     def x(self) -> float:
@@ -134,11 +141,15 @@ class Element:
         out the `[actions]`; `place=False` leaves out `@x,y WxH` (an action's first line, AGENT-TOOLS 1.8 §13
         rule 1). The actions a role implies are never listed (rule 4). The label is the quoted text, so there
         is no separate `label=`."""
+        eyes = USERS_EYES.get()
         parts = [self.ref] if ref else []
         parts.append(self.role)
-        if self.text:
+        if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
+            parts.append("(icon only)")
+            parts.append(f"(VoiceOver: {clip(self.text)})")
+        elif self.text:
             parts.append(clip(self.text))
-        if self.identifier:
+        if self.identifier and not eyes:  # a user sees no ids
             parts.append(f"id={self.identifier}")
         # a switch's value ("1", "0") is already `checked=`; an empty input's placeholder is `placeholder=` (v1.7)
         if self.shows_placeholder:
@@ -473,7 +484,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             checked = (value == "1") if role == "switch" else None
             candidate = Element("", role, label, identifier, value, rect, enabled,
                                 "Selected" in traits, checked, ROLE_ACTIONS.get(role, ()), kind, in_alert, False, name,
-                                kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")))
+                                kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")),
+                                icon_only=icon_only_button(node, kind, label, rect, in_tab_bar))
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor
@@ -697,13 +709,48 @@ def alert_line(alert: Alert) -> str:
     return f"Alert: {json.dumps(alert.title, ensure_ascii=False)} " + " ".join(f"[{b}]" for b in alert.buttons)
 
 
+ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon
+ICON_SHAPE = (0.7, 1.4)  # its width over its height
+
+
+def icon_only_button(node: ET.Element, kind: str, label: str, rect: tuple[float, float, float, float],
+                     in_tab_bar: bool = False) -> bool:
+    """Is this button an icon with no visible text (AGENT-TOOLS §17.1)? Its label then is VoiceOver's, which a user
+    looking at the glass doesn't read. The tree doesn't say what is drawn, so this is a heuristic: a button (not a
+    tab) that has a label, and no StaticText with text inside it, and either holds an image, or is small and
+    roughly square (at most ICON_MAX points, width over height within ICON_SHAPE). A text button has its words as
+    a StaticText child (React Native) or is wider than it is tall (UIKit), so it isn't taken for an icon."""
+    if kind != "Button" or in_tab_bar or not label:
+        return False
+    inside = [n for n in node.iter() if n is not node]
+    if any(_kind(n) == "StaticText" and (_text(n.get("label")) or _text(n.get("value"))) for n in inside):
+        return False
+    if any(_kind(n) == "Image" for n in inside):
+        return True
+    w, h = rect[2], rect[3]
+    return 0 < w <= ICON_MAX and 0 < h <= ICON_MAX and ICON_SHAPE[0] <= w / h <= ICON_SHAPE[1]
+
+
+def on_glass(items: list[Element]) -> list[Element]:
+    """`items` without what the keyboard covers at its centre: a user can't see those (AGENT-TOOLS §17.1). What
+    lies past a scroll view's edge or behind a sheet is not in the list to begin with."""
+    return [e for e in items
+            if not any(b.kind == "Keyboard" and b.rect[0] <= e.center[0] < b.rect[0] + b.rect[2]
+                       and b.rect[1] <= e.center[1] < b.rect[1] + b.rect[3] for b in e.covered_by)]
+
+
 def describe(items: list[Element], screen: tuple[float, float], scale: float | None = None,
              app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
              more: int = 0, off: tuple[int, int] = (0, 0)) -> str:
     """The full list (docs/AGENT-TOOLS.md §3.2): the header lines, then one line per element.
     `app` is (name, bundle id); `off` is how many elements lie (above, below) the screen."""
+    eyes = USERS_EYES.get()
+    if eyes:
+        items = on_glass(items)
     size = f"{round(screen[0])}x{round(screen[1])} pt" + (f" @{scale:g}x" if scale else "")
-    beyond = ", ".join(f"+{n} {side}" for n, side in ((off[1], "below"), (off[0], "above")) if n > 0)
+    # a user sees no counts: `more below` / `more above` where a scroll view has more beyond the glass (§17.1)
+    beyond = ", ".join((f"more {side}" if eyes else f"+{n} {side}") for n, side in ((off[1], "below"), (off[0], "above"))
+                       if n > 0)
     lines = [f"Screen {size} · {len(items)} elements" + (f" ({beyond})" if beyond else "")]
     if app:
         lines.append(f"App: {app[0]} ({app[1]})")
@@ -713,7 +760,7 @@ def describe(items: list[Element], screen: tuple[float, float], scale: float | N
         lines.append("Keyboard: shown")
     lines.extend(e.line() for e in items)
     if more:
-        lines.append(f"(+{more} more below; scroll)")
+        lines.append("(more below; scroll)" if eyes else f"(+{more} more below; scroll)")
     if not items:
         lines.append("(nothing visible; the app may still be loading)")
     return "\n".join(lines)
@@ -829,9 +876,11 @@ def _hits(items: list[Element], target: Target) -> tuple[list[Element], str, str
         miss = f'nothing on screen has label "{target.label}"; use {{text}} for a partial match, or look.'
     else:
         want = _norm(target.text)
-        hits = [e for e in items if _norm(e.label) == want or _norm(e.value) == want]
+        # in a user's eyes (a journey) text is what shows on the glass: an icon-only button's label is VoiceOver's
+        pool = [e for e in items if not (USERS_EYES.get() and e.icon_only)]
+        hits = [e for e in pool if _norm(e.label) == want or _norm(e.value) == want]
         if not hits:
-            hits = [e for e in items if want in _norm(e.label) or want in _norm(e.value)]
+            hits = [e for e in pool if want in _norm(e.label) or want in _norm(e.value)]
         hits = _without_nested(hits)
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     return hits, what, miss

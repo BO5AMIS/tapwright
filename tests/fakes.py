@@ -373,6 +373,30 @@ class FakeSession:
         return 3.0
 
     audit_issues: list = []  # what `audit` answers: WebDriverAgent's issue dicts
+    tw_version = 3  # the runner's route version (media needs 3)
+    photo_access: dict = {"add": "authorized", "full": "authorized"}
+    photo_deletes = 1  # how many a delete reports (0: the person declined); an Exception is raised instead
+
+    async def runner_version(self):
+        self._record("runner_version")
+        return self.tw_version
+
+    async def photos_access(self):
+        self._record("photos_access")
+        return dict(self.photo_access)
+
+    async def photos_add(self, pictures):
+        self._record(("photos_add", tuple(name for name, _ in pictures)))
+        self.photos = getattr(self, "photos", [])
+        ids = [f"ID-{len(self.photos) + n}/L0/001" for n, _ in enumerate(pictures)]
+        self.photos += ids
+        return ids
+
+    async def photos_delete(self, identifiers):
+        self._record(("photos_delete", tuple(identifiers)))
+        if isinstance(self.photo_deletes, Exception):
+            raise self.photo_deletes
+        return len(identifiers) if self.photo_deletes else 0
 
     async def audit(self, types):
         self._record(("audit", tuple(types)))
@@ -530,3 +554,30 @@ class VirtualLoop(asyncio.SelectorEventLoop):
 
     def time(self) -> float:
         return self.t
+
+
+class DescribingSession(FakeSession):
+    """A FakeSession whose look() prints the real header and element lines (ui.describe), with `above` and `below`
+    counts of what lies past the screen, and whose snapshots carry them: for tests of what an answer shows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.above = 0
+        self.below = 0
+
+    async def look(self, screenshot=True):
+        self._record("look")
+        self.items = list(self.tree)
+        text = ui.describe(self.items, self.screen, 3.0, self.app, self.last_alert, self.last_keyboard, 0,
+                           (self.above, self.below))
+        return text, (b"JPEG" if screenshot else None)
+
+    async def snapshot(self, keyboard=False, timeout=None):
+        self._record("snapshot")
+        self.items = list(self.tree)
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, above=self.above, below=self.below)
+        return Snapshot(tree, self.app, 3.0)
+
+    async def rotate(self, to):
+        self._record(f"rotate:{to}")
+        return f"rotated to {to}"

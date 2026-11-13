@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import policy, store
+from . import policy, store, uxcheck
 
 
 class DaemonError(RuntimeError):
@@ -48,6 +48,15 @@ def set_policy(rules: policy.Policy | None = None) -> None:
         SCOPE.pop("X-Tapwright-Policy", None)
     else:
         SCOPE["X-Tapwright-Policy"] = rules.dumps()
+
+
+def set_ux_rules(rules: uxcheck.Rules | None = None) -> None:
+    """The user's house rules for `ux_check` and journeys (docs/AGENT-TOOLS.md 17.3). None or empty is sent as no
+    header at all. The daemon refuses a call whose rules it can't read."""
+    if not rules:
+        SCOPE.pop("X-Tapwright-Ux-Rules", None)
+    else:
+        SCOPE["X-Tapwright-Ux-Rules"] = rules.dumps()
 
 
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,

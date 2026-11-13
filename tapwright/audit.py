@@ -108,9 +108,10 @@ def duplicates(items: list[ui.Element]) -> list[tuple[str, str]]:
     return found
 
 
-def report(screen: str, issues: list[dict], items: list[ui.Element], types: list[str]) -> str:
-    """The answer (AGENT-TOOLS §10): a count line, one numbered line per issue, the `Checked:` line."""
-    rows: list[tuple[str, str, str]] = []  # (type, element line, what)
+def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> list[tuple[str, str, str]]:
+    """(type, element line, what) for each issue of the asked types, XCTest's first, then `duplicate_id`. Shared by
+    `audit`'s report and `ux_check`."""
+    rows: list[tuple[str, str, str]] = []
     for issue in issues:
         kind = FROM_XCTEST.get(str(issue.get("auditType") or ""), "")
         if not kind or kind not in types:
@@ -119,6 +120,12 @@ def report(screen: str, issues: list[dict], items: list[ui.Element], types: list
         rows.append((kind, element_of(issue.get("elementAttributes") or {}, items), what))
     if "duplicate_id" in types:
         rows += [(kind, line, WHAT[kind]) for kind, line in duplicates(items)]
+    return rows
+
+
+def report(screen: str, issues: list[dict], items: list[ui.Element], types: list[str]) -> str:
+    """The answer (AGENT-TOOLS §10): a count line, one numbered line per issue, the `Checked:` line."""
+    rows = rows_of(issues, items, types)
     checked = [t for t in TYPES if t in types and t in CHECKED_HERE]
     not_here = [t for t in TYPES if t in types and t not in CHECKED_HERE]
     tail = f"Checked: {', '.join(checked)}." + (f" Not checked here: {', '.join(not_here)}." if not_here else "")

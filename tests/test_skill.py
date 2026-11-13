@@ -10,7 +10,7 @@ from tapwright.errors import CODES
 
 REPO = Path(__file__).parent.parent
 SHIPPED, LISTED = skills.SOURCE, REPO / "skills" / "tapwright"
-FILES = ("SKILL.md", "references/setup.md", "agents/openai.yaml")
+FILES = ("SKILL.md", "references/setup.md", "references/personas.md", "agents/openai.yaml")
 
 
 def frontmatter(text: str) -> dict:
@@ -101,3 +101,16 @@ def test_install_into_a_folder_that_is_not_there_says_so(tmp_path, capsys, monke
     assert cli.main() == 1 and "couldn't install the skill" in capsys.readouterr().out
     with pytest.raises(FileNotFoundError):
         skills.install(str(tmp_path / "missing"))
+
+def test_the_personas_guide_is_tool_neutral_and_has_the_six_examples():
+    """The file is shared byte for byte with the sibling tool: no tool's own words in it."""
+    text = (SHIPPED / "references/personas.md").read_text(encoding="utf-8")
+    for word in ("Tapwright", "Tapline", "open_app", "app_command"):
+        assert word not in text, word
+    assert "pass these as `conditions` on `journey { start }`; each tool applies them its own way" in " ".join(text.split())
+    for persona in ("First-timer", "Busy regular", "Older user with large text", "Right-to-left speaker",
+                    "Poor connection", "One-handed on a big phone"):
+        assert f"**{persona}.**" in text, persona
+    assert "`language: ar · region: QA`" in text
+    skill = (SHIPPED / "SKILL.md").read_text(encoding="utf-8")
+    assert "(references/personas.md)" in skill and "`ux_check`" in skill and "`media`" in skill

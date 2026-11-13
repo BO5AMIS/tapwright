@@ -23,6 +23,8 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "record": ("start", "stop", "name", "path"),
     "replay": ("name", "path", *_SHOT, "update_references"),  # (update_references: the CLI's, not the MCP tool's)
     "audit": ("types",),
+    "ux_check": (),
+    "media": ("add", "remove", "confirm"),
     "logs": ("since", "level", "grep", "limit"),
     "crash": ("all", "pull"),
     "performance": ("launch", "seconds", "tap"),
@@ -37,6 +39,8 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "press_button": ("name", *_SHOT),
     "swipe": ("x0", "y0", "x1", "y1", "seconds", *_SHOT, "dry_run"),
     "rotate": ("to", *_SHOT),
+    "journey": ("start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
+                "mode", "target", "survives", "done", "finding"),
 }
 # Names the daemon takes that the MCP tools' signatures don't have (tests/test_params.py holds the table to this)
 NOT_IN_MCP: dict[str, set[str]] = {t: {"index"} for t, names in ALLOWED.items() if "index" in names}

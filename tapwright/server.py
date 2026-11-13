@@ -16,7 +16,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import policy, store
+from . import policy, store, uxcheck
 from .control import Refused
 from .daemon import Scope
 from .errors import HTTP_STATUS
@@ -128,9 +128,15 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             rules = policy.loads(sent) if sent else None
         except ValueError as e:
             return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
+        # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
+        sent_ux = request.headers.get("x-tapwright-ux-rules")
+        try:
+            ux_rules = uxcheck.loads(sent_ux) if sent_ux else None
+        except ValueError as e:
+            return _error("bad_params", f"the ux rules this agent was started with are refused: {e}", 400)
         try:
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
-                                                      policy=rules))
+                                                      policy=rules, ux_rules=ux_rules))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net

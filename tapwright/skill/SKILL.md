@@ -23,6 +23,8 @@ themselves; what follows is what they can't tell you.
   prompt one of those apps raises. That is by design: don't look for a way around it.
 - **`locked`** means a person must act: the phone is locked, or it is asking for its passcode.
   You can't pass Face ID, Touch ID or the passcode. Tell the user and wait.
+- **iOS's Health access sheet** (HealthKit's "Turn On All" and "Allow") can't be changed by automation: iOS ignores
+  the touches. Ask the user to choose and tap Allow, then go on.
 - **A person may be watching** in the live view (`viewer` opens it for the user) and can take over.
   Their input goes first.
 - **Each tool's description lists its arguments.** The calls below show the ones that matter.
@@ -174,6 +176,25 @@ run {"steps": [
   {"tool": "tap", "target": {"id": "tab-search"}, "expect": {"matches": "search"}},
   {"tool": "tap", "target": {"id": "tab-profile"}, "expect": {"matches": "profile"}}]}
 ```
+
+## 4b. Usability journeys, reports and test pictures
+
+To judge whether a real user can find and finish a feature, not only whether it works:
+
+- **Build personas for the app's own users and agree them with your user.** The guide and six examples are in
+  [references/personas.md](references/personas.md). A persona is guidance for you; nothing enforces it.
+- **Run the feature as a journey:** `journey` with `start: true`, a `goal`, a `persona` and its `conditions`. Tapwright
+  applies `language`, `region` and `text_size` by reopening the app for the journey (as `open_app` does) and `network`
+  through the `network` tool, and undoes them at the stop. Use only what a user sees: refs and visible text, no ids.
+- **Check each new screen with `ux_check`** and report its facts as findings. Add your own judgment from a screenshot,
+  and say it is judgment. If the user has house rules, `ux_check` lists the written ones for you to judge.
+- **Stress moments and the end:** `stress` tests leaving the app, a bad network, a double tap, rotating, relaunching.
+  `journey` with `stop: true` and `reached` writes the visual report to its folder and answers its summary with up to
+  two key pictures (the filmstrip, and the first finding's or the last screen's); the rest stays in the folder. Offer `export` only if the user asks.
+- **Photo pickers:** ask your user first whether test pictures may be added to the phone's photo library, and whether
+  to remove them afterwards. Then `media` with `add` (paths) and `confirm: true`; `remove: true` deletes only those.
+  Tapwright never asks iOS for full access to the library: unless the person gave the runner full access themselves,
+  `remove` names what to delete by hand.
 
 ## 5. Errors
 

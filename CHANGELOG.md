@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.5.0, "the Real User Update" (2026-11-13)
+
+Apps are made or broken by whether a user can find a feature, understand it and finish it easily. An agent can now
+test that, going through a feature as a real user would, and file a visual report. The interface is AGENT-TOOLS 1.12,
+shared with Tapline.
+
+**A journey, in a user's eyes**
+- `journey` with a `goal` ("log breakfast by scanning its barcode") and, if useful, a `persona` and `conditions`
+  (language, region, text size, network). While it runs, the agent sees what a user sees: no ids, nothing off screen,
+  no jumping to a target, and icon-only buttons shown as such, with what VoiceOver says kept apart.
+- The tool measures the trip: taps, screens, typing, scrolling, time (waits apart), wrong turns, dead ends, errors,
+  hesitations, and the taps to the goal.
+- Stress moments: leaving the app and coming back, a bad network mid-flow, a double tap, rotating, relaunching, each
+  checking that the user's progress survived.
+
+**Personas as guidance, never enforced**
+- The skill shows how to build personas for the app at hand, with example personas to copy, extend or ignore (the same
+  file as Tapline's). No setup is required: a journey can start with only a goal.
+
+**Each screen against the basics**
+- `ux_check`: competing choices, one clear main action, thumb reach, icon-only buttons, cut-off text, contrast, target
+  size, naming that changes between screens, and error or empty states that don't say what to do. Facts first, each
+  naming its element and basis; the agent adds its own judgment and says it is judgment.
+- House rules (`--ux-rules FILE`): the user's own taste, as text the agent judges, or as rules the tool checks
+  (`max_taps_to_goal`, `way_back`).
+
+**A visual report**
+- When a journey stops, a report folder (Markdown, HTML, screenshots, a filmstrip, marked-up findings, and a GIF of
+  the journey from the live stream), with its summary in the answer and at most two key pictures. `export` puts it in a
+  GitHub PR or issue, only when the user asks.
+
+**Test pictures for photo pickers**
+- `media` adds pictures to the phone's photo library for an app's photo picker, after the user's OK, and removes only
+  what it added. It needs the runner this release pins, tw-16.15.3.3, which has the photo routes (`tapwright setup
+  --force` installs it); an older runner answers `unsupported` and says so.
+
 ## 1.4.0, "the Fewer Steps Update" (2026-11-13)
 
 The same check should cost an agent no more calls on the iPhone than on Android. A QA pass found iPhone lanes took

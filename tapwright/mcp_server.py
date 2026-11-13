@@ -7,6 +7,7 @@ may be watching or driving in its live view at the same time.
 """
 import asyncio
 import base64
+import io
 import logging
 import os
 import re
@@ -22,7 +23,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import client, device, policy, repair, ui
+from . import client, device, policy, repair, ui, uxcheck
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -62,11 +63,12 @@ def save_screenshot(directory: Path, tool: str, jpeg: bytes, size, now: datetime
     return f"Screenshot: {path} ({size[0]}x{size[1]})"
 
 
-def _result(text: str, image: str | None = None, is_error: bool = False) -> CallToolResult:
-    """One text item, plus the screenshot (base64 JPEG) when there is one."""
+def _result(text: str, image: str | None = None, is_error: bool = False,
+            more: list[str] | None = None) -> CallToolResult:
+    """One text item, plus the screenshot (base64 JPEG) when there is one, and `more` pictures (a journey's stop)."""
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=text)]
-    if image:
-        content.append(ImageContent(type="image", data=image, mime_type="image/jpeg"))
+    for picture in ([image] if image else []) + list(more or []):
+        content.append(ImageContent(type="image", data=picture, mime_type="image/jpeg"))
     return CallToolResult(content=content, is_error=is_error)
 
 
@@ -145,12 +147,23 @@ def _first_answer_notice() -> str | None:
         return None
 
 
+TIMEOUT = 120.0
+LONG_TIMEOUT = 200.0  # a batch may take up to 120 s on the phone; media waits up to 150 s for iOS's question to the person
+EXPORT_TIMEOUT = 600.0  # a journey's stop with export: the report is pushed to GitHub (journey_export)
+
+
+def _timeout(tool: str, args: dict) -> float:
+    """How long this client waits for the daemon's answer to one tool call."""
+    if tool == "journey" and args.get("stop") and args.get("export") is not None:
+        return EXPORT_TIMEOUT
+    return LONG_TIMEOUT if tool in ("run", "replay", "media") else TIMEOUT
+
+
 async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
     try:
-        long = tool in ("run", "replay")  # a batch may take up to 120 s on the phone
-        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, 200.0 if long else 120.0)
+        answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID, _timeout(tool, args))
     except client.DaemonError as e:
         return _error(e.code, str(e))
     except Exception:  # the daemon unreachable: never crash the server
@@ -165,7 +178,19 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
         except OSError as e:  # the user chose file mode: no inline picture instead, but the answer stays
             text += f"\nNote: no screenshot: couldn't save to {SHOTS_DIR}: {e.strerror or e}"
         image = None
-    return _result(text, image)
+    more = answer.get("images") or None
+    if more and SHOTS_DIR is not None:  # the journey's second picture goes to the folder too, never inline
+        try:
+            from PIL import Image
+            for extra in more:
+                data = base64.b64decode(extra)
+                with Image.open(io.BytesIO(data)) as shown:
+                    size = shown.size
+                text += "\n" + save_screenshot(SHOTS_DIR, f"{tool}_more", data, size)
+        except Exception as e:  # noqa: BLE001
+            text += f"\nNote: no second screenshot: couldn't save to {SHOTS_DIR}: {getattr(e, 'strerror', None) or e}"
+        more = None
+    return _result(text, image, more=more)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)
@@ -257,6 +282,19 @@ async def audit(types: list[str] | None = None) -> CallToolResult:
     return await _tool("audit", **({"types": types} if types else {}))
 
 
+@server.tool(annotations=READ_ONLY, description=describe("ux_check"), structured_output=False)
+async def ux_check() -> CallToolResult:
+    return await _tool("ux_check")
+
+
+@server.tool(description=describe("media"), structured_output=False)
+async def media(add: list[str] | None = None, remove: bool | Literal["all"] = False,
+                confirm: bool = False) -> CallToolResult:
+    # relative paths are the agent's: where this server was started, not where the daemon runs
+    return await _tool("media", **({"add": [str(Path(p).expanduser().resolve()) for p in add]} if add else {}),
+                       **({"remove": remove} if remove else {}), confirm=confirm)
+
+
 @server.tool(annotations=READ_ONLY, description=describe("logs"), structured_output=False)
 async def logs(since: int | None = None, level: Literal["error", "warning", "info"] = "info",
                grep: str | None = None, limit: int = 100) -> CallToolResult:
@@ -331,6 +369,22 @@ async def network(mode: Literal["offline", "3g", "lossy", "normal"]) -> CallTool
     return await _tool("network", mode=mode)
 
 
+@server.tool(description=describe("journey"), structured_output=False)
+async def journey(start: bool = False, goal: str | None = None, persona: str | None = None,
+                  conditions: dict[str, str] | None = None, allow: list[Literal["open_url", "app_command"]] | None = None,
+                  eyes: Literal["user", "agent"] | None = None, stop: bool = False, reached: bool | None = None,
+                  why: str | None = None, export: dict[str, object] | None = None,
+                  stress: Literal["background", "network", "double_tap", "rotate", "relaunch"] | None = None,
+                  mode: Literal["offline", "3g", "lossy", "normal"] | None = None, target: Target | None = None,
+                  survives: dict[str, object] | None = None, done: bool = False,
+                  finding: dict[str, object] | None = None) -> CallToolResult:
+    given = {"goal": goal, "persona": persona, "conditions": conditions, "allow": allow, "eyes": eyes,
+             "reached": reached, "why": why, "export": export, "stress": stress, "mode": mode, "target": target,
+             "survives": survives, "finding": finding}
+    return await _tool("journey", **({"start": True} if start else {}), **({"stop": True} if stop else {}),
+                       **({"done": True} if done else {}), **{k: v for k, v in given.items() if v is not None})
+
+
 @server.tool(description=describe("close_app"), structured_output=False)
 async def close_app(app: str) -> CallToolResult:
     return await _tool("close_app", app=app)
@@ -377,9 +431,10 @@ def _heartbeat(stop: threading.Event) -> None:
 
 
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
-        rules: policy.Policy | None = None) -> None:
+        rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None) -> None:
     client.set_scope(apps, dedicated)
     client.set_policy(rules)
+    client.set_ux_rules(ux_rules)
     global SHOTS_DIR
     SHOTS_DIR = Path(screenshots).expanduser().resolve() if screenshots else None
     if SHOTS_DIR is not None:
