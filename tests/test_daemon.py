@@ -4561,7 +4561,7 @@ def test_a_touch_outside_the_focused_input_closes_the_keyboard_first(tool, args,
 
 
 def test_closing_the_keyboard_with_a_layer_open_keeps_away_from_what_it_hides():
-    """The JLD 1.1.0 RC pass (2026-11-12): with a layer in front, every touch that closed the keyboard first failed
+    """The 1.1.0 release-candidate pass on a real app (2026-11-12): with a layer in front, every touch that closed the keyboard first failed
     with "'tuple' object has no attribute 'actions'": `behind` holds (element, layer) pairs."""
     async def go():
         d, stop, task = await keyboard_up()

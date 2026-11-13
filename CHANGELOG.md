@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0, "the Diagnostics Update" (2026-11-13)
+
+A failure now comes with its cause: the app's log, its crash, and how it performed. The interface is AGENT-TOOLS
+1.10, shared with Tapline.
+
+**The app's log**
+- `logs`: the app's own entries in the phone's unified log (os_log, NSLog, and React Native's console in a release
+  build), from the app's process only, never another's. `level`, `grep`, `limit` and `since` narrow it; each answer
+  ends with `Latest:` to pass back as `since`.
+
+**Crashes**
+- When the app crashes during a call, the answer says so in one line (`Note: the app crashed: …`), on error answers
+  too; a crash found later is told once on the next answer, with its time.
+- `crash`: the app's crash reports on the phone since the session began: when, the exception and the top frames,
+  the app's own marked. `pull: true` copies the full report to `~/.tapwright/crashes/`.
+
+**Performance**
+- `performance`: memory and CPU of the app's process and the screen's frame rate, while waiting, around a `tap`, or
+  from a cold start to the first settled screen (`launch: true`).
+- In `run` and scripts a `performance` step can hold limits: `"expect": {"under": {"launch_s": 2, "memory_mb": 300,
+  "drops": 0}}`.
+- A limit of its own: a batch of samples already in flight when the window opens carries no timestamp, so it can't be
+  told apart from the window's own and can skew a number at the very edge of the window. Samples are counted by when
+  they arrive, not by when the phone took them. Samples still waiting when the window ends, or lost to a process list
+  that couldn't be read, are said, and fail memory and CPU limits.
+
+**Failures explain themselves**
+- A `run` or `replay` step that fails adds the app's warnings and errors since that step began. `tapwright replay
+  --junit` puts them in the test case's output, and pulls a crash report next to the script.
+
 ## 1.2.0, "the Regression Update" (2026-11-12)
 
 A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with

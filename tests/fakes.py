@@ -84,12 +84,153 @@ class FakeVideo:
         pass
 
 
+@dataclasses.dataclass
+class FakeFrame:
+    image_name: str | None
+    symbol: str | None = None
+    symbol_offset: int | None = None
+    image_offset: int | None = None
+
+
+class FakeReport:
+    """A parsed crash report, with the fields of pycrashreport's UserModeCrashReport that Tapwright reads."""
+
+    def __init__(self, name="Example", when=None, kind="EXC_BAD_ACCESS (SIGSEGV)", subtype="KERN_INVALID_ADDRESS at 0x0",
+                 frames=None, filename="/Example-2026-11-12-101010.ips", info=None, bug_type="309", bundle_id=None,
+                 stamp=None) -> None:
+        import datetime
+        self.name, self.timestamp = name, when or datetime.datetime.now()
+        self.bug_type_str = bug_type  # 309 and 109 are crashes; 385 and the like are resource reports
+        # the .ips header (its first JSON line): `bundleID`, and `timestamp` with the phone's UTC offset
+        self._metadata = {"name": name, "bug_type": bug_type, **({"bundleID": bundle_id} if bundle_id else {}),
+                          **({"timestamp": stamp} if stamp else {})}
+        self._data = {}
+        self.exception_type, self.exception_subtype, self.filename = kind, subtype, filename
+        self.application_specific_information = info
+        app = "/private/var/containers/Bundle/Application/X/Example.app/Example"
+        self.frames = frames if frames is not None else [
+            FakeFrame("/usr/lib/system/libsystem_kernel.dylib", "__pthread_kill", 8),
+            FakeFrame(app, "-[HomeController crash]", 40), FakeFrame(app, "main", 12),
+            FakeFrame("/System/Library/Frameworks/UIKitCore.framework/UIKitCore", "UIApplicationMain", 340)]
+
+
+class FakeMeter:
+    """device.AppMeter's interface: start(), then stop() gives the Measurement a test set on the device."""
+
+    def __init__(self, device, bundle_id: str) -> None:
+        self.device, self.bundle_id = device, bundle_id
+
+    async def start(self) -> None:
+        self.device.metered.append(("start", self.bundle_id))
+        if self.device.meter_error is not None:
+            raise self.device.meter_error
+
+    async def begin_window(self, fresh: bool = False) -> None:
+        self.device.windows.append(fresh)
+        if self.device.on_window is not None:
+            self.device.on_window(fresh)
+
+    async def stop(self):
+        self.device.metered.append(("stop", self.bundle_id))
+        return self.device.measurement
+
+
 class FakeDevice:
     def __init__(self) -> None:
+        from tapwright.performance import Measurement
+        self.measurement = Measurement()  # what a meter's stop() returns (tests set it)
+        self.metered: list = []  # ("start" | "stop", bundle id) in order
+        self.meter_error: Exception | None = None
+        self.windows: list[bool] = []  # one per begin_window of a meter (True: a launch's)
+        self.on_window = None  # called with `fresh` when a window begins (tests look at what has happened by then)
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
         self.opened = 0  # how often the MJPEG stream was asked for
+        # bundle id -> the pids of its running processes; an app not listed here is running (as pid 1)
+        self.pids: dict[str, list[int]] = {}
+        self.streams: dict[int, asyncio.Queue] = {}  # pid -> entries its log stream will give (see emit)
+        self.streamed: list[int] = []  # the pids a log stream was asked for
+        self.crashes: dict[str, list] = {}  # executable -> reports, newest first
+        self.crash_files: dict[str, bytes] = {}  # path on the phone -> the whole report
+        self.crash_asks = 0
+        self.stream_error: Exception | None = None  # app_log_stream raises this when asked
+        self.stream_closed: list[int] = []  # the pids whose log streams have ended
+        self.replay: dict[int, list] = {}  # pid -> entries every new stream of it gives first (the phone's replay)
+        self.replay_delay = 0.0  # seconds a new stream takes before it gives its replay (a slow phone)
+        self.phone_ms: int | None = 0  # the phone's clock, epoch ms (None: it can't be read)
+        self.crash_error: Exception | None = None  # crash_reports / crash_file raise this
+        self.crash_unreadable = 0  # how many reports crash_reports says it passed over
+        self.crash_too_big = 0  # how many it says were over the byte cap
+        self.app_pids_calls = 0
+        self.starts: dict[int, float] = {}  # pid -> when its process started (epoch s); a pid not listed has no start time
+        self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
+        #                                                         that is not what `pids` says (a pid taken by another app)
+        self.proc_error: Exception | None = None  # the process list can't be read
+
+    async def app_pids(self, bundle_id: str) -> list[int]:
+        self.app_pids_calls += 1
+        return list(self.pids.get(bundle_id, [1]))
+
+    async def app_processes(self, bundle_id: str):
+        from tapwright.device import Proc
+        self.app_pids_calls += 1
+        if self.proc_error is not None:
+            raise self.proc_error
+        return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def phone_time_ms(self) -> int | None:
+        return self.phone_ms
+
+    async def process_holder(self, pid: int):
+        """Who has that pid now (a Proc), or None when nobody does."""
+        from tapwright.device import Proc
+        if self.proc_error is not None:
+            raise self.proc_error
+        if pid in self.holders:
+            bundle, start = self.holders[pid]
+            return Proc(pid, start, bundle)
+        for bundle, pids in self.pids.items():
+            if pid in pids:
+                return Proc(pid, self.starts.get(pid), bundle)
+        return None
+
+    def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None) -> None:
+        """An entry the log stream of `pid` gives (os_trace level byte `raw`); `from_pid` is the pid the entry says
+        it comes from (another process's, to prove it is dropped)."""
+        self.streams.setdefault(pid, asyncio.Queue()).put_nowait((at, raw, text, pid if from_pid is None else from_pid))
+
+    async def app_log_stream(self, pid: int):
+        """The pid's stream: what the phone replays first (`replay`), then what `emit` gives; a None put in the queue
+        ends it, as a relay that closes does. `stream_error` makes it fail at once, as a phone without the service."""
+        self.streamed.append(pid)
+        if self.stream_error is not None:
+            raise self.stream_error
+        queue = self.streams.setdefault(pid, asyncio.Queue())
+        try:
+            if self.replay_delay:
+                await asyncio.sleep(self.replay_delay)
+            for entry in self.replay.get(pid, []):
+                yield entry
+            while True:
+                entry = await queue.get()
+                if entry is None:
+                    return
+                yield entry
+        finally:
+            self.stream_closed.append(pid)
+
+    async def crash_reports(self, executable: str, count: int, bundle_id: str | None = None):
+        from tapwright.diagnostics import CrashSearch
+        self.crash_asks += 1
+        if self.crash_error is not None:
+            raise self.crash_error
+        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable, self.crash_too_big)
+
+    async def crash_file(self, filename: str) -> bytes:
+        if self.crash_error is not None:
+            raise self.crash_error
+        return self.crash_files[filename]
 
     async def open_stream(self):
         self.opened += 1
@@ -98,6 +239,9 @@ class FakeDevice:
     async def kill_app(self, bundle_id: str) -> int:
         self.killed.append(bundle_id)
         return 1
+
+    def meter(self, bundle_id: str) -> FakeMeter:
+        return FakeMeter(self, bundle_id)
 
 
 def button(ref: str, label: str, identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
@@ -132,7 +276,8 @@ class FakeSession:
         self.locked_errors = 0  # the next N locked() calls raise a DeviceError
         self.tree: list[ui.Element] = [button("e1", "OK", "ok-button")]
         self.app: tuple[str, str] | None = ("Example", "com.example.app")
-        self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7"}]
+        self.installed = [{"bundle_id": "com.example.app", "name": "Example", "version": "1.0", "build": "7",
+                          "executable": "Example"}]
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)

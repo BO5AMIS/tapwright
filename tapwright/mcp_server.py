@@ -256,6 +256,24 @@ async def audit(types: list[str] | None = None) -> CallToolResult:
     return await _tool("audit", **({"types": types} if types else {}))
 
 
+@server.tool(annotations=READ_ONLY, description=describe("logs"), structured_output=False)
+async def logs(since: int | None = None, level: Literal["error", "warning", "info"] = "info",
+               grep: str | None = None, limit: int = 100) -> CallToolResult:
+    return await _tool("logs", **({"since": since} if since is not None else {}), level=level,
+                       **({"grep": grep} if grep else {}), limit=limit)
+
+
+@server.tool(description=describe("crash"), structured_output=False)
+async def crash(all: bool = False, pull: bool = False) -> CallToolResult:
+    return await _tool("crash", all=all, pull=pull)
+
+
+@server.tool(description=describe("performance"), structured_output=False)
+async def performance(launch: bool = False, seconds: float | None = None, tap: Target | None = None) -> CallToolResult:
+    return await _tool("performance", **({"launch": True} if launch else {}),
+                       **({"seconds": seconds} if seconds is not None else {}), **({"tap": tap} if tap else {}))
+
+
 @server.tool(description=describe("filmstrip"), structured_output=False)
 async def filmstrip(frames: int = 6, interval_ms: int = 250, frame_width: int = 200,
                     tap: Target | None = None) -> CallToolResult:
