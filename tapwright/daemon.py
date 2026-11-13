@@ -2236,21 +2236,30 @@ class Daemon(journey_tool.JourneyTools):
         if isinstance(found, tuple):
             found = self._element_at(found, items)
         top = (getattr(self.session, "last_insets", None) or (None, None))[0]
-        return (isinstance(found, ui.Element) and found.role != "cell" and self._is_native_back(found, top)
-                and any(titled(t) for t in (found.label, found.text, found.value)))
+        if not (isinstance(found, ui.Element) and found.role != "cell" and self._is_native_back(found, top)):
+            return False
+        if any(titled(t) for t in (found.label, found.text, found.value)):
+            return True
+        # a screen first seen (a deep link, a restored screen) has no known title yet: told by what iOS's Back is, the
+        # leading button of the top bar with no id of its own (Codex, PR #10 cycle 3)
+        mirrors = found.identifier in ("", found.label, found.text, found.value)
+        leading = [e for e in items if e.type == "Button" and self._is_native_back(e, top)]
+        return (mirrors and bool(found.label or found.text) and found.name in ("BackButton", found.label, "")
+                and (found.label or found.text).lower() not in ui.NOT_BACK
+                and min(leading, key=lambda e: e.x + e.width / 2) is found)
 
     def _record_expect(self, client_id: str, args: dict) -> None:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
         rec = self._recording[client_id]
         kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
+        if kind is not None and kind != "id" and self._title_test()(args[kind]):
+            return  # a title is never saved: not as an expectation, and not as a wait of its own (Codex, PR #10 cycles 2, 3)
         if rec["steps"] and kind is not None and rec["steps"][-1]["tool"] == "performance":
             # a performance step takes only `expect.under` (§15.3): the wait is a step of its own
             self._record_step(client_id, "wait_for", args, None)
             return
         if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
             return
-        if kind != "id" and self._title_test()(args[kind]):
-            return  # a title is never saved, so the step keeps no expectation of it (Codex, PR #10 cycle 2)
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
             expect["gone"] = True
@@ -2759,7 +2768,7 @@ class Daemon(journey_tool.JourneyTools):
             return None
         given = await self._given(scope) if scope is not None else None
         recording = client_id in self._recording
-        kept = batch.recorded_ignore(expect["ignore"], view.items) if recording and expect.get("ignore") else None
+        kept = batch.recorded_ignore(expect["ignore"], view.items, self._title_test()) if recording and expect.get("ignore") else None
         done = await self._compare(view, expect["matches"], threshold=expect.get("threshold"),
                                    ignore=expect.get("ignore"), check=True, given=given)
         if notes is not None:
