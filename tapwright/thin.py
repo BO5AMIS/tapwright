@@ -170,10 +170,24 @@ def _utf8() -> None:
             pass
 
 
+def _stdin_text() -> str:
+    """Standard input as UTF-8 (a leading BOM dropped), whatever the console's code page: on Windows `sys.stdin` decodes
+    with cp1252, so piped Arabic or Japanese arrived as mojibake and was typed that way."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:  # already text (a test's StringIO, an embedding host)
+        return sys.stdin.read()
+    return buffer.read().decode("utf-8-sig")
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8()
     a = _parser().parse_args(argv)
-    raw = sys.stdin.read() if a.arguments == "-" else a.arguments
+    try:
+        raw = _stdin_text() if a.arguments == "-" else a.arguments
+    except UnicodeDecodeError as e:
+        print(f"tapwright call: standard input isn't UTF-8 ({e.reason} at byte {e.start}); send the JSON as UTF-8",
+              file=sys.stderr)
+        return EXIT_REFUSED
     try:
         args = json.loads(raw) if raw.strip() else {}
     except (ValueError, RecursionError) as e:

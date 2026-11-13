@@ -154,6 +154,32 @@ def test_arguments_can_come_from_standard_input(fake, capsys, monkeypatch):
     assert fake.seen[0]["body"] == {"text": "Saved"}
 
 
+class _Bytes:
+    """A standard input whose text layer would decode with cp1252, as Windows' console does; `buffer` holds the bytes."""
+    def __init__(self, data: bytes):
+        import io
+        self.buffer = io.BytesIO(data)
+
+    def read(self):
+        return self.buffer.getvalue().decode("cp1252", errors="replace")
+
+
+def test_standard_input_is_read_as_utf8_whatever_the_console_code_page(fake, capsys, monkeypatch):
+    text = "مرحبا بالعالم こんにちは世界 👋🌍"
+    for data in (json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),
+                 b"\xef\xbb\xbf" + json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")):  # with a BOM too
+        fake.seen.clear()
+        monkeypatch.setattr(sys, "stdin", _Bytes(data))
+        assert run(capsys, "type_text", "-", "--apps", "a.b")[0] == 0
+        assert fake.seen[0]["body"] == {"text": text}
+
+
+def test_standard_input_that_is_not_utf8_is_refused_not_sent(fake, capsys, monkeypatch):
+    monkeypatch.setattr(sys, "stdin", _Bytes('{"text": "café"}'.encode("cp1252")))
+    code, _, err = run(capsys, "type_text", "-", "--apps", "a.b")
+    assert code == 2 and "isn't UTF-8" in err and fake.seen == []
+
+
 def test_the_client_defaults_to_the_parent_process(fake, capsys):
     run(capsys, "look", "--apps", "a.b")
     assert fake.seen[0]["headers"]["x-agent-client"] == str(os.getppid())
