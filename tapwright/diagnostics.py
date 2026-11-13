@@ -109,6 +109,12 @@ class LogRing:
         self.unvouched = min(self.unvouched, len(keep))
         return tail - len(keep)
 
+    def discard_unvouched(self, from_at: int | None = None) -> int:
+        """Take back the entries no answer may use yet (all, or only those at `from_at` or later): they were read while
+        another process held the pid, or nothing shows whose they are. (Exact even after an earlier discard, which
+        leaves `added` counting what it took back.)"""
+        return self.discard_since(self.added - self.unvouched, from_at)
+
     def newest(self) -> tuple[int, frozenset[str]] | None:
         """(the newest entry's time, the texts of the entries at that time): where a stream that starts again for the
         same process must pick up, so the phone's replay of what it already gave isn't added twice."""

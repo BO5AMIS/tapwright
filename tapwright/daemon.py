@@ -651,6 +651,7 @@ class Daemon:
         self._rings: dict[str, diagnostics.LogRing] = {}
         self._log_tasks: dict[str, asyncio.Task] = {}
         self._log_pids: dict[str, int] = {}  # the process each task reads
+        self._log_tainted: dict[str, Proc] = {}  # the process whose pid another process was seen holding: absence won't vouch for it
         self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
@@ -1167,8 +1168,12 @@ class Daemon:
         except Exception:
             ring.discard_since(mark)
             return
-        if holder is not None:  # gone, with nobody holding the pid, is an ordinary end: its last lines are its own
+        if holder is not None:
+            self._log_tainted[bundle] = proc
             ring.discard_since(mark, None if holder.started is None else int(holder.started * 1000))
+        elif bundle in self._log_tainted and self._log_tainted[bundle].same_life(proc):
+            ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
+        # (else: gone, with nobody holding the pid, is an ordinary end: its last lines are its own)
 
     async def _watch_logs(self, bundle: str) -> None:
         """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
@@ -1291,7 +1296,12 @@ class Daemon:
                 holder = await _wait_for(self.session.device.process_holder(life[0].pid), 5)
             except Exception:
                 return
-            if holder is not None:
+            if holder is not None:  # another process holds the pid: what was read since is not the app's, and is taken back
+                self._log_tainted[bundle] = life[0]
+                ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
+                return
+            if bundle in self._log_tainted and self._log_tainted[bundle].same_life(life[0]):
+                ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
                 return
         ring.vouch(asked)
         if self._log_life.get(bundle) is life:
@@ -1695,7 +1705,7 @@ class Daemon:
         marks: dict[str, int | None] = {}
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
-            # not this computer's, so the start is the newest time each ring had then, on the phone's own clock
+            # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
             if i == 1:
                 await self._log_boundary(scope)  # the app's log is read, with the phone's replay, before the first mark
             marks = {b: r.latest() for b, r in self._rings.items()}
@@ -1770,22 +1780,25 @@ class Daemon:
                 pass
 
     async def _clock_mark(self, scope: "Scope | None", marks: dict[str, int | None]) -> None:
-        """The app's ring has no entry yet, so no boundary for a step: the phone's own clock now is the boundary (log
-        times are on it), whatever its stream still has to replay. When the clock can't be read the app stays without
-        one, and a failure shows none of its log (an unknown start is not epoch zero)."""
+        """The boundary of a step: the phone's own clock now (log times are on it), or the ring's newest entry when
+        that is later, whatever its stream still has to replay. An old entry's time alone is no boundary: a replay
+        of older lines can still come during the step. When the clock can't be read the app stays without one, and a
+        failure shows none of its log (an unknown start is not epoch zero)."""
         try:
             given = await self._given(scope) if scope is not None else None
             bundle, _ = self._diag_app(given)
         except Refused:
             return
-        if marks.get(bundle) is not None:
-            return
         try:
-            marks[bundle] = await _wait_for(self.session.device.phone_time_ms(), 3)
+            clock = await _wait_for(self.session.device.phone_time_ms(), 3)
         except asyncio.CancelledError:
             raise
         except Exception:
-            marks[bundle] = None
+            clock = None
+        newest = marks.get(bundle)
+        # the step began at the phone's clock, or at the ring's newest entry when that is later; never at an old
+        # entry alone (the phone may still replay older lines than the newest one during the step)
+        marks[bundle] = None if clock is None else max(clock, newest) if newest is not None else clock
 
     async def _failure_logs(self, scope: "Scope | None", step: int, marks: dict[str, int | None]) -> list[str]:
         """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in

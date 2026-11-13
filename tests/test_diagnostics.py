@@ -935,7 +935,7 @@ def test_a_line_of_a_process_that_is_not_proven_the_apps_is_in_no_logs_answer():
         device.holders.clear()  # the app has its pid again, but the phone can't be asked whose the process is
         device.pids[APP] = [42]
         device.emit(42, BASE + 3, "not yet proven")
-        await settle(lambda: len(ring.entries) == 3)
+        await settle(lambda: len(ring.entries) == 2)  # (the other app's secret was taken back when it was seen holding the pid)
         device.proc_error = RuntimeError("no process list")
         assert "not yet proven" not in (await d.run_tool("a", "logs", {}))["text"]
         device.proc_error = None
@@ -975,6 +975,84 @@ def test_a_replay_that_arrives_during_the_step_is_not_shown_as_since_the_step():
         text = str(e.value)
         assert e.value.code == "expect_failed" and "an old error" not in text
         assert "Logs (since step 1):" in text and "a failure during the step" in text  # what happened in the step is shown
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_replay_that_arrives_during_a_step_is_not_the_steps_even_when_the_ring_already_has_an_old_entry():
+    """Codex and CodeRabbit, PR #4 cycle 3: the ring held an error from T-10 s, so the step's boundary stayed there and a
+    second historical error (T-5 s), replayed during the step, was shown as logged since the step."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = BASE
+        device.replay[42] = [(BASE - 10_000, 0x10, "the first old error, in the warm-up", 42)]
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        slow_down(d, 0.45)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.2, device.emit, 42, BASE - 5_000, "a delayed historical error", 0x10)
+        loop.call_later(0.35, device.emit, 42, BASE + 10, "a failure during the step", 0x10)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert "the first old error" not in text and "a delayed historical error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_boundary_is_never_older_than_the_phones_clock():
+    """Nor newer than the ring's newest entry, when that is the later of the two."""
+    async def go():
+        d = tuned(make())
+        device = d.session.device
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        ring = d._rings.setdefault(APP, diagnostics.LogRing())
+        ring.add(LogEntry(BASE - 10_000, "error", "old"))
+        device.phone_ms = BASE
+        marks = {APP: ring.latest()}
+        await d._clock_mark(None, marks)
+        assert marks[APP] == BASE
+        ring.add(LogEntry(BASE + 500, "error", "newer than the clock reading"))
+        marks = {APP: ring.latest()}
+        await d._clock_mark(None, marks)
+        assert marks[APP] == BASE + 500
+        device.phone_ms = None  # no clock: an old entry's time is not a boundary
+        marks = {APP: BASE - 10_000}
+        await d._clock_mark(None, marks)
+        assert marks[APP] is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_lines_of_a_replacement_process_stay_out_when_it_exits_and_logs_is_asked_again():
+    """Codex, PR #4 cycle 3: another app took the app's pid and logged a secret; it was withheld while that app held the
+    pid, but stayed in the ring, and was published once that app was gone and nobody held the pid."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        assert "secret" not in (await d.run_tool("a", "logs", {}))["text"]
+        device.emit(42, BASE + 3, "its second secret")  # more from the pid's new holder, after it was seen holding it
+        await settle(lambda: len(ring.entries) >= 2)
+        device.holders.clear()  # the other app exits: the app is still absent and nobody holds the pid
+        for _ in range(2):
+            shown = (await d.run_tool("a", "logs", {}))["text"]
+            assert "secret" not in shown and f"Latest: {BASE + 1}" in shown
+        assert not any("secret" in e.text for e in ring.entries)
         await finish(stop, task)
     run(go)
 
