@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.5.1 (unreleased)
+## 1.5.1 (2026-11-13)
 
 Small fixes from the first real-app runs. No new tools.
 
