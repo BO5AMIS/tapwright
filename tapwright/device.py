@@ -891,7 +891,8 @@ class AppMeter:
         try:
             listed = await aio.wait_for(info.proclist(), PROCLIST_WAIT)
         except Exception:
-            self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
+            if arrived > self._boundary:  # (a batch from before the window, lost late, is not the window's loss)
+                self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
             return
         if arrived <= self._boundary:
             return  # the window began while the list was asked for: the batch is from before it

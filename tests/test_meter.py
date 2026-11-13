@@ -227,6 +227,31 @@ def test_batches_queued_or_waiting_for_the_process_list_when_the_window_begins_a
     run(go)
 
 
+def test_a_set_up_batch_whose_process_list_fails_after_the_window_began_is_not_lost_to_the_window(world):
+    """Codex, PR #4 cycle 4: setup batch 1 waited for the process list, the window began, then that lookup raised; the
+    failure was counted against the new window, and valid 150 MB samples failed memory_mb=300 as partial."""
+    async def go():
+        from tapwright import performance
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.gate = asyncio.Event()
+        world.batches.put_nowait([world.row(7, 800)])
+        await settle(lambda: world.waiting)
+        await meter.begin_window(fresh=False)
+        world.proc_error = RuntimeError("process list unavailable")
+        world.gate.set()
+        await asyncio.sleep(0.05)
+        world.proc_error = None
+        for _ in range(2):
+            world.batches.put_nowait([world.row(7, 150, 10.0)])
+        await settle(lambda: len(meter.measurement.memory_mb) == 2)
+        found = await meter.stop()
+        assert found.memory_mb == [150.0, 150.0] and found.lost == 0
+        assert not performance.summarize(found, 2.0).samples_lost
+    run(go)
+
+
 def test_a_process_without_a_start_time_that_was_not_sampled_before_the_window_is_not_a_new_one(world):
     """CodeRabbit, PR #4: an old process the phone lists without a startDate, and that no sample had shown before the
     launch's window, was taken for the new process."""
