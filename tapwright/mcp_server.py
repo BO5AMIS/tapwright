@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -294,9 +295,17 @@ async def apps() -> CallToolResult:
     return await _tool("apps")
 
 
+@server.tool(annotations=READ_ONLY, description=describe("session_report"), structured_output=False)
+async def session_report(since: int | None = None) -> CallToolResult:
+    return await _tool("session_report", **({"since": since} if since is not None else {}))
+
+
 @server.tool(description=describe("open_app"), structured_output=False)
-async def open_app(app: str, look: bool = True, screenshot: bool = False) -> CallToolResult:
-    return await _tool("open_app", app=app, look=look, screenshot=screenshot)
+async def open_app(app: str, look: bool = True, screenshot: bool = False, language: str | None = None,
+                   region: str | None = None, text_size: str | None = None) -> CallToolResult:
+    # (language, region and text_size are sent only when given: AGENT-TOOLS §16.3)
+    given = {k: v for k, v in (("language", language), ("region", region), ("text_size", text_size)) if v is not None}
+    return await _tool("open_app", app=app, look=look, screenshot=screenshot, **given)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("viewer"), structured_output=False)
@@ -315,6 +324,11 @@ async def viewer() -> CallToolResult:
                        "it carries a key. If the user doesn't see it, they can run `tapwright view` on this computer.")
     return _result("No browser could be opened here. Ask the user to run `tapwright view` on the computer the phone is "
                    "connected to; it opens the live view.")
+
+
+@server.tool(description=describe("network"), structured_output=False)
+async def network(mode: Literal["offline", "3g", "lossy", "normal"]) -> CallToolResult:
+    return await _tool("network", mode=mode)
 
 
 @server.tool(description=describe("close_app"), structured_output=False)
@@ -347,6 +361,21 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
     return await _tool("rotate", to=to, look=look, screenshot=screenshot)
 
 
+HEARTBEAT = 5.0  # s between the signs this process gives the daemon that it lives (a network condition is kept meanwhile)
+
+
+def _heartbeat(stop: threading.Event) -> None:
+    """Tell a running daemon, every HEARTBEAT seconds, that this agent's process is alive. Never starts a daemon and
+    never fails: a daemon that isn't there has nothing to keep."""
+    while True:
+        try:
+            client.ping(CLIENT_ID)
+        except Exception:
+            pass
+        if stop.wait(HEARTBEAT):
+            return
+
+
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
         rules: policy.Policy | None = None) -> None:
     client.set_scope(apps, dedicated)
@@ -360,4 +389,13 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
             logger.warning(warning)
     except Exception:
         pass
-    device.run(server.run_stdio_async)
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat, args=(stop,), name="tapwright-heartbeat", daemon=True)
+    beat.start()
+    try:
+        device.run(server.run_stdio_async)
+    finally:
+        # the agent's session ended (its stdio closed, or the host asked this process to stop): what it set on the phone
+        # ends with it. A process that is killed outright sends nothing, and the daemon notices the heartbeat stop.
+        stop.set()
+        client.end_session(CLIENT_ID)

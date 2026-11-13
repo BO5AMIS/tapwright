@@ -163,6 +163,8 @@ class FakeDevice:
         self.crash_unreadable = 0  # how many reports crash_reports says it passed over
         self.crash_too_big = 0  # how many it says were over the byte cap
         self.app_pids_calls = 0
+        self.network_calls: list = []  # ("set", mode) | ("clear",) | ("drop",) in order
+        self.network_error: Exception | None = None  # set_network raises this
         self.starts: dict[int, float] = {}  # pid -> when its process started (epoch s); a pid not listed has no start time
         self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
         #                                                         that is not what `pids` says (a pid taken by another app)
@@ -243,6 +245,21 @@ class FakeDevice:
     def meter(self, bundle_id: str) -> FakeMeter:
         return FakeMeter(self, bundle_id)
 
+    async def set_network(self, mode: str) -> str:
+        if self.network_error is not None:
+            raise self.network_error
+        self.network_calls.append(("set", mode))
+        return f"profile-{mode}"
+
+    async def clear_network(self) -> None:
+        self.network_calls.append(("clear",))
+
+    def drop_network(self) -> None:
+        self.network_calls.append(("drop",))
+
+    async def clear_leftover(self) -> None:
+        self.network_calls.append(("leftover",))
+
 
 def button(ref: str, label: str, identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
     """An element for a fake screen."""
@@ -284,6 +301,7 @@ class FakeSession:
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.dismiss_at: tuple[float, float] | None = None  # where a touch closes an open popover (None: none open)
         self.launched: list = []
+        self.launch_args: list = []  # the launch arguments of each launch ([] for none)
         self.closed: list = []
         self.read_timeouts: list = []  # the per-read timeout each refresh() was given
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
@@ -459,9 +477,10 @@ class FakeSession:
             if self.taken_by is not None:
                 self.app, self.foreground, self.taken_by = self.taken_by, self.taken_by[1], None
 
-    async def launch(self, bundle_id):
+    async def launch(self, bundle_id, arguments=None):
         self._record("launch")
         self.launched.append(bundle_id)
+        self.launch_args.append(list(arguments or []))
         self.foreground = bundle_id
         self.app = (self.app_names.get(bundle_id, bundle_id), bundle_id)
         return f"launched {bundle_id}"

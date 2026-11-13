@@ -150,6 +150,29 @@ def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
         return _attempt(info, tool, args, timeout, client_id, retry_ok=False)
 
 
+def tell_daemon(path: str, client_id: str, timeout: float = 3.0) -> bool:
+    """A word from this agent's process to a daemon that is already running (never starting one): `/api/session/ping`
+    (still here) or `/api/session/end` (gone). True when the daemon took it."""
+    info = store.read_serve_info()
+    if not info.get("port") or not info.get("token"):
+        return False
+    try:
+        _request(info, "POST", path, {}, timeout, client_id)
+    except (OSError, ValueError, DaemonError, http.client.HTTPException):
+        return False
+    return True
+
+
+def ping(client_id: str) -> bool:
+    """This agent's process is alive (sent every few seconds): a condition it set is kept while it is heard from."""
+    return tell_daemon("/api/session/ping", client_id)
+
+
+def end_session(client_id: str) -> bool:
+    """This agent's process is ending: whatever it set on the phone (a network condition) ends with it."""
+    return tell_daemon("/api/session/end", client_id)
+
+
 def shutdown(info: dict) -> None:
     """Ask the daemon to stop. It may drop the connection before its answer is out (seen now and then with a
     stream open): that is the stop happening, not a failure, so `tapwright serve --stop` doesn't end in a

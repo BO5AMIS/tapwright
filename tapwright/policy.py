@@ -45,6 +45,15 @@ class Policy:
                     return kind, word
         return None
 
+    def blocks_tool(self, tool: str, app_bundle: str | None) -> str | None:
+        """Does the block list in force for an app hold the name of a whole tool (`network`)? "app" when it is the
+        app's own list that does, "global" when it is the global one, else None. (The whole word, ignoring case.)"""
+        block, _ = self.words(app_bundle)
+        if not any(w.strip().casefold() == tool.casefold() for w in block):
+            return None
+        own = self.apps.get(app_bundle or "")
+        return "app" if own is not None and own.block is not None else "global"
+
     def to_obj(self) -> dict:
         """The policy as the JSON object `parse` reads."""
         apps = {bundle: {k: list(v) for k, v in (("confirm", w.confirm), ("block", w.block)) if v is not None}

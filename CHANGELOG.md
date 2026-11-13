@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.4.0, "the Fewer Steps Update" (2026-11-13)
+
+The same check should cost an agent no more calls on the iPhone than on Android. A QA pass found iPhone lanes took
+about 1.5 times the calls: failed targets, scrolling to search, detours through iOS Settings, and a `look` after every
+action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
+
+**See where the calls go**
+- The action log now records reads too, which agent made each call, and how long each answer was (never typed text,
+  pictures or log text).
+- `session_report` (and `tapwright report`): calls per tool, failures by code, and the waste to cut, with call numbers:
+  a `look` right after an answer that already had the changes, retries after `not_found`, scroll hunts, and actions
+  that could have been one `run`.
+
+**One call where it took several**
+- `tap`, `long_press`, `toggle` and `type_text` on an element that is off screen scroll it into view and act, in one
+  call (`Scrolled to it, then tapped …`). The safety check runs before the scroll.
+- `not_found` names up to 3 closest matches (`Closest: e12 button "Save draft" id=save-draft, …`).
+
+**No more trips through Settings**
+- `open_app` takes `language`, `region` and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`, `system`): the app opens as if the
+  phone were set that way, for that launch only, through Apple's launch arguments. Nothing in Settings changes.
+- `network`: `offline`, `3g`, `lossy` or `normal`, through the phone's own network conditioner. It affects the whole
+  phone, every answer says so while it's on, and it goes back to normal by itself when the agent that set it goes
+  quiet, the connection drops or the daemon stops. Over Wi-Fi, `offline` and `lossy` are refused, as they would cut
+  Tapwright's own link.
+
+**Fixes from the review of this release**
+- A secure field's text never reaches a recording, even when the field was below the screen: the step is saved from the
+  field `type_text` really typed into, after any scroll.
+- A `network` condition lives only as long as the agent that set it. The agent's MCP process sends a heartbeat every
+  few seconds and a goodbye when its stdio closes; the condition is cleared on the goodbye, 20 s after the heartbeat
+  stops (the process was killed), after 10 minutes without a call, and at the 30-minute cap. A condition whose
+  connection to the phone closes is noticed at once. A daemon that starts and finds a condition left by one that
+  crashed clears it before any agent's first call.
+- One agent never clears another's condition by accident: a failing `run` clears only the condition it set, a
+  replaced or ended condition is told to its owner in its next answer, and a goodbye from one agent leaves the
+  other's condition alone.
+- `network` checks a per-app policy against the app in front now, not the one at the last read, and refuses when the
+  phone can't say which it is and a policy blocks `network` for some app.
+- A plain `open_app` (or `text_size: system`) after one with a language, region or text size closes the running app
+  and opens it with the defaults, and says so.
+- `tap`, `long_press`, `toggle` and `type_text` with an `index` on an off-screen match follow that element through the
+  scroll by its own identifier (when nothing else in the tree has it) and act on it, never on another match, and the
+  policy checks the element that is touched. A match without an identifier of its own is scrolled into view and not
+  touched (`stale`: look, then target it by its ref): as a list scrolls its matches move, drop and change, and an
+  `index` can then name another one.
+
+**Habits that save calls**
+- The skill has `run` examples for common patterns and a "spend fewer calls" list: read the change list instead of
+  calling `look`, target by id, let the action scroll, and put known steps in `run`.
+- The shared benchmark (QUALITY-BAR 2.4) adds calls per check: five everyday checks on Wayfare, held to no more calls
+  than Android.
+
 ## 1.3.1 (2026-11-13)
 
 Small fixes from an app tester's pass.

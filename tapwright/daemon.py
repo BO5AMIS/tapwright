@@ -23,8 +23,8 @@ from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, aio, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
-               performance, ui)
+from . import (actionlog, aio, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib,
+               launch as launchlib, needs, network, ocr, params, performance, report, store, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -48,7 +48,10 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network"})
+# AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "apps"})  # (compare_screen writes its own line: _log_compare)
+READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay")  # AGENT-TOOLS §9: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
@@ -80,6 +83,9 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# whether the field type_text really typed into is secure, appended by _type_text once it has resolved the field (after
+# any scroll or re-read), so a recording never trusts a guess made before the call (Codex, PR #6)
+_TYPED_SECURE: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar("tapwright_typed_secure", default=None)
 # True while a replay's fresh start runs: its calls are real steps of a recording in progress (the app restart), but the
 # first-answer note goes on the replay's own answer, not on theirs
 _GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_greeting_held", default=False)
@@ -187,6 +193,8 @@ NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answer
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
+REACH_TOOLS = KEYBOARD_TOOLS  # AGENT-TOOLS §16.2: on a target in the tree but off screen they scroll to it first
+SCROLLED_THEN = "Scrolled to it, then "
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
 
 
@@ -250,6 +258,8 @@ def step_caption(tool: str, result: str, args: dict) -> str | None:
         text = f"{'Open' if tool == 'open_app' else 'Close'} {app.group(1) if app else 'the app'}"
     elif tool == "rotate":
         text = "Turn the phone"
+    elif tool == "network":
+        text = "Set the network"
     elif tool == "press_button":
         text = BUTTON_CAPTIONS.get(str(args.get("name") or ""), "Press a button")
     elif tool == "wait_for":
@@ -399,6 +409,12 @@ def _checked(name: str, args: dict) -> dict:
             raise Refused("bad_params", f"seconds must be a number from {WAIT_MIN:g} to {WAIT_MAX:g}, not {seconds!r}")
     if name in ("open_app", "close_app") and (not isinstance(args["app"], str) or not args["app"].strip()):
         raise Refused("bad_params", f"app must be a bundle id or an app's name, not {args['app']!r}")
+    if name == "open_app":  # §16.3: language, region and text size, checked before anything reaches the phone
+        for key in launchlib.KEYS:
+            checked.pop(key, None)
+        checked.update(launchlib.check(args))
+    if name == "network" and args.get("mode") not in network.MODES:
+        raise Refused("bad_params", f"mode must be one of {', '.join(network.MODES)}, not {args.get('mode')!r}")
     if name == "toggle" and args.get("value") is not None and not isinstance(args["value"], bool):
         raise Refused("bad_params", f"value must be true or false, not {args['value']!r}")
     return checked
@@ -589,6 +605,10 @@ PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own syst
 PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its prompt is answered
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 FRONT_WATCH = 0.15  # s between front-app questions while a filmstrip films in personal mode
+NETWORK_IDLE = 600.0  # s without a call from the agent that set a network condition before it is cleared
+NETWORK_CHECK = 5.0  # s between those checks
+NETWORK_OWNER_LOST = 20.0  # s without a heartbeat or a call from an agent that sends heartbeats (its process is gone)
+NETWORK_MAX = 1800.0  # s a condition may last from the moment it was set, whatever its agent does (30 min)
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
 # whatever row lies under it. It is in no app's tree, so a row half under it looked reachable: a tap on Settings'
@@ -600,7 +620,7 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash")
+READS = ("look", "apps", "audit", "filmstrip", "compare_screen", "logs", "crash", "session_report")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -620,8 +640,9 @@ _FILM_SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("ta
 _GIVEN: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar("tapwright_given", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-SPECIAL = ("wait", "wait_for", "performance")  # sleep before they answer, so they don't hold the phone's queue meanwhile
-REQUIRED = {"rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
+# not on the phone's queue: the first three sleep before they answer, network talks to the instruments service
+SPECIAL = ("wait", "wait_for", "performance", "network")
+REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
             "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",), "compare_screen": ("name",)}
@@ -730,6 +751,9 @@ class Daemon:
         self._recheck: dict[str, tuple[tuple[str, str], float, int]] = {}
         self._taken_notes: dict[str, str] = {}  # {agent: a note _check_again found for its look}
         self._greeted: set[str] = set()  # agents that have had their first answer (it carries what needs a person)
+        self._scrolled_first: set[str] = set()  # agents whose action just scrolled to its target (§16.2): its first line says so
+        self._policed: tuple | None = None  # (tool, key) of a touch the policy checked before a scroll (§16.2)
+        self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         self._queues: set = set()
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
@@ -738,6 +762,28 @@ class Daemon:
                           "alert": self._alert, "swipe": self._swipe}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
+        self._overridden: set[str] = set()  # apps launched with a language, region or text size (§16.3) and not closed since
+        self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
+        # who set it and when they last called: a condition whose agent has gone quiet for NETWORK_IDLE is cleared, so
+        # the phone isn't left slow after that agent's session ends (the daemon itself may live on for others)
+        self._network_by: str | None = None
+        self._network_seen = 0.0
+        self._network_set_at = 0.0  # when it was set (the hard cap NETWORK_MAX counts from here)
+        self._network_watch: asyncio.Task | None = None
+        self._network_notes: dict[str, str] = {}  # {agent: why its condition ended}, told in its next answer
+        # Which condition is on: a number that grows with every one set. A clear that names the number it means ends
+        # that condition only, so an agent's cleanup can't end the condition another agent set after it. Setting and
+        # clearing run one at a time under the lock, and the check and the clear are one step.
+        self._network_gen = 0
+        self._network_lock = asyncio.Lock()
+        # {agent: when it last said it lives}: an MCP process sends a heartbeat every few seconds (agent_alive) and a
+        # goodbye as it ends (agent_ended); a condition whose agent is silent for NETWORK_OWNER_LOST is cleared
+        self._agent_alive: dict[str, float] = {}
+        # agents that said goodbye (a client id is one MCP process's, never used again): a call of theirs that arrives
+        # late, or is still setting a condition when the goodbye comes, must not leave one on the phone
+        self._agents_ended: dict[str, None] = {}
+        # the device reports a condition that ended by itself or with its tunnel (L6)
+        self.session.device.on_network_end = self._network_over
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -802,6 +848,210 @@ class Daemon:
         else:
             self._announced = message
 
+    # ---- network conditions (AGENT-TOOLS §16.4) ----
+    def _network_over(self, why: str) -> None:
+        """The condition is over without the daemon asking: its connection died, or the tunnel went (the device
+        calls this). The agent that set it is told in its next answer."""
+        if self._network is None:
+            return
+        self.log(f"network: {self._network} ended: {why}")
+        self._tell_network_setter(f"the network condition ended: {why}.")
+        self._network = None
+        self._stop_network_watch()
+        self._forget_network_marker()
+
+    def _tell_network_setter(self, text: str) -> None:
+        if self._network_by is not None:
+            self._network_notes[self._network_by] = text
+
+    def _write_network_marker(self, mode: str) -> None:
+        """A note on disk that a condition is on, so a daemon that is killed without clearing it finds it at its next
+        start (_clear_leftover_network). Never fails the call."""
+        try:
+            store.NETWORK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            store.NETWORK_FILE.write_text(json.dumps({"mode": mode, "pid": os.getpid()}), encoding="utf-8")
+        except OSError as e:
+            self.log(f"network: couldn't write {store.NETWORK_FILE}: {e}")
+
+    @staticmethod
+    def _forget_network_marker() -> None:
+        try:
+            store.NETWORK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    async def _clear_leftover_network(self) -> None:
+        """A condition that a daemon left on the phone when it ended without clearing it (killed, crashed, the
+        computer lost power): its marker is still on disk. Cleared once the line is up, before any agent's first call,
+        so the phone isn't slow for whoever comes next (AGENT-TOOLS §16.4). No marker, or a condition of this very
+        daemon's: nothing to do. A failure leaves the marker for the next connect."""
+        if self._network is not None or not store.NETWORK_FILE.exists():
+            return
+        clear = getattr(self.session.device, "clear_leftover", None)
+        if clear is None:
+            self.log("network: a condition may have been left on the phone, and this device can't clear one")
+            return
+        try:
+            async with self._network_lock:
+                await asyncio.wait_for(clear(), 15)
+        except Exception as e:
+            self.log(f"network: couldn't clear a condition left from before: {e}")
+            return
+        self._forget_network_marker()
+        self.log("network: cleared a condition left on the phone by a daemon that ended without clearing it")
+
+    async def _clear_network(self, gen: int | None = None) -> bool:
+        """Back to normal, politely (the phone's condition ends when the connection that holds it closes). With `gen`,
+        only the condition that was set under that number: false, and nothing done, when another has replaced it."""
+        async with self._network_lock:
+            if gen is not None and gen != self._network_gen:
+                return False
+            self._network = None
+            self._stop_network_watch()
+            self._forget_network_marker()
+            clear = getattr(self.session.device, "clear_network", None)
+            if clear is not None:
+                await clear()
+            return True
+
+    def agent_alive(self, client_id: str) -> None:
+        """A heartbeat from an agent's MCP process (one that has said goodbye is not heard again)."""
+        if client_id not in self._agents_ended:
+            self._agent_alive[client_id] = time.monotonic()
+
+    async def agent_ended(self, client_id: str) -> None:
+        """An agent's MCP process ended (its stdio closed, or it said goodbye): the condition it set ends with it, so
+        the phone isn't left slow for the next agent. A condition another agent set is not touched. The agent is
+        marked first, before anything waits: a `network` call of it that is setting a condition right now sees the
+        mark when the phone answers, and clears what it set (_network_tool)."""
+        # kept for the daemon's life: a call or a heartbeat of this agent can still arrive or be under way however many
+        # agents end after it (Codex, PR #6 cycle 3: a cap of 256 forgot it). An id is a few dozen bytes.
+        self._agents_ended[client_id] = None
+        self._agent_alive.pop(client_id, None)
+        self._network_notes.pop(client_id, None)
+        if self._network is not None and self._network_by == client_id:
+            self.log(f"network: {self._network} cleared, its agent {client_id} has gone")
+            await self._clear_network(self._network_gen)
+
+    def _stop_network_watch(self) -> None:
+        watch, self._network_watch, self._network_by = self._network_watch, None, None
+        if watch is not None and watch is not asyncio.current_task():
+            watch.cancel()
+
+    def _network_seen_by(self, client_id: str) -> None:
+        """A call from the agent that set the condition: it is still there."""
+        if client_id == self._network_by:
+            self._network_seen = time.monotonic()
+
+    async def _watch_network(self) -> None:
+        """Clear the condition once the agent that set it has made no call for NETWORK_IDLE seconds: its session has
+        most likely ended, and the phone shouldn't stay slow for whoever uses it next (AGENT-TOOLS §16.4)."""
+        while self._network is not None:
+            await asyncio.sleep(NETWORK_CHECK)
+            if self._network is None:
+                return
+            now, gen = time.monotonic(), self._network_gen
+            heard = max(self._agent_alive.get(self._network_by or "", float("-inf")), self._network_seen)
+            if now - self._network_set_at > NETWORK_MAX:
+                # the hard cap: an agent that keeps calling can't keep the owner's phone slow for good
+                self.log(f"network: {self._network} cleared, it had been on for {NETWORK_MAX:g} s")
+                self._tell_network_setter(f"the network condition ended after {NETWORK_MAX / 60:g} min; set it again "
+                                          "if the test needs it.")
+                await self._clear_network(gen)
+            elif self._network_by in self._agent_alive and now - heard > NETWORK_OWNER_LOST:
+                # an agent that sends heartbeats stopped: its process is gone, killed or cut off, with no goodbye
+                self.log(f"network: {self._network} cleared, its agent {self._network_by} stopped sending heartbeats")
+                await self._clear_network(gen)
+            elif now - self._network_seen > NETWORK_IDLE:
+                self.log(f"network: {self._network} cleared, its agent {self._network_by} has been quiet "
+                         f"{NETWORK_IDLE:g} s")
+                await self._clear_network(gen)
+
+    async def _network_tool(self, client_id: str, args: dict, notes: list) -> dict:
+        """`network`: put the whole phone's network in a bad condition, or back to normal. Over Wi-Fi, offline and
+        lossy would cut Tapwright's own link, so they are `unsupported`."""
+        mode = args["mode"]
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if mode == "normal":
+            if self._network is not None and self._network_by not in (None, client_id):
+                self._tell_network_setter("another agent set the network back to normal.")  # its condition is ended
+            await self._clear_network()
+            self.log("network: normal")
+            self._announce("agent", "network", label="normal")
+            return _answer([network.line(mode)], notes)
+        # The owner's decision (2026-11-12): `network` is open to every agent, personal mode included, within the
+        # limits above (idle clear, NETWORK_MAX); a policy can shut it off by holding the word `network` in `block`.
+        rules = _POLICY.get()
+        blocked = rules.blocks_tool("network", self._app_bundle())  # the app of the last read
+        front = self._app_bundle()
+        if blocked is None:
+            # a person may have brought another app to the front since the last read: ask the phone now. A per-app
+            # block word anywhere in the policy makes the answer matter; when the phone can't say, the safe side wins
+            per_app = any(rules.blocks_tool("network", bundle) == "app" for bundle in rules.apps)
+            try:
+                now = await self._read(self.session.foreground_bundle_id)
+            except Exception:
+                now = None
+            if per_app and not now:  # (the real session answers None for an error of WebDriverAgent as well)
+                raise Refused("not_allowed", "blocked: the safety policy blocks network for some apps, and the app "
+                                             "in front can't be read now; try again in a moment.")
+            if now:
+                blocked, front = rules.blocks_tool("network", now), now
+        if blocked == "global":
+            raise Refused("not_allowed", "blocked: the safety policy blocks network here.")
+        if blocked == "app":
+            last = self.session.app or (None, None)
+            app = self.session.app_names.get(front or "") or (last[0] if last[1] == front else None) or front
+            raise Refused("not_allowed", f"blocked: the safety policy blocks network for {app}.")
+        if device.rsd is None:
+            raise self._not_connected()
+        if mode in network.BREAKING and str(getattr(device, "via", "") or "").lower() != "usb":
+            raise Refused("unsupported", f"{mode} would cut Tapwright's own link, which runs over the network here "
+                                         f"({getattr(device, 'via', None) or 'not USB'}); connect the phone with a cable, "
+                                         "or use 3g.")
+        gone = Refused("not_allowed", "this agent's session has ended; the network condition was not set.")
+        async with self._network_lock:  # set, replace and clear take turns: the generation says which one is on
+            if client_id in self._agents_ended:
+                raise gone
+            try:
+                profile = await device.set_network(mode)
+            except ConnectionLost as e:
+                self.lost(e)
+                raise Refused("reconnecting", "the connection dropped while setting the network; wait a few seconds, "
+                                              "then look and set it again") from None
+            except DeviceError as e:
+                raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
+            if client_id in self._agents_ended:
+                # the goodbye came while the phone was answering: nobody owns this condition, and nobody would clear it
+                if self._network is not None:  # (the phone has one condition: this call's set replaced any other)
+                    if self._network_by != client_id:
+                        self._tell_network_setter("another agent's call replaced your network condition just as its "
+                                                  "session ended; set it again if the test needs it.")
+                    self._network = None
+                    self._stop_network_watch()
+                    self._forget_network_marker()
+                try:
+                    await device.clear_network()
+                except Exception as e:
+                    self.log(f"network: couldn't clear a condition its agent had already left: {e}")
+                raise gone
+            if self._network is not None and self._network_by not in (None, client_id):
+                # the phone has one condition: this replaces another agent's, and that agent is told
+                self._tell_network_setter(f"another agent set the network to {mode}, replacing yours.")
+            self._network_gen += 1
+            self._network = mode
+            self._network_by, self._network_seen = client_id, time.monotonic()
+            self._network_set_at = self._network_seen
+            self._network_notes.pop(client_id, None)
+            self._write_network_marker(mode)
+        if self._network_watch is None:
+            self._network_watch = asyncio.create_task(self._watch_network(), name="network-watch")
+        self.log(f"network: {mode} ({profile})")
+        self._announce("agent", "network", label=mode)
+        return _answer([network.line(mode)], notes)
+
     # ---- the connection ----
     def lost(self, reason: "str | Exception") -> None:
         """A request found the line dead: the supervisor reconnects. When the request was cut because the app in
@@ -814,6 +1064,9 @@ class Daemon:
             self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
+        # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
+        # mends without a new tunnel, and the condition lives on the instruments connection, not on WebDriverAgent.
+        # The hold reports its own death (Device._hold_died), and a new tunnel ends it (Device.connect).
         self._lost.set()
 
     def _not_connected(self) -> Refused:
@@ -1005,6 +1258,8 @@ class Daemon:
                 else:
                     attempt = failures = 0
                     self.stuck = None
+                    if not self._ever_connected:  # this daemon's first line to the phone: before any agent's call
+                        await self._clear_leftover_network()
                     self._ever_connected = True
                     self._lost.clear()  # a drop noticed while reconnecting is already dealt with
                     self._set_state("live")
@@ -1052,6 +1307,7 @@ class Daemon:
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
+        self._network_seen_by(client_id)
         top_level = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
         greets = top_level and not _GREETING_HELD.get()
         if top_level and name in params.ALLOWED:
@@ -1067,18 +1323,31 @@ class Daemon:
         try:
             if not locks:
                 answer = await self._run_tool_policed(client_id, name, args, scope)
-                return self._first_answer(client_id, answer) if greets else answer
-            async with self._record_locks.setdefault(client_id, asyncio.Lock()):
-                rec = self._recording.get(client_id)
-                btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
-                try:
-                    answer = await self._run_tool_policed(client_id, name, args, scope)
-                finally:
-                    _BASELINES.reset(btoken)
+            else:
+                async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+                    rec = self._recording.get(client_id)
+                    btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
+                    try:
+                        answer = await self._run_tool_policed(client_id, name, args, scope)
+                    finally:
+                        _BASELINES.reset(btoken)
+            if top_level:
+                answer = self._with_network(name, answer)
+                if (ended := self._network_notes.pop(client_id, None)) is not None and name != "network":
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
+
+    def _with_network(self, name: str, answer: dict) -> dict:
+        """While a network condition is on, every answer's header carries `Network: 3g (Tapwright, whole phone).`
+        (§16.4): as the line after the first. (The `network` call's own answer is that line.)"""
+        if self._network is None or name == "network":
+            return answer
+        lines = answer["text"].split("\n")
+        lines.insert(1, network.line(self._network))
+        return {**answer, "text": "\n".join(lines)}
 
     def _first_answer(self, client_id: str, answer: dict) -> dict:
         """The first answer an agent gets carries what only the phone's owner can clear (needs.py), as Note: lines. (A
@@ -1093,12 +1362,45 @@ class Daemon:
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
+            if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
+                raise Refused("not_allowed", NO_APPS)
+            return await self._session_report(client_id, args)
+        known = self._hunt_known(client_id, name, args)
+        if name == "filmstrip":
+            return await self._filmstrip_logged(client_id, args, scope)
+        if name in LOGGED:
+            started, self._announced, self._granted_now = time.monotonic(), None, False
+            aimed = self._aim_for_recording(client_id, name, args)
+            typed_secure: list[bool] = []
+            secure_token = _TYPED_SECURE.set(typed_secure)
+            try:
+                result = await self._run_tool_inner(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            finally:
+                _TYPED_SECURE.reset(secure_token)
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            self._record_step(client_id, name, args, aimed, secure=any(typed_secure))
+            return result
+        if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
+            started = time.monotonic()
+            try:
+                result = await self._policed_other(client_id, name, args, scope)
+            except Refused as e:
+                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                raise
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            return result
+        return await self._policed_other(client_id, name, args, scope)
+
+    async def _policed_other(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
+        """The tools whose log line is written by the caller (reads, and the batch tools)."""
         if name in BATCH_TOOLS:
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
-        if name == "filmstrip":
-            return await self._filmstrip_logged(client_id, args, scope)
         if name == "wait_for" and client_id in self._recording:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
@@ -1115,32 +1417,74 @@ class Daemon:
             self._record_compare(client_id, args, ignore, compared[0].folder if compared else None,
                                  compared[0].picture if compared else None, fold=BATCH.get() is None)
             return answer
-        if name in LOGGED:
-            started, self._announced, self._granted_now = time.monotonic(), None, False
-            aimed = self._aim_for_recording(client_id, name, args)
-            try:
-                result = await self._run_tool_inner(client_id, name, args, scope)
-            except Refused as e:
-                self._log_action(name, args, started, e)
-                raise
-            self._log_action(name, args, started, None)
-            self._record_step(client_id, name, args, aimed)
-            return result
         return await self._run_tool_inner(client_id, name, args, scope)
 
+    def _hunt_known(self, client_id: str, name: str, args: dict) -> bool | None:
+        """AGENT-TOOLS §16.1: was this action's target already in the tree's off-screen list before the agent's run
+        of scrolls began? (A scroll hunt is exact then, and `session_report` says so without `(maybe)`.) A scroll
+        starts a run and keeps the off-screen list as it was; looks leave it; any other call ends it, and the
+        action that ends it is the one asked. True only; None when there is nothing to say."""
+        if name == "look":
+            return None
+        if name == "scroll":
+            if client_id not in self._hunts:
+                self._hunts[client_id] = list(getattr(self.session, "offscreen", []))
+            return None
+        off = self._hunts.pop(client_id, None)
+        raw = args.get("target")
+        if not off or not isinstance(raw, dict):
+            return None
+        try:
+            target = ui.parse_target(raw)
+            if target.point is not None or target.ref is not None:
+                return None
+            ui.resolve(off, dataclasses.replace(target, index=0))
+        except Refused:
+            return None
+        return True
+
+    async def _session_report(self, client_id: str, args: dict) -> dict:
+        """`session_report` (AGENT-TOOLS §16.1): where this agent's calls went, from the action log."""
+        since = args.get("since")
+        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float)) or since < 0
+                                  or not math.isfinite(since)):
+            raise Refused("bad_params", "since is a time in epoch milliseconds, like 1762950000000.")
+        if since is not None:
+            since = report.to_epoch_ms(since)
+        if self.actions.folder is None:
+            return _answer(["The call log is off (tapwright serve --no-log), so there is nothing to report."])
+        # the log is read in a worker thread (many files), and only the day files the window can reach
+        entries = await asyncio.to_thread(report.read_entries, self.actions.folder,
+                                          int(since) if since is not None else None)
+        start = int(since) if since is not None else report.client_start(entries, client_id)
+        return _answer([report.build(entries, client_id, start)])
+
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
-                    frames: int | None = None) -> None:
-        """The agent's action, one line in the action log. Typed text only as its length (AGENT-TOOLS §12)."""
-        told = self._announced or {}
+                    frames: int | None = None, *, client: str | None = None, answer: dict | None = None,
+                    known_off: bool | None = None) -> None:
+        """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
+        its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
+        read = name in READ_KINDS
+        told = {} if read else (self._announced or {})  # a read carries nothing of the action before it
         message = str(error) if error is not None else ""
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
+        said = answer["text"] if answer is not None else message
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": name, "target": actionlog.target_of(args.get("target")),
+            "source": "tapwright", "by": "agent", "client": client, "tool": name, "kind": "read" if read else None,
+            "target": actionlog.target_of(args.get("target")),
             "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
-            "batch": BATCH.get(), "confirmed": True if self._granted_now else None,
+            "answer_chars": len(said) if isinstance(said, str) else None,
+            "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
+            "confirmed": True if self._granted_now and not read else None,
+            "screenshot": True if name == "look" and args.get("screenshot", True) else None,  # (look's default is on)
+            "to": args.get("to") if name == "scroll" else None,
+            "labels": True if name == "look" and args.get("labels") else None,
+            "ocr": True if name == "look" and args.get("ocr") else None,
+            "listed": True if not read and error is None and isinstance(said, str) and "Settled in " in said else None,
+            "known_off": known_off,
             "measured": self._measured if name == "performance" and error is None else None,
             "count": self._diag_count if name in DIAG_TOOLS and error is None else None})  # counts only, never the text
 
@@ -1443,8 +1787,8 @@ class Daemon:
                 found = await _wait_for(self.session.device.crash_reports(exe, 3, bundle), self.crash_lookup)
             except Exception:
                 return None
-            for report in found.reports:
-                info = diagnostics.describe_crash(report, exe)
+            for crash in found.reports:
+                info = diagnostics.describe_crash(crash, exe)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
                     return info
@@ -1594,14 +1938,17 @@ class Daemon:
             step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
-    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
-        """An action that succeeded while this agent records becomes a step of its script."""
+    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False) -> None:
+        """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
+        text really went into is a secure one (read by type_text itself, after any scroll); the guess made before
+        the call (`next_secure`) counts too, and either hides the text."""
         rec = self._recording.get(client_id)
         if rec is None or name not in batch.STEP_TOOLS or _NESTED.get():
             return
         key = "tap" if name == "performance" else "target"  # the argument that aims at an element
         step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
-        if name == "type_text" and rec.pop("next_secure", False):
+        guessed = rec.pop("next_secure", False)
+        if name == "type_text" and (guessed or secure):
             # a password is never written to a file (safety review M4): the user puts a test password in the script
             step["text"] = ""
             step["secure"] = True
@@ -1749,6 +2096,7 @@ class Daemon:
         failed: tuple[str, str] | None = None
         done = 0
         marks: dict[str, int | None] = {}
+        set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -1764,6 +2112,8 @@ class Daemon:
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
+                if step["tool"] == "network":  # a condition this script set, until a step sets it back to normal
+                    set_here = self._network_gen if step.get("mode") != "normal" and self._network_by == client_id else None
                 recorded = before is not None and len(self._recording[client_id]["steps"]) > before
                 lines = answer["text"].splitlines()
                 step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
@@ -1793,6 +2143,13 @@ class Daemon:
                                            f"{why}")
                 break
             done += 1
+        if failed and set_here is not None and self._network is not None:
+            # a script that stops before its own `normal` step would leave the phone slow until the idle clear; one
+            # that finishes decides for itself. Only the condition this script set: if another agent has set one since,
+            # that one is theirs (the generation says which is on)
+            if await self._clear_network(set_here):
+                step_notes.append("Note: the network condition this script set was cleared because it stopped at a "
+                                  "failing step.")
         first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
         if args.get("look", True):
             view.unlooked = 0  # the block covers the batch: one call, not "N actions ago"
@@ -2130,6 +2487,28 @@ class Daemon:
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
+        self._scrolled_first.discard(client_id)
+        try:
+            answer = await self._run_tool_core(client_id, name, args)
+            if client_id in self._scrolled_first:  # the action scrolled to its target first (§16.2): the first line says so
+                return {**answer, "text": self._said_scrolled(answer["text"])}
+            return answer
+        finally:
+            self._scrolled_first.discard(client_id)
+            self._policed = None
+
+    @staticmethod
+    def _said_scrolled(text: str) -> str:
+        """`Tapped e41 button "Save" id=save.` as `Scrolled to it, then tapped e41 button "Save" id=save.`"""
+        first, _, rest = text.partition("\n")
+        word = first.split(" ", 1)[0]
+        if word in ("Tapped", "Long-pressed", "Toggled", "Typed"):
+            first = SCROLLED_THEN + first[0].lower() + first[1:]
+        else:  # (a toggle that was already as asked: `e5 switch "X" is already true.`)
+            first = "Scrolled to it. " + first
+        return first + ("\n" + rest if rest else "")
+
+    async def _run_tool_core(self, client_id: str, name: str, args: dict) -> dict:
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
             raise Refused("unsupported", f"no tool named {name!r}; the tools are "
                                          f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
@@ -2166,10 +2545,12 @@ class Daemon:
             return await self._audit(view, args, notes)
         if name == "performance":
             return await self._performance(client_id, args, notes)
+        if name == "network":
+            return await self._network_tool(client_id, args, notes)
         if name == "filmstrip":
             return await self._filmstrip(client_id, args, notes)
         if name == "compare_screen":
-            return await self._compare_screen(view, args, notes)
+            return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
             if args.get("ocr") and not ocr.available():
@@ -2198,6 +2579,7 @@ class Daemon:
             self._require_connected()
             await self._quicken()
             s = self.session
+            aim = target  # what the touch is aimed at: after a scroll to an off-screen element, that element's ref
             # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
             # from it is read for again before it is not_found
             live = by_lookup and (not self._current(view) or (target.kind != "point" and self._missing(view.items, target)))
@@ -2233,16 +2615,19 @@ class Daemon:
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
-                        self._refuse_off_screen(target)
+                        if (pinned := await self._reach(view, client_id, name, args, target, dry)) is not None:
+                            box["scrolled"] = True
+                            aim = pinned  # the element that came on screen, by its ref
+            use = args if aim is target else {**args, "target": aim}
             # a person would close the keyboard before the touch
-            box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, target))
+            box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, aim))
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
             if dry and name == "swipe":
                 self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
-            return await (handler(view, args) if handler else call(s, args))
+            return await (handler(view, use) if handler else call(s, use))
 
         async def act_as_agent():
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
@@ -2272,6 +2657,11 @@ class Daemon:
         except DryRun as e:  # nothing was sent: the answer is what would have been
             return _answer([str(e)], notes)
         except Refused as e:
+            if e.code == "not_found" and (near := self._closest(view, target, str(e))):
+                raise Refused("not_found", f"{e}\n{near}") from None
+            if e.code == "ambiguous" and self._other_app_shown():
+                head = str(e).split("\nCandidates:", 1)[0]
+                raise Refused("ambiguous", f'{head}\nLook again, then add "index" (0-based) or use a ref.') from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
                 said = str(e)
@@ -2345,7 +2735,8 @@ class Daemon:
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
-        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds, drifted=to_target,
+        answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
+                                   drifted=to_target or bool(box.get("scrolled")),
                                    snap=landed[0] if landed is not None else None)
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
@@ -2559,20 +2950,40 @@ class Daemon:
 
     async def _open_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"])
+        extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
+        # an app this daemon launched with them still runs with them: WebDriverAgent would bring that process forward as
+        # it is, so a plain open (or text_size: system) closes it and launches it again with the defaults (Codex, PR #6)
+        back = not extra and bundle_id in self._overridden
         try:
-            await self.session.launch(bundle_id)
+            if extra or back:
+                try:
+                    await self.session.terminate(bundle_id)  # a running app is closed first
+                except ConnectionLost:
+                    raise
+                except DeviceError:
+                    pass  # not running
+                await self.session.launch(bundle_id, extra)
+            else:
+                await self.session.launch(bundle_id)
         except ConnectionLost:
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        if extra:
+            self._overridden.add(bundle_id)
+        else:
+            self._overridden.discard(bundle_id)
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
-        return f"Opened {shown}."
+        if back:
+            return f"Opened {shown}, back to the phone's own language and text size."
+        return f"Opened {shown}{launchlib.said(a)}."
 
     async def _close_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"], partial=False)
         await self.session.terminate(bundle_id)
+        self._overridden.discard(bundle_id)  # the process is gone, and its launch overrides with it
         return f"Closed {shown}."
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
@@ -2715,12 +3126,13 @@ class Daemon:
         try:
             result = await self._run_tool_inner(client_id, "filmstrip", args, scope)
         except Refused as e:
-            self._log_action("filmstrip", logged, started, e)
+            self._log_action("filmstrip", logged, started, e, client=client_id)
             raise
         finally:
             _FILM_SCOPE.reset(token)
         made = re.match(r"Filmstrip: (\d+) frames", result["text"])
-        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None)
+        self._log_action("filmstrip", logged, started, None, frames=int(made.group(1)) if made else None,
+                         client=client_id, answer=result)
         return result
 
     async def _watch_front(self, given: dict[str, str], client_id: str, away: list) -> None:
@@ -2815,7 +3227,7 @@ class Daemon:
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
 
-    async def _compare_screen(self, view, args: dict, notes: list) -> dict:
+    async def _compare_screen(self, view, args: dict, notes: list, client: str | None = None) -> dict:
         """AGENT-TOOLS §14.1: the screen against the reference picture called `name`, or saved as it. Inside `run`
         or a script it is a check (§14.2): it never saves, and a difference stops the batch as `expect_failed`."""
         started, check = time.monotonic(), BATCH.get() is not None
@@ -2834,15 +3246,18 @@ class Daemon:
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
-            self._log_compare(args["name"], started, e, done)
+            self._log_compare(args["name"], started, e, done, client)
             raise
-        self._log_compare(args["name"], started, None, done)
-        return _answer(done.lines, [*done.notes, *notes], done.image)
+        answer = _answer(done.lines, [*done.notes, *notes], done.image)
+        self._log_compare(args["name"], started, None, done, client, answer)
+        return answer
 
-    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None") -> None:
+    def _log_compare(self, name: str, started: float, error: Refused | None, done: "Compared | None",
+                     client: str | None = None, answer: dict | None = None) -> None:
         """The action log's line for a picture check: the name and the share that changed, never the picture."""
         self.actions.write({
-            "source": "tapwright", "by": "agent", "tool": "compare_screen", "name": name,
+            "source": "tapwright", "by": "agent", "client": client, "tool": "compare_screen", "kind": "read", "name": name,
+            "answer_chars": len(answer["text"]) if answer is not None else len(str(error)) if error is not None else None,
             "percent": round(done.percent, 2) if done is not None and done.percent is not None else None,
             "ok": error is None, "code": error.code if error is not None else None,
             "ms": round((time.monotonic() - started) * 1000), "app": self._bundle(), "batch": BATCH.get()})
@@ -3028,6 +3443,8 @@ class Daemon:
                 raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
         # the focusing tap is a touch: refused where tap would be, and made where it shows; `force` as for tap
         self._refuse_disabled(field)
+        if (typed_secure := _TYPED_SECURE.get()) is not None:
+            typed_secure.append(bool(field.secure))  # the field this call types into, for a recording
         forced, at = "", None
         if a.get("force"):
             forced = self._forced(view, field)
@@ -3136,10 +3553,14 @@ class Daemon:
                 return True
         return False
 
-    def _anywhere(self, view, target: ui.Target) -> ui.Element:
+    def _anywhere(self, view, target: ui.Target, together: bool = False) -> ui.Element:
         """The element a target names, on the agent's list or, failing that, among what the last read found off
-        screen. Raises as `resolve` does when it is in neither."""
+        screen. Raises as `resolve` does when it is in neither. `together`: always count through both, in reading
+        order (a scroll that follows an off-screen element: as it moves, more of its matches come on screen, and an
+        `index` counted in the visible ones alone would name another element)."""
         off = getattr(self.session, "offscreen", [])
+        if together and target.ref is None and target.point is None:
+            return ui.resolve(sorted([*view.items, *off], key=lambda e: (e.y, e.x)), target)
         if target.text is not None:
             # {text} is an exact match first, then a part of one: an element off screen that is exactly the text
             # comes before one on screen that only contains it (seen on the phone 2026-11-10: "Alert" found the
@@ -3159,7 +3580,7 @@ class Daemon:
 
             return ui.resolve(everything, target)
 
-    async def _scroll_to(self, view, target: ui.Target) -> Scrolled:
+    async def _scroll_to(self, view, target: ui.Target, together: bool = False) -> Scrolled:
         """`scroll` with `to: "target"` (AGENT-TOOLS v1.6): drag the scroll view that holds the element until the
         element is on screen and clear of the bars. The tree gives the place of an element that is off screen, and
         an eased drag doesn't slide on, so each drag covers a known distance; the screen is read after each one,
@@ -3171,7 +3592,7 @@ class Daemon:
         seen: list[tuple[float, ...]] = []  # where the element was before each drag
         for drags in range(MAX_SCROLL_SWIPES + 1):
             try:
-                element = self._anywhere(view, target)
+                element = self._anywhere(view, target, together)
             except Refused:
                 if seen:  # the screen has moved under the agent's list, and this answer carries none
                     view.moved = True
@@ -3346,6 +3767,121 @@ class Daemon:
         named = self._front_line(front) if front is not None else "a sheet or menu"
         return f"; {named} is still open: tap its close control."
 
+    def _other_app_shown(self) -> bool:
+        """Personal mode only: is the app of the last read not one of the given apps? Then its labels are not shown
+        (another app may have come to the front since the check before the call)."""
+        given = _GIVEN.get()
+        return given is not None and self._app_bundle() not in given
+
+    def _closest(self, view, target: ui.Target | None, message: str) -> str:
+        """The `Closest:` line of a `not_found` for an id, label or text (AGENT-TOOLS §16.2), or "". An `index` past
+        the matches already has them: it adds nothing."""
+        if target is None or target.point is not None or target.ref is not None or "out of range" in message:
+            return ""
+        if self._other_app_shown():
+            return ""
+        hidden = {id(e) for e, _ in getattr(self.session, "behind", [])}
+        off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
+        return closest.find(target, view.items, off, self.session.screen)
+
+    async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> ui.Target | None:
+        """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
+        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
+        has its say on the target first, and again on the element that came on screen when that isn't the one it
+        checked. Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
+        before: `off_screen`, or `not_found` further on. Returns the target to act on when it scrolled (the element
+        that came on screen, by ref), else None."""
+        if name not in REACH_TOOLS:
+            self._refuse_off_screen(target)
+            return None
+        s = self.session
+        try:
+            # the element _scroll_to will bring on screen: the same lookup, `index` counted through both lists
+            hit = self._anywhere(view, target)
+        except Refused as e:
+            if e.code == "not_found":
+                return None  # not off screen either: the action says not_found
+            raise
+        if not isinstance(hit, ui.Element) or any(hit is e for e in view.items):
+            return None  # (on screen already: the action touches it where it is)
+        said = ""
+        if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
+            said = self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
+            if _POLICY.get().check(self._app_bundle(), hit.label if hit.role == "input" else hit.text) is not None:
+                self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
+        shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
+        area = ui.scroll_holding(view.items, hit, s.screen)
+        why = ""
+        if area is None:
+            why = "it isn't inside a scroll view, so no scroll brings it on screen."
+        else:
+            view_rect = self._scroll_view_rect(area)
+            if view_rect[3] <= 0:
+                why = "the scroll view that holds it lies under the bars."
+        if why:
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; {why}")
+        if dry:
+            dx, dy = ui.scroll_move(hit.rect, view_rect)
+            x, y = hit.center[0] + dx, hit.center[1] + dy
+            verb = {"tap": "tap", "long_press": "long-press", "toggle": "toggle"}.get(name)
+            if verb is None:
+                n = len(args["text"])
+                self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
+            self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
+        # `hit` was counted through the screen and what lies past it, so the scroll and the look after it count the
+        # same way. An `index` alone doesn't keep the element: as a list scrolls it drops and adds rows, and other
+        # matches can come and go, so the count can name another element afterwards (Codex, PR #6 cycles 3 to 8, which
+        # also showed that where the matches lie after the scroll can't prove which one it is). So an indexed target
+        # follows the element's own identifier when nothing else in the tree has it; without one, the element is
+        # scrolled into view and not touched: the agent's next look shows it with a ref.
+        follow = target
+        if target.index is not None:
+            tree = [*view.items, *getattr(s, "offscreen", [])]
+            if hit.identifier and sum(e.identifier == hit.identifier for e in tree) == 1:
+                follow = ui.Target(id=hit.identifier)
+        done = await self._scroll_to(view, follow, together=True)
+        if target.index is not None and follow is target:
+            raise Refused("stale", f"scrolled {hit.line(ref=False, actions=False)} into view, but index "
+                                   f"{target.index} can't be sure to name it after a scroll (it has no identifier of "
+                                   f"its own, and the list's matches move and change as it scrolls), so it wasn't "
+                                   f"touched. Look, then target it by its ref.")
+        # The element the target names now: on screen after the scroll, it is the one to touch. The action gets its
+        # ref, not the target again: an `index` counted in the visible matches alone would point at another element.
+        try:
+            final = self._anywhere(view, follow, together=True)
+        except Refused:
+            final = None
+        if not isinstance(final, ui.Element) or not any(final is e for e in view.items):
+            note = getattr(done, "note", "") or "it is as far into view as it gets."
+            raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
+                                            f"scrolling didn't bring it on screen: {note}")
+        if hit.identifier and (follow is not target or target.id == hit.identifier):
+            # Followed by its real identifier: what is touched must still carry it, and nothing else may. An `id`
+            # lookup falls back to WebDriverAgent's raw name when no identifier matches, so with the element gone
+            # (an app refresh during the scroll) another element whose label mirrors that word would be found
+            # (Codex, PR #6 cycle 9).
+            tree = [*view.items, *getattr(s, "offscreen", [])]
+            if final.identifier != hit.identifier or sum(e.identifier == hit.identifier for e in tree) != 1:
+                raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
+                                       f"scroll (its identifier \"{hit.identifier}\" is gone or no longer its own), "
+                                       f"so nothing was touched. Look, then target what is there.")
+        if name != "type_text" and self._police_key(final) != self._police_key(hit):
+            # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
+            self._policed = None
+            self._police(name, args, final)
+            if _POLICY.get().check(self._app_bundle(), final.label if final.role == "input" else final.text) is not None:
+                self._policed = (name, self._police_key(final))
+        self._scrolled_first.add(client_id)
+        return ui.Target(ref=final.ref) if final.ref else target
+
+    def _scroll_view_rect(self, area: ui.Element) -> tuple[float, float, float, float]:
+        """The part of a scroll view between the bars: where its content is seen and dragged."""
+        s = self.session
+        top, bottom = s.last_insets
+        band = (SCROLL_TOP_INSET if top is None else top, s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+        x, y, w, h = area.rect
+        return x, max(y, band[0]), w, min(y + h, band[1]) - max(y, band[0])
+
     def _refuse_off_screen(self, target: ui.Target) -> None:
         """A target on no listed element but on one the last read found past the screen (or its scroll view's
         edge): `off_screen`, not `not_found`. A touch can't reach it, so `force` doesn't either."""
@@ -3398,9 +3934,10 @@ class Daemon:
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
-        # the element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)
-        key = (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
-                                           or ("role", element.role, element.label, element.text)))
+        key = self._police_key(element)
+        if self._policed == (tool, key) and not a.get("dry_run"):
+            self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
+            return ""
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
@@ -3411,6 +3948,11 @@ class Daemon:
             _GRANTED.get().append(True)
             return ""
         raise Refused("not_allowed", self._ask(tool, a, key, element, word, what, now))
+
+    def _police_key(self, element: ui.Element) -> tuple[str, ...]:
+        """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)."""
+        return (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
+                                            or ("role", element.role, element.label, element.text)))
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float) -> str:
@@ -4178,6 +4720,10 @@ class Daemon:
         return text
 
     async def close(self) -> None:
+        try:
+            await asyncio.wait_for(self._clear_network(), 10)  # first: the phone is never left in a condition
+        except Exception as e:
+            self.log(f"closing: network: {e}")
         if self._feeder_task is not None:
             self._feeder_task.cancel()
             await asyncio.gather(self._feeder_task, return_exceptions=True)

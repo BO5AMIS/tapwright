@@ -124,6 +124,11 @@ class Device:
         self.tunnel = None
         self.rsd = None
         self.via = None
+        self._network_hold: "NetworkHold | None" = None  # keeps a network condition on (see set_network)
+        self._network_holds: "set[NetworkHold]" = set()  # every hold with a live task, the current one included
+        self._network_lock = asyncio.Lock()  # one set or clear at a time: two calls must not leak a hold
+        # called with the reason when a hold ends by itself or with the tunnel (not when the daemon asked to clear)
+        self.on_network_end = None  # Callable[[str], None] | None
         # One connection kept open to WebDriverAgent (see _on_kept). On over USB, where the reliability suite
         # passed with it (2026-11-11); off over a network until it has been measured there. TAPWRIGHT_KEEP=1 or
         # 0 overrides.
@@ -140,6 +145,8 @@ class Device:
 
     # ---- the tunnel ----
     async def connect(self) -> None:
+        # a new tunnel is a new phone session: the old condition went with the old connection
+        self.drop_network("the phone's connection was rebuilt")
         from pymobiledevice3 import usbmux
         from pymobiledevice3.remote import userspace_tunnel
         on_usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"
@@ -422,6 +429,76 @@ class Device:
             stat = await manager.afc.stat(filename)
             return await _read_capped(manager.afc, filename, _size_of(stat))
 
+    # ---- network conditions (AGENT-TOOLS §16.4) ----
+    async def set_network(self, mode: str) -> str:
+        """Put the phone's network in `mode` (offline, 3g or lossy; network.py) and keep it there: Apple's condition
+        holds only while the instruments connection that set it stays open, so a task here keeps that connection
+        until clear_network, a reconnect or close. The identifier of the profile used. DeviceError when the phone
+        can't."""
+        async with self._network_lock:
+            replaced = bool(self._network_holds)
+            await self._stop_holds()
+            hold = NetworkHold(self, mode)
+            self._network_hold = hold
+            self._network_holds.add(hold)
+            try:
+                return await hold.start()
+            except BaseException:
+                if self._network_hold is hold:
+                    self._network_hold = None
+                self._network_holds.discard(hold)
+                if replaced:  # the condition that was on is gone with nothing in its place: the daemon is told
+                    self._network_ended(f"{mode} could not replace it, so the phone is back to normal")
+                raise
+
+    async def clear_leftover(self) -> None:
+        """Ask the phone to end a condition that an earlier process left (the daemon was killed or crashed, and its
+        marker file says so). A condition ends with the connection that holds it, so this is a safety net: a new
+        instruments connection says `clear`, whoever set the condition. Raises when the phone can't be asked."""
+        from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        async with self._network_lock:
+            async with DvtProvider(self.rsd) as dvt, ConditionInducer(dvt) as inducer:
+                await inducer.clear()
+
+    async def clear_network(self) -> None:
+        """The phone's network back to normal: every connection that holds a condition is closed. Never raises."""
+        async with self._network_lock:
+            await self._stop_holds()
+
+    async def _stop_holds(self) -> None:
+        holds, self._network_hold = list(self._network_holds), None
+        self._network_holds.clear()
+        for hold in holds:
+            await hold.stop()
+
+    def drop_network(self, reason: str | None = None) -> None:
+        """The tunnel is gone or going: its instruments connection can't be closed politely, and the phone has
+        already dropped the condition with it. Stop the tasks that held it, without waiting. With a `reason`, and a
+        hold that was on, the daemon is told (on_network_end)."""
+        holds, self._network_hold = list(self._network_holds), None
+        self._network_holds.clear()
+        for hold in holds:
+            hold.abandon()
+        if holds and reason is not None:
+            self._network_ended(reason)
+
+    def _network_ended(self, reason: str) -> None:
+        if self.on_network_end is not None:
+            try:
+                self.on_network_end(reason)
+            except Exception as e:  # a callback must not break the connection's own work
+                self.log(f"network: {e}")
+
+    def _hold_died(self, hold: "NetworkHold", reason: str) -> None:
+        """A hold's task ended without being asked to: the phone has dropped its condition with the connection."""
+        if hold not in self._network_holds:
+            return
+        self._network_holds.discard(hold)
+        if self._network_hold is hold:
+            self._network_hold = None
+            self._network_ended(reason)
+
     def meter(self, bundle_id: str) -> "AppMeter":
         """A meter for that app's own process (`performance`): start() it, do the thing, stop() it."""
         return AppMeter(self, bundle_id)
@@ -594,6 +671,10 @@ class Device:
                 runner.exception()  # collected, so it isn't logged as never retrieved
 
     async def close(self) -> None:
+        had = bool(self._network_holds)
+        await self.clear_network()  # first: the phone is never left offline
+        if had:
+            self._network_ended("the phone's connection was closed")
         await self._stop_runner()
         if self.tunnel:
             await self.tunnel.aclose()
@@ -916,3 +997,105 @@ class AppMeter:
                 self._skip_frame = False
                 continue
             self.measurement.fps.append(float(fps))
+
+
+NETWORK_START = 20.0  # seconds the instruments service may take to set a condition
+NETWORK_STOP = 5.0  # seconds a condition may take to clear before its connection is simply cut
+# pymobiledevice3's errors for a connection that is gone (by class name: the library is imported only when used)
+LINE_ERRORS = frozenset({"ConnectionTerminatedError", "ConnectionFailedError", "StreamClosedError", "TimeoutError"})
+
+
+class NetworkHold:
+    """One network condition on the phone (`network`), held by a task that keeps the instruments connection open: the
+    condition is Apple's developer condition inducer, and it ends when that connection closes. So the connection is
+    opened here, the profile set, and the task waits; stop() clears the condition and closes the connection (the
+    phone is back to normal either way)."""
+
+    def __init__(self, device: "Device", mode: str) -> None:
+        self.device, self.mode = device, mode
+        self._task: asyncio.Task | None = None
+        self._release = asyncio.Event()
+        self._ready: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    async def start(self) -> str:
+        self._task = asyncio.create_task(self._run(), name="network-condition")
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._ready), NETWORK_START)
+        except asyncio.TimeoutError:
+            await asyncio.shield(self.stop())
+            raise DeviceError("the phone's condition service didn't answer in time") from None
+        except BaseException:
+            await asyncio.shield(self.stop())
+            raise
+
+    async def stop(self) -> None:
+        self._release.set()
+        task, self._task = self._task, None
+        if task is None:
+            return
+        done, _ = await asyncio.wait({task}, timeout=NETWORK_STOP)
+        if not done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def abandon(self) -> None:
+        """Stop without waiting (the tunnel is gone)."""
+        self._release.set()
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+
+    async def _wait_for_release_or_loss(self, dvt) -> None:
+        """Wait until stop() is asked for, or until the condition's own connection closes. pymobiledevice3 closes it
+        in a background reader (the phone ended the session, the tunnel under it dropped): nothing raises here by
+        itself, and the condition is gone with it, so the wait ends in an error that says so."""
+        waiter = getattr(getattr(dvt, "_dtx", None), "wait_disconnected", None)
+        if waiter is None:  # a library without the signal: stop() is the only way out, and the idle clear the backstop
+            await self._release.wait()
+            return
+        released = asyncio.ensure_future(self._release.wait())
+        lost = asyncio.ensure_future(waiter())
+        try:
+            await asyncio.wait({released, lost}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for pending in (released, lost):
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(released, lost, return_exceptions=True)
+        if lost.done() and not lost.cancelled() and not self._release.is_set():
+            raise ConnectionLost("the connection closed")
+
+    async def _run(self) -> None:
+        from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from .network import pick_profile
+        try:
+            async with DvtProvider(self.device.rsd) as dvt, ConditionInducer(dvt) as inducer:
+                groups = await inducer.list()
+                profile = pick_profile(self.mode, groups)
+                if profile is None:
+                    raise DeviceError(f"this phone offers no network condition for {self.mode}")
+                await inducer.set(profile)
+                if not self._ready.done():
+                    self._ready.set_result(profile)
+                await self._wait_for_release_or_loss(dvt)
+                try:
+                    await inducer.clear()
+                except Exception as e:  # the connection closing ends the condition anyway
+                    self.device.log(f"network: clearing: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not self._ready.done():
+                if not isinstance(e, DeviceError):
+                    # a dead line is ConnectionLost (the daemon reconnects); anything else the phone said is an error
+                    lost = isinstance(e, (OSError, EOFError)) or type(e).__name__ in LINE_ERRORS
+                    e = (ConnectionLost if lost else DeviceError)(str(e) or type(e).__name__)
+                self._ready.set_exception(e)
+            else:
+                self.device.log(f"network: condition lost: {e}")
+                if not self._release.is_set():  # nobody asked it to stop: it died
+                    self.device._hold_died(self, f"the phone's condition connection closed ({str(e) or type(e).__name__})")
+        finally:
+            if not self._ready.done():
+                self._ready.cancel()

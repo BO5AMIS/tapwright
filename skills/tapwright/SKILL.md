@@ -118,18 +118,62 @@ with no element.
 | check that the app is fast enough | `performance` with `launch: true` for opening it, or `tap` for one action. In a `run` or a saved script, `"expect": {"under": {"launch_s": 2}}` makes it a check. `record` saves a `performance` call without its `under`, so add the limit to the saved script after recording, or replay checks nothing. Samples are counted by when they arrive: a batch already in flight when the window opens carries no timestamp, so it can't be told apart from the window's own, and a number at the very edge of the window can be skewed |
 | leave a screen, or close a sheet | `back`. Not every sheet closes that way: if it answers `no_action`, the sheet has only its own close control, and the message names the sheet. Tap that control |
 | check that something appeared | read the action's answer; `look` only if it isn't there |
-| pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates |
+| pick one of several elements with the same text | its `id` if it has one; else add `index` to the target (0-based, in reading order), or use a ref from the `ambiguous` answer's candidates. An `index` on an element below the screen with no id of its own scrolls it into view and answers `stale`: look, then use its ref |
 | see pixels (layout, colours, images) | `look`, or `screenshot: true` on an action. Pictures cost many tokens: drive by text |
 | run steps whose answers you don't need | `look: false` on them, then read the next full answer and its note |
 | work with Tapwright and Tapline both connected | inside the app under test, Tapline's tools: its reads and actions are the fast ones. For what iOS draws (permission prompts, system alerts, the share sheet), other apps, real gestures, and the live view: Tapwright's. A ref belongs to the tool that gave it: never pass one tool's ref to the other; use the element's `id` with either |
 | answer a system alert (permissions, notifications) | `alert` with `accept` or `dismiss`, the way a new user would unless the test says otherwise. `Alert:` in the header is a system alert; an app's own alert is ordinary elements: tap its button. On the owner's phone this works for a permission prompt raised by an app you were given; after your answer the call waits for the app to come back |
 | start a run from a clean app | `close_app`, then `open_app` |
+| open the app in another language, region or text size (right-to-left layouts, long words, large text) | `open_app` with `language` (`ar`), `region` (`QA`) and/or `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the default). It reopens the app for that launch only, and the first line says what it opened with. A plain `open_app` afterwards (or `text_size: system`) closes the app and opens it again with the phone's own settings, and says so. A launch that fails after the app was closed leaves it closed: look, then open it again. Never go into Settings for this: Settings on the owner's phone shows their name and accounts |
+| test a bad network (offline, slow, lossy) | `network` with `mode`: `offline`, `3g`, `lossy`, then `normal`. It is the whole phone's network, every answer carries `Network: …` while it is on, and it clears itself when the session ends. Over Wi-Fi `offline` and `lossy` are `unsupported` (they would cut Tapwright's own link): use `3g`, or a cable |
 | get back when a link opened another app | `open_app` with the app under test: `{"app": "com.example.app"}` |
 | open a link a person would scan as a QR code (pairing Tapline, an Expo project, a deep link) | `open_url` with the link itself, then answer the app's prompt (Tapline's "Connect for testing?": tap Connect). Ask for the link as text; don't ask the user to scan. A pairing link works once: never log it or put it in a file. On a project's first load, Expo Go (and a development build) opens its developer menu by itself: tap Continue, then Close |
 | drag a slider or a carousel | `swipe` between two points |
 | see what a touch would do, and whether it needs a person's OK, without touching | `dry_run: true` on `tap`, `long_press`, `toggle`, `type_text`, `swipe`, `scroll` or `back`: it answers `Would tap e12 ...` and sends nothing to the phone |
 
 **With both tools connected:** when the two tools answer differently, both are right about their own way in: Tapwright does what a finger can do, Tapline what the app's own code allows (Tapline's `back` calls a sheet's own close; Tapwright's needs a gesture the sheet accepts). Test what the user can do with Tapwright; use Tapline to get there faster. Each tool's `was` is from its own last answer: after the other tool acted, read the current value, not the old one.
+
+## 4a. Spend fewer calls
+
+Every call costs time. These save the most:
+
+- **Read the change list instead of `look`.** An action's answer says what appeared, went and changed. `look` only
+  after a new screen you haven't seen, or when the answer doesn't have what you need.
+- **Target by `id`.** An `id` works without a `look` first, still works after the screen changed, and a
+  `not_found` lists the closest names. Then `ref`, `label`, `text`; `x` and `y` last.
+- **Let the action scroll.** `tap`, `long_press`, `toggle` and `type_text` on an element that is below the fold scroll it
+  into view and act, in one call. Don't `scroll` by guess first.
+- **Put known steps in `run`.** Anything you could write down before starting (open a sheet, choose, save, check) is
+  one call, with an `expect` on the step that should change something.
+- **`look: false`** on steps whose answer you don't need, then read the next full answer.
+- **A language, a text size, a bad network** are one call each (`open_app` with `language`, `text_size`; `network`), not a trip through
+  Settings.
+
+`run` for the common patterns:
+
+```
+# a sheet: open it, choose, save, check
+run {"steps": [
+  {"tool": "tap", "target": {"id": "filter-button"}},
+  {"tool": "tap", "target": {"label": "Newest first"}},
+  {"tool": "tap", "target": {"id": "apply"}, "expect": {"text": "Newest first"}}]}
+```
+
+```
+# a form: fill, submit, wait for the confirmation
+run {"steps": [
+  {"tool": "type_text", "target": {"id": "email"}, "text": "test@example.com"},
+  {"tool": "type_text", "target": {"id": "message"}, "text": "Hello"},
+  {"tool": "tap", "target": {"id": "send"}, "expect": {"text": "Thanks", "timeout": 10}}]}
+```
+
+```
+# a tab tour: each tab matches its saved reference (the first run saves them with compare_screen outside run)
+run {"steps": [
+  {"tool": "tap", "target": {"id": "tab-home"}, "expect": {"matches": "home"}},
+  {"tool": "tap", "target": {"id": "tab-search"}, "expect": {"matches": "search"}},
+  {"tool": "tap", "target": {"id": "tab-profile"}, "expect": {"matches": "profile"}}]}
+```
 
 ## 5. Errors
 

@@ -3090,6 +3090,8 @@ def test_scroll_to_the_end_swipes_until_the_stream_stops_changing():
 
 def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_ends(monkeypatch):
     monkeypatch.setattr(daemon_module, "SCROLL_CAP", 0.3)  # 12 s in life
+    # the time cap is under test, not the swipe count: a fast machine made 15 swipes in 0.3 s (Windows CI, PR #6)
+    monkeypatch.setattr(daemon_module, "MAX_SCROLL_SWIPES", 10_000)
     async def go():
         d = make()
         stop, task = await started(d)
@@ -3099,6 +3101,7 @@ def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_en
 
         async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
             ends.append((y0, y1))
+            await asyncio.sleep(0.05)  # a swipe takes time on a phone (about 6 fit in the cap)
             return await original(x0, y0, x1, y1, duration_ms, hold_ms)
         d.session.swipe = swipe
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
@@ -4038,8 +4041,9 @@ def test_a_target_that_is_only_off_screen_is_off_screen_not_not_found():
                 with pytest.raises(Refused) as e:
                     await d.run_tool("a", "tap", {"target": target, "force": force})
                 assert e.value.code == "not_actionable", target
+                # (§16.2: no scroll view holds it, so no scroll could bring it on screen; the message says why)
                 assert str(e.value) == ('off_screen: button "Bottom" id=lab-bottom @16,1500 398x48 is off screen; '
-                                        'scroll to it first (scroll with this target and to: "target").')
+                                        "it isn't inside a scroll view, so no scroll brings it on screen.")
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "nowhere"}})
         assert e.value.code == "not_found"
@@ -4870,8 +4874,8 @@ def test_scroll_to_a_target_far_below_drags_until_it_is_clear_of_the_bars():
         stop, task = await started(d)
         LongList(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "row-30"}})
+        with pytest.raises(Refused) as e:  # a scroll toward a point of a target that is off screen isn't `to: "target"`
+            await d.run_tool("a", "scroll", {"target": {"id": "row-30"}})
         assert str(e.value).endswith('is off screen; scroll to it first (scroll with this target and to: "target").')
         r = await d.run_tool("a", "scroll", {"target": {"id": "row-30"}, "to": "target"})
         first = r["text"].splitlines()[0]

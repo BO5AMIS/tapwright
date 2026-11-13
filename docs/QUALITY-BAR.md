@@ -8,7 +8,8 @@ two projects on 2026-11-10, and both agree on it. Version 2.1 (2026-11-10) adds 
 that has never seen the tool gets on with it. Version 2.2 (2026-11-11, the owner's decision) narrows the
 launch links to USB and Wi-Fi on the same network, for a test phone that stays next to the computer;
 5G and Tailscale move to "Later". Version 2.3 (2026-11-11, the owner's decision) gives Tapwright over
-Wi-Fi a speed target of its own for a tap, type or toggle (S1). Each repo keeps an identical copy.
+Wi-Fi a speed target of its own for a tap, type or toggle (S1). Version 2.4 (2026-11-12, the plan the owner chose
+for 1.4) adds group K: how many calls a common check costs, against the same check on Android. Each repo keeps an identical copy.
 
 The two tools should feel like one product made by one team. They differ only in setup: how an
 agent is wired to them, how the user gives access (an app pairs with Tapline; a whole phone
@@ -135,6 +136,45 @@ and both helpers did. A4: no wrong conclusion in either report; what the helpers
 tool's and is fixed (an off-screen change said twice, the keyboard's own keys listed as elements, a
 notification banner taken for the home screen). So Tapwright meets A, on two runs with the skill. An
 earlier run without the skill, before v1.5, took about 110 calls and passed 9 points.
+
+## Calls per check (K): no more than on Android
+
+Group A asks whether an agent can use the tool at all; this group asks what an everyday check costs. The
+tester's iPhone lanes took about 1.5 times the calls of their Android lanes (2026-11-12). The bar is that a check
+costs no more calls on the iPhone than on Android.
+
+**The checks.** Five, on Wayfare (the shared demo app), each judged by its state on screen, so both tools score
+them the same way. Before each check the harness puts the app back on its first screen (Tapwright: `close_app`
+and `open_app`; Tapline: `reload`), and those calls aren't counted:
+
+| | Check | Done when |
+|---|---|---|
+| 1 | **Open a screen:** a destination's details, from Explore. | Its name and price show on its details screen. |
+| 2 | **Change a setting:** turn on "Prices in local currency" in Settings, then go back to Explore. | Explore's prices show in the local currency. |
+| 3 | **Fill a form:** plan a trip to a destination (departure, return, travellers and a note), and save it. | The trip shows in Trips. |
+| 4 | **Find in a long list:** open the last destination in Explore, which is off screen at first. | Its details show. |
+| 5 | **An error state:** sign up with an email that isn't one and a password that is too short, then correct both. | Both field errors show, then the sign-up goes through. |
+
+Wayfare makes no network requests, so network conditions (AGENT-TOOLS §16.4) are checked in each tool's own
+tests, not here. A network check joins this group when the demo app gains one.
+
+**How it's measured.** A helper agent, as in group A: a mid-size model, given only what an MCP client shows and
+the tool's skill. It gets the five checks as tasks, one at a time, and the tool's `session_report` counts its
+calls (AGENT-TOOLS §16.1). Each check is run twice and the lower count is kept. The Android numbers are the same
+checks run through an Android driver by the same model and brief. When those aren't available, the bar falls back
+to the counts below.
+
+| | Standard | Measured by |
+|---|---|---|
+| K1 | **Calls per check:** each check costs no more calls than the same check on Android. Until Android numbers exist: check 1 at most 2 calls, check 2 at most 3, check 3 at most 3, check 4 at most 2 (3 when the list hasn't made the last row yet: the list's `+N below` says whether it is there), check 5 at most 3. | `session_report` of the helper's run, one check at a time. |
+| K2 | **No waste:** at most 1 call that `session_report` flags as waste across the five checks. | Its `Waste:` lines. |
+| K3 | **No failed calls on the way:** at most 1 call answering `not_found`, `ambiguous` or `not_actionable` across the five checks. | Its `Failed:` line. |
+
+The fallback counts are what each check takes with the 1.4 tools: check 1 is a look and a tap; checks 2 and 3 are a
+look to plan, then one `run` with every tap in it (Wayfare's dates and travellers are plus and minus steppers) (check 2 may need a look at Explore after it); check 4 is a look and one tap that scrolls to
+the item by itself (Explore is a FlatList of 14; a lazy list that hasn't made the row yet needs `scroll` with
+`to: "end"` first); check 5 is a look, then one `run` that submits and expects the errors, then one that corrects
+and expects success. A tool that needs more is listed under the gaps.
 
 ## Gaps today, with plans
 
