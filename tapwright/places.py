@@ -153,12 +153,24 @@ def title_hash(title_key: str, lang: str, title: str) -> str:
     return mac.hexdigest()[:HASH_CHARS]
 
 
-def is_title(data: dict, between: tuple[str, ...], *texts: str | None) -> bool:
+def titled_places(data: dict, *texts: str | None) -> frozenset[str]:
+    """The places (of the whole map) whose stored title hash is any of these texts. Worked out BEFORE a screen read
+    updates the hashes: an arrival that changes a title ("Chat with Sara" to "Chat with Omar") overwrites the hash the
+    Back button's label still matches (Codex, PR #10 cycle 2)."""
+    return frozenset(name for name, place in data["places"].items()
+                     if any(text and title_hash(data["titleKey"], lang, text) == wanted
+                            for lang, wanted in place.get("titles", {}).items() for text in texts))
+
+
+def is_title(data: dict, between: tuple[str, ...], *texts: str | None, held: frozenset[str] = frozenset()) -> bool:
     """Is any of these texts the navigation title of one of the places `between` (a road's two ends)? A native Back
     button is labelled with the title of the screen under it, and a button often carries the title of the screen it
     opens, so those two places are the ones whose titles a road's names can hold. A title is kept only as a hash
     (never in plain text), so a road that would hold one keeps nothing of it. Only the two ends are checked, not every
-    title of the app: a label that merely equals some other screen's title is no title of this road."""
+    title of the app: a label that merely equals some other screen's title is no title of this road. `held`: the places
+    a title matched before the screen was read (`titled_places`), which a title change since cannot take back."""
+    if held.intersection(between):
+        return True
     for name in between:
         place = data["places"].get(name)
         for lang, wanted in (place.get("titles", {}) if place else {}).items():

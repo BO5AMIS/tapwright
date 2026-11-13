@@ -93,26 +93,27 @@ class Maps:
         return Seen(visit.name, visit.new, visit.renamed_from, had_map)
 
     def record(self, root: str | None, app: str, src: str, dst: str, move: dict, names: dict, ms: int,
-               build: str | None) -> roads.Recorded | None:
+               build: str | None, held: frozenset[str] = frozenset()) -> roads.Recorded | None:
         data = self.data(root, app)
-        if self.titled(data, src, dst, move):
+        if self.titled(data, src, dst, move, held):
             return None  # a name that is a title is never saved: no road rather than a title in plain text
-        made = roads.record(data, src, dst, move, self.untitled(data, src, dst, names), ms, mapfile.now(), build)
+        made = roads.record(data, src, dst, move, self.untitled(data, src, dst, names, held), ms, mapfile.now(), build)
         if made is not None:
             self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
             self._changed(root, app)
         return made
 
     @staticmethod
-    def titled(data: dict, src: str, dst: str, move: dict) -> bool:
-        """Does the move aim by a label or text that is a title of the road's two places?"""
+    def titled(data: dict, src: str, dst: str, move: dict, held: frozenset[str] = frozenset()) -> bool:
+        """Does the move aim by a label or text that is a title of the road's two places? (`held`: the places a title
+        matched before the screen was read, places.titled_places.)"""
         target = move.get("target")
-        return isinstance(target, dict) and places.is_title(data, (src, dst), *(target.get(k) for k in ("label", "text")))
+        return isinstance(target, dict) and places.is_title(data, (src, dst), *(target.get(k) for k in ("label", "text")), held=held)
 
     @staticmethod
-    def untitled(data: dict, src: str, dst: str, names: dict) -> dict:
+    def untitled(data: dict, src: str, dst: str, names: dict, held: frozenset[str] = frozenset()) -> dict:
         """The names a road keeps, without the label or text that is a title of its two places (the id stays)."""
-        return {k: v for k, v in names.items() if k == "id" or not places.is_title(data, (src, dst), v)}
+        return {k: v for k, v in names.items() if k == "id" or not places.is_title(data, (src, dst), v, held=held)}
 
     def fail(self, root: str | None, app: str, src: str, move: dict) -> list[tuple[str, str]]:
         gone: list[dict] = []

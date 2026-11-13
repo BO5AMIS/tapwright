@@ -152,6 +152,12 @@ _GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 # While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
 # digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _title_of(tree: "ui.Tree | None") -> str:
+    """The navigation title a screen read shows, whitespace collapsed ("" when it has none)."""
+    structure = getattr(tree, "structure", None)
+    return " ".join((getattr(structure, "title", "") or "").split())
+
+
 def _name_key(name: str) -> str:
     """What a file system may make of a reference name: Windows and macOS ignore case (`home.png`, `HOME.png`), and
     macOS also treats a name's Unicode forms as one (NFC and NFD Hangul or accents). Names with one key are one file."""
@@ -2187,11 +2193,13 @@ class Daemon(journey_tool.JourneyTools):
         an element of the list the agent has now)."""
         if client_id not in self._recording or name not in batch.STEP_TOOLS or _NESTED.get():
             return None
+        self._recording[client_id].pop("back_next", None)
         if name == "type_text" and args.get("as") is not None:
             routes.recorded_text("", args["as"])  # a name that can't be a variable is refused before the text is typed
         items = self.control.client(client_id).items
+        titled = self._title_test()
         if name == "performance":  # its `tap` is saved by id, label or text like a target
-            return batch.recorded_target(args.get("tap"), items)
+            return batch.recorded_target(args.get("tap"), items, titled)
         if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
             field = None
             try:
@@ -2203,7 +2211,36 @@ class Daemon(journey_tool.JourneyTools):
                 inputs = [e for e in items if e.role == "input"]
                 field = inputs[0] if len(inputs) == 1 else None
             self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
-        return batch.recorded_target(args.get("target"), items)
+        if name == "tap" and self._native_back_of(args.get("target"), items, titled):
+            self._recording[client_id]["back_next"] = True  # the step is `back`: its label is a title (never saved)
+        return batch.recorded_target(args.get("target"), items, titled)
+
+    def _title_test(self) -> "Callable[[str | None], bool]":
+        """Is this text a navigation title: the one the screen shows now, or one the map holds a hash of (any place of
+        the app)? A recording never saves one in plain text (Codex, PR #10 cycle 2)."""
+        shown = _title_of(getattr(self.session, "last_tree", None))
+        bundle = self._bundle()
+        data = self.maps.data(self._maps_root(), bundle) if bundle and self._may_map(bundle) else None
+
+        def test(text: str | None) -> bool:
+            if not text or not isinstance(text, str):
+                return False
+            return " ".join(text.split()) == shown or (data is not None and bool(places.titled_places(data, text)))
+        return test
+
+    def _native_back_of(self, target: object, items: list[ui.Element], titled: "Callable[[str | None], bool]") -> bool:
+        """Is the element a tap is aimed at a native Back button: the top bar's leading button, labelled with a title?"""
+        if not isinstance(target, dict):
+            return False
+        try:
+            found = ui.resolve(items, ui.parse_target(target))
+        except Refused:
+            return False
+        if isinstance(found, tuple):
+            found = self._element_at(found, items)
+        top = (getattr(self.session, "last_insets", None) or (None, None))[0]
+        return (isinstance(found, ui.Element) and found.role != "cell" and self._is_native_back(found, top)
+                and any(titled(t) for t in (found.label, found.text, found.value)))
 
     def _record_expect(self, client_id: str, args: dict) -> None:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
@@ -2215,6 +2252,8 @@ class Daemon(journey_tool.JourneyTools):
             return
         if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
             return
+        if kind != "id" and self._title_test()(args[kind]):
+            return  # a title is never saved, so the step keeps no expectation of it (Codex, PR #10 cycle 2)
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
             expect["gone"] = True
@@ -2226,7 +2265,7 @@ class Daemon(journey_tool.JourneyTools):
         """While this agent records: the `ignore` list its step will be saved with, worked out before the call."""
         if not isinstance(args.get("ignore"), list):
             return None
-        return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
+        return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items, self._title_test())
 
     def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
                         picture: bytes | None,
@@ -2277,6 +2316,10 @@ class Daemon(journey_tool.JourneyTools):
         the call (`next_secure`) counts too, and either hides the text."""
         rec = self._recording.get(client_id)
         if rec is None or name not in batch.STEP_TOOLS or _NESTED.get():
+            return
+        if rec.pop("back_next", False) and name == "tap":
+            rec["steps"].append({"tool": "back"})  # a native Back button, labelled with a title: saved as what it does
+            rec["app"] = rec["app"] or self._bundle()
             return
         key = "tap" if name == "performance" else "target"  # the argument that aims at an element
         step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
@@ -3258,6 +3301,7 @@ class Daemon(journey_tool.JourneyTools):
             box["from"] = self._place_before(view)
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
             box["top"] = (getattr(s, "last_insets", None) or (None, None))[0]  # where the top bar ends, before the touch
+            box["title_before"] = _title_of(getattr(s, "last_tree", None))  # the title the screen showed before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
@@ -3743,6 +3787,10 @@ class Daemon(journey_tool.JourneyTools):
         root = self._maps_root()
         before = box.get("from")
         previous = before[1] if before is not None and before[0] == bundle else None
+        # which places' titles the aimed element carries, decided BEFORE this read updates the stored title hashes: a
+        # screen that arrives with another title (Chat with Sara, then Omar) would hide a Back button's label (Codex,
+        # PR #10 cycle 2)
+        box["held"] = self._held_titles(box, root, bundle, previous)
         seen = self.maps.observe(root, bundle, tree, arrived=None, lang=self._language.get(bundle), previous=previous)
         if seen is None:
             view.place = None
@@ -3765,7 +3813,7 @@ class Daemon(journey_tool.JourneyTools):
                 aim = box.get("aim")
                 names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None and move["tool"] != "back" else {})
                 made = self.maps.record(root, bundle, previous, seen.name, move, names,
-                                        round((time.monotonic() - began) * 1000), await self._build_of(bundle))
+                                        round((time.monotonic() - began) * 1000), await self._build_of(bundle), box["held"])
                 notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in (made.dropped if made else []))
         if (problem := self.maps.problem_once(root, bundle)) is not None:
             notes.append(problem)
@@ -3776,10 +3824,22 @@ class Daemon(journey_tool.JourneyTools):
             text = "\n".join(lines)
         return {**answer, "text": text + "".join(f"\nNote: {n}" for n in notes)} if (notes or text != answer["text"]) else answer
 
-    def _is_native_back(self, element: ui.Element, box: dict) -> bool:
+    def _held_titles(self, box: dict, root: str | None, bundle: str, previous: str | None) -> frozenset[str]:
+        """The places whose title (as the map held it before this read, or as the screen showed it before the touch) is
+        the label, text or value of the element the move aimed at."""
+        element = (box.get("aim") or (None, None, None))[1]
+        if element is None:
+            return frozenset()
+        texts = (element.label, element.text, element.value)
+        held = places.titled_places(self.maps.data(root, bundle), *texts)
+        shown = box.get("title_before")
+        if previous is not None and shown and any(t and " ".join(t.split()) == shown for t in texts):
+            held |= {previous}
+        return held
+
+    def _is_native_back(self, element: ui.Element, top: float | None) -> bool:
         """Is the element a navigation bar's leading button (where `back` taps; ui.back_button), by where it was before
-        the touch: a button inside the top bar, in its left quarter."""
-        top = box.get("top")
+        the touch (`top`: where the top bar ended): a button inside the top bar, in its left quarter."""
         if element.type != "Button" or top is None:
             return False
         width = self.session.screen[0]
@@ -3795,14 +3855,16 @@ class Daemon(journey_tool.JourneyTools):
         if element is not None and any(self._loaded().holds(v) for v in (element.identifier, element.label, element.value)):
             return None  # a field that shows an account's value (its placeholder, as the tree reads it) is no name for a road
         data = self.maps.data(root, bundle)
+        held = box.get("held") or frozenset()
         if (name in roads.TARGETED and element is not None and element.role != "cell"
-                and places.is_title(data, between, element.label, element.text, element.value) and self._is_native_back(element, box)):
+                and places.is_title(data, between, element.label, element.text, element.value, held=held)
+                and self._is_native_back(element, box.get("top"))):
             return {"tool": "back"}
         extra = dict(args)
         if name == "open_url":
             extra = {"link": links.canonical(data, str(args.get("url")))}
         move = roads.move_of(name, target, element, items, extra)
-        if move is not None and self.maps.titled(data, *between, move):
+        if move is not None and self.maps.titled(data, *between, move, held):
             return None  # Maps.record would refuse it too; no road, and no note
         return move
 

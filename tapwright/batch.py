@@ -3,6 +3,7 @@ answer, the script file, and the target a recording saves. The daemon runs the s
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from . import compare, names, params, performance, ui
@@ -244,20 +245,26 @@ def load_script(path: str) -> dict:
     return data
 
 
-def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
+def recorded_target(target: dict | None, items: list[ui.Element],
+                    titled: Callable[[str | None], bool] | None = None) -> dict | None:
     """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
     `index` when that target matches several elements. A ref is turned into the element it names first.
 
     A test account's value, or the placeholder it is shown as, is never saved (AGENT-TOOLS §18.6; Codex, PR #10 cycle
     2): an id, label or text that holds one is passed over for the next, and the point is the last resort, as for an
     element with none of the three. A selector the agent wrote with a placeholder in it is saved the same way, from
-    the element it finds."""
+    the element it finds. `titled` (a navigation title) is held to the same rule for a label or text: a title is never
+    saved in plain text (Codex, PR #10 cycle 2), so one is passed over, and an element named only by a title is saved
+    as its point. An id is no content and is kept."""
     if not isinstance(target, dict):
         return None
     if target.get("x") is not None:
         return {"x": target["x"], "y": target["y"]}
+
+    def unsafe(kind: str, value: object) -> bool:
+        return isinstance(value, str) and (ui.private(value) or (kind != "id" and titled is not None and titled(value)))
     named = {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
-    if not target.get("ref") and not any(isinstance(v, str) and ui.private(v) for v in named.values()):
+    if not target.get("ref") and not any(unsafe(k, v) for k, v in named.items()):
         return named
     try:
         found = ui.resolve(items, ui.parse_target(target))
@@ -266,7 +273,7 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
     if not isinstance(found, ui.Element):
         return None
     for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
-        if not value or ui.private(value):
+        if not value or unsafe(kind, value):
             continue
         aim = {kind: value}
         # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
@@ -281,7 +288,8 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
     return {"x": round(x, 1), "y": round(y, 1)}
 
 
-def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
+def recorded_ignore(ignore: list[dict], items: list[ui.Element],
+                    titled: Callable[[str | None], bool] | None = None) -> list[dict]:
     """The `ignore` list a recording saves (§14.2): a ref becomes the element's id, label or text (with `index` when it
     matches several), because refs don't outlive a session. A ref whose element has none of the three can't be saved
     (`bad_params`, naming it). Rects and the other targets are kept as given."""
@@ -294,7 +302,7 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
             found = ui.resolve(items, ui.parse_target(entry))
         except Refused:
             found = None
-        aim = recorded_target(entry, items) if isinstance(found, ui.Element) else None
+        aim = recorded_target(entry, items, titled) if isinstance(found, ui.Element) else None
         if aim is None or "x" in aim:
             what = found.line(ref=False, actions=False, place=False) if isinstance(found, ui.Element) else entry["ref"]
             account = isinstance(found, ui.Element) and any(ui.private(v) for v in (found.identifier, found.label, found.text))
