@@ -19,7 +19,7 @@ import time
 import unicodedata
 import traceback
 from contextlib import nullcontext
-from typing import Awaitable, NamedTuple, TypeVar
+from typing import Awaitable, Callable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
@@ -656,14 +656,18 @@ def _key(e: ui.Element) -> tuple:
 
 
 def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element],
-              matches: list[ui.Element], on_screen: list[ui.Element]) -> ui.Element | None:
+              matches: list[ui.Element], on_screen: list[ui.Element],
+              inside: "Callable[[ui.Element, bool], bool] | None" = None) -> ui.Element | None:
     """The match on screen after a scroll that is the element `hit` was before it, or None when that can't be told.
 
     The scroll's shift is measured on the elements that moved with it and that nothing else resembles: an element seen
     once before and once after (role, label, identifier, value and size), that isn't one of the matches and that has
     moved. They must all agree. Elements that didn't move (a bar or a header outside the list) say nothing, and the
     matches themselves never vouch for a shift: a row can be dropped or replaced as the list scrolls (Codex, PR #6
-    cycles 3 and 4). `hit`, moved by that shift, must then lie on exactly one match on screen."""
+    cycles 3 and 4). `inside(element, after)` says whether an element lies in the scroll view that holds `hit`, before
+    the scroll (False) or after it (True): an element elsewhere, in a pane that scrolls with it but by another amount,
+    says nothing either (cycle 5). `hit`, moved by that shift, must then lie on exactly one match on screen, in that
+    scroll view."""
     def once(items):
         seen: dict[tuple, list[ui.Element]] = {}
         for e in items:
@@ -676,6 +680,8 @@ def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element]
         b = now.get(k)
         if b is None or k in taken:
             continue
+        if inside is not None and not (inside(a, False) and inside(b, True)):
+            continue
         dx, dy = b.x - a.x, b.y - a.y
         if abs(dx) > FOLLOW_TOLERANCE or abs(dy) > FOLLOW_TOLERANCE:
             shifts.append((dx, dy))
@@ -684,7 +690,7 @@ def _followed(hit: ui.Element, before: list[ui.Element], after: list[ui.Element]
     dx, dy = shifts[0]
     if any(abs(x - dx) > FOLLOW_TOLERANCE or abs(y - dy) > FOLLOW_TOLERANCE for x, y in shifts):
         return None  # the elements disagree (rows laid out again): the shift is unknown
-    spot = [m for m in matches if any(m is e for e in on_screen)
+    spot = [m for m in matches if any(m is e for e in on_screen) and (inside is None or inside(m, True))
             and abs(m.x - hit.x - dx) <= FOLLOW_TOLERANCE and abs(m.y - hit.y - dy) <= FOLLOW_TOLERANCE]
     return spot[0] if len(spot) == 1 else None
 
@@ -3877,6 +3883,7 @@ class Daemon:
         follow, before = target, []
         if target.index is not None:
             before = sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x))
+            shown_before = list(view.items)
             if hit.identifier and sum(e.identifier == hit.identifier for e in before) == 1:
                 follow = ui.Target(id=hit.identifier)  # (no other element in the tree has it)
         done = await self._scroll_to(view, follow, together=True)
@@ -3884,7 +3891,11 @@ class Daemon:
         # ref, not the target again: an `index` counted in the visible matches alone would point at another element.
         if before and follow is target:
             after = sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x))
-            final = _followed(hit, before, after, ui.candidates(after, target), view.items)
+
+            def inside(e: ui.Element, later: bool) -> bool:
+                holder = ui.scroll_holding(view.items if later else shown_before, e, s.screen)
+                return holder is not None and holder.rect == area.rect
+            final = _followed(hit, before, after, ui.candidates(after, target), view.items, inside)
             if final is None:
                 raise Refused("stale", f"index {target.index} can't be sure to name "
                                        f"{hit.line(ref=False, actions=False)} after the scroll: nothing that moved with "

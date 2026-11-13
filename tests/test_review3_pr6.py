@@ -117,6 +117,44 @@ def test_a_horizontal_list_is_followed_by_its_shift_across():
     assert _followed(before[1], [tag0, *before], [tag1, *after], after, after) is after[1]
 
 
+# ---- cycle 5: an element in another pane that scrolls by another amount says nothing ----
+@pytest.mark.parametrize("heading", [False, True])
+def test_an_indexed_tap_measures_the_shift_only_inside_its_own_scroll_view(heading):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        left = el("e1", "scroll", "", "list", rect=(0, 200, 190, 600))
+        right = el("e2", "scroll", "", "pane", rect=(200, 200, 200, 600))
+        acct = lambda y: el("", "button", "Account", "", rect=(10, y, 100, 40))
+        side = lambda y: el("", "text", "Sidebar", "", rect=(210, y, 100, 30))
+        head = lambda y: el("", "text", "Billing", "", rect=(10, y, 100, 30))
+        s.tree = [left, right, acct(100), side(600)]
+        s.offscreen = [acct(950), acct(1000), *([head(900)] if heading else [])]
+        real = s.scroll
+
+        async def scroll(x0, y0, x1, y1):  # the list moves by -248, the linked pane by -298
+            s.tree = [left, right, acct(100), side(302), acct(702), acct(752), *([head(652)] if heading else [])]
+            s.offscreen = []
+            for n, e in enumerate(s.tree, 1):
+                e.ref = f"e{n}"
+            return await real(x0, y0, x1, y1)
+        s.scroll = scroll
+        for n, e in enumerate(s.tree, 1):
+            e.ref = f"e{n}"
+        await d.run_tool("a", "look", {"screenshot": False})
+        taps = len(s.tap_points)
+        if heading:  # the heading moved with the list: C, at 752
+            await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 2}, "look": False})
+            assert s.tap_points[-1][1] == 772
+        else:  # only the pane's Sidebar moved: it doesn't tell, so nothing is touched (it said B, at 702)
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 2}, "look": False})
+            assert e.value.code == "stale" and len(s.tap_points) == taps
+        await finish(stop, task)
+    run(go)
+
+
 # ---- cycle 3: an ended agent is not forgotten after others end ----
 def test_an_ended_agent_stays_ended_after_hundreds_of_others_end():
     async def go():
