@@ -157,7 +157,6 @@ class Journey:
     launched_with: dict = field(default_factory=dict)  # the language/region/text size the app was launched with
     left_out: int = 0  # pictures not kept because another app was in front (H1)
     over_cap: int = 0  # pictures not kept because the report holds at most MAX_FRAMES
-    muted: int = 0  # >0 while the tool makes calls of its own (stress moments, conditions): not measured
 
     @property
     def users_eyes(self) -> bool:
@@ -166,7 +165,7 @@ class Journey:
     # ---- the numbers ----
     def note_call(self, name: str, args: dict, text: str, seconds: float, error: str | None) -> bool:
         """Count one call this agent made. Returns whether the screen changed (a new screen was entered)."""
-        if self.muted or name == "journey":
+        if name == "journey":
             return False
         self.calls += 1
         if error is not None:

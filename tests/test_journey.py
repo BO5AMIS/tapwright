@@ -1229,3 +1229,36 @@ def test_codex_pr7_c1_a_picture_from_a_frame_that_came_after_a_switch_to_an_unli
         assert len(jr.frames) == kept + 1  # the same call with the given app in front still keeps its picture
         await finish(stop, task)
     run(go)
+
+
+def test_codex_pr7_c1_a_call_made_while_a_stress_moment_waits_for_the_phone_still_goes_through_the_gate(reports):
+    """`open_url` of the same client, sent while the journey's own network call awaits the phone, is refused as ever."""
+    import asyncio
+
+    async def go():
+        session = DescribingSession()
+        session.tree = list(HOME)
+        session.asked, session.go_on = asyncio.Event(), asyncio.Event()
+        phone_set_network = session.device.set_network
+
+        async def slow_set_network(mode):  # the phone takes its time
+            session.asked.set()
+            await session.go_on.wait()
+            return await phone_set_network(mode)
+        session.device.set_network = slow_set_network
+        d = make(session)
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g", "allow": []})
+        jr = d._journeys["a"]
+        stress = asyncio.ensure_future(d.run_tool("a", "journey", {"stress": "network", "mode": "3g"}))
+        await asyncio.wait_for(session.asked.wait(), 5)
+        calls = jr.calls
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "open_url", {"url": "myapp://x"})
+        assert e.value.code == "not_allowed" and e.value.args[0].startswith("blocked: in a journey, open_url is refused")
+        assert jr.calls == calls and jr.shortcuts == []  # refused at the gate: no shortcut slipped through
+        session.go_on.set()
+        r = await stress
+        assert r["text"].splitlines()[0] == "Stress: network 3g."
+        await finish(stop, task)
+    run(go)

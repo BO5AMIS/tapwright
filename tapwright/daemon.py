@@ -84,6 +84,9 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# True inside a journey tool's own call (a stress moment, the conditions): only that task's calls skip the journey's gate and
+# count. A shared counter on the journey let an independent call of the same client, made meanwhile, skip them too.
+_JOURNEY_OWN: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_journey_own", default=False)
 # True while a journey's `double_tap` stress makes its tap: the touch goes out twice, DOUBLE_TAP_GAP apart (§17.4)
 _DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
 DOUBLE_TAP_GAP = 0.08  # seconds between the two touches of a double tap
@@ -1340,20 +1343,22 @@ class Daemon(journey_tool.JourneyTools):
                                    scope: "Scope | None", policy: "safety.Policy | None",
                                    ux_rules: "uxcheck.Rules | None" = None) -> dict:
         """A call by an agent that has a journey running (§17): checked against what a user could do, answered in the
-        user's eyes (ui.USERS_EYES), and counted. The tool's own calls (stress moments, conditions) are `muted`."""
-        if not jr.muted:
+        user's eyes (ui.USERS_EYES), and counted. The tool's own calls (stress moments, conditions) are `own` (a context
+        variable of the task making them, so a call of the agent's made at the same time is checked and counted)."""
+        own = _JOURNEY_OWN.get()
+        if not own:
             args = self._journey_gate(jr, name, args)
         token = ui.USERS_EYES.set(jr.users_eyes)
         began, outer = self.control.clock(), BATCH.get() is None and not _NESTED.get()
         try:
             answer = await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
         except Refused as e:
-            if not jr.muted and name not in BATCH_TOOLS:
+            if not own and name not in BATCH_TOOLS:
                 jr.note_call(name, args, "", self.control.clock() - began, e.code)
             raise
         finally:
             ui.USERS_EYES.reset(token)
-        if not jr.muted:
+        if not own:
             await self._journey_after(client_id, jr, name, args, answer, self.control.clock() - began, outer, scope)
         return answer
 

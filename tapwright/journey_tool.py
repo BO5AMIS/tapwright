@@ -191,13 +191,12 @@ class JourneyTools:
     async def _calls_of_its_own(self, client_id: str, jr: journey.Journey, scope, name: str, args: dict) -> dict:
         """One of the tool's own calls: through run_tool (so scope, policy and log apply), not counted as the agent's."""
         d = _d()
-        jr.muted += 1
-        token = d._NESTED.set(True)
+        token, own = d._NESTED.set(True), d._JOURNEY_OWN.set(True)  # (of this task only: another call of the agent still goes through the gate)
         try:
             return await self.run_tool(client_id, name, args, scope)
         finally:
+            d._JOURNEY_OWN.reset(own)
             d._NESTED.reset(token)
-            jr.muted -= 1
 
     async def _journey_start(self, client_id: str, args: dict, scope) -> dict:
         if client_id in self._journeys:
