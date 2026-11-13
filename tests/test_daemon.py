@@ -5262,7 +5262,7 @@ def test_an_index_given_beside_the_target_is_taken_as_the_targets():
 
 
 def test_a_touch_that_changes_nothing_on_ioss_health_sheet_says_ask_a_person():
-    """The JLD RC pass (2026-11-12): iOS's Health access sheet took every touch and changed nothing; "Allow" stayed
+    """An app tester's RC pass (2026-11-12): iOS's Health access sheet took every touch and changed nothing; "Allow" stayed
     disabled. iOS doesn't let automation change it, so the answer says so instead of leaving the agent to retry."""
     async def go():
         d = make()

@@ -201,7 +201,7 @@ SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  
 NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answers with look: false (v1.6)
 # iOS draws the Health access sheet (HealthKit) in a separate service inside the app's window, and doesn't let UI
 # automation change it: its switches and "Turn On All" take touches and nothing changes, "Allow" stays disabled
-# (the JLD RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
+# (an app tester's RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
 NOTE_HEALTH = ("this is iOS's Health access sheet; iOS doesn't let automation change it. Ask a person to choose and "
                "tap Allow.")
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act

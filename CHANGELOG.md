@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.5.0, "the Real User Update" (unreleased)
+## 1.5.0, "the Real User Update" (2026-11-13)
 
 Apps are made or broken by whether a user can find a feature, understand it and finish it easily. An agent can now
 test that, going through a feature as a real user would, and file a visual report. The interface is AGENT-TOOLS 1.12,
@@ -33,8 +33,8 @@ shared with Tapline.
 
 **Test pictures for photo pickers**
 - `media` adds pictures to the phone's photo library for an app's photo picker, after the user's OK, and removes only
-  what it added. It needs Tapwright's runner with the photo routes (runner version 3, not yet released); older runners
-  answer `unsupported` and say so.
+  what it added. It needs the runner this release pins, tw-16.15.3.3, which has the photo routes (`tapwright setup
+  --force` installs it); an older runner answers `unsupported` and says so.
 
 ## 1.4.0, "the Fewer Steps Update" (2026-11-13)
 
