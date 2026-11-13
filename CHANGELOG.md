@@ -23,8 +23,11 @@
   rule, and replacing a field's text erases all of it, not as many characters as its placeholder has. A target or an
   expectation matches the screen's words or their placeholder, so `{"text": "<tester2's username>"}` finds what an
   answer showed that way, and a script that names the value itself still replays.
-  A recording never saves a selector that holds a value or its placeholder: it takes the element's id, else its label,
-  else the point. As a script or route is written, only its content (labels, texts, ids, values, links) is redacted,
+  A recording never saves a selector that holds a value or its placeholder: it takes the id, else the label or text,
+  else the point of the element the touch really reached (not of the list the agent had before the call, which may be
+  empty before a first look). A step that can't be saved that way, or a wait or expectation on a value, refuses the save
+  with a message that names the step and never the value; nothing is saved and no step is dropped without a word. A
+  `compare_screen` ignore that holds a value is saved by the element's id or rectangle. As a script or route is written, only its content (labels, texts, ids, values, links) is redacted,
   never a key, a tool, the format or a `${account.…}`, so an account whose username is `tap` leaves the saved tool
   `tap`. A redacted file is checked as `replay` reads it before it is reported saved.
   Every sink is guarded where it writes, so a path that was missed can't leak: a diagnostic (an app's log line, a
@@ -33,11 +36,14 @@
   holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
   that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
   is redacted in that form too.
-  Every shape of a value is redacted (one generator: as it is, collapsed, without direction marks, JSON-escaped, Python
-  `repr`/`ascii` with and without quotes, URL-encoded), so a `%r` in a log message or a traceback shows none. A value ever
+  Every shape of a value is redacted, and `holds` knows each (one generator: collapsed, without direction marks,
+  JSON-escaped with and without ASCII escapes, Python `repr`/`ascii`, URL-encoded with `quote` and `quote_plus`, and
+  these composed up to three deep in any order, such as a `%r` inside a JSON crash report), so a log message, a
+  traceback or a report shows none. A value ever
   loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
   current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
-  sanitized copy in the same format. The map writer redacts only content fields (never the format, a hash, a key or a
+  sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so
+  a value its bytes hold only escaped is caught too. The map writer redacts only content fields (never the format, a hash, a key or a
   name), and a redacted map that wouldn't read never replaces the file.
 - `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
   console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not

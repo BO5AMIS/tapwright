@@ -131,20 +131,55 @@ def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
                  if value and len(value) >= MIN_SCRUBBED)
 
 
+def _repr_inner(text: str, quote: str) -> str:
+    """What Python's repr puts between its quotes, as it is inside a longer string's repr too: each character escaped as
+    repr escapes it alone (a backslash, a control, an unprintable one), and `quote` (the quote that string's repr chose:
+    `'` when it holds both kinds) escaped as well."""
+    out = "".join(repr(c)[1:-1] if c not in "'\"" else c for c in text)
+    return out.replace(quote, "\\" + quote) if quote else out
+
+
+def _ascii_inner(text: str, quote: str) -> str:
+    """The same for ascii(): a non-ASCII character escaped too (backslash x, u or U)."""
+    out = "".join(ascii(c)[1:-1] if c not in "'\"" else c for c in text)
+    return out.replace(quote, "\\" + quote) if quote else out
+
+
+# The ways a value is changed on its way out, each as it shows INSIDE a longer string (a log line, a JSON document, a
+# URL): a form found anywhere in a text is replaced, so a quoted shape needs no form of its own. Each works character by
+# character (or, collapsing, on whitespace runs), so what one makes of a value is part of what it makes of a longer string
+# that holds it, and the shapes compose: a repr inside a JSON document, a JSON string URL-encoded (Codex, PR #10 cycle 6).
+_STEPS: tuple[Callable[[str], str], ...] = (
+    lambda t: " ".join(t.split()),  # a text line's whitespace collapsed
+    lambda t: t.translate(BIDI_MARKS),  # the direction marks ui._text drops
+    lambda t: json.dumps(t, ensure_ascii=False)[1:-1],
+    lambda t: json.dumps(t, ensure_ascii=True)[1:-1],
+    lambda t: _repr_inner(t, ""),
+    lambda t: _repr_inner(t, "'"),
+    lambda t: _ascii_inner(t, ""),
+    lambda t: _ascii_inner(t, "'"),
+    lambda t: urllib.parse.quote(t),
+    lambda t: urllib.parse.quote(t, safe=""),
+    lambda t: urllib.parse.quote_plus(t),
+)
+FORM_DEPTH = 3  # how many of the steps are composed at most
+
+
 @functools.lru_cache(maxsize=512)
 def forms(value: str) -> frozenset[str]:
-    """Every shape a value can take on its way out (Codex, PR #10 cycle 5): as it is, with its whitespace collapsed to
-    single spaces (what a text line shows), without the direction marks ui._text drops from every screen string; and of each
-    of those, JSON-escaped (with and without escapes of non-ASCII), as Python writes it in a log message's `%r` or a
-    traceback (`repr` and `ascii`, with and without the outer quotes), and URL-encoded (`quote`, `quote_plus`)."""
-    plain = value.translate(BIDI_MARKS)
-    bases = {value, " ".join(value.split()), plain, " ".join(plain.split())}
-    out = set(bases)
-    for b in bases:
-        for shown in (json.dumps(b, ensure_ascii=False), json.dumps(b, ensure_ascii=True), repr(b), ascii(b)):
-            out.update((shown, shown[1:-1]))
-        out.update((urllib.parse.quote(b), urllib.parse.quote(b, safe=""), urllib.parse.quote_plus(b),
-                    urllib.parse.quote_plus(b, safe="")))
+    """Every shape a value can take on its way out (Codex, PR #10 cycles 5 and 6): the value with up to FORM_DEPTH of the
+    `_STEPS` applied, in every order, each one that changes the string (collapsed, without direction marks, JSON-escaped
+    with and without escapes of non-ASCII, as Python's `repr` and `ascii` write it, URL-encoded with `quote` and
+    `quote_plus`): a `%r` in a log line written into a JSON crash report is one of them. A value written whole with its
+    quotes (`repr`, `ascii`, JSON) is a form too, so a quoted one is replaced quotes and all. Deduplicated and cached."""
+    out = {value}
+    level = {value}
+    for _ in range(FORM_DEPTH):
+        level = {made for text in level for step in _STEPS if (made := step(text)) != text} - out
+        out |= level
+    bases = {value, " ".join(value.split()), value.translate(BIDI_MARKS), " ".join(value.translate(BIDI_MARKS).split())}
+    out.update(shown for b in bases for shown in (json.dumps(b, ensure_ascii=False), json.dumps(b, ensure_ascii=True),
+                                                  repr(b), ascii(b)))
     return frozenset(f for f in out if f)
 
 
@@ -166,11 +201,16 @@ class Redaction:
     def redacts(self) -> bool:
         return bool(self.values)
 
+    @functools.cached_property
+    def _any(self) -> "re.Pattern[str] | None":
+        """One search for every form at once (a value has up to a few hundred: a loop over them was 3 times slower)."""
+        return re.compile("|".join(re.escape(value) for value, _ in self.values)) if self.values else None
+
     def scrub(self, text: str) -> str:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
         values = self.values
-        if not text or not values or not any(value in text for value, _ in values):
+        if not text or self._any is None or self._any.search(text) is None:
             return text
         parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
         for n in range(0, len(parts), 2):
@@ -182,7 +222,7 @@ class Redaction:
     def holds(self, text: str) -> bool:
         if not text:
             return False
-        return any(value in text for value, _ in self.values) or bool(
+        return bool(self._any is not None and self._any.search(text)) or bool(
             self.placeholders is not None and self.placeholders.search(text))
 
 

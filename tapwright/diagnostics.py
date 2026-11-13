@@ -358,13 +358,12 @@ def newer(info: CrashInfo, than: datetime.datetime) -> bool:
 
 def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
     """A crash report as it may be saved: a test account's value (`redact`) replaced in its content, its format kept
-    (Codex, PR #10 cycle 5). An .ips is JSON documents one after another (a header line, then the body, each on one line
-    or several): a document that needs no change stays byte for byte, one that does has every string in it, key or value,
-    redacted and is written as JSON again (one line stays one line). A report that isn't JSON (a .crash text) is redacted
-    as text. Bytes that aren't UTF-8 pass through the same way."""
+    (Codex, PR #10 cycles 5 and 6). An .ips is JSON documents one after another (a header line, then the body, each on
+    one line or several; JSON lines too). Each is parsed, and every string in it, key or value, is redacted as decoded:
+    a value the raw bytes hold only escaped (a `repr` inside a JSON string, a unicode escape) is found too. A document
+    that needs no change stays byte for byte; one that does is written as JSON again (one line stays one line). A report
+    that isn't JSON (a .crash text) is redacted as text. Bytes that aren't UTF-8 pass through the same way."""
     text = data.decode("utf-8", errors="surrogateescape")
-    if redact(text) == text:
-        return data
 
     def walk(value):
         if isinstance(value, str):
@@ -376,6 +375,7 @@ def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
         return value
 
     parts: list[str] = []
+    changed = False
     decoder, at = json.JSONDecoder(), 0
     try:
         while at < len(text):
@@ -388,16 +388,19 @@ def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
                 continue
             parsed, end = decoder.raw_decode(text, at)
             raw = text[at:end]
-            if redact(raw) == raw:
+            clean = walk(parsed)
+            if clean == parsed and redact(raw) == raw:
                 parts.append(raw)
             else:
+                changed = True
                 many = chr(10) in raw
-                parts.append(json.dumps(walk(parsed), ensure_ascii=False, indent=2 if many else None,
+                parts.append(json.dumps(clean, ensure_ascii=False, indent=2 if many else None,
                                         separators=None if many else (",", ":")))
             at = end
     except ValueError:
-        return redact(text).encode("utf-8", errors="surrogateescape")  # not JSON: a text report
-    return "".join(parts).encode("utf-8", errors="surrogateescape")
+        out = redact(text)  # not JSON: a text report
+        return data if out == text else out.encode("utf-8", errors="surrogateescape")
+    return "".join(parts).encode("utf-8", errors="surrogateescape") if changed else data
 
 
 def crash_folder(bundle_id: str) -> Path:
