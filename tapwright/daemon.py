@@ -984,9 +984,9 @@ class Daemon:
                 now = await self._read(self.session.foreground_bundle_id)
             except Exception:
                 now = None
-                if per_app:
-                    raise Refused("not_allowed", "blocked: the safety policy blocks network for some apps, and the app "
-                                                 "in front can't be read now; try again in a moment.") from None
+            if per_app and not now:  # (the real session answers None for an error of WebDriverAgent as well)
+                raise Refused("not_allowed", "blocked: the safety policy blocks network for some apps, and the app "
+                                             "in front can't be read now; try again in a moment.")
             if now:
                 blocked, front = rules.blocks_tool("network", now), now
         if blocked == "global":
