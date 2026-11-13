@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -75,51 +76,36 @@ class Loaded:
             raise Refused("not_allowed", f"account {name} may be used only in {', '.join(found.apps)}; this is {bundle or 'no app'}")
         return found
 
-    @functools.cached_property
-    def _values(self) -> list[tuple[str, str]]:
-        """(form of a value, its placeholder), the longest form first: a value that holds another is replaced whole.
-        Worked out once per load (every string the tree takes in goes through `scrub`)."""
-        out = []
-        for account in self.accounts.values():
-            if account.username and len(account.username) >= MIN_SCRUBBED:
-                out.extend((form, f"<{account.name}'s username>") for form in _forms(account.username))
-            if account.password and len(account.password) >= MIN_SCRUBBED:
-                out.extend((form, f"<{account.name}'s password>") for form in _forms(account.password))
-        out.sort(key=lambda pair: -len(pair[0]))
-        return out
+    def entries(self) -> tuple[tuple[str, str, str], ...]:
+        """(account name, "username" or "password", value) of every value this file holds."""
+        return _entries(self.accounts)
 
     @functools.cached_property
+    def _redaction(self) -> "Redaction":
+        return Redaction(self.entries())
+
+    @property
+    def _values(self) -> list[tuple[str, str]]:
+        return self._redaction.values
+
+    @property
     def _placeholders(self) -> "re.Pattern[str] | None":
-        """The placeholders this file's values become, as one pattern (a capturing group, for re.split)."""
-        shown = sorted({label for _, label in self._values}, key=len, reverse=True)
-        return re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
+        return self._redaction.placeholders
 
     @property
     def redacts(self) -> bool:
         """Is there any value to redact?"""
-        return bool(self._values)
+        return self._redaction.redacts
 
     def scrub(self, text: str) -> str:
-        """The text with every account's username and password replaced by `<name's username>` / `<name's password>`.
-        Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
-        where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's …`)."""
-        values = self._values
-        if not text or not values or not any(value in text for value, _ in values):
-            return text
-        parts = self._placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
-        for n in range(0, len(parts), 2):
-            for value, label in values:
-                if value in parts[n]:
-                    parts[n] = parts[n].replace(value, label)
-        return "".join(parts)
+        """The text with every account's username and password replaced by `<name's username>` / `<name's password>`
+        (Redaction.scrub)."""
+        return self._redaction.scrub(text)
 
     def holds(self, text: str) -> bool:
         """Does the text hold an account's value, or the placeholder it is shown as? What does is never saved to a map,
         a recording or a route: the value is private, and the placeholder finds nothing on a phone."""
-        if not text:
-            return False
-        return any(value in text for value, _ in self._values) or bool(
-            self._placeholders is not None and self._placeholders.search(text))
+        return self._redaction.holds(text)
 
     def holds_in(self, value: object) -> bool:
         """Does any string inside `value` (a move, a target: dicts and lists, to any depth) hold an account's value?"""
@@ -139,13 +125,65 @@ class Loaded:
 NONE = Loaded()  # no file was given
 
 
-def _forms(value: str) -> set[str]:
-    """The forms a value can take in an answer: as it is, without direction marks, with its whitespace collapsed to single
-    spaces (what a text line shows), and each of those JSON-escaped (a quote or backslash inside a quoted string)."""
-    # (ui._text drops the direction marks from every screen string before any redaction sees it: their absence is a form too)
+def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
+    return tuple((a.name, kind, value) for a in found.values()
+                 for kind, value in (("username", a.username), ("password", a.password))
+                 if value and len(value) >= MIN_SCRUBBED)
+
+
+@functools.lru_cache(maxsize=512)
+def forms(value: str) -> frozenset[str]:
+    """Every shape a value can take on its way out (Codex, PR #10 cycle 5): as it is, with its whitespace collapsed to
+    single spaces (what a text line shows), without the direction marks ui._text drops from every screen string; and of each
+    of those, JSON-escaped (with and without escapes of non-ASCII), as Python writes it in a log message's `%r` or a
+    traceback (`repr` and `ascii`, with and without the outer quotes), and URL-encoded (`quote`, `quote_plus`)."""
     plain = value.translate(BIDI_MARKS)
     bases = {value, " ".join(value.split()), plain, " ".join(plain.split())}
-    return bases | {json.dumps(b, ensure_ascii=False)[1:-1] for b in bases}
+    out = set(bases)
+    for b in bases:
+        for shown in (json.dumps(b, ensure_ascii=False), json.dumps(b, ensure_ascii=True), repr(b), ascii(b)):
+            out.update((shown, shown[1:-1]))
+        out.update((urllib.parse.quote(b), urllib.parse.quote(b, safe=""), urllib.parse.quote_plus(b),
+                    urllib.parse.quote_plus(b, safe="")))
+    return frozenset(f for f in out if f)
+
+
+_forms = forms  # (the old name)
+
+
+class Redaction:
+    """A set of account values, as (name, kind, value), and what redacts them: every form of each (`forms`) becomes
+    `<name's username>` / `<name's password>`, the longest form first, so a value that holds another is replaced whole."""
+
+    def __init__(self, entries: "tuple[tuple[str, str, str], ...]" = ()) -> None:
+        pairs = [(form, f"<{name}'s {kind}>") for name, kind, value in entries for form in forms(value)]
+        pairs.sort(key=lambda pair: -len(pair[0]))
+        self.values: list[tuple[str, str]] = pairs
+        shown = sorted({label for _, label in pairs}, key=len, reverse=True)
+        self.placeholders = re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
+
+    @property
+    def redacts(self) -> bool:
+        return bool(self.values)
+
+    def scrub(self, text: str) -> str:
+        """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
+        where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
+        values = self.values
+        if not text or not values or not any(value in text for value, _ in values):
+            return text
+        parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
+        for n in range(0, len(parts), 2):
+            for value, label in values:
+                if value in parts[n]:
+                    parts[n] = parts[n].replace(value, label)
+        return "".join(parts)
+
+    def holds(self, text: str) -> bool:
+        if not text:
+            return False
+        return any(value in text for value, _ in self.values) or bool(
+            self.placeholders is not None and self.placeholders.search(text))
 
 
 def mentions(text: str) -> bool:
@@ -252,10 +290,14 @@ def load(path: str, git: GitRunner = _git) -> Loaded:
 
 
 class Store:
-    """The loaded files, each read again when it changes (its size or time), so an edit needs no restart."""
+    """The loaded files, each read again when it changes (its size or time), so an edit needs no restart. Every value ever
+    loaded from any file stays in `scrub` for the daemon's life, even after the file changes: what the app still has in
+    flight can hold the old value (Codex, PR #10 cycle 5). Typing uses the current values only."""
 
     def __init__(self) -> None:
         self._held: dict[str, tuple[tuple[int, int], Loaded]] = {}
+        self._ever: dict[tuple[str, str, str], None] = {}
+        self._redaction = Redaction()
 
     def get(self, path: str | None) -> Loaded:
         if not path:
@@ -269,10 +311,17 @@ class Store:
         if held is None or held[0] != stamp:
             held = (stamp, load(path))
             self._held[path] = held
+            if held[1].problem is None:
+                self.remember(held[1])
         return held[1]
 
+    def remember(self, loaded: Loaded) -> None:
+        """Keep the values of a file that loaded (a deduplicated set, for the daemon's life)."""
+        fresh = [e for e in loaded.entries() if e not in self._ever]
+        if fresh:
+            self._ever.update(dict.fromkeys(fresh))
+            self._redaction = Redaction(tuple(self._ever))
+
     def scrub(self, text: str) -> str:
-        """The text without the values of every file loaded so far (a log line has no call whose accounts to use)."""
-        for _, loaded in list(self._held.values()):
-            text = loaded.scrub(text)
-        return text
+        """The text without any value ever loaded (a log line has no call whose accounts to use)."""
+        return self._redaction.scrub(text)

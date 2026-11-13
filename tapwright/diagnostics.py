@@ -356,6 +356,50 @@ def newer(info: CrashInfo, than: datetime.datetime) -> bool:
     return when >= than - datetime.timedelta(seconds=CRASH_SLACK)
 
 
+def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
+    """A crash report as it may be saved: a test account's value (`redact`) replaced in its content, its format kept
+    (Codex, PR #10 cycle 5). An .ips is JSON documents one after another (a header line, then the body, each on one line
+    or several): a document that needs no change stays byte for byte, one that does has every string in it, key or value,
+    redacted and is written as JSON again (one line stays one line). A report that isn't JSON (a .crash text) is redacted
+    as text. Bytes that aren't UTF-8 pass through the same way."""
+    text = data.decode("utf-8", errors="surrogateescape")
+    if redact(text) == text:
+        return data
+
+    def walk(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {redact(k): walk(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        return value
+
+    parts: list[str] = []
+    decoder, at = json.JSONDecoder(), 0
+    try:
+        while at < len(text):
+            if text[at].isspace():
+                end = at
+                while end < len(text) and text[end].isspace():
+                    end += 1
+                parts.append(text[at:end])
+                at = end
+                continue
+            parsed, end = decoder.raw_decode(text, at)
+            raw = text[at:end]
+            if redact(raw) == raw:
+                parts.append(raw)
+            else:
+                many = chr(10) in raw
+                parts.append(json.dumps(walk(parsed), ensure_ascii=False, indent=2 if many else None,
+                                        separators=None if many else (",", ":")))
+            at = end
+    except ValueError:
+        return redact(text).encode("utf-8", errors="surrogateescape")  # not JSON: a text report
+    return "".join(parts).encode("utf-8", errors="surrogateescape")
+
+
 def crash_folder(bundle_id: str) -> Path:
     """Where `crash` with pull puts the full report. A function, so tests can move it."""
     from .store import HOME

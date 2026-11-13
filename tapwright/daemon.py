@@ -1017,7 +1017,7 @@ class Daemon(journey_tool.JourneyTools):
     def _announce(self, by: str, kind: str, label: str | None = None, point=None, ok: bool = True,
                   code: str | None = None, caption: str | None = None, reason: str | None = None) -> None:
         # an account's value is scrubbed before it is broadcast or logged, as in an answer (Codex, PR #9 cycle 1)
-        scrub = self._loaded().scrub
+        scrub = self.scrub_everywhere
         label = scrub(label) if label else label
         caption = scrub(caption) if caption else caption
         reason = scrub(reason) if reason else reason
@@ -1613,14 +1613,14 @@ class Daemon(journey_tool.JourneyTools):
                         finally:
                             _BASELINES.reset(basetoken)
             except Refused as e:
-                if (said := self._loaded().scrub(str(e))) != str(e):  # an account's value is never in an error either
+                if (said := self.scrub_everywhere(str(e))) != str(e):  # an account's value is never in an error either
                     raise Refused(e.code, said) from None
                 raise
             if top_level:
                 answer = self._with_network(name, answer)
                 if (ended := self._network_notes.pop(client_id, None)) is not None and name != "network":
                     answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
-            if (said := self._loaded().scrub(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
+            if (said := self.scrub_everywhere(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
                 answer = {**answer, "text": said}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
@@ -1635,7 +1635,7 @@ class Daemon(journey_tool.JourneyTools):
 
     def _redact(self, text: str) -> str:
         """A screen string without the test accounts' values (the call's accounts file, else the daemon's)."""
-        return self._loaded().scrub(text)
+        return self.scrub_everywhere(text)
 
     def _redactor(self) -> "Callable[[str], str] | None":
         """The redactor in force now: this call's (ui.REDACT), else the accounts' scrub; None when no account has a value
@@ -1643,7 +1643,7 @@ class Daemon(journey_tool.JourneyTools):
         if (inside := ui.REDACT.get()) is not None:
             return inside
         loaded = self._loaded()
-        return loaded.scrub if loaded.redacts else None
+        return self.scrub_everywhere if loaded.redacts or self.accounts._redaction.redacts else None
 
     @property
     def maps(self) -> "mapkeeper.Maps":
@@ -1660,7 +1660,7 @@ class Daemon(journey_tool.JourneyTools):
         if getattr(self, "accounts", None) is None:
             return text
         try:
-            self._loaded()  # (the server's file is read at least once)
+            text = self._loaded().scrub(text)  # (the server's file is read at least once)
         except Exception:
             pass
         return self.accounts.scrub(text)
@@ -1818,7 +1818,7 @@ class Daemon(journey_tool.JourneyTools):
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
         said = answer["text"] if answer is not None else message
-        scrub = self._loaded().scrub  # an account's value is never in the log (a label, a target's text)
+        scrub = self.scrub_everywhere  # an account's value is never in the log (a label, a target's text)
         target = actionlog.target_of(args.get("target"))
         if target is not None:
             target = {k: scrub(v) if isinstance(v, str) else v for k, v in target.items()}
@@ -2122,7 +2122,7 @@ class Daemon(journey_tool.JourneyTools):
         path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            path.write_bytes(diagnostics.sanitized_report(data, self.scrub_everywhere))  # no account's value, whatever the app wrote
         except OSError as e:
             raise Refused("internal", f"couldn't save the crash report to {path.parent}: {e.strerror or e}") from None
         return str(path)
@@ -2215,7 +2215,6 @@ class Daemon(journey_tool.JourneyTools):
         if name == "type_text" and args.get("as") is not None:
             routes.recorded_text("", args["as"])  # a name that can't be a variable is refused before the text is typed
         items = self.control.client(client_id).items
-        titled = self._title_test()
         if name == "performance":  # its `tap` is saved by id, label or text like a target
             return batch.recorded_target(args.get("tap"), items, titled)
         if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
@@ -5344,7 +5343,7 @@ class Daemon(journey_tool.JourneyTools):
         # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
         # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
         # the key the OK is matched by keeps the element's own words
-        what = f"{element.role} {ui.clip(self._loaded().scrub(element.text))}"
+        what = f"{element.role} {ui.clip(self.scrub_everywhere(element.text))}"
         if _DOUBLE.get():  # two touches under one check would act twice on what the policy holds back
             raise Refused("not_allowed", f'double_tap on an element the safety policy holds: {what} (policy word '
                                          f'"{word}"). Do one tap instead; a person\'s OK is for a single touch.')
@@ -5417,7 +5416,7 @@ class Daemon(journey_tool.JourneyTools):
             self._confirms[request.id] = request
             # an account's value is never in what a person is shown (as in an answer, _announce): `what` is scrubbed
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
-            scrub = self._loaded().scrub
+            scrub = self.scrub_everywhere
             caption = step_caption(tool, what, a)
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
