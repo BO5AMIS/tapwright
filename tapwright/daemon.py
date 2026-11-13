@@ -3152,7 +3152,10 @@ class Daemon(journey_tool.JourneyTools):
 
     async def _media(self, client_id: str, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §17.6: put test pictures in the phone's photo library (add-only access), or delete what this
-        daemon added (full access, which iOS asks the person for, and iOS asks them to confirm each delete)."""
+        daemon added. Deleting needs full access, and Tapwright never asks for it: it deletes only when the person has
+        already given the runner full access themselves (iOS then asks them to confirm each delete), and otherwise names
+        the pictures to delete by hand (Codex, PR #7: the runner's delete route asks iOS for full access when it hasn't
+        been decided)."""
         add, remove = args.get("add"), args.get("remove")
         if remove is not None and not (isinstance(remove, bool) or remove == "all"):
             raise Refused("bad_params", f'remove must be true or "all", not {remove!r}')
@@ -3202,6 +3205,8 @@ class Daemon(journey_tool.JourneyTools):
         if access.get("full") in ("denied", "restricted"):
             return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library "
                                                         "(iOS has it denied).")], notes)
+        if access.get("full") != "authorized":  # not decided (or unknown): the delete route would ask iOS for it
+            return _answer([medialib.by_hand_text(names, medialib.NEVER_ASKS_FULL)], notes)
         try:
             deleted = await self._media_write(lambda: self.session.photos_delete([e["id"] for e in held]),
                                               "removing the pictures")

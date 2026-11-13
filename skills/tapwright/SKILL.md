@@ -193,7 +193,8 @@ To judge whether a real user can find and finish a feature, not only whether it 
   report folder. Offer `export` only if the user asks.
 - **Photo pickers:** ask your user first whether test pictures may be added to the phone's photo library, and whether
   to remove them afterwards. Then `media` with `add` (paths) and `confirm: true`; `remove: true` deletes only those.
-  Without full access, `remove` names what to delete by hand.
+  Tapwright never asks iOS for full access to the library: unless the person gave the runner full access themselves,
+  `remove` names what to delete by hand.
 
 ## 5. Errors
 

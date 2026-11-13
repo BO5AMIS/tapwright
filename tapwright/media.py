@@ -16,6 +16,8 @@ MAX_FILES = 20  # per call
 MAX_TOTAL = 40 * 1024 * 1024  # per call, all pictures together (the runner's JSON body is a third bigger)
 MIN_TW_VERSION = 3  # the runner route version that has the photo routes
 OLD_RUNNER = ("this phone's runner is older than the photo routes (tw version < 3); update the runner")
+NEVER_ASKS_FULL = ("deleting needs full access to the photo library, and Tapwright never asks for it (it adds with "
+                   "add-only access).")
 NEED_CONFIRM = ("media changes the photo library on the user's phone. Ask your user first whether pictures may be "
                 "added (and whether to remove them afterwards), then call again with confirm: true.")
 
