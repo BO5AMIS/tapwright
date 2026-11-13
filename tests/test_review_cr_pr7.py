@@ -63,12 +63,17 @@ def test_a_double_tap_refused_at_the_second_touch_still_advances_the_screen_gene
         stop, task = await started(d)
         scope = Scope((APP,))
         await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        await d.run_tool("b", "look", {"screenshot": False})  # another agent (given every app) sees the app's screen
         session.tap_points.clear()
         before = d.control.generation
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 200, "y": 500}}, scope=scope)
         assert e.value.code == "not_allowed" and len(session.tap_points) == 1  # one touch went out
         assert d.control.generation > before  # so every client's refs from before it are stale
+        # Codex, PR #7 cycle 2: the other agent's ref from before the touch is not used on what is in front now
+        with pytest.raises(Refused) as late:
+            await d.run_tool("b", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert late.value.code == "stale" and len(session.tap_points) == 1
         await finish(stop, task)
     run(go)
 
