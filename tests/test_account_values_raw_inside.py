@@ -39,6 +39,8 @@ class XmlSession(MapSession):
         self.buttons: list[tuple[str, str]] = []
         self.texts: list[str] = []
         self.field: str | None = None
+        self.headings: list[tuple[str, str]] = []  # (id, label) static texts
+        self.switches: list[tuple[str, str]] = []  # (id, label), off
         self.alert_shown: tuple[str, tuple[str, ...]] | None = None
 
     def _show(self):
@@ -52,6 +54,11 @@ class XmlSession(MapSession):
         for n, text in enumerate(self.texts):
             app.append(node("StaticText", label=text, name=text, value=text, x=10, y=400 + 24 * n, width=300, height=20,
                             traits="StaticText"))
+        for n, (ident, label) in enumerate(self.headings):
+            app.append(node("StaticText", label=label, name=ident, value=label, x=10, y=100 + 24 * n, width=300, height=20,
+                            traits="StaticText"))
+        for n, (ident, label) in enumerate(self.switches):
+            app.append(node("Switch", label=label, name=ident, value="0", x=300, y=130 + 44 * n, width=51, height=31))
         if self.field is not None:
             app.append(node("TextField", label="Email", name="email", value=self.field, x=10, y=520, width=300, height=40))
         if self.alert_shown is not None:

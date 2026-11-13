@@ -12,6 +12,10 @@
   on the Back button is decided before the screen is read again, so a screen that comes back with another title (a chat
   renamed) doesn't hide it, and only a tap on it is learned as `back` (a long press is not). A recorded script or route
   keeps its steps, waits, expectations and `ignore` entries as recorded, a title included, so it replays the same way.
+- `crash` with `pull` also replaces a number, true, false or null in the report's JSON whose text is a test account's
+  value (a PIN, a user id) with the placeholder, and checks the finished file; a report that still holds a value is not
+  saved, and the answer says so. A road repaired during `drive` keeps none of the titles the screens showed on the way.
+  A recorded step aimed by a placeholder is saved from the element the action really touched (a toggle's switch).
 - A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
   (`<tester2's password>`) in everything that leaves Tapwright, in any form (escaped, collapsed, cut): text answers and
   errors, change lists (a `(was …)` cut no longer keeps a password's end), alerts, the audit's element lines (`id=`) and

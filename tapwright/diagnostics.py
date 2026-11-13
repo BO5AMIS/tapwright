@@ -356,6 +356,13 @@ def newer(info: CrashInfo, than: datetime.datetime) -> bool:
     return when >= than - datetime.timedelta(seconds=CRASH_SLACK)
 
 
+class Unsanitizable(Exception):
+    """A report that can't be made free of the test accounts' values."""
+
+
+CRASH_UNSAFE = "the crash report couldn't be saved safely (it holds a test account's value that couldn't be removed), so nothing was saved"
+
+
 def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
     """A crash report as it may be saved: a test account's value (`redact`) replaced in its content, its format kept
     (Codex, PR #10 cycles 5 and 6). An .ips is JSON documents one after another (a header line, then the body, each on
@@ -372,7 +379,8 @@ def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
             return {redact(k): walk(v) for k, v in value.items()}
         if isinstance(value, list):
             return [walk(v) for v in value]
-        return value
+        shown = json.dumps(value)  # a number, true, false or null: its JSON text can be an account value (a PIN, a user id)
+        return value if redact(shown) == shown else redact(shown)  # (becomes the placeholder text: the JSON stays valid)
 
     parts: list[str] = []
     changed = False
@@ -398,9 +406,11 @@ def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
                                         separators=None if many else (",", ":")))
             at = end
     except ValueError:
-        out = redact(text)  # not JSON: a text report
-        return data if out == text else out.encode("utf-8", errors="surrogateescape")
-    return "".join(parts).encode("utf-8", errors="surrogateescape") if changed else data
+        parts, changed = [redact(text)], True  # not JSON: a text report
+    final = "".join(parts)
+    if redact(final) != final:  # a value form is still in it (a number written as 8.36291e5, a split form): nothing is saved
+        raise Unsanitizable(CRASH_UNSAFE)
+    return final.encode("utf-8", errors="surrogateescape") if changed and final != text else data
 
 
 def crash_folder(bundle_id: str) -> Path:

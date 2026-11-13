@@ -2133,8 +2133,12 @@ class Daemon(journey_tool.JourneyTools):
         data = await self._phone_files("copy the crash report", read())
         path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
         try:
+            clean = diagnostics.sanitized_report(data, self.scrub_everywhere)  # no account's value, whatever the app wrote
+        except diagnostics.Unsanitizable as e:
+            raise Refused("unsupported", f"{info.filename}: {e}") from None
+        try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(diagnostics.sanitized_report(data, self.scrub_everywhere))  # no account's value, whatever the app wrote
+            path.write_bytes(clean)
         except OSError as e:
             raise Refused("internal", f"couldn't save the crash report to {path.parent}: {e.strerror or e}") from None
         return str(path)
@@ -4825,6 +4829,8 @@ class Daemon(journey_tool.JourneyTools):
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
 
+        self._touching(field)
+
         async def typed() -> None:
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
                                          submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
@@ -4866,6 +4872,7 @@ class Daemon(journey_tool.JourneyTools):
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
+            self._touching(hit if isinstance(hit, ui.Element) else None)
         direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
         top, bottom = s.last_insets
         band = (SCROLL_TOP_INSET if top is None else top,
@@ -5751,6 +5758,14 @@ class Daemon(journey_tool.JourneyTools):
         found = ui.resolve(items, target)
         return self._element_at(found, items) if isinstance(found, tuple) else found
 
+    def _touching(self, element: "ui.Element | None") -> None:
+        """Right before a touch: the element it goes to, in the list it was chosen from, for a recording (Codex, PR #10
+        cycle 7). Every handler says what it finally chose (a toggle prefers a switch, a point has an element under it),
+        so a saved selector is never worked out again by another lookup. The last one before the call ends wins."""
+        touched = _RESOLVED.get()
+        if touched is not None and element is not None:
+            touched[:] = [(element, list(self.session.items))]
+
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
         element under a bar that shows. `force` skips all of it. A point is a raw touch."""
@@ -5771,11 +5786,13 @@ class Daemon(journey_tool.JourneyTools):
                 under = self._element_at(found, (await s.refresh()).items)
             said = await self._police(tool, a, under)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
+            self._touching(under)
             return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             said = await self._police(tool, a, found)  # `force` skips the checks above, never the policy
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
+            self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
@@ -5789,6 +5806,7 @@ class Daemon(journey_tool.JourneyTools):
             point = self._touch_point(found)  # what is drawn over it now
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
+        self._touching(found)
         if point is None:
             return ui.without_place(await self._press(target, hold_ms))
         await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
@@ -5914,6 +5932,7 @@ class Daemon(journey_tool.JourneyTools):
                     point = self._switch_control(self.session.items, found, shown)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
+        self._touching(found)
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
         where = "" if shown is None else f" at its visible part ({round(point[0])}, {round(point[1])})"

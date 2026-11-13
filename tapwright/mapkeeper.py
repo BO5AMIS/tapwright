@@ -124,13 +124,24 @@ class Maps:
         return dropped
 
     def repair(self, root: str | None, app: str, src: str, old_move: dict, dst: str, new_move: dict, names: dict, ms: int,
-               build: str | None) -> roads.Recorded:
+               build: str | None, live: frozenset[str] = frozenset()) -> roads.Recorded:
         """A road driven by another name than the one it was saved with, and the arrival check passed (§18.4): the new
-        move replaces the old one, here and (a merge would bring it back) in the file."""
+        move replaces the old one, here and (a merge would bring it back) in the file. `live`: the titles the two screens
+        showed during the drive (their stored hashes may not have caught up): never kept in the road's target or names."""
         data = self.data(root, app)
         if self.titled(data, src, dst, new_move):
             return roads.Recorded(False)  # the road stays as it was; a title is not put in its place
-        made = roads.repair(data, src, old_move, dst, new_move, self.untitled(data, src, dst, names), ms, mapfile.now(), build)
+        shown = {places._flat(t) for t in live if t}
+        move = new_move
+        target = new_move.get("target")
+        if shown and isinstance(target, dict):
+            kept = {k: v for k, v in target.items() if not (k in ("label", "text") and isinstance(v, str) and places._flat(v) in shown)}
+            if kept != target:
+                if "id" not in kept and "x" not in kept:
+                    return roads.Recorded(False)  # nothing safe is left to aim by
+                move = {**new_move, "target": kept}
+        names = {k: v for k, v in names.items() if k == "id" or not (isinstance(v, str) and places._flat(v) in shown)}
+        made = roads.repair(data, src, old_move, dst, move, self.untitled(data, src, dst, names), ms, mapfile.now(), build)
         self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
         self._changed(root, app)
         return made

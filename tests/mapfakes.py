@@ -11,7 +11,8 @@ SCREEN = (400.0, 800.0)
 
 
 def screen(title: str, ids: tuple[str, ...] = (), rows: tuple[str, ...] = (), tab: str | None = None, alert: str | None = None,
-           texts: tuple[str, ...] = (), inputs: tuple[str, ...] = (), bundle: str = APP[1], secure: tuple[str, ...] = (), back: str | None = None) -> ui.Tree:
+           texts: tuple[str, ...] = (), inputs: tuple[str, ...] = (), bundle: str = APP[1], secure: tuple[str, ...] = (), back: str | None = None,
+           labels: dict[str, str] | None = None) -> ui.Tree:
     """A screen: a navigation bar with `title`, a table of `rows` (cells without identifiers), buttons with these `ids`
     (their label is "Label of <id>"), static `texts`, a tab bar with `tab` selected, perhaps an alert."""
     def node(kind, **attrs):
@@ -26,7 +27,7 @@ def screen(title: str, ids: tuple[str, ...] = (), rows: tuple[str, ...] = (), ta
         table.append(node("Cell", label=row, name=row, x=0, y=110 + 50 * i, width=400, height=48))
     app.extend([bar, table])
     for n, i in enumerate(ids):
-        app.append(node("Button", label=f"Label of {i}", name=i, x=10, y=620 + 44 * n, width=200, height=40))
+        app.append(node("Button", label=(labels or {}).get(i, f"Label of {i}"), name=i, x=10, y=620 + 44 * n, width=200, height=40))
     for n, i in enumerate(inputs):
         app.append(node("TextField", label=f"Field {i}", name=i, value="", x=10, y=540 + 44 * n, width=300, height=40))
     for n, i in enumerate(secure):
