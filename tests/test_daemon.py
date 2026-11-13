@@ -2587,7 +2587,10 @@ def test_the_delivered_note_is_also_given_when_the_tree_read_is_skipped():
 def test_the_delivered_note_counts_its_seconds_from_the_touch_not_from_the_calls_return():
     """Review of 1.5.1 (L1): a tap's call takes a while, and "within 0.0 s" read as "after the tap" was wrong."""
     async def go():
-        d = make()
+        # settle_first_frame is how long the settle waits for the first frame after the call returns. The default 10 ms
+        # is shorter than the feeder's period on Windows/Python 3.10 (asyncio.sleep(0.004) takes ~15.6 ms there), so
+        # the wait timed out, the stream counted as stalled and the tree was read. 0.2 s is the margin, not the subject.
+        d = make(settle_first_frame=0.2)
         stop, task = await started(d)
         slow_tap = d.session.tap
 
