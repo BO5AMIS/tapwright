@@ -319,6 +319,28 @@ def test_two_calls_of_one_client_with_the_same_pictures_send_them_once(pictures,
     run(go)
 
 
+def test_other_pictures_wait_while_an_add_is_still_pending_on_the_person(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        e = await refused(d, {"add": pictures[:1], "confirm": True})  # other pictures: not queued behind it
+        assert e.code == "busy" and "still waiting" in str(e) and "once the person has answered" in str(e)
+        d.session.last_alert = None
+        d.session.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})  # the first set picks up its own add
+        assert r["text"].startswith("Added 3 pictures")
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # the first add once, the other never sent
+        assert d._media_adds == {}
+        r = await d.run_tool("a", "media", {"add": pictures[:1], "confirm": True})  # now it is free to go
+        assert r["text"].startswith("Added 1 picture")
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_person_driving_still_holds_media_back(pictures, quick):
     async def go():
         d = make()

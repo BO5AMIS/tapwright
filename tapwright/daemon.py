@@ -3417,7 +3417,12 @@ class Daemon(journey_tool.JourneyTools):
         async with self._media_locks.setdefault(client_id, asyncio.Lock()):
             kept = self._media_adds.get(client_id)
             now = self.control.clock()
-            if kept is not None and kept[0] == same and now - kept[2] < MEDIA_KEEP:
+            if kept is not None and not kept[1].done() and kept[0] != same:
+                # another add of this client is still waiting on the person: other pictures would queue behind it
+                # and, once it went on, be added next to it; one at a time (CodeRabbit, PR #8)
+                raise Refused("busy", "an add of other pictures is still waiting for the person's answer on the "
+                                      "phone; call media again with those pictures once the person has answered")
+            if kept is not None and kept[0] == same and (not kept[1].done() or now - kept[2] < MEDIA_KEEP):
                 task = kept[1]
             else:
                 async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
@@ -3439,7 +3444,8 @@ class Daemon(journey_tool.JourneyTools):
             if alert is not None:
                 named = RUNNER_NAME in alert.title or "photo" in alert.title.lower()
                 raise Refused("not_allowed", NEEDS_PHOTO_ANSWER if named else NEEDS_ALERT_ANSWER)
-        self._media_adds.pop(client_id, None)
+        if (self._media_adds.get(client_id) or (None, None))[1] is task:  # only its own entry
+            del self._media_adds[client_id]
         task.result()
 
     async def _media_alert(self) -> ui.Alert | None:
