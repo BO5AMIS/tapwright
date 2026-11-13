@@ -98,6 +98,11 @@ tapwright skill install --project .    # for one project: .claude/skills and .ag
 
 Claude Code reads `.claude/skills`; Codex and other agents read `.agents/skills`.
 
+Both commands also write the driver agent (`phone-driver`): `.claude/agents/phone-driver.md` for Claude Code and
+`.codex/agents/phone-driver.toml` for Codex, each on that host's fastest small model (`--driver-model NAME` changes
+it). Its tool names assume the MCP server is registered as `tapwright`, as `install` does. For a host with no agent
+files, paste [driver.md](driver.md) as the brief of a subagent on your fastest model.
+
 ## The live view
 
 `tapwright view` opens the phone's screen in the browser. The user can watch, take over,

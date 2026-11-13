@@ -315,6 +315,21 @@ def test_open_url_is_refused_unless_allowed_and_the_report_lists_it(reports):
     run(go)
 
 
+def test_allow_takes_drive_reflexes_and_fast_animations_and_the_report_lists_them(reports):
+    """AGENT-TOOLS 1.13.1 (9): `drive` lifts roads-only (jumps allowed), `reflexes` the reflex ban, `fast_animations` the
+    animation ban (Tapwright has no quick animations to ban: it takes the word and reports it)."""
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "journey", {"start": True, "goal": "g", "allow": ["drive", "reflexes", "fast_animations"]})
+        assert r["text"]
+        assert d._journeys["a"].allow == ("drive", "reflexes", "fast_animations")
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        assert "Shortcuts allowed" in (only_folder(reports) / "report.md").read_text("utf-8")
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_agent_can_turn_the_eyes_off_and_the_report_says_so(reports):
     async def go():
         d = daemon()
@@ -949,6 +964,9 @@ UX = {"kind": "icon_only", "element": 'e2 button @340,20 44x44', "what": "an ico
 
 
 def test_a_ux_check_finding_goes_to_the_journey_the_agent_has_running(reports):
+    import gc
+    gc.collect()  # `journey.running` holds its journeys weakly: one an earlier test left may be alive until a collection
+
     async def go():
         d = daemon()
         stop, task = await started(d)
@@ -1105,7 +1123,7 @@ def test_m5_the_naming_memory_skips_a_withheld_look_and_is_scoped_to_the_journey
     run(go)
 
 
-def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_re_police_before_the_second_touch(reports):
+def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_a_changed_control_gets_no_second_touch(reports):
     class Swapping(DescribingSession):
         swap: list | None = None
 
@@ -1130,11 +1148,73 @@ def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_re_police_before_
         session.tree = [button("e1", "Log meal", "log"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
         session.swap = [button("e1", "Delete all", "del"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
         session.tap_points.clear()
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 60, "y": 120}})
-        assert "safety policy holds" in str(e.value) and "Delete all" in str(e.value)
+        r = await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 60, "y": 120}})
+        # (1.13.1, item 6: a second touch needs the same control, so the policy is never asked about the new one)
+        assert "changed after the first tap" in r["text"].splitlines()[0] and 'button "Delete all"' in r["text"].splitlines()[0]
         assert len(session.tap_points) == 1
         await finish(stop, task)
+    run(go)
+
+
+def test_a_double_taps_second_touch_needs_the_same_control_or_it_answers_changed(reports):
+    """AGENT-TOOLS 1.13.1 (6): the safety check saw only the first touch, and a recycled row can turn "Continue" into
+    "Delete account": when the control's id, label or text changed after the first tap there is no second one."""
+    class Swapping(DescribingSession):
+        swap: list | None = None
+
+        async def tap(self, target, hold_ms=60):
+            done = await super().tap(target, hold_ms)
+            if self.swap is not None:
+                self.tree, self.swap = self.swap, None
+            return done
+
+    async def stress(session, target):
+        d = make(session)
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        session.tap_points.clear()
+        r = await d.run_tool("a", "journey", {"stress": "double_tap", "target": target})
+        taps = len(session.tap_points)
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        await finish(stop, task)
+        return r["text"].splitlines()[0], taps
+
+    def session(*tree):
+        s = Swapping()
+        s.tree = list(tree)
+        return s
+
+    async def go():
+        rows = el("e2", "text", "Today", rect=(10, 400, 100, 40))
+        # the label changed under a point
+        s = session(button("e1", "Continue", "go"), rows)
+        s.swap = [button("e1", "Delete account", "go"), rows]
+        line, taps = await stress(s, {"x": 60, "y": 120})
+        assert taps == 1
+        assert line == ('Stress: double_tap: changed after the first tap (button "Continue" is now button '
+                        '"Delete account"), so there was no second tap.')
+        # the label changed, so a text target finds nothing now: that is a change too
+        s = session(button("e1", "Continue", "go"), rows)
+        s.swap = [button("e1", "Delete account", "go"), rows]
+        line, taps = await stress(s, {"text": "Continue"})
+        assert taps == 1
+        assert line == ('Stress: double_tap: changed after the first tap (button "Continue" is gone), '
+                        "so there was no second tap.")
+        # only the id changed, under a point
+        s = session(button("e1", "Continue", "go"), rows)
+        s.swap = [button("e1", "Continue", "recycled"), rows]
+        line, taps = await stress(s, {"x": 60, "y": 120})
+        assert taps == 1 and line == ('Stress: double_tap: changed after the first tap (button "Continue" is another control with the same '
+                                'name), so there was no second tap.')
+        # nothing under the point before or after: the same, no change
+        s = session(button("e1", "Continue", "go"), rows)
+        line, taps = await stress(s, {"x": 300, "y": 700})
+        assert taps == 2 and line == "Stress: double_tap."
+        # the control is the same: two touches, as before
+        s = session(button("e1", "Continue", "go"), rows)
+        line, taps = await stress(s, {"text": "Continue"})
+        assert taps == 2 and line == "Stress: double_tap."
+
     run(go)
 
 

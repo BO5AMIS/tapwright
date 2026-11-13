@@ -70,6 +70,23 @@ def test_the_first_call_saves_the_reference_and_the_next_matches(tmp_path):
     run(go)
 
 
+def test_a_reference_name_that_differs_from_a_saved_one_only_in_case_is_refused_before_a_picture_is_saved(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        for args in ({"name": "HOME"}, {"name": "Home", "update": True}):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "compare_screen", args)
+            assert e.value.code == "bad_params" and 'existing reference "home"' in str(e.value)
+        assert [p.name for p in stored(tmp_path, "home").parent.iterdir()] == ["home.png"]
+        r = await d.run_tool("a", "compare_screen", {"name": "home", "update": True})  # its own name is no twin
+        assert r["text"].startswith('Saved the reference "home"')
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_change_is_a_finding_with_regions_named_by_their_elements_and_a_picture(tmp_path):
     async def go():
         d = make()
@@ -88,7 +105,7 @@ def test_a_change_is_a_finding_with_regions_named_by_their_elements_and_a_pictur
     run(go)
 
 
-def test_a_change_within_the_threshold_matches_and_says_how_much(tmp_path):
+def test_a_change_within_the_threshold_matches_and_says_how_much_and_where(tmp_path):
     async def go():
         d = make()
         stop, task = await ready(d)
@@ -96,7 +113,8 @@ def test_a_change_within_the_threshold_matches_and_says_how_much(tmp_path):
         await d.run_tool("a", "compare_screen", {"name": "home"})
         show(d, ((0, 800, 100, 900), (0, 0, 0)))
         r = await d.run_tool("a", "compare_screen", {"name": "home", "threshold": 2})
-        assert r["text"] == 'Matches the reference "home": 0.78% changed.', r["text"]
+        assert r["text"] == ('Matches the reference "home" (0.78% changed, under the 2% threshold): changed at '
+                             "@0,395 53x64."), r["text"]  # a change of 0.1% or more is named even where no element is
         r = await d.run_tool("a", "compare_screen", {"name": "home", "threshold": 0.5})
         assert r["text"].startswith('Differs from the reference "home": 0.78% changed, in 1 region (points):')
         await finish(stop, task)
@@ -570,6 +588,84 @@ def test_replay_takes_update_references_and_a_junit_message_ends_with_the_diff(t
     assert cli.main() == 0 and seen[0].update_references is True
     monkeypatch.setattr("sys.argv", ["tapwright", "replay", "x.json", "--apps", "a"])
     assert cli.main() == 0 and seen[1].update_references is False
+
+
+# ---- a change under the threshold is still named (AGENT-TOOLS 1.13.1, clarification 2) ----
+PRICE = el("e3", "text", "from €1,362", rect=(40, 500, 120, 20))
+PRICE_TWEAK = ((100, 1010, 120, 1020), (0, 0, 0))  # 10 x 5 pt: a price's digits, far under 0.1% of the screen
+SPECK = ((500, 300, 520, 310), (0, 0, 0))  # in nothing at all
+
+
+async def with_price(d):
+    stop, task = await ready(d)
+    d.session.tree = [SAVE, CLOCK, PRICE]
+    await d.run_tool("a", "look", {"screenshot": False})
+    return stop, task
+
+
+def test_a_price_changed_under_the_threshold_still_matches_but_names_the_element(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await with_price(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, PRICE_TWEAK)
+        r = await d.run_tool("a", "compare_screen", {"name": "home"})
+        assert r["text"] == ('Matches the reference "home" (0.02% changed, under the 0.5% threshold): changed at '
+                             'e3 text "from €1,362".'), r["text"]
+        assert r["image"] is None
+        r = await d.run_tool("a", "compare_screen", {"name": "home", "threshold": 0.01})
+        assert r["text"].startswith('Differs from the reference "home"')  # the threshold is still the pass bar
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_speck_in_nothing_is_still_a_plain_match(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await with_price(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, SPECK)
+        r = await d.run_tool("a", "compare_screen", {"name": "home"})
+        assert r["text"] == 'Matches the reference "home": 0.02% changed.'
+        await finish(stop, task)
+    run(go)
+
+
+def test_in_a_run_the_named_change_is_a_match_and_the_steps_note_carries_the_names(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await with_price(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, PRICE_TWEAK)
+        named = 'Matches the reference "home" (0.02% changed, under the 0.5% threshold): changed at e3 text "from €1,362".'
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "compare_screen", "name": "home"}]})
+        assert r["text"].startswith("Ran 1 of 1 steps") and f"Note (step 1): {named}" in r["text"], r["text"]
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1, "expect": {"matches": "home"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps") and f"Note (step 1): {named}" in r["text"], r["text"]
+        show(d, SPECK)  # a plain match says nothing more
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1, "expect": {"matches": "home"}}]})
+        assert "Matches the reference" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_log_counts_the_names_of_a_match_and_session_report_flags_it(tmp_path):
+    async def go():
+        d = make(actions=ActionLog(tmp_path / "log"))
+        stop, task = await with_price(d)
+        show(d)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        show(d, PRICE_TWEAK)
+        await d.run_tool("a", "compare_screen", {"name": "home"})
+        r = await d.run_tool("a", "session_report", {})
+        assert "- 1 picture check matched with named changes under the threshold (calls 4): look at what changed" in r["text"], r["text"]
+        await finish(stop, task)
+        lines = [json.loads(x) for f in (tmp_path / "log").glob("actions-*.jsonl") for x in f.read_text("utf-8").splitlines()]
+        assert [x.get("named") for x in lines if x["tool"] == "compare_screen"] == [None, 1]
+    run(go)
 
 
 # ---- the review of PR #3 ----

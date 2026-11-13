@@ -864,3 +864,59 @@ def test_a_search_field_above_the_list_covers_nothing_and_the_field_itself_is_no
     tree = ui.read(screen(top, node("Table", 0, 160, 430, 700, children=(
         node("Cell", 20, 170, 390, 57, "Row", children=(node("Button", 20, 170, 390, 57, "Row"),)),))), PHONE)
     assert all(e.covered_by == () for e in tree.items)
+
+
+# ---- a named plain view drawn over an element (the lab's `lab-overlay` over `lab-covered`, 1.6 benchmark W71) ----
+def lab_cover(overlay_first=False, ancestor=False):
+    """React Native's testID with the same accessibilityLabel: an `Other` whose name equals its label, drawn after the
+    button in the same wrapper, over all of it."""
+    button = node("Button", 60, 300, 280, 44, "lab-covered")
+    overlay = node("Other", 60, 300, 280, 44, "lab-overlay")
+    return node("Other", 60, 300, 280, 44, children=[overlay, button] if overlay_first else [button, overlay])
+
+
+def test_a_named_view_drawn_later_over_a_button_covers_it_though_it_is_not_listed():
+    items = ui.elements(screen(lab_cover()), SCREEN)
+    by = {e.label: e for e in items}
+    assert "lab-overlay" not in by  # not listed: its label is its identifier's words
+    assert [(b.kind, b.rect) for b in by["lab-covered"].covered_by] == [("Other", (60.0, 300.0, 280.0, 44.0))]
+    assert "lab-overlay" in by["lab-covered"].covered_by[0].line
+
+
+def test_a_named_view_drawn_before_the_button_or_around_it_covers_nothing():
+    assert all(e.covered_by == () for e in ui.elements(screen(lab_cover(overlay_first=True)), SCREEN))
+    around = node("Other", 40, 280, 320, 100, "Card", children=[node("Button", 60, 300, 280, 44, "Go")])
+    assert all(e.covered_by == () for e in ui.elements(screen(around), SCREEN))  # its ancestor
+    beside = node("Other", 0, 0, 400, 800, children=[node("Button", 60, 300, 100, 44, "Go"),
+                                                     node("Other", 200, 300, 100, 44, "Note")])
+    assert all(e.covered_by == () for e in ui.elements(screen(beside), SCREEN))  # not over its centre
+
+
+def test_a_full_screen_named_view_is_a_layer_not_a_cover():
+    wrapper = node("Other", 0, 0, 400, 800, "Root")
+    items = ui.elements(screen(node("Button", 60, 300, 100, 44, "Go"), wrapper), SCREEN)
+    assert all(e.covered_by == () for e in items)
+
+
+def indicator(text, x, y, w, h, value="0%"):
+    """iOS's scroll indicator as WDA gives it: an adjustable `Other` named like its label, with a percentage."""
+    return (f'<XCUIElementTypeOther type="XCUIElementTypeOther" value="{value}" name="{text}" label="{text}" '
+            f'enabled="true" x="{x}" y="{y}" width="{w}" height="{h}" traits="Adjustable"></XCUIElementTypeOther>')
+
+
+@pytest.mark.parametrize("bar", [indicator("Horizontal scroll bar, 1 page", 0, 290, 400, 30),
+                                 indicator("Vertical scroll bar, 5 pages", 330, 100, 30, 400, "10%"),
+                                 indicator("Barre de défilement", 0, 290, 400, 30, "10%")])
+def test_a_scroll_indicator_over_a_button_does_not_cover_it(bar):
+    button = node("Button", 20, 280, 340, 60, "lab-native-alert")
+    by = {e.label: e for e in ui.elements(screen(button, bar), SCREEN)}
+    assert by["lab-native-alert"].covered_by == ()
+    assert ui.resolve(list(by.values()), ui.Target(label="lab-native-alert")).label == "lab-native-alert"
+
+
+def test_the_lab_overlay_still_covers_next_to_a_scroll_indicator():
+    button = node("Button", 60, 300, 280, 44, "lab-covered")
+    overlay = node("Other", 60, 300, 280, 44, "", name="lab-overlay")
+    bar = indicator("Horizontal scroll bar, 1 page", 0, 290, 400, 30)
+    by = {e.label: e for e in ui.elements(screen(button, bar, overlay), SCREEN)}
+    assert [b.line for b in by["lab-covered"].covered_by] == ["other id=lab-overlay @60,300 280x44"]

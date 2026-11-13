@@ -1,0 +1,193 @@
+"""The daemon's maps (AGENT-TOOLS §18): each app's map held in memory, learned from what the agent sees and does, and
+saved to its file (mapfile.py) in the background. One map per (folder, app id); the folder is `--maps DIR`, else the
+tool's home.
+
+What is learned goes into memory at once (a place seen, a road driven) and is written by a task that merges memory into
+the file under the lock, so two tools or two daemons on one folder keep each other's work. `flush` waits for those
+writes (the `map` tool and the daemon's stop call it). Explicit edits (`map name`, `forget`...) write through at once.
+A file that is left alone (it doesn't parse) keeps the tool driving from memory; `problem_once` says so once.
+"""
+import asyncio
+import copy
+from dataclasses import dataclass
+from typing import Callable, TypeVar
+
+from . import mapfile, places, roads, ui
+
+T = TypeVar("T")
+Key = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class Seen:
+    """A screen observed: its place's name, whether the place is new, its earlier name when a title just named it, and
+    whether the app had a map (a place saved) before this screen."""
+    name: str
+    new: bool
+    renamed_from: str | None
+    had_map: bool
+
+
+class Maps:
+    def __init__(self, root: str | None = None) -> None:
+        self.root = root  # the folder given to `tapwright serve --maps`; None: the tool's home
+        self._files: dict[Key, mapfile.MapFile] = {}
+        self._memory: dict[Key, dict] = {}
+        self._dirty: set[Key] = set()
+        self._dropped: dict[Key, list[tuple[str, str, str]]] = {}  # roads dropped in memory, to be dropped from the file too
+        self._forgotten: dict[Key, set[str | None]] = {}  # reflexes forgotten by an edit, to be dropped from a save under way
+        self._tasks: dict[Key, asyncio.Task] = {}
+        self._told: set[Key] = set()
+
+    # ---- what is held ----
+    def _key(self, root: str | None, app: str) -> Key:
+        return str(mapfile.root(root or self.root)), app
+
+    def file(self, root: str | None, app: str) -> mapfile.MapFile:
+        key = self._key(root, app)
+        if key not in self._files:
+            self._files[key] = mapfile.MapFile(key[0], app)
+        return self._files[key]
+
+    def data(self, root: str | None, app: str) -> dict:
+        """The app's map in memory, read from its file the first time."""
+        key = self._key(root, app)
+        if key not in self._memory:
+            self._memory[key] = self.file(root, app).load()
+        return self._memory[key]
+
+    def has_map(self, root: str | None, app: str) -> bool:
+        return bool(self.data(root, app)["places"])
+
+    def problem(self, root: str | None, app: str) -> str | None:
+        self.data(root, app)
+        return self.file(root, app).problem
+
+    def problem_once(self, root: str | None, app: str) -> str | None:
+        """Why the file is left alone, the first time it is asked for (an answer says so once, not on every call)."""
+        key = self._key(root, app)
+        why = self.problem(root, app)
+        if why is None or key in self._told:
+            return None
+        self._told.add(key)
+        return why
+
+    # ---- learning ----
+    def observe(self, root: str | None, app: str, tree: ui.Tree, arrived: bool | None = True, lang: str | None = None,
+                previous: str | None = None) -> Seen | None:
+        """The screen the agent is on: the place it is (saved if new). None for a screen with nothing to recognise it by.
+        `arrived`: the agent came here from somewhere else (a title counts only on an arrival); None: it did, unless this
+        is the place it was at before (`previous`), as a look at the same screen again."""
+        if not places.has_structure(tree):
+            return None
+        data = self.data(root, app)
+        had_map = bool(data["places"])
+        read = places.read_place(tree, lang)
+        if arrived is None:
+            arrived = places.locate(data, read)[0] != previous or previous is None
+        visit = places.visit(data, read, mapfile.now(), arrived)
+        self._changed(root, app)
+        return Seen(visit.name, visit.new, visit.renamed_from, had_map)
+
+    def record(self, root: str | None, app: str, src: str, dst: str, move: dict, names: dict, ms: int,
+               build: str | None) -> roads.Recorded | None:
+        made = roads.record(self.data(root, app), src, dst, move, names, ms, mapfile.now(), build)
+        if made is not None:
+            self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
+            self._changed(root, app)
+        return made
+
+    def fail(self, root: str | None, app: str, src: str, move: dict) -> list[tuple[str, str]]:
+        gone: list[dict] = []
+        dropped = roads.fail(self.data(root, app), src, move, gone)
+        self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in gone)
+        self._changed(root, app)
+        return dropped
+
+    def repair(self, root: str | None, app: str, src: str, old_move: dict, dst: str, new_move: dict, names: dict, ms: int,
+               build: str | None) -> roads.Recorded:
+        """A road driven by another name than the one it was saved with, and the arrival check passed (§18.4): the new
+        move replaces the old one, here and (a merge would bring it back) in the file."""
+        made = roads.repair(self.data(root, app), src, old_move, dst, new_move, names, ms, mapfile.now(), build)
+        self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
+        self._changed(root, app)
+        return made
+
+    def link(self, root: str | None, app: str, name: str, url: str) -> str | None:
+        """An open_url landed on place `name`: it remembers the link when the URL matches a pattern. Returns the note."""
+        from . import links
+        done = links.landed(self.data(root, app), url, name)
+        if done.link is not None:
+            self._changed(root, app)
+        return done.note
+
+    # ---- writing ----
+    def _changed(self, root: str | None, app: str) -> None:
+        key = self._key(root, app)
+        self._dirty.add(key)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (a plain test): flush by hand
+        task = self._tasks.get(key)
+        if task is None or task.done():
+            self._tasks[key] = asyncio.create_task(self._persist(key))
+
+    async def _persist(self, key: Key) -> None:
+        file = self._files[key]
+        while key in self._dirty:
+            self._dirty.discard(key)
+            if file.problem is not None:
+                continue  # left alone: memory is all there is
+            snapshot = copy.deepcopy(self._memory[key])
+            try:
+                merged = await asyncio.to_thread(file.save, snapshot)
+            except mapfile.MapError as e:
+                file.problem = f"The map for {key[1]} couldn't be saved ({e}); what is learned is kept until the daemon stops."
+                self._told.discard(key)
+                continue
+            gone = self._dropped.pop(key, [])
+            forgotten = self._forgotten.pop(key, set())  # reflexes forgotten while this save ran, the same way
+            if gone or forgotten:  # a merge would bring them back from the snapshot: take them out of the file
+                merged = await asyncio.to_thread(file.update, lambda d: d.update(
+                    roads=[r for r in d["roads"] if roads.identity(r) not in gone],
+                    reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten]))
+            if file.problem is None:
+                self._memory[key] = mapfile.merge(merged, self._memory[key])  # what changed meanwhile stays
+
+    async def flush(self) -> None:
+        """Wait until everything learned so far is in the files."""
+        while True:
+            tasks = [t for t in self._tasks.values() if not t.done()]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def edit(self, root: str | None, app: str, change: Callable[[dict], T]) -> T:
+        """An explicit edit (`map name`, `link`, `forget`...): what is unsaved is merged into the file first, then the
+        change is made on the file's map under the lock, and memory becomes the result. With a file that is left alone
+        the change is made on memory."""
+        key = self._key(root, app)
+        data, file = self.data(root, app), self.file(root, app)
+        result: list[T] = []
+        if file.problem is not None:
+            result.append(change(data))
+            return result[0]
+        def edited(d: dict) -> None:
+            before = {r.get("name") for r in d["reflexes"]}
+            result.append(change(d))
+            after = {r.get("name") for r in d["reflexes"]}
+            task = self._tasks.get(key)
+            forgotten = self._forgotten.setdefault(key, set())
+            if task is not None and not task.done():
+                forgotten |= before - after  # a save already under way would bring these back from its snapshot
+            forgotten -= after  # (a reflex added again is wanted)
+        try:
+            file.save(copy.deepcopy(data))
+            self._memory[key] = file.update(edited)
+        except mapfile.MapError as e:
+            result.clear()
+            file.problem = f"The map for {app} couldn't be saved ({e}); what is learned is kept until the daemon stops."
+            result.append(change(data))
+        self._dirty.discard(key)
+        return result[0]

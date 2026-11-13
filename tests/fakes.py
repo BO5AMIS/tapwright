@@ -8,7 +8,7 @@ from PIL import Image
 
 from tapwright import ui
 from tapwright.device import ConnectionLost, DeviceError, NotSetUp
-from tapwright.session import BANNER_ZONE, Snapshot
+from tapwright.session import BANNER_ZONE, FrontUnchecked, Snapshot
 
 
 def image_bytes(size, color, fmt="PNG") -> bytes:
@@ -307,6 +307,8 @@ class FakeSession:
                           "executable": "Example"}]
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
+        self.tree_app: tuple[str, str] | None = None  # the root Application a read names (None: it names none)
+        self.front_asks = 0  # how many times foreground_bundle_id (the separate activeAppInfo question) was asked
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
         self.dismiss_at: tuple[float, float] | None = None  # where a touch closes an open popover (None: none open)
@@ -333,6 +335,14 @@ class FakeSession:
         # (name, bundle id) of an app a notification banner brings to the front when a tap lands near the top
         self.taken_by: tuple[str, str] | None = None
         self.top_touch = False
+        # a runner whose tap checks the app in front itself (route version 4, Session.front_by_touch): with
+        # `front_apps` set, a tap touches only while `foreground` is one of them, else FrontUnchecked and no touch
+        self.touch_checks_front = False
+        self.front_apps: tuple[str, ...] | None = None
+        self.checked_taps: list = []  # the given apps each checking tap was sent with
+
+    def front_by_touch(self) -> bool:
+        return self.touch_checks_front
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -429,7 +439,7 @@ class FakeSession:
         self._record("refresh")
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard)
+        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
 
     async def snapshot_from(self, tree):
         """The foreground app for a tree that was already read: the one extra request a final answer needs."""
@@ -445,6 +455,7 @@ class FakeSession:
         self.app_names = {a["bundle_id"]: a["name"] for a in self.installed}
 
     async def foreground_bundle_id(self):
+        self.front_asks += 1
         return self.foreground
 
     async def back_point(self):
@@ -464,6 +475,11 @@ class FakeSession:
 
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
+        if self.front_apps is not None:
+            self.checked_taps.append(self.front_apps)
+            if self.foreground not in self.front_apps:
+                raise FrontUnchecked(f"tapwright front: {self.foreground} is in front; nothing was touched")
+            self.front_apps = None
         self._record("tap")
         self.tap_points.append(hit if isinstance(hit, tuple) else hit.center)
         if isinstance(hit, tuple):

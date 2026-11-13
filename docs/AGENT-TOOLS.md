@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-??) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -134,6 +134,15 @@ Settled in 0.31 s.
 - **The change block is a literal diff,** including the element just acted on: typing
   "eggs" into a field that held "egg" shows `~ … value="eggs" … (was "egg")`. Typing the
   same text again is `No visible change.`.
+- **A tap that changes nothing (v1.13).** After `No visible change.` from a `tap`, `long_press` or `double_tap`, the
+  answer adds one note: `Note: the tap was delivered, and nothing on screen changed within <N> s.` `<N>` is how long
+  the screen was watched, to one decimal: at least 0.3 s in Tapwright, at least 0.5 s in Tapline.
+  - Each tool may add one clause after it.
+  - Tapwright: a hint by what was touched (a text field: `type_text` types into it; a point with no element; else
+    wait for what you expect, then try once more, then report it).
+  - Tapline: `onPress ran and returned`, `onPress threw <message>`, `it has no handler of its own; its parent took
+    it`, or `a request it started is still running`.
+  - Tapwright ships this in 1.5.1, ahead of 1.13, with this wording.
 - **The full list replaces the changes** when:
   - the screen or route changed;
   - more than max(8, half the elements) changed;
@@ -392,6 +401,9 @@ text items.
 
 - New code **`expect_failed`**: a step's expectation in `run` (§9) didn't hold. What the agent does: look,
   then fix the step or report a bug. Raised by both.
+- New code **`off_route`** (v1.13): `drive` or a route step stopped because the screen isn't where the road leads
+  (§18.4). Nothing else was touched. What the agent does: go on by hand from the screen the answer shows; what it
+  does is remembered. Raised by both, only from `drive` and route steps.
 - `stale` also covers a touch by position (Tapwright): `Error stale: the screen around (x, y) changed since your
   last look; look again, or pass force: true to touch there anyway.` It compares the picture within 40 pt of the
   point with the moment of the agent's last list; after an answer without a list (`look: false`) it isn't
@@ -414,6 +426,7 @@ text items.
 | `not_connected` | nothing to drive: no app connected, or no phone found | follow the setup steps in the message | both. Replaces Tapline's `no_app` and `unknown_session` |
 | `timeout` | no answer in time; the action may have happened | look before retrying | both. Tapwright adds two messages for a phone that gave one request no answer while the line is alive (over Wi-Fi a single request can stall). After a touch: `the phone didn't answer within <N> s; the action may have happened: look before you retry.`, after the touch's own length plus 10 s; the session stays. From `wait_for`, when not one read of the screen came back in its time, or in 3 s if that is longer: `The phone didn't answer within <N> s, so it isn't known whether <kind> "<value>" is on screen; look, then wait again.` It says "it didn't happen" only after it has read the screen at least once |
 | `expect_failed` | an expectation of a `run` step didn't hold (§9.2) | look, then fix the step or report the bug | both |
+| `off_route` | `drive` or a route step stopped because the screen isn't where the road leads; nothing else was touched (v1.13, §18.4) | go on by hand from the screen shown; what you do is remembered | both |
 | `bad_params` | the call's arguments are invalid | fix the call | both. **Change Tapwright:** it uses `unsupported` for this today. (v1.11) An argument the tool doesn't take is never ignored: `Error bad_params: audit doesn't take labels, ocr; it takes types.` (a tool with none: `…; it takes no arguments.`), on every path (MCP, HTTP, `run` steps, where a step's message starts `step 3: `) |
 | `unsupported` | this tool, app or phone can't do it | use the alternative named in the message | both |
 | `not_allowed` | a read or a touch outside the apps the agent was given (v1.5). The message's first word is the reason: `outside_apps` (another app is in front, or the call names one), `no_apps` (the agent was given none) | for `outside_apps`, go back to a given app with `open_app`; for `no_apps`, tell the user | Tapwright, in personal mode (it was `unsupported` with the same reason words). Tapline drives one app and never answers it |
@@ -456,6 +469,7 @@ text items.
 | `journey`, `ux_check`, `media` | both (v1.12) | §17. What each tool can do inside them differs, and the answers say so |
 | `session_report`, `network` | both (v1.11) | §16. Tapline's `network` is an `app_command` |
 | `logs`, `crash`, `performance` | both (v1.10) | diagnostics: §15. What each tool reads differs, and the answers say so |
+| `drive`, `map` | both (v1.13) | §18. Places are route keys in Tapline and signatures in Tapwright, and each tool drives only the roads it can |
 | `reload`, `app_command`, `pair` | Tapline | they need the app's JS runtime |
 
 `dry_run` (§11.4) is a parameter of every touch tool (`tap`, `long_press`, `toggle`, `type_text`, `swipe`,
@@ -523,14 +537,26 @@ checking `covered` costs (`hittable`, §4).
 A step is one tool call written as an object: `{"tool": "<name>", ...its parameters, "expect": {...}}`.
 Allowed tools: `tap`, `long_press`, `type_text`, `scroll`, `toggle`, `back`, `swipe`, `open_url`, `wait`,
 `wait_for`, `compare_screen` (a check, §14.2), `performance` (v1.10, §15.3), `network` (v1.11, §16.4), and where the tool has them `alert`,
-`press_button`, `rotate`, `open_app`, `close_app`, `app_command`. Not
-allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`, `session_report`, `journey`, `ux_check`, `media`,
+`press_button`, `rotate`, `open_app`, `close_app`, `app_command`. `drive` (v1.13, §18.4) is allowed as a step;
+it counts as one step, however many moves it makes. Not
+allowed (`bad_params`): `look`, `run`, `audit`, `apps`, `viewer`, `record`, `replay`, `filmstrip`, `logs`, `crash`, `session_report`, `journey`, `ux_check`, `media`, `map`,
 and where the tool has them `inspect` and `check_layout`. A step's own `look` and
 `screenshot` are ignored; the batch answers once.
 
 Targets are resolved when the step runs, against the screen as it is then. Refs (`{ref}`) are allowed in
 `run` (they resolve against the latest list, which every step keeps current, §3.4) but not in a saved script
 (§9.4).
+
+**Conditional steps (v1.13).** A step may carry:
+- `if`: one of `text`, `id`, `label` (as in `expect`, §9.2), with optional `gone: true`. The step runs only when that
+  is on screen, or, with `gone`, only when it isn't.
+- `optional: true`: the step is skipped when its own target isn't on screen.
+
+Both are one check, made once right after the step before has settled, with no wait of their own; `wait_for` is the
+step that waits. "On screen" here means in the element list, so an element below the fold counts as there, and a step
+that then runs scrolls to it as any step does (§16.2). `if` matches as `wait_for` does: the same text, id and label
+rules, including its check of the whole text, so the two never disagree about one screen. A skipped step's `expect`
+isn't checked. `if` and `optional` work in `run`, `replay` and routes (§18.5).
 
 ### 9.2 `expect`
 
@@ -584,8 +610,12 @@ Error not_actionable: Ran 1 of 4 steps; stopped at step 2 (tap "Delete"): covere
 **`trace: true`** adds one line per step that ran, after line 1: two spaces, the step's number, its own first
 answer line and its time: `  1. Tapped e3 button "Save" id=save. (0.2 s)`.
 
+**A skipped step (v1.13)** is said after line 1, in the form `trace` uses, whether or not `trace` is on:
+`  3. skipped (if: "Not now" isn't on screen).` or, for `optional`, `  3. skipped (optional: "Not now" isn't on screen).`
+
 **Limits:** at most 50 steps (`bad_params` above that); the batch as a whole times out at 120 s (`timeout`,
-with `Ran <k> of <n>` in the message). A person taking over between steps stops the batch the usual way
+with `Ran <k> of <n>` in the message). Time spent waiting for a person's OK (§11.3) or for a "needs a person"
+moment to clear (§11.5) doesn't count toward the 120 s. A person taking over between steps stops the batch the usual way
 (`busy` or `paused` after the wait, §6), with `Ran <k> of <n>` in the message. Policy checks (§11) apply to
 every step; a `needs_confirmation` stops the batch at that step.
 
@@ -619,6 +649,9 @@ A script is a saved batch:
   bad file). `--junit out.xml` writes one test case per script (the stop message as the failure).
 - (v1.9) A script may carry reference pictures in `<script name>.references/` beside it, and `record` folds a
   `compare_screen` into the step before it (§14.2, §14.3).
+- (v1.13) A script may be version 2 (§18.5): it adds `start` (a place), `end`, `variables` and `${…}` values, and a
+  `replay` of it first drives to `start`. A step of either version may carry `if` or `optional` (§9.1). Version 1
+  files are unchanged. A `replay` reads the map (§18.9) but never writes it.
 
 ## 10. Accessibility audit: `audit`
 
@@ -689,12 +722,40 @@ Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy a
 - Viewer → server: `{"type": "confirm_answer", "id": "c7", "allow": true}`. Any viewer may answer; the
   first answer wins; the request expires after 120 s.
 - An allow lets exactly one matching call through within 120 s: the same tool on the same element of the
-  same app. Its answer ends `Note: a person allowed this.` After an expiry the retry answers
+  same app. Its answer ends `Note: allowed by a person (in the live view).` After an expiry the retry answers
   needs_confirmation again, with `Nobody answered.` added. After a refusal, for 60 s the same touch asks no
   one: it answers `needs_confirmation: … and they declined it just now. Don't ask again by repeating the call:
   ask your user what they want.`; after that a retry asks again, with `They declined.` added.
-- The live view is the only place a request is answered, for both tools: a prompt on the phone could be
-  pressed by an agent.
+- On the phone's side the live view is the only place a request is answered, for both tools: a prompt on the phone
+  could be pressed by an agent. (v1.13) The host's dialog below is drawn by the host, not on the phone.
+
+**The host's dialog (v1.13).** At the same moment as the live view's request, the tool asks the host through MCP
+elicitation (`elicitation/create`, form mode), when the client's capabilities say it can show one.
+- **The caption is the tool's own words.** Text from the app is quoted, cut to 80 characters and stripped of control
+  characters: `Allow: tap "Delete trip" in Wayfare? (policy word "Delete")`.
+- **One required field,** `answer`, with the choices `Allow once` and `Don't allow` and no default. Only `accept` with
+  `Allow once` allows. `accept` without it, `decline`, `cancel` or an error is Don't allow.
+- **The first answer from either place wins.** When the live view answers first, the elicitation is aborted; when the
+  dialog answers first, the viewer gets `confirm_done`.
+- One dialog at a time per server; a second request waits behind the first.
+- **Blocked words never reach a dialog:** a blocked touch is refused as in §11.2.
+- **With a dialog, the call waits** for the answer, up to the 120 s, instead of answering `needs_confirmation` at once.
+  - **Allowed:** before it acts, the tool checks again that it is the same element, with the same label, still
+    touchable, in the same app in front. If so it acts, and the answer ends `Note: allowed by a person (in chat).` or
+    `Note: allowed by a person (in the live view).` If not: `Error not_allowed: needs_confirmation: the screen
+    changed while waiting for the OK; ask again.`
+  - **Refused or expired:** `Error not_allowed: needs_confirmation: …` as above, with `They declined.` or `Nobody
+    answered.` added; after a refusal the 60 s rule above holds.
+  - In `run`, `drive` and routes, the step waits the same way, and a refusal stops the batch there.
+- **A host with no dialog** answers at once, as in §11.2. The agent repeats the call once the person allows it in the
+  live view, and the answer ends `Note: allowed by a person (in the live view).`
+- **Where each OK came from** (chat or the live view) is in the action log, in `session_report` and in journey reports.
+- **An opt-out:** `--no-dialog` on both servers, for a host that passes elicitation requests to the model instead of
+  showing them to a person.
+- The dialog is drawn by the host and answered by the person; nothing the model writes can answer it. There is still
+  no parameter that skips a check, and no approving through the agent.
+- **To test, per host:** that it shows the dialog to a person, and that a call held open for 120 s isn't cut off by
+  the host's own time limit for a tool call.
 
 ### 11.4 Dry run
 
@@ -702,6 +763,25 @@ Both MCP servers take `--policy FILE` (JSON). Without one, the built-in policy a
 `Would tap e12 button "Delete trip" at 215,640.` plus, when the policy applies, ` It needs a person's OK (policy word "Delete").`
 On `run`: checks every step's parameters, resolves step 1 only (later steps depend on what step 1 does) and
 answers `Would run 5 steps; step 1 would tap e12 button "Sign up" at 215,640.`
+
+### 11.5 Needs a person (v1.13)
+
+When a call can't go on without a person, the tool asks through the host's dialog (§11.3), with exactly what to do:
+`Needs a person: unlock the phone. I'll go on by myself when it's unlocked.` The one required field is `Done` or
+`Can't now`.
+
+- **The moments.**
+  - **Both tools:** an iOS alert over the app that the tool may not answer; a journey's stress moment that needs hands
+    (§17.4); a media picker the person must use (§17.6).
+  - **Tapwright:** the phone locked and no passcode given (§18.6); the XCTest passcode prompt; iOS's Health sheet.
+  - **Tapline:** the app never paired; the app not open, not in front, or closed; the app not answering twice; a native
+    crash (close and reopen it). Tapline can't tell a locked phone from an app in the background, so for it the phone
+    locked is the app not in front: `Needs a person: open <app> on the phone (unlock it first if it's locked).`
+- The call waits until it can go on, up to 120 s. The tool closes the dialog by itself as soon as the moment clears
+  (the app connects, the alert goes, the picker returns, the phone unlocks), then goes on. `Can't now`, or the limit,
+  answers the usual error.
+- `busy` and `paused` are not such moments: they are a person already at the phone.
+- A host without a dialog, or `--no-dialog`: today's behaviour.
 
 ## 12. Action log
 
@@ -764,6 +844,21 @@ all tokens fall by 11%):
 
 **Guard.** The 16:00 cold-agent run and the A-charter run decide whether the rules stay. If any misread is
 traced to a rule, that rule is rolled back: rule 4 first, then rule 3.
+
+### 13.4 `brief` (v1.13)
+
+Shorter answers, for an agent that knows its way around.
+- `brief: true` on any action, on `run` and on `drive`, or `--brief` when the server starts. An argument overrides the
+  server's setting.
+- The answer is: its first line; the `Place:` line when known (§18.1); then the change block, at most 12 lines. When
+  the block is cut, the last line is `…<n> more: look shows them.`
+- A cut change block keeps its `+` text lines ahead of its `~` and `↕` lines.
+- A new screen shows its headers, its actionable elements (buttons, inputs, switches, links, tabs) and every text
+  element that is new since the last screen, together at most 12 lines, newest text first, then the same `…<n> more`
+  line. New text stays because it is what says an action failed: "Wrong password", "Card declined", an empty state's
+  text.
+- Never cut: the `Alert:`, `Network:`, `Keyboard:` and `Place:` lines, notes, errors and `Reflex:` lines.
+- `look` is never brief.
 
 ## 14. Visual checks (v1.9)
 
@@ -951,6 +1046,16 @@ next one unnecessary.
   At most 5 call numbers per flag, then `…`. A flag with nothing to show is left out; with no waste: `Waste: none.`
 - A scroll hunt is exact when the element was in the tree's off-screen list before the first scroll; otherwise the
   flag says `(maybe)`.
+- **Seconds (v1.13).** Every entry of the action log, reads too, carries `"ms"`, the call's time in the tool (§12). The
+  report gains one line, after the `Session:` line:
+  ```
+  Time: 31 min: thinking between calls 22 min (median 3.4 s), in the tool 9 min (median 0.7 s; tap 0.5 s, look 0.2 s, …).
+  ```
+  - Thinking time is the gap between one call's answer and this client's next call. A gap over 2 minutes counts as
+    idle and is left out.
+- **New waste flags (v1.13),** in the same list and with the same limit of 5 call numbers:
+  - `- 5 calls in a row on a way the map knows (calls 12–16): drive {"to": "language"} is one call`
+  - `- 14 calls each from a new process (calls 1–14): load the MCP server once; each call paid about 2 s`
 
 ### 16.2 Off-screen targets and closest matches
 
@@ -1127,3 +1232,312 @@ be added, and whether to remove them afterwards. Without `confirm`, `bad_params`
   own permission prompt and delete confirmation. Without either, `unsupported`, naming Tapwright's `media`. Tapline also
   has `picker: true`: the next image-picker call returns the picture without the library; the report marks it
   `(picker skipped)`.
+
+## 18. Driving (v1.13)
+
+An agent should never be asked to decide what the tool already knows. A screen the tool has seen, a way between two
+screens it has driven, a link that reaches a screen: these are remembered, and the tool drives them at its own speed
+with no model in the loop. A small, fast model drives only where nothing is known yet, and what it does is remembered
+for next time.
+
+### 18.1 Places
+
+A **place** is a screen the tool can recognise again. Each place has a key, a name and, when known, a link.
+
+- **A route key** (Tapline, in an app with React Navigation or Expo Router):
+  `{"route": ["(tabs)", "settings", "language"], "tab": "settings", "layer": "sheet:Filters"}`
+  - `route`: the route *pattern* names, never the params (`/user/123` is `["user", "[id]"]`);
+  - `tab`: the selected tab's route name, or absent;
+  - `layer`: what lies on top, `sheet:<name>`, `modal:<name>` or `alert`, or absent.
+- **A signature key** (Tapwright; Tapline in an app without a router, or where one route holds several steps):
+  `{"signature": "<hex>", "parts": {...}}`. The signature is built only from what doesn't change with content or
+  language:
+  - the identifiers of elements that aren't list rows;
+  - the kinds of the top-level containers, in order (navigation bar, tab bar, list, form, web view);
+  - the selected tab's identifier, else its position;
+  - what lies on top (a sheet, an alert; the keyboard isn't counted).
+
+  `parts` keeps those pieces, so two reads can be compared part by part. Two reads are the same place when at least
+  the tool's threshold of parts agree (each tool tunes its own). The navigation title breaks a tie, compared per
+  language as the hashes of §18.9.
+- **Never in a key or a name:** a list row's text, a param's value, typed text, anything from a secure field.
+- **The name.** Names are ASCII, `[a-z0-9_]`, lower case with `_` for spaces; a second place with the same name gets
+  `_2`. A navigation title can be private ("Chat with Sara", "Order #10432"), and a name ends up in the map, in
+  `map`'s listing and in every `Place:` line, so a name never comes from content:
+  - **Tapline** names a place from its route only: the last route name, skipping groups such as `(tabs)`. When the
+    last segment is a param, the name is its parent plus the param's name, so `trips/[id]` is `trips_id`. `index`
+    takes its parent's name, so `trips/index` is `trips`. Tapline never needs titles.
+  - **Tapwright** names a place after its navigation title only when that place showed the same title on two visits:
+    a title that changes between visits is content, not a name. Otherwise the place is `place_<n>` until someone names
+    it. So is a place whose title has no ASCII letters (Arabic, for example): a name doesn't depend on the language of
+    the first visit.
+  - `map {"name": ...}` renames the current place.
+- **Known before any visit:** an Expo Router app's places can be listed from its route tree, each with its link
+  (`scheme://path`). A place whose route has params takes their values as variables (`trips_id` needs `id`).
+  Such a place has no roads until one is driven.
+- **Between the tools:** when both are connected to the same app, Tapwright may take the place from Tapline (§18.11).
+
+**The `Place:` line.**
+- An action that arrives at a known place says so after its first line: `Place: language.` A place seen for the
+  first time says `Place: new (call it with map name).` It is saved under the name the rules above give.
+- The line goes on `look` (as a line of the header, §3.2), on every answer that shows a new screen, and in `brief`
+  (§13.4) and `drive` answers. A same-screen answer (`Same screen. Changes:` or `No visible change.`) doesn't carry
+  it: nothing moved, so the line would only repeat the last one.
+- It appears only once the app has a map: at least one place saved.
+
+### 18.2 Roads
+
+A **road** is one move that left a place and arrived at another, as it was seen:
+```json
+{"from": "settings", "to": "language", "move": {"tool": "tap", "target": {"id": "language-row"}},
+ "names": {"id": "language-row", "label": "Language", "text": "Language"},
+ "by": "tapwright", "seen": 7, "failed": 0, "ms": 840, "last": "2026-11-12T18:20:00Z", "build": "1.4.0 (212)"}
+```
+- A move is saved when it is made by `tap`, `long_press`, `toggle`, `back`, `open_url` or `swipe`, and leaves a known
+  or new place and arrives at another, in `run`, `drive` and single calls alike. These are not saved:
+  - reads, a person's input from the live view, and actions in a dry run;
+  - a move that needed a person's OK, so that `drive` never plans through a Delete or a Buy. The answer says
+    `Note: not saved as a road (it needed a person's OK).`;
+  - `type_text`, and any move whose effect depends on typed text (a search that leads to a results screen): the text
+    isn't stored, so the road couldn't be driven again. Typed paths belong in routes, which have variables (§18.5);
+  - anything a `replay` does (§18.9).
+- `move` targets by `id`, else `label`, else `text`, never by `ref`. A point only for something with no element.
+  `names` keeps every name the element had, for repair (§18.4).
+- A list row is saved only by its id. A row with no id is saved as `{"row": true}`: the road exists, but `drive`
+  can't replay it and stops there with `off_route` (the driver chooses the row).
+- `by` is the tool that drove it. A tool replays only its own roads, unless a road is marked `"by": "both"` after
+  each tool has driven it once.
+- `build` is the app's version and native build number (`CFBundleShortVersionString (CFBundleVersion)`). A
+  JavaScript reload is not a new build. A road whose build isn't the app's current one is **unproven** until it is
+  driven cleanly once.
+- A road that fails twice in a row (its target is missing, or it arrives somewhere else) is dropped, and the answer
+  says so.
+
+### 18.3 Links
+
+- A place reached by `open_url` remembers that URL as its link. A link can carry a secret (a magic sign-in, a
+  password-reset or an invite link holds a token in its query or its path), so it is saved with these rules:
+  - only scheme and path; the query and the fragment are dropped;
+  - a path segment is kept only where a known place's pattern has fixed text; where the pattern has a param, the
+    segment becomes its variable (`wayfare://trips/42` is saved as `wayfare://trips/[id]`). Patterns come from an Expo Router
+    app's route tree, which says which segments are params;
+  - a link whose path matches no pattern isn't saved, and the answer says `Link not saved: it may hold a value; add it
+    with map link.`
+- `map {"link": "wayfare://settings", "place": "settings"}` adds one by hand, and keeps it as given.
+- A **jump** is an `open_url` of the place's link. Tapline doesn't move the app with its own navigation from inside,
+  and Tapwright doesn't use private ways into an app: a jump goes through the app's linking, as a person's tap on
+  the link would.
+
+### 18.4 `drive`
+
+```json
+{"to": "language"}
+{"to": "trips_id", "with": {"id": "42"}}
+{"route": "sign_in", "account": "tester2"}
+{"to": "language", "then": [{"tool": "tap", "target": {"text": "العربية"}, "expect": {"text": "اللغة"}}]}
+{"to": "language", "by": "taps"}
+```
+- `to`: a place's name. `route`: a saved route (§18.5). One of the two.
+- `with`: values for a place's params or a route's variables. `account`: a test account's name (§18.6).
+- `then`: ordinary `run` steps (§9), run after arriving, in the same call.
+- `by`: `"any"` (default: a jump when the place has a link and the moment allows one, else roads), `"taps"` (roads
+  only, never a jump), `"link"` (a jump only).
+- `brief` as on any action (§13.4).
+
+**How it travels.**
+1. Where am I? The current place, from a read.
+2. The way: a jump if the place has a link and `by` allows one. A jump doesn't need to know where it starts, so it
+   works from an unknown place. Otherwise the chain of proven roads with the fewest moves (unproven roads count
+   double); from an unknown place that is `off_route`, before anything is touched. No way: `Error not_found: no known
+   way from settings to language; drive it once (the driver), and it is remembered.` Two ways of equal cost: the one
+   used most recently.
+3. Each move goes through the same checks as a single call (scope, policy, confirmation, `force` never implied).
+   Between moves the tool waits only until the next move's target is on screen, steady and touchable (cap: the
+   road's own `ms` times 3, at least 2 s, at most 10 s). No answer is built for the steps in between.
+4. After each move it checks that it is where the road leads. After the last, it checks the destination.
+
+**When the road is wrong.**
+1. The target is missing: the same element by its other `names`, then the closest match of §16.2. A match is taken
+   only when it is the only one, and it goes through the policy like any target. The road is updated only after the
+   arrival check passes, not when the match is made, and the answer then says `Road repaired: "Language" (was
+   id=language-row).`
+2. It arrived somewhere else that is a known place: it plans again from there, at most twice per call.
+3. Otherwise it stops, with nothing more touched:
+   `Error off_route: stopped at step 2 of 3 (tap "Language"): it isn't on this screen. Now at: settings_general
+   (known). Done: 1 move. Nothing else was touched.` followed by the screen as a normal action answer shows it.
+
+**The answer.**
+```
+Arrived at language by 3 taps in 1.9 s (settings > general > language).
+Place: language.
+<the destination's screen, as an action's answer shows a new screen>
+```
+- How it travelled is always said: `by link`, `by 3 taps`, `by link then 1 tap`, and `, 1 reflex` when one fired.
+- Unproven roads driven cleanly: `Note: 2 roads proven again for build 1.5.0 (220).`
+- With `then`, the steps follow as in `run`'s answer (§9.3).
+- A person's input pauses a drive between moves, as it pauses any call (Tapline: 3 s of quiet). `paused` and
+  `locked` stop it with the usual errors, plus `Done: <n> moves.`
+
+**`dry_run`** answers the way it would take and touches nothing:
+`Would drive to language by 3 taps: settings > general > language (all proven).`
+
+### 18.5 Routes
+
+A **route** is a script (§9.4) in version 2, saved by name, that starts at a place instead of a fresh start.
+```json
+{"format": "agent-tools-script", "version": 2, "app": "com.example.wayfare", "name": "sign_in",
+ "start": "welcome", "end": "home", "variables": ["account"],
+ "steps": [
+   {"tool": "tap", "target": {"text": "Continue"}},
+   {"tool": "type_text", "target": {"id": "email"}, "text": "${account.username}"},
+   {"tool": "type_text", "target": {"id": "password"}, "text": "${account.password}", "secure": true},
+   {"tool": "tap", "target": {"text": "Sign in"}},
+   {"tool": "tap", "target": {"text": "Not now"}, "optional": true},
+   {"tool": "wait_for", "text": "Home"}]}
+```
+- `record` with `"route": "<name>"` saves what follows as a route from the current place; `record` with `stop` writes
+  it, with `start` and `end` set from the places it saw.
+- While recording, `type_text` takes `"as": "<name>"`: the step is saved with the text `${<name>}`, and the name goes
+  into `variables`. Without `as`, the text is saved as typed. A secure field's text is never saved. A literal `${` in
+  typed text is written `$${`.
+- `start` is a place: `drive {"route": ...}` drives there first if the app is elsewhere.
+- `replay` of a version 2 file starts fresh, as for any script, then drives to `start` (by link or roads; an
+  `off_route` there fails the replay), then runs the steps. `drive` runs it from wherever the app is.
+- A route is a way between its `start` and `end` for `drive {"to": ...}`, counted as one move per step.
+- `if` and `optional` (§9.1) work in routes. Version 1 files keep working everywhere.
+
+### 18.6 Test accounts
+
+Both servers take `--accounts FILE` when they start:
+```json
+{"version": 1, "accounts": {
+  "tester2": {"username": "tester2@example.com", "password": "…", "apps": ["com.example.wayfare"]},
+  "phone":   {"passcode": "…"}}}
+```
+- An agent refers to an account by name (`"account": "tester2"`, or `${account.username}` in a step). The tool types
+  the values. They are never in the action log, the map, a script, a report's text or the live view's captions.
+- **An account value is the whole text of a step, never part of one.** `"text": "${account.username}"` works;
+  `"text": "hi ${account.password}"` is `bad_params`, since joining text would get around the secure-field rule.
+- `password` is typed only into a secure field, `username` only into a text input that isn't secure. Any other
+  target: `Error bad_params: an account's password goes only into a password field; e14 is a text field.`
+- **What can be seen.** The password never: secure fields show dots. While a field holds exactly an account's
+  username, text answers show `value=<tester2's username>`. Pictures (screenshots, journey frames, the GIF) show what
+  is on screen, so a username can be seen in them. Only the password is guaranteed never to be seen.
+- `apps`: the apps the account may be typed into (absent: any given app).
+- `phone.passcode` (Tapwright only) is typed by the tool itself, only on the lock screen's keypad, when a call needs
+  the phone and it is locked. No step or tool can type it anywhere else.
+- **An accounts file inside a git work tree that doesn't ignore it:** the server starts but loads no accounts. Every
+  use of an account answers `Error bad_params: accounts file is inside the git repo at <path> and not ignored; move
+  it or add it to .gitignore.` `doctor` and the session's first answer say it too.
+- `map` and `session_report` list account names, never values.
+
+### 18.7 Reflexes
+
+A reflex is a rule the tool applies by itself when its moment comes, between the steps of any call.
+- **Built in, in both tools:** close the keyboard when it covers the next target (both do this today); while a
+  loading indicator is the only thing changing, or a request the action started is in flight (where the tool can
+  see one), keep waiting up to the step's cap instead of answering `not_found`. Tapwright also waits out a
+  notification banner (it does today).
+- **Declared, per app,** in the map: `{"name": "rate_prompt", "when": {"text": "Rate Wayfare"}, "do": {"tool": "tap",
+  "target": {"text": "Not now"}}, "max": 1, "at": "home"}`.
+  - `when`: `text`, `label` or `id` on screen; `do`: one step; `max`: firings per call (default 1, at most 3).
+  - `at`: optional, a place. The reflex fires only there, so a "Not now" for a rating prompt doesn't fire on a screen
+    where "Not now" means something else.
+  - Added with `map {"reflex": {...}}`, removed with `map {"forget_reflex": "rate_prompt"}`.
+  - A `do` the policy flags (§11) is refused when it is added. It is checked again at the moment the reflex fires,
+    because the policy file can change and the `do` target can carry another word on another screen; a reflex whose
+    `do` is flagged then doesn't fire.
+- Every firing is in the answer: `Reflex: closed "Rate Wayfare" (tapped "Not now").`
+- **Never reflexes:** a permission prompt (how it is answered is the test's decision), a policy-flagged action, a
+  person's OK.
+- **Off** in a user's-eyes journey unless its start allows `reflexes` (§17.1): there the interruption is a finding.
+
+### 18.8 `map`
+
+A read (no `look`), and the way to edit what a map holds.
+```
+map                         → this app's places, routes, reflexes, account names; the current place
+map {"to": "language"}      → the way drive would take, and whether each road is proven
+map {"name": "checkout"}    → names the current place
+map {"link": "wayfare://x", "place": "x"} / {"reflex": {...}} / {"forget_reflex": "..."} / {"forget": "place"}
+```
+The listing, one line each, at most 60 places then `…`:
+```
+Map of Wayfare (com.example.wayfare), build 1.5.0 (220): 23 places, 41 roads (38 proven), 4 routes, 1 reflex. Now at: home.
+Places: home (link wayfare://), settings (link wayfare://settings), language, profile, trips_id (link wayfare://trips/[id]), …
+Routes: sign_in (welcome → home; account), switch_language (settings → language; language), …
+Reflexes: rate_prompt.
+Accounts: tester1, tester2.
+```
+
+### 18.9 The map file
+
+- **One folder per app,** named by the app's own id, never its container's: in Expo Go every app reports Expo Go's
+  bundle id, so the key is the app's id from its config. By default it is in each tool's home
+  (`~/.tapwright/maps/<bundle id>/`, `~/.tapline/maps/<bundle id>/`). Both servers take `--maps DIR` to keep it with a
+  project (`<DIR>/<bundle id>/`), so a team, CI and both tools share one folder. It holds `map.json`, in the format
+  `agent-tools-map` version 1, and `routes/<name>.json` (§18.5), so a person can review each route.
+  ```json
+  {"format": "agent-tools-map", "version": 1, "app": "com.example.wayfare", "titleKey": "<random hex>",
+   "places": {"language": {"key": {...}, "link": null, "titles": {"en": "3fa9c1d27b0e44a8", "ar": "9c01e7a5d2b84f36"}, "last": "..."}},
+   "roads": [ ... ], "routes": {"sign_in": "routes/sign_in.json"}, "reflexes": [ ... ]}
+  ```
+- **Titles are kept only as hashes.** A navigation title is often private, and with `--maps` in a project the file is
+  committed. Each title is stored as HMAC-SHA-256 with a random key kept in the map file (one per map), cut to 16 hex
+  characters, per language. Equality is all the tie-break in §18.1 needs. A person who wants readable titles names the
+  place. Tapline stores no titles.
+- **Writing** is read, merge and write under a lock file (`<file>.lock`, created exclusively, counted as stale after
+  10 s). The file on disk is merged with the tool's memory by place key and by road (`from`, `move`, `to`), the newest
+  `last` winning, so one tool's save never drops the other's work. The result goes to a temporary file, then a rename
+  over the map. On Windows a rename over a file the other tool has open can fail with `EPERM` or `EBUSY`, so it is
+  retried up to 5 times, 50 ms apart.
+- **`replay` reads the map and never writes it** (`tapwright replay`, `tapline replay` and the `replay` tool alike), so
+  a CI run with `--maps` pointed at the repo doesn't change tracked files as a side effect.
+- A person may edit the file by hand; a file that doesn't parse is left alone, and the tool says so and keeps
+  driving without it.
+
+### 18.10 The thin call
+
+For hosts that can't keep an MCP connection: `tapwright call <tool> '<json>'` and `tapline call <tool> '<json>'`.
+- It sends the call to the tool's running process (Tapwright's daemon; Tapline's host) over loopback with the token
+  that process already uses, and loads nothing beyond the language's standard library. A test checks it.
+- **With the thin call the model writes the command line, so a call may only narrow what its process was started
+  with.** Scope (`--apps`, `--dedicated`), the policy (`--policy FILE`, `--no-policy`), `--no-dialog` and the accounts
+  (`--accounts FILE`) are fixed when the daemon or host starts. A call may give a smaller `--apps` or a stricter
+  policy. One that tries to widen any of them answers `Error bad_params: <flag> is set when <tool> starts, not per
+  call`. Tapwright refuses every call when its daemon was started without `--apps` or `--dedicated`, as its MCP
+  server does.
+- `--maps DIR` and `--ux-rules FILE` as the MCP server takes them.
+- **Tapline** serves `/api/<tool>` only from a standalone `tapline host`, never from a host inside an agent's MCP
+  server, so one agent's session can't be driven by another's thin calls.
+- `--client NAME`: the agent's identity, so its report and journey stay its own (default: the parent process's id).
+- Output: the answer's text on stdout (a picture, when there is one, is saved and its path printed);
+  `--json` prints `{"text", "image_path"}`. A refusal prints its error line on stderr and exits with 2; a failure to
+  reach the tool, 3.
+- `POST /api/<tool>` with the JSON arguments is the documented interface underneath, for a host that keeps its own
+  connection: headers `Authorization: Bearer <token>`, `X-Agent-Client` and the scope headers each tool already
+  uses. `X-Agent-Client` is the one shared name for the client; Tapwright still accepts `X-Tapwright-Client`, and
+  Tapline takes only the new one. Without either header, the client is the connection.
+
+### 18.11 A place over the link (Tapline → Tapwright)
+
+- Tapline's host answers `GET /place?app=<bundle id>` on loopback, with the token that guards `POST /agent-touch`:
+  `{"app", "route": [...], "tab", "layer", "seenAt": <epoch ms>, "inFront": true}`. Never params.
+- The app sends its host a small event whenever its route, tab or layer changes, so the answer comes from memory.
+- Tapwright asks each Tapline port (7210–7219) until one has the app, and keeps that port.
+- Tapwright uses it only when `seenAt` is later than its own last touch and `inFront` is true; otherwise its own
+  signature. A place found this way is stored with its route key.
+
+### 18.12 How travel is reported, and journeys
+
+- Every answer that moved by other than the agent's own touches says how: `by link`, `by 3 taps`, `1 reflex`,
+  `Road repaired`. A report (§17.5) keeps these, so it can tell a user's path from a shortcut.
+- In a user's-eyes journey (§17.1), `drive` may use only roads, and only roads made of taps a person could make:
+  no jumps, no reflexes, no fast animations, unless the journey's start allows them (`allow` gains `drive`,
+  `reflexes`, `fast_animations`). An interruption is then a finding, as §17 says.
+- In such a journey each move is aimed by the visible text it had (`names.text`), since a person can't see ids. A road
+  with no visible text can't be driven there and stops with `off_route`: `it has no text a person could read`.
+
+### 18.13 Web pages
+
+The web tools are specified after their gates pass, not in this version.

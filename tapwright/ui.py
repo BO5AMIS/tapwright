@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 from xml.etree import ElementTree as ET
 
+from . import trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -187,6 +188,17 @@ class Alert:
     rect: tuple[float, float, float, float]
 
 
+@dataclass(frozen=True)
+class Structure:
+    """What a screen is made of, apart from its content (for places.py, AGENT-TOOLS §18.1): the kinds of its
+    top-level containers in reading order (`nav`, `tabs`, `toolbar`, `list`, `form`, `web`), the identifiers of the
+    elements that aren't list rows (sorted, each once), and the navigation bar's title. The title is the only content
+    here; places.py keeps it as a hash, and never in a key."""
+    kinds: tuple[str, ...] = ()
+    ids: tuple[str, ...] = ()
+    title: str = ""
+
+
 @dataclass
 class Tree:
     """One read of the accessibility tree."""
@@ -206,6 +218,7 @@ class Tree:
     # what an open sheet or other layer hides, each with the line of what is in front of it (a target naming
     # one is covered); what is off screen under a presented sheet is here too
     behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
+    structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -328,6 +341,82 @@ def _clean(source: str) -> str:
     return _CONTROL_REFS.sub(drop, _RAW_CONTROLS.sub("", source))
 
 
+TYPE_PREFIX = "XCUIElementType"
+_TYPE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+# what an attribute value must escape: the XML specials, and the whitespace an attribute would otherwise turn into spaces
+_ATTR_ESCAPES = str.maketrans({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+                               "\n": "&#10;", "\r": "&#13;", "\t": "&#9;"})
+_NEEDS_ESCAPE = re.compile(r'[&<>"\n\r\t]')
+# the compact node's string keys, in the order /source writes those attributes (value, name, label; placeholderValue
+# and traits after the frame)
+_TEXT_KEYS = (("v", "value"), ("n", "name"), ("l", "label"))
+
+
+def _attr(value: object) -> str:
+    text = value if isinstance(value, str) else ""
+    return text.translate(_ATTR_ESCAPES) if _NEEDS_ESCAPE.search(text) else text
+
+
+def _coordinate(value: object) -> str:
+    """A frame number as /source writes it: whole points without a decimal part."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"a frame number is {value!r}")
+    if isinstance(value, int):
+        return str(value)
+    return str(int(value)) if value.is_integer() else repr(value)
+
+
+def xml_of_tree(root: object) -> str:
+    """The fork's compact tree (GET /wda/tw/tree, route version 4: WebDriverAgentLib/Commands/TWTreeCommands.m) as the
+    XML `SOURCE_PATH` sends for the same screen: the same elements and the same attributes this module reads, in
+    /source's order, so `read`, `back_button` and the session's checks on the text work on it unchanged. Raises
+    ValueError when the answer isn't such a tree (the caller reads /source instead)."""
+    if not isinstance(root, dict):
+        raise ValueError("the compact tree has no root element")
+    out = ['<?xml version="1.0" encoding="UTF-8"?>']
+    stack: list[object] = [root]  # nodes still to write, and the closing tags (str) of the ones open
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+            continue
+        if not isinstance(node, dict):
+            raise ValueError("a compact tree node isn't an object")
+        kind = node.get("t")
+        if not isinstance(kind, str) or not _TYPE_NAME.fullmatch(kind):
+            raise ValueError(f"a compact tree node has the type {kind!r}")
+        tag = kind if kind.startswith(TYPE_PREFIX) else TYPE_PREFIX + kind
+        rect = node.get("r")
+        if not isinstance(rect, list) or len(rect) != 4:
+            raise ValueError("a compact tree node has no frame")
+        x, y, w, h = (_coordinate(v) for v in rect)
+        parts = [f'<{tag} type="{tag}"']
+        for key, name in _TEXT_KEYS:
+            if key in node:
+                parts.append(f' {name}="{_attr(node[key])}"')
+        parts.append(f' enabled="{"false" if node.get("d") else "true"}" x="{x}" y="{y}" width="{w}" height="{h}"')
+        if "p" in node:
+            parts.append(f' placeholderValue="{_attr(node["p"])}"')
+        parts.append(f' traits="{_attr(node.get("tr", ""))}"')
+        pid = node.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            parts.append(f' processId="{pid}"')
+        if "b" in node:
+            parts.append(f' bundleId="{_attr(node["b"])}"')
+        children = node.get("c")
+        if children:
+            if not isinstance(children, list):
+                raise ValueError("a compact tree node's children aren't a list")
+            parts.append(">")
+            out.append("".join(parts))
+            stack.append(f"</{tag}>")
+            stack.extend(reversed(children))
+        else:
+            parts.append("/>")
+            out.append("".join(parts))
+    return "\n".join(out)
+
+
 def _kind(node: ET.Element) -> str:
     return _text(node.get("type") or node.tag).removeprefix("XCUIElementType")
 
@@ -344,6 +433,15 @@ class _NoTrait(NamedTuple):
     label: str
     value: str
     checked: bool | None
+
+
+def _is_scroll_indicator(text: str, value: str, traits: set[str]) -> bool:
+    """iOS's scroll indicator: an `Other` named "Horizontal scroll bar, 1 page" / "Vertical scroll bar, 5 pages",
+    adjustable, with a percentage value ("10%"). It is drawn over content and takes no touch, so it never covers
+    anything. Where the name is not English, the adjustable trait with a percentage value is enough."""
+    if re.match(r"(horizontal|vertical) scroll bar\b", text, re.I):
+        return True
+    return "Adjustable" in traits and re.fullmatch(r"\d+(\.\d+)?\s*%", value.strip()) is not None
 
 
 def _no_trait(node: ET.Element, kind: str, label: str, value: str, identifier: str) -> _NoTrait | None:
@@ -393,6 +491,7 @@ def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    trace.parsed()
     if screen is not None and screen[0] > screen[1]:
         _upright_keyboard(root, screen)
     return root
@@ -439,6 +538,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     # Everything below is numbered by visit order, so "what is inside this node" is a range of numbers.
     found: list[tuple[Element, int, tuple[int, ...]]] = []  # each listed element, its number, the bars it is inside
     covering: list[tuple[int, Bar]] = []  # the bars iOS draws over content, by number
+    # Named plain views that are not listed (an `Other` whose label only repeats its identifier: React Native's
+    # `testID` with the same `accessibilityLabel`), by number: drawn over an earlier element they still take the touch.
+    veils: list[tuple[int, Bar]] = []
     # number ranges a later layer covers, where, whether it is a presentation (which hides bars too), and the
     # layer's own range
     hidden: list[tuple[int, int, tuple[float, float, float, float], bool, tuple[int, int]]] = []
@@ -468,7 +570,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
 
     def walk(node: ET.Element, clip: tuple[float, float, float, float], in_keyboard: bool, in_tab_bar: bool,
              in_alert: bool, parent: Element | None = None, inside: tuple[int, ...] = (), depth: int = -1,
-             keys_top: float | None = None) -> None:
+             keys_top: float | None = None, holders: tuple[tuple[float, float], ...] = ()) -> None:
         kind = _kind(node)
         depth = 0 if kind == "Application" else depth  # levels below the application
         x, y, w, h = rect = _rect(node)
@@ -482,7 +584,13 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         keys_top = keyboard_windows.get(node, keys_top)
         in_keyboard = in_keyboard or (keys_top is not None and y >= keys_top - 1 and node not in keyboard_holders)
         if w > 0 and h > 0 and (x + w <= left or y + h <= top or x >= right or y >= bottom):
-            if screen_rect is not None and not in_keyboard:
+            # Wholly left or right of the screen is not content waiting off screen but another screen's: a stack
+            # navigator keeps the previous one mounted at a negative x (V1.6 finding 6). Only a horizontal scroll view
+            # on the screen has real content out there: what lies beyond its own width, a carousel's cards or a pager's
+            # pages, whatever it is nested in.
+            aside = screen_rect is not None and (x + w <= 0 or x >= screen[0]) and not any(
+                x + w > h1 + 1 or x < h0 - 1 for h0, h1 in holders)
+            if screen_rect is not None and not in_keyboard and not aside:
                 before = len(tree.offscreen)
                 tally_all(node, parent, visits[0])
                 _offscreen(node, tree.offscreen, parent)
@@ -538,6 +646,12 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         # text effects window on the phone)
         if worth and kind == "Other" and not label and not value and any(_same_rect(rect, r) for r in keyboard_rects):
             worth = False
+        if (visible and not worth and kind == "Other" and (label or value or name) and not inside
+                and not _is_scroll_indicator(label or name, value, traits)
+                and not in_keyboard and not in_alert and node not in keyboard_holders
+                and not any(_same_rect(rect, r) for r in keyboard_rects)):
+            veils.append((number, Bar(kind, rect, Element("", role, label, name, value, rect)
+                                      .line(ref=False, actions=False))))
         listed = parent  # the nearest listed ancestor, for what this node's children are compared with
         if visible and worth and (keyboard or not in_keyboard):
             enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
@@ -567,10 +681,13 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 off_numbers.append(number)
         if kind in CLIPPING:
             clip = (max(left, x), max(top, y), min(right, x + w), min(bottom, y + h))
+            if screen and w > 0 and x >= -1 and x + w <= screen[0] + 1:  # (one that is itself on the screen)
+                holders += ((x, x + w),)
         spans = []  # the numbers each child's subtree used
         for child in node:
             start = visits[0]
-            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside, depth + 1, keys_top)
+            walk(child, clip, in_keyboard, in_tab_bar or kind == "TabBar", in_alert, listed, inside, depth + 1, keys_top,
+                 holders)
             spans.append((start, visits[0]))
         ends[number] = visits[0]
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
@@ -599,6 +716,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    tree.structure = _structure(root, screen_rect)
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
@@ -627,7 +745,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in ahead
                       if m >= ends[number] and m not in bar_numbers and not over & within
                       and o.role not in PASSIVE and o.width * o.height < OVERLAY_MAX * area and _meets(e.rect, o.rect))
-        e.covered_by = tuple(bar for _, bar in bars_over) + later
+        # ...and every later unlisted named view over its centre (`later` only knows what the list holds)
+        named = tuple(bar for m, bar in veils if m >= ends[number] and bar.rect[2] * bar.rect[3] < OVERLAY_MAX * area
+                      and _holds(bar.rect, e.center))
+        e.covered_by = tuple(bar for _, bar in bars_over) + later + named
     tree.items = [e for e, _, _ in shown[:MAX_ELEMENTS]]
     tree.more = max(0, len(shown) - MAX_ELEMENTS)
     for i, e in enumerate(tree.items, 1):
@@ -652,7 +773,56 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             tree.top_inset = max(tree.top_inset or 0.0, reach)
         else:
             tree.bottom_inset = max(tree.bottom_inset or 0.0, reach)
+    trace.built()
     return tree
+
+
+STRUCTURE_KINDS = {"NavigationBar": "nav", "TabBar": "tabs", "Toolbar": "toolbar", "Table": "list",
+                   "CollectionView": "list", "ScrollView": "list", "WebView": "web"}
+INPUT_TYPES = {"TextField", "SecureTextField", "TextView"}  # a scroll view holding one of these is a form
+
+
+def _on_screen(node: ET.Element, screen: tuple[float, float, float, float] | None) -> bool:
+    x, y, w, h = _rect(node)
+    if w <= 0 or h <= 0:
+        return False
+    return screen is None or (screen[0] <= x + w / 2 < screen[0] + screen[2] and screen[1] <= y + h / 2 < screen[1] + screen[3])
+
+
+def _structure(root: ET.Element, screen: tuple[float, float, float, float] | None) -> Structure:
+    """What the screen is made of (see Structure), from the parsed tree. Only what is on screen counts; the keyboard
+    and an alert are not part of the app's screen. A list row is a Cell and everything inside it: its identifier and
+    text are content, so they take no part."""
+    kinds: list[str] = []
+    ids: set[str] = set()
+    bars: list[ET.Element] = []
+
+    def visit(node: ET.Element, in_container: bool) -> None:
+        kind = _kind(node)
+        if kind in ("Keyboard", "Alert", "Cell") or not _on_screen(node, screen) and kind != "Application":
+            return
+        label, name = _text(node.get("label")), _text(node.get("name"))
+        if name and name != label and name not in IOS_NOISE and kind not in ("Application", "Window", "NavigationBar"):
+            ids.add(name)
+        shown = STRUCTURE_KINDS.get(kind)
+        if shown == "list" and kind == "ScrollView" and any(_kind(n) in INPUT_TYPES for n in node.iter()):
+            shown = "form"
+        if shown is not None and not in_container:
+            kinds.append(shown)
+        if kind == "NavigationBar":
+            bars.append(node)
+        for child in node:
+            visit(child, in_container or shown is not None)
+
+    visit(root, False)
+    title = ""
+    if bars:
+        bar = min(bars, key=lambda n: _rect(n)[1])
+        texts = [n for n in bar.iter() if _kind(n) == "StaticText" and (_text(n.get("label")) or _text(n.get("value")))]
+        heads = [n for n in texts if "Header" in (n.get("traits") or "")]
+        pick = (heads or texts or [None])[0]
+        title = (_text(pick.get("label")) or _text(pick.get("value"))) if pick is not None else _text(bar.get("name"))
+    return Structure(tuple(kinds), tuple(sorted(ids)), title)
 
 
 def _plain(node: ET.Element) -> Element | None:
@@ -810,6 +980,15 @@ def describe(items: list[Element], screen: tuple[float, float], scale: float | N
              more: int = 0, off: tuple[int, int] = (0, 0)) -> str:
     """The full list (docs/AGENT-TOOLS.md §3.2): the header lines, then one line per element.
     `app` is (name, bundle id); `off` is how many elements lie (above, below) the screen."""
+    head, shown, tail = describe_parts(items, screen, scale, app, alert, keyboard, more, off)
+    return "\n".join([*head, *(e.line() for e in shown), *tail])
+
+
+def describe_parts(items: list[Element], screen: tuple[float, float], scale: float | None = None,
+                   app: tuple[str, str] | None = None, alert: Alert | None = None, keyboard: bool = False,
+                   more: int = 0, off: tuple[int, int] = (0, 0)) -> tuple[list[str], list[Element], list[str]]:
+    """`describe` in three parts: the header lines, the elements that are listed, and the lines after them. (A brief
+    answer, §13.4, lists only some of the elements between the first two and the last.)"""
     eyes = USERS_EYES.get()
     if eyes:
         items = on_glass(items)
@@ -824,12 +1003,12 @@ def describe(items: list[Element], screen: tuple[float, float], scale: float | N
         lines.append(alert_line(alert))
     if keyboard:
         lines.append("Keyboard: shown")
-    lines.extend(e.line() for e in items)
+    tail = []
     if more:
-        lines.append("(more below; scroll)" if eyes else f"(+{more} more below; scroll)")
+        tail.append("(more below; scroll)" if eyes else f"(+{more} more below; scroll)")
     if not items:
-        lines.append("(nothing visible; the app may still be loading)")
-    return "\n".join(lines)
+        tail.append("(nothing visible; the app may still be loading)")
+    return lines, items, tail
 
 
 @dataclass(frozen=True)

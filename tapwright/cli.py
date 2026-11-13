@@ -3,7 +3,7 @@
   tapwright setup     one time, phone on USB: pair, sign and install WebDriverAgent,
                      pair for network use. Signing: --asc-key-id/--asc-issuer-id/--asc-key-file
                      with --bundle-prefix (App Store Connect API key), or --p12/--profile
-  tapwright doctor [--fix]
+  tapwright doctor [--fix] [--unattended [--accounts FILE]]
                      check the setup and say what's missing; --fix repairs what it can (the
                      developer disk image, WebDriverAgent and its signature, network pairing)
   tapwright smoke --app BUNDLE_ID
@@ -32,6 +32,7 @@ address such as the phone's Tailscale IP (experimental).
 """
 import argparse
 import asyncio
+import json
 import os
 import logging
 import socket
@@ -313,6 +314,70 @@ async def lockdown_needs(udid: str, connect=None) -> list[str]:
     return needs.from_lockdown(True, False, mode if isinstance(mode, bool) else None)
 
 
+async def lockdown_facts(udid: str, connect=None) -> dict:
+    """What the phone on USB says for `doctor --unattended`, as the fields of needs.Facts it could read (and no more):
+    trusted, locked, Developer Mode, the battery. Asks for no pairing. A phone that can't be read gives {}."""
+    from pymobiledevice3.exceptions import (NotPairedError, PairingDialogResponsePendingError, PasswordRequiredError,
+                                            UserDeniedPairingError)
+    if connect is None:
+        from pymobiledevice3.lockdown import create_using_usbmux
+
+        def connect(serial):
+            return create_using_usbmux(serial=serial, autopair=False)
+    try:
+        lockdown = await asyncio.wait_for(connect(udid), 10)
+    except (NotPairedError, PairingDialogResponsePendingError, UserDeniedPairingError):
+        return {"trusted": False}
+    except PasswordRequiredError:
+        return {"trusted": True, "locked": True}
+    except Exception:  # can't be read: nothing is claimed
+        return {}
+    try:
+        mode = await asyncio.wait_for(lockdown.get_developer_mode_status(), 10)
+    except Exception:  # an iOS without the setting, or no answer
+        mode = None
+    try:
+        battery = await asyncio.wait_for(lockdown.get_value("com.apple.mobile.battery", "BatteryCurrentCapacity"), 10)
+    except Exception:
+        battery = None
+    percent = battery if isinstance(battery, int) and not isinstance(battery, bool) and 0 <= battery <= 100 else None
+    return {"trusted": True, "locked": False, "developer_mode": mode if isinstance(mode, bool) else None,
+            "battery": percent}
+
+
+def passcode_given(accounts: str | None) -> bool:
+    """Is there an accounts file (`--accounts FILE`) with a `phone.passcode`? Only whether: the value is never read out."""
+    if not accounts:
+        return False
+    try:
+        data = json.loads(Path(accounts).expanduser().read_text(encoding="utf-8"))
+        passcode = data["accounts"]["phone"]["passcode"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return isinstance(passcode, str) and bool(passcode.strip())
+
+
+async def unattended_stops(usb: list[str], accounts: str | None, connect=None, status: dict | None = None) -> list:
+    """What would stop a run with nobody at the phone (needs.unattended), from what the computer can read: the phone on
+    USB, the running daemon's state (`status`, its health answer), and whether an accounts file gives the passcode."""
+    from . import needs
+    facts: dict = {"passcode_given": passcode_given(accounts)}
+    if usb:
+        facts.update(await lockdown_facts(usb[0], connect))
+    if status is not None:
+        if status.get("state") == "locked":
+            facts["locked"] = True
+        if needs.phone_moment(status.get("state"), status.get("detail")) is needs.PASSCODE_PROMPT:
+            facts["ui_automation"] = False  # iOS asked for the passcode before the automation started
+    return needs.unattended(needs.Facts(**facts))
+
+
+def print_unattended(stops: list) -> None:
+    print("\nWhat would stop an unattended run:" if stops else "\nNothing doctor can see would stop an unattended run.")
+    for stop in stops:
+        print(f"  - {stop.what}\n    Fix: {stop.fix}", flush=True)
+
+
 async def needs_person(usb: list[str]) -> list[str]:
     """The things only the phone's owner can clear, as far as they can be read: from the running daemon when there
     is one (it owns the phone), else from the phone on USB."""
@@ -341,6 +406,18 @@ def report_checkout(package: Path | None = None) -> int:
     return 1 if kind == "fail" else 0
 
 
+def report_accounts(path: str | None) -> int:
+    """`doctor --accounts FILE`: whether the test accounts file can be used (AGENT-TOOLS §18.6). The number of problems."""
+    if not path:
+        return 0
+    from . import accounts
+    loaded = accounts.load(str(Path(path).expanduser().resolve()))
+    if loaded.problem is not None:
+        return fail(loaded.problem)
+    ok(f"test accounts: {', '.join(loaded.names) or 'none'} (values are never shown)")
+    return 0
+
+
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
@@ -349,6 +426,7 @@ async def doctor(a) -> int:
     problems += report_checkout()
     if problems:  # before the signing modules are imported: a conflicted one would raise SyntaxError first
         return problems
+    problems += report_accounts(getattr(a, "accounts", None))
     from pymobiledevice3 import usbmux
 
     from . import repair, signing
@@ -393,6 +471,11 @@ async def doctor(a) -> int:
         note("tapwright doctor --fix repairs what it can (phone on USB)")
     waiting = await needs_person(usb) if not a.fix else []
     print_needs(waiting)
+    if a.unattended:  # each thing that would stop a run without a person counts as a problem
+        from . import client
+        stops = await unattended_stops(usb, a.accounts, status=client.healthy(store.read_serve_info()))
+        print_unattended(stops)
+        problems += len(stops)
     print(f"\n{problems} problem(s)." if problems else
           "\nSet up, but the phone needs a person (above)." if waiting else "\nAll set.")
     return 1 if problems else 0
@@ -520,17 +603,25 @@ def view() -> int:
 
 
 def skill(a) -> int:
-    """`tapwright skill install`: put the agent skill where Claude Code, Codex and other agents look for skills."""
-    from . import skills
+    """`tapwright skill install`: put the agent skill where Claude Code, Codex and other agents look for skills,
+    and the driver agent where Claude Code and Codex look for agents."""
+    from . import driver, skills
     if a.action == "path":
         print(skills.SOURCE)
         return 0
     try:
+        driver.models_for(a.driver_model, list(driver.HOSTS))
         written = skills.install(a.project)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         print(f"couldn't install the skill: {e}")
         return 1
     print(skills.installed_text(written))
+    try:
+        wrote = driver.install(list(driver.HOSTS), a.project, None, a.driver_model)
+    except (OSError, ValueError) as e:
+        print(f"couldn't install the driver agent: {e}")
+        return 1
+    print("\n".join(["", *driver.installed_lines(wrote, list(driver.HOSTS), a.driver_model)]))
     return 0
 
 
@@ -540,7 +631,7 @@ def install(a) -> int:
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
     try:
         lines = connect.install(a.client, apps, a.dedicated, a.project, policy=a.policy, no_policy=a.no_policy,
-                                ux_rules=a.ux_rules)
+                                ux_rules=a.ux_rules, driver_model=a.driver_model)
     except connect.ConnectError as e:
         print(f"tapwright install: {e}")
         return 1
@@ -656,6 +747,9 @@ def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "call":  # an installed `tapwright` script that predates __main__.main
+        from .thin import main as call
+        return call(sys.argv[2:])
     # pymobiledevice3's test-runner channel logs every message it drops while the runner shuts down as a warning
     # ("received connection termination: <DTXMessage …>", "No channel registered …"): expected, and only noise on a
     # new user's console (seen in a clean install's `tapwright smoke`). Its errors still show.
@@ -675,6 +769,14 @@ def main() -> int:
     p.add_argument("--force", action="store_true",
                    help="do every step again, even those already done (WebDriverAgent, network pairing)")
     p = sub.add_parser("doctor")
+    p.add_argument("--unattended", action="store_true",
+                   help="also list what would stop a run with nobody at the phone, and how to fix each: the phone locked "
+                        "with no passcode given, Enable UI Automation, the computer not trusted, Developer Mode off, a "
+                        "battery under 20%%")
+    p.add_argument("--accounts", metavar="FILE",
+                   help="also check this test accounts file: that it reads, that it isn't inside a git repo that "
+                        "doesn't ignore it (then no account can be used), and, with --unattended, whether it gives "
+                        "the phone's passcode (the value is never read out)")
     p.add_argument("--fix", action="store_true",
                    help="repair what it can with the phone on USB: mount the developer disk image, install or "
                         "re-sign WebDriverAgent with the stored profile, refresh the network pairing")
@@ -694,6 +796,28 @@ def main() -> int:
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
     p.add_argument("--no-log", action="store_true",
                    help="don't keep the action log (~/.tapwright/log: one line per action, typed text never written)")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--apps", metavar="APP[,APP]",
+                       help="the most any call may read and touch, as bundle ids or exact names: a call (tapwright call, "
+                            "or an MCP server) may name these or fewer, never more. Without --apps or --dedicated there "
+                            "is no ceiling")
+    scope.add_argument("--dedicated", action="store_true",
+                       help="the phone is kept for testing: calls may use every app")
+    p.add_argument("--policy", metavar="FILE",
+                   help="the safety policy every call is held to: a call's own policy may add words that need an OK or "
+                        "are blocked, never remove one (see tapwright mcp --policy for the file)")
+    p.add_argument("--no-dialog", action="store_true",
+                   help="no person's OK in the host's dialog (for 1.6; kept as the daemon's setting)")
+    p.add_argument("--accounts", metavar="FILE",
+                   help="the test accounts file (JSON: named accounts with a username and password, and the phone's "
+                        "passcode), kept outside any git repo or ignored by it. An agent names one with drive's "
+                        "account; the values are typed, never shown. A call can't name another file")
+    p.add_argument("--brief", action="store_true",
+                   help="answer every action in brief unless the call says brief: false (the change block cut to 12 lines)")
+    p.add_argument("--maps", metavar="DIR",
+                   help="where the per-app maps (<DIR>/<bundle id>/map.json and routes/) are kept, instead of "
+                        "~/.tapwright/maps: keep them with a project so a team, CI and Tapline share one folder. A call "
+                        "can't move it")
     p.add_argument("--settle-on-video", action="store_true",
                    help="experimental, with --video: actions watch the video's frames and the JPEG stream stays "
                         "closed (faster over Wi-Fi; a stalled mirror can make an action answer 'No visible change')")
@@ -701,7 +825,10 @@ def main() -> int:
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
     sub.add_parser("view")
-    p = sub.add_parser("report", help="where an agent's calls went, from the action log (no phone needed)")
+    sub.add_parser("call", add_help=False,
+                   help="run one tool in the running daemon and print its answer (standard library only: "
+                        "tapwright call --help)")
+    p = sub.add_parser("report",help="where an agent's calls went, from the action log (no phone needed)")
     p.add_argument("--since", metavar="TIME",
                    help="epoch ms, an ISO time or how long ago (30m, 2h, 1d); default: the start of the agent's session")
     p.add_argument("--client", metavar="ID", help="one agent's client id; default: the agent that called last")
@@ -720,6 +847,10 @@ def main() -> int:
     p.add_argument("action", choices=("install", "path"),
                    help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")
     p.add_argument("--project", metavar="DIR", help="install into this project's folder instead of your home folder")
+    p.add_argument("--driver-model", metavar="NAME", action="append", dest="driver_model",
+                   help="the model of the driver agent written next to the skill: a name the host knows, for both "
+                        "hosts, or host=NAME (claude=haiku, codex=gpt-6.1-terra) for one. Default: each host's "
+                        "fastest small model")
     p = sub.add_parser("install", help="connect an agent: register the MCP server with it and install the skill")
     p.add_argument("--client", required=True, choices=("claude", "codex", "cursor"),
                    help="the agent to connect: Claude Code, Codex or Cursor")
@@ -737,6 +868,9 @@ def main() -> int:
     p.add_argument("--ux-rules", metavar="FILE",
                    help="the house rules file to register with the server (see tapwright mcp --ux-rules); a rerun "
                         "keeps the entry's earlier one unless this replaces it")
+    p.add_argument("--driver-model", metavar="NAME", action="append", dest="driver_model",
+                   help="the model of the driver agent (a subagent for ground the map doesn't know; Claude Code and "
+                        "Codex): a name the host knows. Default: that host's fastest small model (haiku, gpt-6.1-terra)")
     p = sub.add_parser("mcp")
     p.add_argument("--screenshots", metavar="DIR",
                    help="save screenshots in DIR (the newest 50) and answer with their path, instead of sending images")
@@ -756,6 +890,18 @@ def main() -> int:
     p.add_argument("--ux-rules", metavar="FILE",
                    help="the user's house rules for ux_check and journeys, as JSON: rules written as text (the agent "
                         'judges them) or {"max_taps_to_goal": n} / {"way_back": true} (the tool checks them)')
+    p.add_argument("--brief", action="store_true",
+                   help="answer every action in brief unless the call says brief: false (the change block cut to 12 lines)")
+    p.add_argument("--maps", metavar="DIR",
+                   help="where the per-app maps (<DIR>/<bundle id>/map.json and routes/) are kept, instead of "
+                        "~/.tapwright/maps: keep them with a project so a team, CI and Tapline share one folder")
+    p.add_argument("--no-dialog", action="store_true",
+                   help="never ask the host's dialog (MCP elicitation) for a person's OK or a moment that needs them; "
+                        "the live view alone answers. For a host that passes elicitation requests to the model instead "
+                        "of showing them to a person")
+    p.add_argument("--accounts", metavar="FILE",
+                   help="the test accounts file (JSON), kept outside any git repo or ignored by it: an agent names an account "
+                        "with drive's account, and the tool types its values; they are never shown")
     a = ap.parse_args()
     if a.cmd == "mcp":
         from . import mcp_server, policy, uxcheck
@@ -765,7 +911,8 @@ def main() -> int:
             ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
             raise SystemExit(f"tapwright mcp: {e}") from e
-        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules)
+        mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
+                       brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts)
         return 0
     if a.cmd == "view":
         return view()
@@ -785,8 +932,18 @@ def main() -> int:
         if a.no_log:
             os.environ["TAPWRIGHT_NO_LOG"] = "1"
         port = a.port if a.port is not None else server.DEFAULT_PORT
+        from . import policy
+        from .ceiling import Ceiling
+        try:
+            chosen = policy.load(a.policy) if a.policy else None
+        except ValueError as e:
+            raise SystemExit(f"tapwright serve: {e}") from e
+        ceiling = Ceiling(apps=tuple(x.strip() for x in (a.apps or "").split(",") if x.strip()), dedicated=a.dedicated,
+                          policy=chosen, no_dialog=a.no_dialog,
+                          accounts=str(Path(a.accounts).expanduser().resolve()) if a.accounts else None,
+                          maps=str(Path(a.maps).expanduser().resolve()) if a.maps else None, brief=a.brief)
         return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone,
-                                        video=a.video, settle_on_video=a.settle_on_video))
+                                        video=a.video, settle_on_video=a.settle_on_video, ceiling=ceiling))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 
 

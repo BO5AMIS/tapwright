@@ -38,7 +38,7 @@ def test_the_daemon_names_the_arguments_a_tool_does_not_take():
         assert str(e.value) == "apps doesn't take x; it takes no arguments."
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "x"}, "forse": True})
-        assert "tap doesn't take forse; it takes target, index, force, look, screenshot, dry_run." == str(e.value)
+        assert "tap doesn't take forse; it takes target, index, force, look, screenshot, dry_run, brief." == str(e.value)
         await finish(stop, task)
     run(go)
 

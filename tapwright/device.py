@@ -17,7 +17,7 @@ import re
 import sys
 import time
 
-from . import aio, store
+from . import aio, store, trace
 from . import diagnostics
 from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
 
@@ -544,6 +544,7 @@ class Device:
                 raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
             finally:
                 await self._close(conn)
+        trace.note_bytes(len(rest or b""))
         try:
             data = json.loads(rest or b"{}")
         except ValueError:

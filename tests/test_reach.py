@@ -118,7 +118,7 @@ def test_the_policy_has_its_say_before_the_scroll_and_an_allow_is_used_once(monk
         assert dry["text"].endswith('It needs a person\'s OK (policy word "Delete").') and d.session.scrolls == []
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         r = await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False})
-        assert r["text"].startswith("Scrolled to it, then tapped e") and r["text"].endswith("Note: a person allowed this.")
+        assert r["text"].startswith("Scrolled to it, then tapped e") and r["text"].endswith("Note: allowed by a person (in the live view).")
         assert d.session.scrolls and "tap" in d.session.calls
         await finish(stop, task)
     run(go)
@@ -149,6 +149,8 @@ def test_when_no_scroll_can_bring_it_on_screen_the_refusal_says_why():
             await d.run_tool("a", "tap", {"target": {"id": "stuck"}})
         assert e.value.code == "not_actionable" and str(e.value).startswith('off_screen: button "Stuck" id=stuck')
         assert "scrolling didn't bring it on screen" in str(e.value)
+        assert str(e.value).endswith("look at the screen, then target something else or report it.")
+        assert 'to: "target"' not in str(e.value)
         await finish(stop, task)
     run(go)
 

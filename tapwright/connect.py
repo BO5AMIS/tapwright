@@ -302,10 +302,12 @@ def config_path(client: str, project: str | None, home: Path | None = None) -> P
 
 def install(client: str, apps: list[str], dedicated: bool, project: str | None = None, home: Path | None = None,
             runner: Runner = _run, which: Callable[[str], str | None] = shutil.which,
-            policy: str | None = None, no_policy: bool = False, ux_rules: str | None = None) -> list[str]:
-    """Register the server with `client` and install the skill. Returns the lines to print. A rerun keeps the
-    `--policy`, `--no-policy`, `--ux-rules` and `--screenshots` of the existing entry that this run doesn't set."""
-    from . import skills
+            policy: str | None = None, no_policy: bool = False, ux_rules: str | None = None,
+            driver_model: list[str] | None = None) -> list[str]:
+    """Register the server with `client` and install the skill and the driver agent (Claude Code and Codex have
+    agent files; Cursor gets the handbook in the skill). Returns the lines to print. A rerun keeps the `--policy`,
+    `--no-policy`, `--ux-rules` and `--screenshots` of the existing entry that this run doesn't set."""
+    from . import driver, skills
     check_scope(apps, dedicated)
     if policy and no_policy:
         raise ConnectError("--policy and --no-policy can't be used together.")
@@ -317,6 +319,10 @@ def install(client: str, apps: list[str], dedicated: bool, project: str | None =
         ux_rules = str(Path(ux_rules).expanduser().resolve())
         if not Path(ux_rules).is_file():
             raise ConnectError(f"the ux rules file {ux_rules} doesn't exist; nothing was changed.")
+    try:
+        driver.models_for(driver_model, [client] if client in driver.HOSTS else [])
+    except ValueError as e:
+        raise ConnectError(f"{e}; nothing was changed.") from e
     chosen: list[list[str]] = []
     notes: list[str] = []
 
@@ -345,5 +351,14 @@ def install(client: str, apps: list[str], dedicated: bool, project: str | None =
         raise ConnectError(f"the server is registered, but the skill wasn't installed: {e}") from e
     lines.append("Skill installed:")
     lines.extend(f"  {path}" for path in written)
+    if client in driver.HOSTS:
+        try:
+            wrote = driver.install([client], project, home, driver_model)
+        except (OSError, ValueError) as e:
+            raise ConnectError(f"the server is registered and the skill installed, but the driver agent wasn't: {e}") from e
+        lines.extend(driver.installed_lines(wrote, [client], driver_model))
+    else:
+        lines.append("Cursor has no agent files: references/driver.md in the skill is the driver's handbook, to paste "
+                     "as a brief into a subagent on your fastest small model.")
     lines.append("Next: start a new session in your agent and ask it to open one of your apps on the phone.")
     return lines

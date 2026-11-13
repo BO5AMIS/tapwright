@@ -16,7 +16,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import policy, store, uxcheck
+from . import policy, store, trace, uxcheck
+from .ceiling import Ceiling
 from .control import Refused
 from .daemon import Scope
 from .errors import HTTP_STATUS
@@ -73,7 +74,7 @@ def _error(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
 
 
-def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette:
+def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
 
     def denied(conn, cookie: bool = False) -> Response | None:
@@ -120,30 +121,105 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             return _error("bad_params", "the body must be JSON", 400)
         if not isinstance(args, dict):
             return _error("bad_params", "the body must be a JSON object", 400)
-        client = request.headers.get("x-tapwright-client", "anonymous")
+        # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
+        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client") or "anonymous"
         # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
         apps = tuple(a.strip() for a in request.headers.get("x-tapwright-apps", "").split(",") if a.strip())
-        scope = None if request.headers.get("x-tapwright-mode") == "dedicated" else Scope(apps)
+        dedicated = request.headers.get("x-tapwright-mode") == "dedicated"
+        scope = None if dedicated else Scope(apps)
+        # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
+        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated)) is not None:
+            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
         sent = request.headers.get("x-tapwright-policy")
         try:
             rules = policy.loads(sent) if sent else None
         except ValueError as e:
             return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
+        if ceiling is not None:
+            rules, why = ceiling.check_policy(rules)  # the daemon's own policy when the call sent none
+            if why is not None:
+                return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
         sent_ux = request.headers.get("x-tapwright-ux-rules")
         try:
             ux_rules = uxcheck.loads(sent_ux) if sent_ux else None
         except ValueError as e:
             return _error("bad_params", f"the ux rules this agent was started with are refused: {e}", 400)
+        # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
+        via: dict[str, str | bool] = {"via": "call"} if request.headers.get("x-tapwright-via") == "call" else {}
+        if request.headers.get("x-tapwright-dialog") == "1":
+            via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
+        # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
+        sent_maps = request.headers.get("x-tapwright-maps")
+        if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
+            return _error("bad_params", "--maps must be an absolute folder path", 400)
+        if ceiling is not None:
+            sent_maps, why = ceiling.check_maps(sent_maps)
+            if why is not None:
+                return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        if sent_maps is not None:
+            via["maps"] = sent_maps
+        # The test accounts file (--accounts, §18.6): only its path travels; a thin call may not name one serve wasn't given
+        sent_accounts = request.headers.get("x-tapwright-accounts")
+        if sent_accounts is not None and (not os.path.isabs(sent_accounts) or "\x00" in sent_accounts):
+            return _error("bad_params", "--accounts must be an absolute file path", 400)
+        thin_call = via.get("via") == "call"
+        if ceiling is not None:
+            accounts_path, refused = ceiling.check_accounts(sent_accounts, thin_call)
+        elif sent_accounts is not None and thin_call:
+            accounts_path, refused = None, ("bad_params", "--accounts is set when tapwright serve starts, not per call")
+        else:
+            accounts_path, refused = sent_accounts, None
+        if refused is not None:
+            return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
+        if accounts_path is not None:
+            via["accounts"] = accounts_path
         try:
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
-                                                      policy=rules, ux_rules=ux_rules))
+                                                      policy=rules, ux_rules=ux_rules, **via))
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net
             logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
+
+    async def dialog_body(request) -> tuple[str, dict] | Response:
+        """The agent's client id and the JSON body of one of the host-dialog calls, or the refusal (dialog.py)."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client")
+        if not client:
+            return _error("bad_params", "the host dialog's calls name their agent (X-Agent-Client)", 400)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except (ValueError, RecursionError):
+            return _error("bad_params", "the body must be JSON", 400)
+        if not isinstance(body, dict):
+            return _error("bad_params", "the body must be a JSON object", 400)
+        return client, body
+
+    async def dialog_poll(request):
+        """The events for an agent's host after `since`: `ask` (show this) and `close` (take it down)."""
+        got = await dialog_body(request)
+        if isinstance(got, Response):
+            return got
+        client, body = got
+        since, wait = body.get("since", 0), body.get("wait", 0)
+        if not isinstance(since, int) or isinstance(since, bool) or not isinstance(wait, (int, float)) or isinstance(wait, bool):
+            return _error("bad_params", "since is a whole number and wait is seconds", 400)
+        return JSONResponse(await daemon.dialog_poll(client, since, float(wait)))
+
+    async def dialog_answer(request):
+        """The host's answer to an `ask`: only this agent's own open request counts."""
+        got = await dialog_body(request)
+        if isinstance(got, Response):
+            return got
+        client, body = got
+        if not isinstance(body.get("id"), str):
+            return _error("bad_params", "id is the ask's id", 400)
+        return JSONResponse({"ok": daemon.dialog_answer(client, body["id"], body.get("answer"))})
 
     async def session(request):
         """`/api/session/ping` and `/api/session/end`: an agent's MCP process says it lives, or that it is going. A
@@ -151,7 +227,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         problem = denied(request)
         if problem is not None:
             return problem
-        client = request.headers.get("x-tapwright-client")
+        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client")
         if request.path_params["what"] not in ("ping", "end"):
             return _error("not_found", "the session calls are ping and end", 404)
         if not client:
@@ -328,6 +404,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         WebSocketRoute("/video", video),
         Route("/api/health", health),
         Route("/api/shutdown", shutdown, methods=["POST"]),
+        Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
+        Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
         Route("/api/session/{what:str}", session, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/{name}", tool, methods=["POST"]),
     ])
@@ -406,11 +484,15 @@ def _lock_instance():
 
 async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: bool = False,
                 phone: str | None = None, make_daemon=_default_daemon, idle_limit: float = IDLE_LIMIT,
-                wait_for_other: float = 60.0, video: bool = False, settle_on_video: bool = False) -> int:
-    """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
+                wait_for_other: float = 60.0, video: bool = False, settle_on_video: bool = False,
+                ceiling: Ceiling | None = None) -> int:
+    """Run the daemon until it is stopped. A healthy daemon already running counts as success. `ceiling`: the most
+    any call may have (scope, policy, ...); None, or one with nothing set, is no limit, as before."""
     import uvicorn
 
     from .client import healthy
+
+    trace.enable_from_env(store.HOME / "trace.jsonl")  # TAPWRIGHT_TRACE=1: the timing trace, read once here
 
     # Nothing here prints the live view's link with its key: an app around the terminal that hides keys in what it
     # shows (T3 Code shows ?token=SECRET) opened that hidden copy as a browser tab each time a daemon started, and the
@@ -420,6 +502,9 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
         if new_token:
             print("the running daemon keeps its token; stop it first (tapwright serve --stop) to get a new one",
                   flush=True)
+        if ceiling is not None and ceiling.is_set:  # the flags were not applied: the running daemon keeps its own
+            print("the running daemon keeps the scope and policy it started with; stop it first (tapwright serve "
+                  "--stop) to start one with these", flush=True)
         return 0
 
     info = store.read_serve_info()
@@ -456,7 +541,8 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             daemon = make_daemon(log.info, phone)
             daemon.want_video = video  # the H.264 live view, set up once the phone is connected
             daemon.settle_on_video = video and settle_on_video
-            app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set)
+            daemon.ceiling = ceiling  # the rest of the flags (--no-dialog, --accounts) are read from it later
+            app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set, ceiling=ceiling)
             server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
                                                    access_log=False, timeout_graceful_shutdown=3))
             store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,

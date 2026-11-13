@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Wayfare" label="Wayfare" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="" processId="3592" bundleId="com.example.wayfare">
+  <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+              <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="There was a problem loading the project." name="There was a problem loading the project." label="There was a problem loading the project." enabled="true" x="20" y="79" width="348" height="63" index="0" traits="StaticText"/>
+              <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="This development build encountered the following error:" name="This development build encountered the following error:" label="This development build encountered the following error:" enabled="true" x="20" y="154" width="360" height="52" index="1" traits="StaticText"/>
+              <XCUIElementTypeScrollView type="XCUIElementTypeScrollView" enabled="true" x="0" y="205" width="430" height="533" index="2" traits="">
+                <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="446" width="768" height="52" index="0" traits="">
+                  <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Failed to load app from http://192.0.2.10:8081 with error: The request timed out." name="Failed to load app from http://192.0.2.10:8081 with error: The request timed out." label="Failed to load app from http://192.0.2.10:8081 with error: The request timed out." enabled="true" x="16" y="461" width="736" height="21" index="0" traits="StaticText"/>
+                </XCUIElementTypeOther>
+                <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Vertical scroll bar, 1 page" label="Vertical scroll bar, 1 page" enabled="true" x="397" y="446" width="30" height="292" index="1" traits="Adjustable">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="424" y="411" width="3" height="37" index="0" traits=""/>
+                </XCUIElementTypeOther>
+                <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Horizontal scroll bar, 2 pages" label="Horizontal scroll bar, 2 pages" enabled="true" x="0" y="705" width="430" height="30" index="2" traits="Adjustable">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="3" y="732" width="236" height="3" index="0" traits=""/>
+                </XCUIElementTypeOther>
+                <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Vertical scroll bar, 1 page" label="Vertical scroll bar, 1 page" enabled="true" x="397" y="446" width="30" height="292" index="3" traits="Adjustable">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="424" y="411" width="3" height="37" index="0" traits=""/>
+                </XCUIElementTypeOther>
+                <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Horizontal scroll bar, 2 pages" label="Horizontal scroll bar, 2 pages" enabled="true" x="0" y="705" width="430" height="30" index="4" traits="Adjustable">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="3" y="732" width="236" height="3" index="0" traits=""/>
+                </XCUIElementTypeOther>
+              </XCUIElementTypeScrollView>
+              <XCUIElementTypeButton type="XCUIElementTypeButton" name="Reload" label="Reload" enabled="true" x="20" y="758" width="390" height="57" index="3" traits="Button"/>
+              <XCUIElementTypeButton type="XCUIElementTypeButton" name="Go home" label="Go home" enabled="true" x="20" y="821" width="192" height="57" index="4" traits="Button"/>
+              <XCUIElementTypeButton type="XCUIElementTypeButton" name="Copy" label="Copy" enabled="true" x="218" y="821" width="192" height="57" index="5" traits="Button"/>
+            </XCUIElementTypeOther>
+          </XCUIElementTypeOther>
+          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="1" traits="">
+            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+              <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+                    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="1" traits=""/>
+                    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="2" traits=""/>
+                    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="3" traits="">
+                      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                        <XCUIElementTypeNavigationBar type="XCUIElementTypeNavigationBar" name="Lab" enabled="true" x="0" y="59" width="430" height="54" index="0" traits="">
+                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="BackButton" label="index" enabled="true" x="19" y="59" width="106" height="44" index="0" traits="Button"/>
+                          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Lab" name="Lab" label="Lab" enabled="true" x="199" y="70" width="32" height="22" index="1" traits="Header"/>
+                        </XCUIElementTypeNavigationBar>
+                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="1" traits="">
+                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                              <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                                <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+                                  <XCUIElementTypeOther type="XCUIElementTypeOther" name="lab-scroll" enabled="true" x="0" y="0" width="430" height="932" index="1" traits="">
+                                    <XCUIElementTypeScrollView type="XCUIElementTypeScrollView" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="-295" width="430" height="3812" index="0" traits="">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="-295" width="430" height="3812" index="0" traits="">
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-under-header" label="Under header" enabled="true" x="16" y="-238" width="398" height="49" index="0" traits="Button"/>
+                                          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="pressed=- typed=w0 typed2= switch=off taps=0 long=0 slow=0 anim=off sheet=closed alert=none shared=none row=-" name="lab-state" label="pressed=- typed=w0 typed2= switch=off taps=0 long=0 slow=0 anim=off sheet=closed alert=none shared=none row=-" enabled="true" x="16" y="-178" width="398" height="52" index="1" traits="StaticText">
+                                            <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="pressed=- typed=w0 typed2= switch=off taps=0 long=0 slow=0 anim=off sheet=closed alert=none shared=none row=-" name="pressed=- typed=w0 typed2= switch=off taps=0 long=0 slow=0 anim=off sheet=closed alert=none shared=none row=-" label="pressed=- typed=w0 typed2= switch=off taps=0 long=0 slow=0 anim=off sheet=closed alert=none shared=none row=-" enabled="true" x="16" y="-178" width="398" height="52" index="0" traits="StaticText"/>
+                                          </XCUIElementTypeStaticText>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-taps" label="Tap me" enabled="true" x="16" y="-115" width="398" height="121" index="2" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-save" label="Save" enabled="true" x="16" y="17" width="193" height="49" index="3" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-cancel" label="Cancel" enabled="true" x="221" y="17" width="193" height="49" index="4" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-dup-1" label="Duplicate" enabled="true" x="16" y="77" width="193" height="49" index="5" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-dup-2" label="Duplicate" enabled="true" x="221" y="77" width="193" height="49" index="6" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-disabled" label="Disabled" enabled="false" x="16" y="137" width="398" height="49" index="7" traits="NotEnabled, Button"/>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="16" y="197" width="398" height="49" index="8" traits="">
+                                            <XCUIElementTypeTextField type="XCUIElementTypeTextField" value="w0" name="lab-input" label="Type here" enabled="true" x="17" y="198" width="396" height="47" index="0" placeholderValue="Type here" traits=""/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="16" y="257" width="398" height="49" index="9" traits="">
+                                            <XCUIElementTypeTextField type="XCUIElementTypeTextField" value="Second field" name="lab-input-2" label="Second field" enabled="true" x="17" y="258" width="396" height="47" index="0" placeholderValue="Second field" traits=""/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="351" y="317" width="63" height="29" index="10" traits="">
+                                            <XCUIElementTypeSwitch type="XCUIElementTypeSwitch" value="0" name="lab-switch" label="Switch" enabled="true" x="351" y="317" width="63" height="29" index="0" traits="ToggleButton, Button"/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Switch" name="Switch" label="Switch" enabled="true" x="16" y="328" width="57" height="23" index="11" traits="StaticText">
+                                            <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Switch" name="Switch" label="Switch" enabled="true" x="16" y="328" width="57" height="23" index="0" traits="StaticText"/>
+                                          </XCUIElementTypeStaticText>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="351" y="373" width="63" height="29" index="12" traits="">
+                                            <XCUIElementTypeSwitch type="XCUIElementTypeSwitch" value="0" name="lab-anim-toggle" label="Animation" enabled="true" x="351" y="373" width="63" height="29" index="0" traits="ToggleButton, Button"/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Animation" name="Animation" label="Animation" enabled="true" x="16" y="384" width="85" height="23" index="13" traits="StaticText">
+                                            <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Animation" name="Animation" label="Animation" enabled="true" x="16" y="384" width="85" height="23" index="0" traits="StaticText"/>
+                                          </XCUIElementTypeStaticText>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="16" y="425" width="398" height="41" index="14" traits="">
+                                            <XCUIElementTypeOther type="XCUIElementTypeOther" name="lab-anim" enabled="true" x="17" y="426" width="40" height="39" index="0" traits=""/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-covered" label="Covered" enabled="true" x="16" y="477" width="398" height="73" index="15" traits="Button"/>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" name="lab-overlay" enabled="true" x="16" y="477" width="398" height="73" index="16" traits=""/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-open-sheet" label="Open sheet" enabled="true" x="16" y="561" width="398" height="49" index="17" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-alert" label="Alert" enabled="true" x="16" y="621" width="398" height="49" index="18" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-native-alert" label="Native alert" enabled="true" x="16" y="681" width="398" height="49" index="19" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-share" label="Share" enabled="true" x="16" y="741" width="398" height="49" index="20" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-long" label="Long press" enabled="true" x="16" y="801" width="398" height="49" index="21" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-reset" label="Reset" enabled="true" x="16" y="861" width="398" height="49" index="22" traits="Button"/>
+                                          <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Fine print 7Q2-K9X 4M8" name="lab-fineprint" label="Fine print 7Q2-K9X 4M8" enabled="true" x="16" y="921" width="398" height="16" index="23" traits="StaticText">
+                                            <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" value="Fine print 7Q2-K9X 4M8" name="Fine print 7Q2-K9X 4M8" label="Fine print 7Q2-K9X 4M8" enabled="true" x="16" y="921" width="398" height="16" index="0" traits="StaticText"/>
+                                          </XCUIElementTypeStaticText>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-1" label="Row 1" enabled="true" x="16" y="948" width="398" height="49" index="24" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-2" label="Row 2" enabled="true" x="16" y="1008" width="398" height="49" index="25" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-3" label="Row 3" enabled="true" x="16" y="1068" width="398" height="49" index="26" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-4" label="Row 4" enabled="true" x="16" y="1128" width="398" height="49" index="27" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-5" label="Row 5" enabled="true" x="16" y="1188" width="398" height="49" index="28" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-6" label="Row 6" enabled="true" x="16" y="1248" width="398" height="49" index="29" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-7" label="Row 7" enabled="true" x="16" y="1308" width="398" height="49" index="30" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-8" label="Row 8" enabled="true" x="16" y="1368" width="398" height="49" index="31" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-9" label="Row 9" enabled="true" x="16" y="1428" width="398" height="49" index="32" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-10" label="Row 10" enabled="true" x="16" y="1488" width="398" height="49" index="33" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-11" label="Row 11" enabled="true" x="16" y="1548" width="398" height="49" index="34" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-12" label="Row 12" enabled="true" x="16" y="1608" width="398" height="49" index="35" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-13" label="Row 13" enabled="true" x="16" y="1668" width="398" height="49" index="36" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-14" label="Row 14" enabled="true" x="16" y="1728" width="398" height="49" index="37" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-15" label="Row 15" enabled="true" x="16" y="1788" width="398" height="49" index="38" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-16" label="Row 16" enabled="true" x="16" y="1848" width="398" height="49" index="39" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-17" label="Row 17" enabled="true" x="16" y="1908" width="398" height="49" index="40" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-18" label="Row 18" enabled="true" x="16" y="1968" width="398" height="49" index="41" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-19" label="Row 19" enabled="true" x="16" y="2028" width="398" height="49" index="42" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-20" label="Row 20" enabled="true" x="16" y="2088" width="398" height="49" index="43" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-21" label="Row 21" enabled="true" x="16" y="2148" width="398" height="49" index="44" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-22" label="Row 22" enabled="true" x="16" y="2208" width="398" height="49" index="45" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-23" label="Row 23" enabled="true" x="16" y="2268" width="398" height="49" index="46" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-24" label="Row 24" enabled="true" x="16" y="2328" width="398" height="49" index="47" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-25" label="Row 25" enabled="true" x="16" y="2388" width="398" height="49" index="48" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-26" label="Row 26" enabled="true" x="16" y="2448" width="398" height="49" index="49" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-27" label="Row 27" enabled="true" x="16" y="2508" width="398" height="49" index="50" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-28" label="Row 28" enabled="true" x="16" y="2568" width="398" height="49" index="51" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-29" label="Row 29" enabled="true" x="16" y="2628" width="398" height="49" index="52" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-30" label="Row 30" enabled="true" x="16" y="2688" width="398" height="49" index="53" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-31" label="Row 31" enabled="true" x="16" y="2748" width="398" height="49" index="54" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-32" label="Row 32" enabled="true" x="16" y="2808" width="398" height="49" index="55" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-33" label="Row 33" enabled="true" x="16" y="2868" width="398" height="49" index="56" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-34" label="Row 34" enabled="true" x="16" y="2928" width="398" height="49" index="57" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-35" label="Row 35" enabled="true" x="16" y="2988" width="398" height="49" index="58" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-36" label="Row 36" enabled="true" x="16" y="3048" width="398" height="49" index="59" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-37" label="Row 37" enabled="true" x="16" y="3108" width="398" height="49" index="60" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-38" label="Row 38" enabled="true" x="16" y="3168" width="398" height="49" index="61" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-39" label="Row 39" enabled="true" x="16" y="3228" width="398" height="49" index="62" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-row-40" label="Row 40" enabled="true" x="16" y="3288" width="398" height="49" index="63" traits="Button"/>
+                                          <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-bottom" label="Bottom" enabled="true" x="16" y="3348" width="398" height="49" index="64" traits="Button"/>
+                                        </XCUIElementTypeOther>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="-1" width="430" height="933" index="1" traits="">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="0" traits=""/>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="-1" width="430" height="933" index="2" traits="">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="0" traits="">
+                                          <XCUIElementTypeImage type="XCUIElementTypeImage" name="AdditionalDimmingOverlay" enabled="true" x="-120" y="-163" width="670" height="326" index="0" traits="Image"/>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="103" index="1" traits=""/>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="2" traits="">
+                                            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="0" traits=""/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="3" traits="">
+                                            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="0" traits=""/>
+                                          </XCUIElementTypeOther>
+                                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="4" traits="">
+                                            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="0" traits=""/>
+                                            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="168" index="1" traits=""/>
+                                          </XCUIElementTypeOther>
+                                        </XCUIElementTypeOther>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" value="10%" name="Vertical scroll bar, 5 pages" label="Vertical scroll bar, 5 pages" enabled="true" x="397" y="113" width="30" height="764" index="3" traits="Adjustable">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="424" y="174" width="3" height="186" index="0" traits=""/>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Horizontal scroll bar, 1 page" label="Horizontal scroll bar, 1 page" enabled="true" x="55" y="899" width="320" height="30" index="4" traits="Adjustable">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="58" y="926" width="314" height="3" index="0" traits=""/>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" value="10%" name="Vertical scroll bar, 5 pages" label="Vertical scroll bar, 5 pages" enabled="true" x="397" y="113" width="30" height="764" index="5" traits="Adjustable">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="424" y="174" width="3" height="186" index="0" traits=""/>
+                                      </XCUIElementTypeOther>
+                                      <XCUIElementTypeOther type="XCUIElementTypeOther" value="0%" name="Horizontal scroll bar, 1 page" label="Horizontal scroll bar, 1 page" enabled="true" x="55" y="899" width="320" height="30" index="6" traits="Adjustable">
+                                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="58" y="926" width="314" height="3" index="0" traits=""/>
+                                      </XCUIElementTypeOther>
+                                    </XCUIElementTypeScrollView>
+                                  </XCUIElementTypeOther>
+                                  <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-edge-tl" label="TL" enabled="true" x="8" y="115" width="44" height="44" index="2" traits="Button"/>
+                                  <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-edge-tr" label="TR" enabled="true" x="378" y="115" width="44" height="44" index="3" traits="Button"/>
+                                  <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-edge-bl" label="BL" enabled="true" x="8" y="846" width="44" height="44" index="4" traits="Button"/>
+                                  <XCUIElementTypeButton type="XCUIElementTypeButton" name="lab-edge-br" label="BR" enabled="true" x="378" y="846" width="44" height="44" index="5" traits="Button"/>
+                                </XCUIElementTypeOther>
+                              </XCUIElementTypeOther>
+                            </XCUIElementTypeOther>
+                          </XCUIElementTypeOther>
+                        </XCUIElementTypeOther>
+                        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="2" traits="">
+                          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+                        </XCUIElementTypeOther>
+                      </XCUIElementTypeOther>
+                    </XCUIElementTypeOther>
+                  </XCUIElementTypeOther>
+                </XCUIElementTypeOther>
+                <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="1" traits="">
+                  <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+                    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+                  </XCUIElementTypeOther>
+                </XCUIElementTypeOther>
+              </XCUIElementTypeOther>
+            </XCUIElementTypeOther>
+          </XCUIElementTypeOther>
+        </XCUIElementTypeOther>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeOther>
+  </XCUIElementTypeWindow>
+  <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="1" traits="">
+    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+    </XCUIElementTypeOther>
+  </XCUIElementTypeWindow>
+  <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="2" traits="">
+    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+            <XCUIElementTypeImage type="XCUIElementTypeImage" name="gearshape.fill" label="gearshape.fill" enabled="true" x="376" y="93" width="26" height="26" index="0" traits="Image"/>
+          </XCUIElementTypeOther>
+        </XCUIElementTypeOther>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeOther>
+  </XCUIElementTypeWindow>
+  <XCUIElementTypeWindow type="XCUIElementTypeWindow" enabled="true" x="0" y="0" width="430" height="932" index="3" traits="">
+    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits="">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="0" width="430" height="932" index="0" traits=""/>
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="832" width="430" height="100" index="1" traits="">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="832" width="430" height="100" index="0" traits=""/>
+      </XCUIElementTypeOther>
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="2" traits="">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="0" traits="">
+          <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="0" traits="">
+            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="0" traits=""/>
+          </XCUIElementTypeOther>
+        </XCUIElementTypeOther>
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="1" traits="">
+          <XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" enabled="true" x="0" y="932" width="430" height="243" index="0" traits="">
+            <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" x="0" y="932" width="430" height="243" index="0" traits="">
+              <XCUIElementTypeOther type="XCUIElementTypeOther" name="UIKeyboardLayoutStar Preview" enabled="true" x="0" y="932" width="430" height="243" index="0" traits="">
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Left" label="Padding-Left" enabled="true" x="0" y="932" width="0" height="0" index="0" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Right" label="Padding-Right" enabled="true" x="0" y="932" width="0" height="0" index="1" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Left" label="Padding-Left" enabled="true" x="0" y="932" width="0" height="0" index="2" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Right" label="Padding-Right" enabled="true" x="0" y="932" width="0" height="0" index="3" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Left" label="Padding-Left" enabled="true" x="0" y="932" width="0" height="0" index="4" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="Padding-Right" label="Padding-Right" enabled="true" x="0" y="932" width="0" height="0" index="5" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="q" label="q" enabled="true" x="4" y="939" width="43" height="56" index="6" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="w" label="w" enabled="true" x="46" y="939" width="43" height="56" index="7" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="e" label="e" enabled="true" x="88" y="939" width="44" height="56" index="8" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="r" label="r" enabled="true" x="131" y="939" width="43" height="56" index="9" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="t" label="t" enabled="true" x="173" y="939" width="43" height="56" index="10" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="y" label="y" enabled="true" x="216" y="939" width="43" height="56" index="11" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="u" label="u" enabled="true" x="258" y="939" width="43" height="56" index="12" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="i" label="i" enabled="true" x="300" y="939" width="43" height="56" index="13" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="o" label="o" enabled="true" x="343" y="939" width="43" height="56" index="14" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="p" label="p" enabled="true" x="385" y="939" width="43" height="56" index="15" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="a" label="a" enabled="true" x="25" y="995" width="43" height="56" index="16" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="s" label="s" enabled="true" x="67" y="995" width="44" height="56" index="17" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="d" label="d" enabled="true" x="110" y="995" width="43" height="56" index="18" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="f" label="f" enabled="true" x="152" y="995" width="43" height="56" index="19" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="g" label="g" enabled="true" x="195" y="995" width="42" height="56" index="20" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="h" label="h" enabled="true" x="237" y="995" width="43" height="56" index="21" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="j" label="j" enabled="true" x="279" y="995" width="43" height="56" index="22" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="k" label="k" enabled="true" x="321" y="995" width="43" height="56" index="23" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="l" label="l" enabled="true" x="364" y="995" width="43" height="56" index="24" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeButton type="XCUIElementTypeButton" name="shift" label="shift" enabled="true" x="4" y="1051" width="56" height="56" index="25" traits="PlaysSound, KeyboardKey, Button"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="z" label="z" enabled="true" x="67" y="1051" width="44" height="56" index="26" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="x" label="x" enabled="true" x="110" y="1051" width="43" height="56" index="27" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="c" label="c" enabled="true" x="152" y="1051" width="43" height="56" index="28" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="v" label="v" enabled="true" x="195" y="1051" width="42" height="56" index="29" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="b" label="b" enabled="true" x="237" y="1051" width="43" height="56" index="30" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="n" label="n" enabled="true" x="279" y="1051" width="43" height="56" index="31" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="m" label="m" enabled="true" x="321" y="1051" width="43" height="56" index="32" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="delete" label="delete" enabled="true" x="372" y="1051" width="56" height="56" index="33" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="more" label="numbers" enabled="true" x="4" y="1107" width="54" height="56" index="34" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeButton type="XCUIElementTypeButton" name="emoji" label="Emoji" enabled="true" x="57" y="1107" width="54" height="56" index="35" traits="PlaysSound, KeyboardKey, Button"/>
+                <XCUIElementTypeKey type="XCUIElementTypeKey" name="space" label=" " enabled="true" x="110" y="1107" width="212" height="56" index="36" traits="PlaysSound, KeyboardKey"/>
+                <XCUIElementTypeButton type="XCUIElementTypeButton" name="Return" label="return" enabled="true" x="321" y="1107" width="107" height="56" index="37" traits="PlaysSound, KeyboardKey, Button"/>
+              </XCUIElementTypeOther>
+            </XCUIElementTypeOther>
+          </XCUIElementTypeKeyboard>
+        </XCUIElementTypeOther>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeOther>
+  </XCUIElementTypeWindow>
+</XCUIElementTypeApplication>

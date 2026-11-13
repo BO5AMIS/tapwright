@@ -6,21 +6,23 @@ from __future__ import annotations
 from .control import Refused
 
 _SHOT = ("look", "screenshot")
+_BRIEF = ("brief",)  # AGENT-TOOLS 1.13 §13.4: on every action and on run; never on look
 _AIM = ("target", "index")  # `index` beside `target` is moved inside it by the daemon
 
 ALLOWED: dict[str, tuple[str, ...]] = {
     "look": ("screenshot", "width", "labels", "ocr"),
-    "tap": (*_AIM, "force", *_SHOT, "dry_run"),
-    "long_press": (*_AIM, "seconds", "force", *_SHOT, "dry_run"),
-    "type_text": ("text", *_AIM, "replace", "submit", "force", *_SHOT, "dry_run"),
-    "scroll": ("direction", "amount", "to", *_AIM, "force", *_SHOT, "dry_run"),  # (force: the daemon refuses it with no_action; the MCP tool omits it)
-    "toggle": (*_AIM, "value", "force", *_SHOT, "dry_run"),
-    "back": (*_SHOT, "dry_run"),
-    "open_url": ("url", *_SHOT),
-    "wait": ("seconds", *_SHOT),
-    "wait_for": ("text", "id", "label", "gone", "timeout", "network_idle", *_SHOT),
-    "run": ("steps", "trace", "dry_run", *_SHOT),
-    "record": ("start", "stop", "name", "path"),
+    "tap": (*_AIM, "force", *_SHOT, "dry_run", *_BRIEF),
+    "long_press": (*_AIM, "seconds", "force", *_SHOT, "dry_run", *_BRIEF),
+    "type_text": ("text", *_AIM, "replace", "submit", "force", "as", *_SHOT, "dry_run", *_BRIEF),  # (as: a recording's variable)
+    "scroll": ("direction", "amount", "to", *_AIM, "force", *_SHOT, "dry_run", *_BRIEF),  # (force: the daemon refuses it with no_action; the MCP tool omits it)
+    "toggle": (*_AIM, "value", "force", *_SHOT, "dry_run", *_BRIEF),
+    "back": (*_SHOT, "dry_run", *_BRIEF),
+    "open_url": ("url", *_SHOT, *_BRIEF),
+    "wait": ("seconds", *_SHOT, *_BRIEF),
+    "wait_for": ("text", "id", "label", "gone", "timeout", "network_idle", *_SHOT, *_BRIEF),
+    "run": ("steps", "trace", "dry_run", *_SHOT, *_BRIEF),
+    "drive": ("to", "route", "with", "account", "then", "by", "dry_run", *_SHOT, *_BRIEF),
+    "record": ("start", "stop", "name", "path", "route", "action"),
     "replay": ("name", "path", *_SHOT, "update_references"),  # (update_references: the CLI's, not the MCP tool's)
     "audit": ("types",),
     "ux_check": (),
@@ -32,13 +34,14 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "compare_screen": ("name", "update", "width", "threshold", "ignore"),
     "apps": (),
     "session_report": ("since",),
-    "open_app": ("app", "language", "region", "text_size", *_SHOT),
+    "map": ("to", "name", "link", "place", "reflex", "forget_reflex", "forget"),
+    "open_app": ("app", "language", "region", "text_size", *_SHOT, *_BRIEF),
     "network": ("mode",),
     "close_app": ("app",),
-    "alert": ("action", *_SHOT),
-    "press_button": ("name", *_SHOT),
-    "swipe": ("x0", "y0", "x1", "y1", "seconds", *_SHOT, "dry_run"),
-    "rotate": ("to", *_SHOT),
+    "alert": ("action", *_SHOT, *_BRIEF),
+    "press_button": ("name", *_SHOT, *_BRIEF),
+    "swipe": ("x0", "y0", "x1", "y1", "seconds", *_SHOT, "dry_run", *_BRIEF),
+    "rotate": ("to", *_SHOT, *_BRIEF),
     "journey": ("start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"),
 }

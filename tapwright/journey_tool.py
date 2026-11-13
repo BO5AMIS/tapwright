@@ -18,6 +18,8 @@ NO_JUMP = ('in a journey, scroll to: "target" is off (a user can\'t jump to what
            "direction, or to: start or end, and read the screen")
 NO_URL = ('blocked: in a journey, open_url is refused unless the journey\'s start allows it (allow: ["open_url"]); '
           "reach the screen by touch, as a user would.")
+NO_MAP = ("in a journey, map is off: a user has no map of the app, and its places and links are what a user can't see; "
+          "finish the journey, then use map")
 NO_JOURNEY = "no journey is running; start one with journey start: true and a goal"
 MODES = ("start", "stop", "stress", "finding")
 KEYS = {"start": ("goal", "persona", "conditions", "allow", "eyes"), "stop": ("reached", "why", "export"),
@@ -46,6 +48,8 @@ class JourneyTools:
                 jr.shortcuts.append(f"open_url {args.get('url')}")
         if not jr.users_eyes:
             return args
+        if name == "map":
+            raise Refused("not_allowed", NO_MAP)
         if journey.hidden(name, args):
             raise Refused("bad_params", HIDDEN)
         if name == "scroll" and args.get("to") == "target":
@@ -381,6 +385,7 @@ class JourneyTools:
             raise Refused("bad_params", f"stress must be one of {', '.join(journey.STRESSES)}, not {kind!r}")
         survives = journey.check_survives(args.get("survives"))
         label, target, mode = kind, args.get("target"), args.get("mode")
+        changed: list[str] = []  # what a double tap found different under its second touch
         if args.get("done") is not None and not isinstance(args["done"], bool):
             raise Refused("bad_params", "done must be true or false")
         if kind == "network":
@@ -417,11 +422,14 @@ class JourneyTools:
                 await run("network", {"mode": mode})
                 jr.network_set = mode != "normal"
             elif kind == "double_tap":
-                token = d._DOUBLE.set(True)
+                token, changed_token = d._DOUBLE.set(True), d._DOUBLE_CHANGED.set(changed)
                 try:
                     await run("tap", {"target": target, "look": False})
                 finally:
                     d._DOUBLE.reset(token)
+                    d._DOUBLE_CHANGED.reset(changed_token)
+                if changed:  # (1.13.1, item 6) the second touch was never sent: the control wasn't the same
+                    label = f"double_tap: changed after the first tap ({changed[0]}), so there was no second tap"
             elif kind == "rotate":
                 await run("rotate", {"to": "landscape_left", "look": False})
                 try:

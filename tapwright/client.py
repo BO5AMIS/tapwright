@@ -59,12 +59,32 @@ def set_ux_rules(rules: uxcheck.Rules | None = None) -> None:
         SCOPE["X-Tapwright-Ux-Rules"] = rules.dumps()
 
 
+def set_maps(folder: str | None = None) -> None:
+    """Where this process's agent keeps its per-app maps (`tapwright mcp --maps DIR`, docs/AGENT-TOOLS.md 18.9), as an
+    absolute folder. None is sent as no header: the daemon's own folder, else ~/.tapwright/maps."""
+    if not folder:
+        SCOPE.pop("X-Tapwright-Maps", None)
+    else:
+        SCOPE["X-Tapwright-Maps"] = str(os.path.abspath(os.path.expanduser(folder)))
+
+
+def set_accounts(file: str | None = None) -> None:
+    """The test accounts file this process's agent uses (`tapwright mcp --accounts FILE`, AGENT-TOOLS §18.6), as an absolute
+    path: only the path is sent, never what is in it. None is sent as no header."""
+    if not file:
+        SCOPE.pop("X-Tapwright-Accounts", None)
+    else:
+        SCOPE["X-Tapwright-Accounts"] = str(os.path.abspath(os.path.expanduser(file)))
+
+
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,
-             client_id: str | None = None) -> dict:
+             client_id: str | None = None, dialog: bool = False) -> dict:
     headers = {"Authorization": f"Bearer {info['token']}", "Content-Type": "application/json"}
     if client_id:
         headers["X-Tapwright-Client"] = client_id
         headers.update(SCOPE)  # an agent's calls carry the apps it was given, or that the device is dedicated
+    if dialog:
+        headers["X-Tapwright-Dialog"] = "1"  # this agent's host can show a dialog, and is polling for it (dialog.py)
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base_url(info) + path, data=data, method=method, headers=headers)
     try:
@@ -133,10 +153,11 @@ def _timed_out(e: BaseException) -> bool:
         isinstance(e, urllib.error.URLError) and isinstance(e.reason, (TimeoutError, socket.timeout)))
 
 
-def _attempt(info: dict, tool: str, args: dict, timeout: float, client_id: str, retry_ok: bool) -> dict:
+def _attempt(info: dict, tool: str, args: dict, timeout: float, client_id: str, retry_ok: bool,
+             dialog: bool = False) -> dict:
     """One request. Only a refused connection (nothing was sent) is passed up for a retry."""
     try:
-        return _request(info, "POST", f"/api/{tool}", args, timeout, client_id)
+        return _request(info, "POST", f"/api/{tool}", args, timeout, client_id, dialog)
     except DaemonError:
         raise
     except (OSError, http.client.HTTPException) as e:
@@ -148,15 +169,30 @@ def _attempt(info: dict, tool: str, args: dict, timeout: float, client_id: str, 
         raise DaemonError("reconnecting", str(e)) from None
 
 
-def call(tool: str, args: dict, client_id: str, timeout: float = 120.0) -> dict:
+def call(tool: str, args: dict, client_id: str, timeout: float = 120.0, dialog: bool = False) -> dict:
     """One agent tool in the daemon: {"text", "image", "image_size"}. Raises DaemonError for refusals.
-    It never sends an action twice: it retries only when the connection was refused."""
+    It never sends an action twice: it retries only when the connection was refused. `dialog`: the caller's host can
+    show a dialog, so the daemon asks a person there and waits for the answer (see dialog.py)."""
     info = find_or_start()
     try:
-        return _attempt(info, tool, args, timeout, client_id, retry_ok=True)
+        return _attempt(info, tool, args, timeout, client_id, retry_ok=True, dialog=dialog)
     except OSError:  # refused: the daemon went away between the check and the call
         info = find_or_start()
-        return _attempt(info, tool, args, timeout, client_id, retry_ok=False)
+        return _attempt(info, tool, args, timeout, client_id, retry_ok=False, dialog=dialog)
+
+
+def dialog_poll(client_id: str, since: int, wait: float) -> dict:
+    """The events the daemon has for this agent's host after `since` ({"seq", "events"}); waits up to `wait` seconds for
+    one. Never starts the daemon: a call in flight has one (see dialog.py)."""
+    return _request(store.read_serve_info(), "POST", "/api/dialog_poll", {"since": since, "wait": wait},
+                    timeout=wait + 10, client_id=client_id)
+
+
+def dialog_answer(client_id: str, ask_id: str, answer: str) -> bool:
+    """The host's answer to an ask; whether the daemon took it (the first answer wins, an old one is ignored)."""
+    done = _request(store.read_serve_info(), "POST", "/api/dialog_answer", {"id": ask_id, "answer": answer},
+                    client_id=client_id)
+    return bool(done.get("ok"))
 
 
 def tell_daemon(path: str, client_id: str, timeout: float = 3.0) -> bool:

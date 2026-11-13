@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from . import ui
     from .stream import Frame
 
 PERSON_IDLE_S = 3.0  # a person counts as driving until idle this long
@@ -37,6 +38,7 @@ class ClientView:
     """What one agent client knows: the generation of its last look or own action, and its elements."""
     seen: int = -1
     items: list = field(default_factory=list)
+    back_before: "tuple | None" = None  # `back` with look false: (the newest frame, the tree's signature) before its touch
     read_at: float = float("-inf")  # the clock when `items` was read
     moved: bool = False  # an action that returned no list ran since: the screen has probably changed
     ocr: dict[str, tuple[float, float]] = field(default_factory=dict)  # ref (o1…) -> centre, from the last OCR reading
@@ -53,6 +55,10 @@ class ClientView:
     alert_now: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert on the newest read of any kind
     read_frame: "Frame | None" = None  # the stream frame at that moment: the picture that matches the list
     read_mark: tuple[int, "Frame | None"] = (0, None)  # (seq, the newest stream frame) when `items` was read
+    place: tuple[str, str] | None = None  # (bundle id, place name) the agent's last answer put the app at (AGENT-TOOLS §18.1)
+    typed_at: tuple[str, str] | None = None  # the place the agent typed text at: a move from there isn't a road (§18.2)
+    place_seen: int = -1  # the screen generation `place` was worked out at: a person's input since makes it unknown
+    tree: "ui.Tree | None" = None  # the tree of the agent's newest answer's read, for the place it shows
 
 
 class Controller:

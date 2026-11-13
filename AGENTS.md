@@ -29,7 +29,9 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    MCP server when the session starts. A wrapper that starts a new process for every call adds
    about 2 s to each call.
 7. `tapwright skill install` puts the Tapwright skill where Claude Code, Codex and other
-   agents look for skills (`--project DIR` for one project). The skill is
+   agents look for skills (`--project DIR` for one project), and the driver agent `phone-driver` where
+   Claude Code and Codex look for agents (`--driver-model NAME` changes its model; `tapwright install`
+   does both too). The skill is
    [skills/tapwright/SKILL.md](skills/tapwright/SKILL.md): how to test well with these tools.
 
 ## Testing an app
@@ -50,17 +52,23 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    draw each element's ref on the picture. `look: false` on an action returns only its first line.
 5. A screen may still be loading: `wait_for` text, an id or a label (or `gone`), instead of
    guessing a delay with `wait`.
-6. Lists: the first line of a list says how much lies off screen (`+41 below`). To reach an
+6. Known ground is one call: `map` lists the places, routes and reflexes the tool has learned for the app, and
+   `drive {"to": "<place>"}` goes to one by its proven roads or a link and answers once, with the screen it
+   arrived at (`off_route` means it stopped on a screen the road doesn't expect, and touched nothing more).
+   Unknown ground: send several moves as one `run`, or hand the goal to the driver agent (`phone-driver`, which
+   `tapwright install` writes: a subagent on a small, fast model), and keep one driver for the session. Name
+   accounts (`account: "tester2"`), never passwords. `brief: true` shortens answers.
+7. Lists: the first line of a list says how much lies off screen (`+41 below`). To reach an
    element there, `scroll` with it as `target` and `to: "target"`: one call brings it on
    screen. `to: "end"` and `to: "start"` go to a list's ends; `down` shows what is below.
-7. Text: `type_text` into a target; without one it types into the only field. `replace` clears
+8. Text: `type_text` into a target; without one it types into the only field. `replace` clears
    first (the default); `submit` presses return. Switches: `toggle`. `back` goes up one screen.
-8. System alerts (notifications, location, tracking) show as `Alert:` in the list. Answer them
+9. System alerts (notifications, location, tracking) show as `Alert:` in the list. Answer them
    with `alert` the way the test needs, usually as a new user would. In personal mode this works
    for a permission prompt of an app you were given; after the answer the call waits for the app
    to come back.
-9. Start a fresh run with `close_app` then `open_app`.
-10. When you know the next two or more steps, send them as one `run`: its `steps` are ordinary
+10. Start a fresh run with `close_app` then `open_app`.
+11. When you know the next two or more steps, send them as one `run`: its `steps` are ordinary
     calls, each with an optional `expect` (`{"text": "Saved"}`) that must hold after it; put one on
     the steps that matter. It stops at the first that fails and says which.
     `record` saves what you do as a script that `replay` (or `tapwright replay FILE` in CI) runs
@@ -68,11 +76,11 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
     screen looks against a saved reference (`"expect": {"matches": "<name>"}` in a step); `filmstrip` shows an
     animation as one numbered picture. When something fails, `logs` (the app's own log) and `crash` usually say
     why; `performance` measures launch time, memory, CPU and frame rate.
-11. A tap on Buy, Delete, Send, Post, Sign out and the like answers
+12. A tap on Buy, Delete, Send, Post, Sign out and the like answers
     `not_allowed: needs_confirmation`: the live view asks the person; repeat the same call once
     they allow it, or ask your user. Never look for another way. `dry_run: true` shows what a touch
     would do without touching.
-12. A person may be watching the live view (`viewer` opens it for the user), or driving. Their input
+13. A person may be watching the live view (`viewer` opens it for the user), or driving. Their input
     goes first. Errors say what to do: `not_found` (look, then pick another target), `ambiguous`
     (use a candidate's ref, or `index`), `not_actionable` (the first word says why: `disabled`,
     `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`; fix the cause, or pass

@@ -165,6 +165,52 @@ def test_references_live_in_the_store_per_app_and_a_scripts_folder_comes_first(t
     assert e.value.code == "bad_params"
 
 
+# ---- a change under the threshold is still named (AGENT-TOOLS 1.13.1, clarification 2) ----
+PRICE = el("e9", "text", "from €1,362", rect=(100, 500, 120, 20))
+
+
+def names(*blocks, items=(PRICE,), scale=1.0):
+    return compare.named_changes(compare.compare(screen(), screen(*blocks)), scale, list(items))
+
+
+def test_a_price_sized_change_in_a_text_element_is_named_even_far_under_a_tenth_of_a_percent():
+    r = compare.compare(screen(), screen(((110, 505, 118, 510), BLACK)))
+    assert r.percent < 0.1 and len(r.regions) == 1 and r.regions[0].width * r.regions[0].height < r.total / 1000
+    assert compare.named_changes(r, 1.0, [PRICE]) == ['e9 text "from €1,362"']
+
+
+def test_a_tiny_change_in_a_non_text_area_under_a_tenth_of_a_percent_is_not_named():
+    assert names(((400, 900, 408, 905), BLACK)) == []
+    assert names(((110, 505, 118, 510), BLACK), items=[]) == []  # (no element there to name, and too small for a place)
+
+
+def test_a_change_of_a_tenth_of_a_percent_or_more_is_named_by_its_element_or_else_by_its_place():
+    assert names(((110, 505, 150, 515), BLACK)) == ['e9 text "from €1,362"']  # 0.2% of the screen
+    assert names(((300, 900, 340, 920), BLACK)) == ["@288,896 64x32"]  # no element: where
+
+
+def test_only_the_elements_that_changed_are_named_and_a_container_gives_way_to_what_is_inside_it():
+    card = el("e8", "text", "Card", rect=(0, 480, 600, 60))
+    beside = el("e10", "text", "per night", rect=(230, 500, 100, 20))  # next to the price, not changed
+    assert names(((110, 505, 150, 515), BLACK), items=[card, PRICE, beside]) == ['e9 text "from €1,362"']
+    assert names(((110, 505, 150, 515), BLACK), items=[card]) == ['e8 text "Card"']  # nothing smaller there
+
+
+def test_regions_are_in_pixels_and_elements_in_points_so_the_scale_is_applied():
+    price = el("e3", "text", "€1", rect=(50, 250, 60, 10))  # points; the picture is 2 px to a point
+    assert names(((110, 505, 118, 510), BLACK), items=[price], scale=2.0) == ['e3 text "€1"']
+
+
+def test_the_names_are_the_largest_cluster_first_and_at_most_eight_then_a_count():
+    blocks = [((20 + 60 * i, 100, 40 + 60 * i, 120), BLACK) for i in range(10)]
+    got = names(*blocks, items=[])
+    assert len(got) == 9 and got[-1] == "(+2 more)" and all(g.startswith("@") for g in got[:8])
+
+
+def test_the_answer_line_says_how_much_changed_the_bar_and_where():
+    line = compare.matched_with_changes("k-explore", compare.shown(0.33, 100, 0.5), 0.5, ['e9 text "from €1,362"', "@4,5 6x7"])
+    assert line == ('Matches the reference "k-explore" (0.33% changed, under the 0.5% threshold): changed at '
+                    'e9 text "from €1,362", @4,5 6x7.')
 # ---- sizes (review of PR #3: a skinny picture must not be resized into billions of pixels) ----
 def png_of(size, mode="RGB", colour=WHITE) -> bytes:
     buf = io.BytesIO()

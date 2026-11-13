@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapwright"
-version = "1.5.1"
+version = "1.6.0"
 description = "Let LLM agents test apps on your real iPhone, from Windows, Linux or macOS. No Mac needed."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,7 @@ video = ["av>=14"]  # the H.264 live view (/video): decode the AirPlay stream, e
 ocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]  # look with ocr: true: text read from the picture, on the CPU
 
 [project.scripts]
-tapwright = "tapwright.entry:main"
+tapwright = "tapwright.entry:main"  # checks for merge markers, and dispatches `call` before the heavy CLI loads
 
 [tool.setuptools]
 packages = ["tapwright"]

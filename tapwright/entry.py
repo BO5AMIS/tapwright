@@ -11,6 +11,12 @@ from pathlib import Path
 
 
 def main() -> int:
+    # `tapwright call` (the thin call, AGENT-TOOLS §18.10) is dispatched first: thin.py needs the standard library only
+    # and loads no other module of the package, so markers elsewhere can't break it, and a host starts one process per
+    # call, which the check's `git status` would slow down
+    if len(sys.argv) > 1 and sys.argv[1] == "call":
+        from .thin import main as call
+        return call(sys.argv[2:])
     from . import checkout
     package = Path(__file__).resolve().parent
     if checkout.work_tree(package) is not None:  # an installed package has no conflict markers to look for

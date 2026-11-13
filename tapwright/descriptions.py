@@ -22,6 +22,8 @@ _CORE = (
     '- Then `Same screen. Changes:` with `+` new, `-` gone, `~` changed, `↕` moved elements (a `~` line marked `off screen` is a change out of view, and has no ref); or `No visible change.`; or the full list when the screen changed or most of it did. Elements still on screen keep their refs, and anything new counts on from the highest ref given. An element that went away and comes back may have its old ref or a new one: read it from the answer. Only `look` starts again at e1.\n'
     '- `Alert:`, `Keyboard:` and similar header lines come first when they changed.\n'
     '- `Settled in 0.31 s.` is how long the screen took to settle. `wait` answers `Waited 1.0 s.` instead.\n'
+    '- `brief: true` on an action, `run` or `drive` cuts the answer to its first line and at most 12 lines of changes, then `…<n> more: look shows them.`; a new screen shows its headers, its actionable elements and its new text. Notes, errors and the `Alert:`, `Network:`, `Keyboard:` and `Place:` lines are never cut. `look` is always whole.\n'
+    '- After `No visible change.`, a `tap`, `long_press` or double tap adds `Note: the tap was delivered, and nothing on screen changed within <N> s.` (`the long press`, `the double tap`), and what to try.\n'
     '- `Note:` lines come last. Read them.\n'
     '- Positions and sizes are in points, origin top-left.\n'
     '- A button, tab or link can be tapped, an input typed into, a switch toggled and a scroll view scrolled; other actions are listed in brackets.\n'
@@ -30,7 +32,7 @@ _CORE = (
     'Errors: `Error <code>: <message>`. The message says what to do next.\n'
     '- `not_found`: nothing matches. `look`, then pick another target.\n'
     "- `ambiguous`: several match. Retry with one candidate's ref, or add `index`.\n"
-    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. Fix the cause (`scroll` with `to: "target"`, close the alert) or pass `force: true` (never for `disabled`: the app has to enable it). For `no_action`, pick another element or tool.\n'
+    '- `not_actionable`: the first word is the reason: `disabled`, `off_screen`, `covered`, `under_tab_bar`, `behind_alert`, `no_action`. `tap`, `long_press`, `toggle` and `type_text` scroll an off-screen target into view themselves, so `off_screen` means no scroll can reach it (it lies behind a fixed bar or outside every list): `look`, then target something else or report it. Otherwise fix the cause (close the alert; `scroll` with `to: "target"` for a bar over it) or pass `force: true` (never for `disabled`: the app has to enable it). For `no_action`, pick another element or tool.\n'
     '- `stale`: a person changed the screen since your list. `look` again.\n'
     '- `busy`: a person is using the app. Wait a few seconds, retry.\n'
     '- `paused`: the user paused you. Ask them to resume.\n'
@@ -44,6 +46,7 @@ _CORE = (
     "- `unsupported`: this tool can't do it. Use the alternative the message names.\n"
     "- `not_allowed`: the first word is the reason: `outside_apps` (another app is in front, or the call names one: go back with `open_app`), `no_apps` (you were given none: tell the user), `needs_confirmation` (a person must OK this touch in the live view; when they have, make the same call again) or `blocked` (the policy forbids it; don't try another way).\n"
     "- `expect_failed`: a `run` step's expectation didn't hold. `look`, then fix the step or report the bug.\n"
+    "- `off_route`: `drive` stopped where the screen isn't what the road expects; nothing else was touched. Go on by hand.\n"
     '- `internal`: a bug. Report it.\n'
     '\n'
     'Screenshots\n'
@@ -51,7 +54,7 @@ _CORE = (
     '- Screenshots cost image tokens. Drive by text, and `look` at the picture only when you need it.\n'
     '\n'
     'Safety\n'
-    "- Some touches need a person's OK first (`needs_confirmation`). You can never give it yourself. `dry_run: true` on a touch or on `run` says what would happen without doing it.\n"
+    "- Some touches need a person's OK first (`needs_confirmation`). You can never give it yourself. The person is asked in the live view and, where the host can show it, in the chat's own dialog; then the call waits up to 120 s for the answer. `dry_run: true` on a touch or on `run` says what would happen without doing it.\n"
     '- A person may be watching or driving in the live view (`viewer`). Their input goes first.\n'
     "- Don't buy, subscribe, send messages, post, delete data, or change account, privacy or security settings, unless the user asked for exactly that step. Ask when unsure.\n"
     "- Use test accounts and test data the user gives you. Don't sign in with credentials you find.\n"
@@ -142,7 +145,13 @@ SHARED = {
         'hold and says which: `Error expect_failed: Ran 3 of 5 steps; stopped at step 4 (tap "Save"): its action '
         'ran, but text "Saved" didn\'t appear within 2 s.` `expect` matches as `wait_for` does: exact text first, '
         'then part of a text. `dry_run: true` checks the steps and says what step 1 would do. Use it to fill a '
-        "form or walk a flow you're sure of; read the answer before the next batch."
+        "form or walk a flow you're sure of; read the answer before the next batch. A step may carry `if` (run it "
+        "only when that is on screen: `text`, `id` or `label`, `gone: true` for when it isn't) and `optional: "
+        "true` (skip it when its own target isn't there). Both look once, with no wait: put a `wait_for` first "
+        "for a load. `brief: true` shortens the answer.\nA step's `text` may be `${account.username}` or "
+        '`${account.password}` of a test account from --accounts: the tool types it, a password only into a '
+        'secure field. A password stays out of pictures only while its field is secure, and the accounts file '
+        'belongs outside the folders the agent may read.'
     ),
     'audit': (
         'Checks the screen in front for accessibility problems: `contrast`, `hit_region`, `description`, '
@@ -155,7 +164,10 @@ SHARED = {
         'that succeeds becomes a step, then `stop: true` saves it (to `path`, or under the name). A `wait_for` '
         "right after an action becomes that step's `expect`, and a `compare_screen` its `expect.matches`; the "
         'reference pictures are saved next to the script. Targets are saved by id, else label, else text (with '
-        '`index` when it matched several); refs only last one run.'
+        '`index` when it matched several); refs only last one run. `action: "start"` with `route: "<name>"` '
+        '(`start: true` works too) records a route for `drive`: it starts from the place the app is at and is '
+        'saved in the app\'s map folder. In it, a `type_text` with `as: "<variable>"` is saved as `${variable}` '
+        "(filled by `drive`'s `with`); a secure field's text is never saved."
     ),
     'replay': (
         'Run a saved script like `run` and answer the same way: it stops at the first step that fails or whose '
@@ -167,9 +179,12 @@ SHARED = {
         'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
         'reference; later calls compare it and answer `Matches` or `Differs` with how much changed, where, and on '
         'a difference a picture with the changes in red. `threshold` is the percent that may change and still '
-        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. Keep the '
-        'same `width` for a name. In `run` and scripts it is a check: `expect: {"matches": name}` on a step, or a '
-        '`compare_screen` step.'
+        'match (default 0.5); `ignore` paints out elements or rects that always change, such as a clock. A change '
+        'under the threshold still matches but is named, for each area of at least 0.1% of the screen and any '
+        'change on a text element: `Matches the reference "k-explore" (0.33% changed, under the 0.5% threshold): '
+        'changed at e9 text "from €1,362", …`. Keep the same `width` for a name. In `run` and scripts it is a '
+        'check: `expect: {"matches": name}` on a step, or a `compare_screen` step; the step\'s line carries the '
+        'names.'
     ),
     'filmstrip': (
         'Several screenshots in one numbered image, for animations and loading states; cheaper than separate '
@@ -213,11 +228,32 @@ SHARED = {
         "with the pictures' paths and `confirm: true`; `remove: true` deletes only what was added. Ask your user "
         'first whether pictures may be added, and whether to remove them afterwards.'
     ),
+    'map': (
+        "The app's map, learned as you drive: its places, the roads between them, saved routes and reflexes, one "
+        'line each, and where the app is now. One argument at a time: `to` shows the shortest known way and '
+        'whether each road is proven; `name` names the current place; `link` (with `place`, default the current '
+        'one) adds the link that reaches a place; `reflex` adds a rule that runs one step when its moment comes: '
+        '`{"name": "rate", "when": {"text": "Rate this app"}, "do": {"tool": "tap", "target": {"text": "Not '
+        'now"}}}`, with `max` firings a call and `at` a place; `forget_reflex` removes one by name; `forget` '
+        'drops a place. Keeps no row text, typed text or secure value. Touches nothing.'
+    ),
+    'drive': (
+        "Go to a place the map knows, in one call. `to` is a place's name (see `map`); `route` is a saved route "
+        "(a flow from a named place, with variables). `with` fills a link's params or a route's variables; "
+        '`account` names a test account (the tool types it; you never see its password); `then` is `run` steps '
+        'that go on after arriving; `by` is `any` (default), `taps` (roads only) or `link` (jump only). One '
+        'answer: how it travelled, like `Arrived at language by 3 taps in 1.9 s.`, and the screen, so no `look` '
+        'is needed. Every move passes the same checks as a single call, and arrival is always checked. A stale '
+        'road is repaired by another name or planned again; otherwise `off_route`: nothing more was touched, so '
+        "go on by hand. In a user's-eyes journey it uses roads only, with no links or reflexes, unless the "
+        "journey's start allows them. `dry_run: true` says the way; `brief: true` shortens the answer."
+    ),
     'session_report': (
-        "Where this session's calls went: calls per tool, failures by code, and waste to cut, each with the call "
-        'numbers: looks right after an answer that already had the changes, retries after `not_found`, scroll '
-        'hunts, and runs of actions that could have been one `run`. `since` (epoch ms) narrows it. Read it after '
-        'a long session, and before writing the next one.'
+        "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "
+        "time and the tool's time, by tool), and waste to cut, each with its call numbers: looks right after an "
+        'answer that had the changes, retries after `not_found`, scroll hunts, runs of actions that could have '
+        'been one `run`, calls that each started a new process (load the MCP server once). `since` (epoch ms) '
+        'narrows it. Read it after a long session.'
     ),
 }
 
@@ -271,7 +307,9 @@ EXTRA = {
     ),
     'alert': (
         "Answer the system alert on screen: `accept` (the default or allow button), `dismiss` (cancel or don't "
-        'allow), or `text` (read it). Answers what changed. Without an alert, `not_found`.'
+        'allow), or `text` (read it). Answers what changed. Without an alert, `not_found`. In personal mode it '
+        'also answers an alert another app draws about one of yours (Settings asking Delete “MyApp”?); `accept` '
+        "on a policy word needs a person's OK."
     ),
     'press_button': (
         'Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; '

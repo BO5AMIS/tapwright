@@ -27,10 +27,12 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # tw-16.15.3.2 adds a fast drag (scroll 1.16 s against 1.44 over USB, 1.62 against 2.00 over Wi-Fi, 2026-11-12): 19%
 # at the median, below the 25% bar, so it isn't the row yet. The session uses the drag only when the runner has it.
 # tw-16.15.3.3 adds the photo routes for `media` (tw version 3: GET /wda/tw/photos/access, POST add and delete).
+# tw-16.15.3.4 (tw version 4, 1.6 E2 and E3) adds a compact tree read (GET /wda/tw/tree, with "unchanged" since a token)
+# and the fast tap's `apps`: it touches only while one of them is in front. Every v3 route is kept.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.3", "466111b6b30d059d79f7d159cc109c562f17a9564b52a68545937ab41e957ef3", "fork-tw-16.15.3.3"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.4", "04876b5385b9e99b1eebabdef27d02afa63306c035f6f9a7136793b5086e59d2", "fork-tw-16.15.3.4"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]

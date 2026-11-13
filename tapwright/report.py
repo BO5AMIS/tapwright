@@ -17,6 +17,9 @@ HUNT = 3  # scrolls in a row that make a hunt
 RUN = 3  # actions in a row that make a run
 # actions that change the phone and answer with the changes: three of them with nothing read between are one `run`.
 # A scroll isn't one (a hunt is its own flag), nor are `run` itself, `record` and `replay`.
+IDLE_S = 120  # a gap between one call's answer and the next call longer than this is idle: left out of the thinking time
+TIMED_TOOLS = 3  # tools named with their median time in the Time: line, the slowest by total time, then `…`
+NEW_PROCESS = 5  # thin calls in a row that make a flag (1.13.1, item 11: five, as Tapline's)
 RUNNABLE = frozenset({"tap", "long_press", "type_text", "toggle", "back", "swipe", "open_url", "open_app",
                       "close_app", "alert", "press_button", "rotate", "wait"})
 
@@ -209,6 +212,73 @@ def action_runs(cs: list[dict]) -> list[tuple[int, int]]:
     return runs
 
 
+def new_process_runs(cs: list[dict]) -> list[tuple[int, int]]:
+    """NEW_PROCESS or more calls in a row that came from `tapwright call`, each from a process of its own.
+
+    How the daemon can tell (chosen 2026-11-12): not by the client id changing every call, because this report is one
+    client's calls (a host that starts a new process per call and doesn't pass --client gives each call its own client,
+    so no report holds two of them); and not by each call opening a new connection, because client.py (the MCP server's
+    way in) opens one for every call too. So the thin call says so itself: it sends `X-Tapwright-Via: call`, and the
+    daemon logs `"via": "call"`. A call that carries none (the MCP server, or an older client) is never counted."""
+    runs, start = [], None
+    for i, e in enumerate(cs + [{}]):
+        if e.get("via") == "call":
+            start = i if start is None else start
+            continue
+        if start is not None and i - start >= NEW_PROCESS:
+            runs.append((start + 1, i))
+        start = None
+    return runs
+
+
+def _half_up(x: float) -> int:
+    return int(x + 0.5)
+
+
+def _span(ms: float) -> str:
+    """A length of time for the Time: line: `31 min`, `19 s`, or `2.4 s` under ten seconds."""
+    if ms >= 60_000:
+        return f"{_half_up(ms / 60_000)} min"
+    return f"{ms / 1000:.1f} s" if ms < 10_000 else f"{_half_up(ms / 1000)} s"
+
+
+def _median_ms(values: list[float]) -> float:
+    s = sorted(values)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def timing(cs: list[dict]) -> str | None:
+    """The `Time:` line (AGENT-TOOLS §16.1, v1.13), or None when no call in the window has `ms` (a log from before it).
+    Thinking time is the gap between one call's answer and this client's next call: an entry is written when its call
+    ends, so the next call began at its `t` minus its `ms`; a gap over IDLE_S is idle and left out, a next call with no
+    `ms` has no gap we can measure. Times in the tool are per call, medians per tool."""
+    timed = [(e, e["ms"]) for e in cs if isinstance(e.get("ms"), (int, float)) and not isinstance(e["ms"], bool)
+             and e["ms"] >= 0]
+    if not timed:
+        return None
+    by_tool: dict[str, list[float]] = {}
+    for e, ms in timed:
+        by_tool.setdefault(e.get("tool", "?"), []).append(ms)
+    gaps: list[float] = []
+    for prev, e in zip(cs, cs[1:]):
+        ms, ended, now = e.get("ms"), epoch_ms(prev["t"]), epoch_ms(e["t"])
+        if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms < 0 or ended is None or now is None:
+            continue
+        gap = max(0.0, now - ms - ended)
+        if gap <= IDLE_S * 1000:
+            gaps.append(gap)
+    tool_total = sum(ms for _, ms in timed)
+    ranked = sorted(by_tool.items(), key=lambda kv: (-sum(kv[1]), kv[0]))
+    named = ", ".join(f"{t} {_median_ms(v) / 1000:.1f} s" for t, v in ranked[:TIMED_TOOLS])
+    named += ", …" if len(ranked) > TIMED_TOOLS else ""
+    in_tool = f"in the tool {_span(tool_total)} (median {_median_ms([ms for _, ms in timed]) / 1000:.1f} s; {named})"
+    if not gaps:
+        return f"Time: {_span(tool_total)}: {in_tool}."
+    thinking = f"thinking between calls {_span(sum(gaps))} (median {_median_ms(gaps) / 1000:.1f} s)"
+    return f"Time: {_span(sum(gaps) + tool_total)}: {thinking}, {in_tool}."
+
+
 def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
     """The answer of `session_report`."""
     cs = calls(entries, client, since_ms)
@@ -233,10 +303,13 @@ def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
         n = len(looks)
         flags.append(f"- {n} {_plural(n, 'look', 'looks')} right after an action whose answer already had the changes "
                      f"(calls {_numbers([str(x) for x in looks])})")
-    if retries := retries_after_not_found(cs):
-        n = len(retries)
-        flags.append(f"- {n} {_plural(n, 'retry', 'retries')} after not_found then worked with another kind "
-                     f"of target, likely the same element (calls {_numbers([str(x) for x in retries])}): use its id first")
+    retried = retries_after_not_found(cs)
+    for ids, advice in ((False, "use its id first"),  # (1.13.1 §4: when the id was what failed, that is no advice)
+                        (True, "target what the latest look shows (its id there, when it has one)")):
+        if retries := [i for i in retried if (_target_kind(cs[i - 1]) == "id") == ids]:
+            n = len(retries)
+            flags.append(f"- {n} {_plural(n, 'retry', 'retries')} after not_found then worked with another kind "
+                         f"of target, likely the same element (calls {_numbers([str(x) for x in retries])}): {advice}")
     if hunts := scroll_hunts(cs):
         n = len(hunts)
         spans = [f"{a}–{b}" + ("" if sure else " (maybe)") for a, b, sure in hunts]
@@ -246,4 +319,19 @@ def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
         n = len(runs)
         flags.append(f"- {n} {_plural(n, 'run', 'runs')} of {RUN} or more actions with no answer read in between "
                      f"(calls {_numbers([f'{a}–{b}' for a, b in runs])}): one run each")
-    return "\n".join([head, "Waste:", *flags] if flags else [head, "Waste: none."])
+    if fresh := new_process_runs(cs):
+        n = sum(b - a + 1 for a, b in fresh)
+        flags.append(f"- {n} calls each from a new process (calls {_numbers([f'{a}–{b}' for a, b in fresh])}): load "
+                     "the MCP server once; each call paid about 2 s")
+    if named := [str(i) for i, e in enumerate(cs, 1) if e.get("tool") == "compare_screen" and e.get("ok")
+                 and isinstance(e.get("named"), int) and e["named"] > 0]:
+        n = len(named)
+        flags.append(f"- {n} picture {_plural(n, 'check', 'checks')} matched with named changes under the threshold "
+                     f"(calls {_numbers(named)}): look at what changed")
+    time_line = timing(cs)
+    top = [head, time_line] if time_line else [head]
+    if okays := [e["confirmed_by"] for e in cs if e.get("confirmed") and isinstance(e.get("confirmed_by"), str)]:
+        # where each person's OK came from (AGENT-TOOLS §11.3): chat is the host's dialog
+        top.append(f"Approvals: {len(okays)} by a person ("
+                   + ", ".join(f"{okays.count(w)} in {w}" for w in dict.fromkeys(okays)) + ").")
+    return "\n".join([*top, "Waste:", *flags] if flags else [*top, "Waste: none."])

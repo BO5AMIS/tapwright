@@ -628,6 +628,7 @@ def test_while_ios_photo_prompt_holds_the_runner_nothing_takes_the_silence_for_a
         async def held():  # every other request waits behind the add, as the runner's queue does, and times out
             await asyncio.sleep(0.05)
             raise ConnectionLost("no answer from WebDriverAgent")
+        answering = s.locked
         s.locked = held
         await asyncio.sleep(0.3)  # many heartbeats
         assert d.state == "live" and "reset" not in s.calls  # no reconnect, the runner and its add stay
@@ -636,7 +637,10 @@ def test_while_ios_photo_prompt_holds_the_runner_nothing_takes_the_silence_for_a
         with pytest.raises(Refused) as other:
             await asyncio.wait_for(d.run_tool("b", "look", {"screenshot": False}), 1.0)
         assert other.value.code == "busy" and "photo prompt" in str(other.value)
-        # the person answers: the add finishes, and the same call picks it up without asking the runner anything
+        # the person answers: the runner's queue is free again (the fake answers its other requests from now on, or a
+        # heartbeat after the wait would still find it held and reconnect), the add finishes, and the same call picks
+        # it up without asking the runner anything
+        s.locked = answering
         s.photos_gate.set()
         r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
         assert r["text"].startswith("Added 3 pictures")
