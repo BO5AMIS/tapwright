@@ -689,7 +689,7 @@ class Typed(Noted):
         line = now.line(actions=False, place=False)
         if now.secure:
             return f"Typed into {line}. The value is hidden (secure field)."
-        return f"Typed into {line}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
+        return f"Typed into {line}. Value is now {ui.quoted(now.value)}."
 
 
 class Scrolled(Noted):
@@ -1530,8 +1530,9 @@ class Daemon(journey_tool.JourneyTools):
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
         atoken = _ACCOUNTS.set(accounts) if accounts is not None else None
+        rtoken = ui.REDACT.set(lambda text: self._loaded().scrub(text))  # every screen string is redacted as it is rendered
         try:
-            jr = self._journeys.get(client_id)
+            jr =self._journeys.get(client_id)
             if jr is None or name == "journey":
                 return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
             return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy, ux_rules)
@@ -1542,6 +1543,7 @@ class Daemon(journey_tool.JourneyTools):
                 _MAPS.reset(mtoken)
             if dtoken is not None:
                 _DIALOG.reset(dtoken)
+            ui.REDACT.reset(rtoken)
             if atoken is not None:
                 _ACCOUNTS.reset(atoken)
 
@@ -5008,7 +5010,7 @@ class Daemon(journey_tool.JourneyTools):
         (it can't touch an element that isn't found)."""
         if view.alert_now is not None:
             title, buttons = view.alert_now
-            alert = " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
+            alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
 

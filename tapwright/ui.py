@@ -11,7 +11,8 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from contextvars import ContextVar
+from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
 from . import trace
@@ -67,10 +68,25 @@ def _text(v) -> str:
     return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
 
+REDACT: ContextVar[Callable[[str], str] | None] = ContextVar("tapwright_redact", default=None)
+
+
+def shown(text: str) -> str:
+    """Screen text as an answer may show it: a test account's username or password is replaced by its placeholder
+    (AGENT-TOOLS §18.6). Every string from the screen goes through this before it is escaped, collapsed or cut."""
+    redact = REDACT.get()
+    return redact(text) if redact is not None else text
+
+
+def quoted(text: str) -> str:
+    """Screen text as a JSON string, redacted first (no collapsing or cutting)."""
+    return json.dumps(shown(text), ensure_ascii=False)
+
+
 def clip(text: str, limit: int = TEXT_LIMIT) -> str:
     """One line, at most `limit` characters, as a JSON string. A cut ends, inside the quotes, with how many
     characters are missing: `…(+57)` (AGENT-TOOLS v1.5)."""
-    flat = " ".join(text.split())
+    flat = shown(" ".join(shown(text).split()))  # a value is redacted before escaping, collapsing or cutting
     missing = len(flat) - limit
     return json.dumps(flat[:limit] + (f"…(+{missing})" if missing > 0 else ""), ensure_ascii=False)
 
@@ -956,7 +972,7 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
 
 
 def alert_line(alert: Alert) -> str:
-    return f"Alert: {json.dumps(alert.title, ensure_ascii=False)} " + " ".join(f"[{b}]" for b in alert.buttons)
+    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{b}]" for b in alert.buttons)
 
 
 ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon

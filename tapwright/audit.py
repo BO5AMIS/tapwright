@@ -118,7 +118,7 @@ NO_TRAIT_FIX = 'give it accessibilityRole="button" (or a native control) with ac
 def no_trait(items: list[ui.Element]) -> list[tuple[str, str, str]]:
     """(`trait`, element line, what) for every radio or checkbox that React Native types `Other` (no trait: VoiceOver
     can focus it but doesn't announce it as a control)."""
-    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {json.dumps(e.text or e.role, ensure_ascii=False)}'
+    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {ui.quoted(e.text or e.role)}'
              " as a control") for e in items if e.no_trait]
 
 

@@ -77,9 +77,9 @@ class Loaded:
         out = []
         for account in self.accounts.values():
             if account.username and len(account.username) >= MIN_SCRUBBED:
-                out.append((account.username, f"<{account.name}'s username>"))
+                out.extend((form, f"<{account.name}'s username>") for form in _forms(account.username))
             if account.password and len(account.password) >= MIN_SCRUBBED:
-                out.append((account.password, f"<{account.name}'s password>"))
+                out.extend((form, f"<{account.name}'s password>") for form in _forms(account.password))
         out.sort(key=lambda pair: -len(pair[0]))  # the longest first: a value that holds another is replaced whole
         return out
 
@@ -102,6 +102,13 @@ class Loaded:
 
 
 NONE = Loaded()  # no file was given
+
+
+def _forms(value: str) -> set[str]:
+    """The forms a value can take in an answer: as it is, with its whitespace collapsed to single spaces (what a text
+    line shows), and each of those JSON-escaped (a quote or backslash inside a quoted string)."""
+    bases = {value, " ".join(value.split())}
+    return bases | {json.dumps(b, ensure_ascii=False)[1:-1] for b in bases}
 
 
 def mentions(text: str) -> bool:
