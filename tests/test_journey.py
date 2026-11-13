@@ -1273,6 +1273,86 @@ def test_codex_pr7_c1_a_call_made_while_a_stress_moment_waits_for_the_phone_stil
     run(go)
 
 
+def test_codex_pr7_c2_a_stop_sent_while_a_network_stress_waits_for_the_phone_ends_the_condition_too(reports):
+    """Codex, PR #7 cycle 2: the stop waits for the stress moment to finish, so it sees the condition the stress set and
+    ends it; the phone is not left on 3g after the journey has stopped."""
+    import asyncio
+
+    async def go():
+        session = DescribingSession()
+        session.tree = list(HOME)
+        session.asked, session.go_on = asyncio.Event(), asyncio.Event()
+        phone_set_network = session.device.set_network
+
+        async def slow_set_network(mode):  # the phone takes its time with the first one
+            if mode != "normal" and not session.go_on.is_set():
+                session.asked.set()
+                await session.go_on.wait()
+            return await phone_set_network(mode)
+        session.device.set_network = slow_set_network
+        d = make(session)
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        stress = asyncio.ensure_future(d.run_tool("a", "journey", {"stress": "network", "mode": "3g"}))
+        await asyncio.wait_for(session.asked.wait(), 5)
+        stopping = asyncio.ensure_future(d.run_tool("a", "journey", {"stop": True, "reached": False}))
+        await asyncio.sleep(0.05)
+        assert not stopping.done()  # it waits for the stress moment
+        session.go_on.set()
+        await stress
+        await stopping
+        assert "a" not in d._journeys
+        assert d._network is None  # the stop ended the condition the stress had set
+        await finish(stop, task)
+    run(go)
+
+
+def test_codex_pr7_c2_a_report_picture_is_taken_in_one_turn_of_the_phones_queue(reports):
+    """Codex, PR #7 cycle 2: the two reads of the app in front and the screenshot are one turn of the queue, so an action
+    queued meanwhile (to another app and back) runs after them, and the picture is of the given app."""
+    import asyncio
+
+    async def go():
+        session = DescribingSession()
+        session.tree = list(HOME)
+        session.foreground = "com.example.app"
+        d = make(session)
+        stop, task = await started(d)
+        scope = Scope(("com.example.app",))
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        jr = d._journeys["a"]
+        kept = len(jr.frames)
+        shoot, seen, front = session.screenshot_png, [], session.foreground_bundle_id
+
+        async def slow_front():  # the read takes a moment: an action is queued meanwhile
+            await asyncio.sleep(0.02)
+            return await front()
+        session.foreground_bundle_id = slow_front
+
+        async def recording_shot():
+            seen.append(session.foreground)
+            return await shoot()
+        session.screenshot_png = recording_shot
+        later = []
+
+        async def to_back():
+            session.foreground = "com.example.app"
+
+        async def to_other():  # an action to another app; the one that comes back is queued only when this has run
+            session.foreground = "com.other.app"
+            later.append(asyncio.ensure_future(d.control.agent(to_back)))
+        said = "Tapped Log meal" + chr(10) + "App: Example (com.example.app)"
+        picture = asyncio.ensure_future(d._journey_frame(jr, "tap", said, scope))
+        await asyncio.sleep(0.005)  # the first read of the app in front is under way
+        switching = asyncio.ensure_future(d.control.agent(to_other))
+        await picture
+        await switching
+        await asyncio.gather(*later)
+        assert seen == ["com.example.app"] and len(jr.frames) == kept + 1
+        await finish(stop, task)
+    run(go)
+
+
 def test_codex_pr7_c1_background_resumes_the_running_app_and_relaunch_keeps_the_journeys_conditions(reports):
     async def go():
         d = daemon(FOOD)

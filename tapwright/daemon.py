@@ -791,6 +791,9 @@ class Daemon(journey_tool.JourneyTools):
                           "alert": self._alert, "swipe": self._swipe}
         self._media_earlier = frozenset(medialib.ledger_ids())  # pictures recorded before this daemon started (media remove)
         self._journeys: dict[str, journey.Journey] = {}  # {agent: its journey} (AGENT-TOOLS §17): one at a time
+        # an agent's journey start, stop and stress moments run one at a time, each to its end (its bookkeeping too): a
+        # stop that came while a stress set the network would otherwise unregister the journey first (Codex, PR #7)
+        self._journey_locks: dict[str, asyncio.Lock] = {}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
         self._overridden: set[str] = set()  # apps launched with a language, region or text size (§16.3) and not closed since

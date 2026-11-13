@@ -11,6 +11,7 @@ import logging
 
 from . import journey, journey_export, journey_report, launch as launchlib, network, ui, uxcheck
 from .control import Refused
+from .device import ConnectionLost
 
 HIDDEN = "in a journey, ids and labels are hidden; use a ref or the visible text"
 NO_JUMP = ('in a journey, scroll to: "target" is off (a user can\'t jump to what is out of sight); scroll with a '
@@ -116,15 +117,27 @@ class JourneyTools:
             return
         try:
             if scope is not None:
-                # Personal mode: the picture is the phone's own screenshot, taken between two reads of the app in front
-                # on the same queue, and kept only when both name the same given app. A stream frame could be one from
-                # before the check, or the next one the stream sends, of another app (Codex, PR #7 cycle 1).
-                before = await self._front_now()
-                if before is None or not await self._journey_bundle_ok(jr, scope, before):
-                    jr.left_out += 1
-                    return
-                source = await self._read(self.session.screenshot_png)
-                if await self._front_now() != before:
+                # Personal mode: the picture is the phone's own screenshot, taken in one turn of the phone's queue
+                # between two reads of the app in front, and kept only when both name the same given app. One turn: no
+                # action or person's input can come between them (separate reads let a queued action switch to another
+                # app and back, Codex, PR #7 cycle 2). A stream frame could be one from before the check, or the next
+                # one the stream sends, of another app (cycle 1).
+                session = self.session
+
+                async def front() -> str | None:
+                    try:
+                        return await session.foreground_bundle_id() or None
+                    except ConnectionLost:
+                        raise  # (the read's own reconnect handles it)
+                    except Exception:  # noqa: BLE001 - the phone can't say: no scope, no picture
+                        return None
+
+                async def capture() -> tuple[str | None, bytes, str | None]:
+                    first = await front()
+                    shot = await session.screenshot_png()
+                    return first, shot, await front()
+                before, source, after = await self._read(capture)
+                if before is None or after != before or not await self._journey_bundle_ok(jr, scope, before):
                     jr.left_out += 1
                     return
             else:
@@ -175,19 +188,25 @@ class JourneyTools:
         if stray:
             raise Refused("bad_params", f"journey {mode} doesn't take {', '.join(stray)}; it takes "
                                         f"{', '.join(KEYS[mode]) or 'nothing more'}")
-        if mode == "start":
-            return await self._journey_start(client_id, args, scope)
+        if mode in ("start", "stop", "stress"):
+            async with self._journey_locks.setdefault(client_id, asyncio.Lock()):
+                if mode == "start":
+                    return await self._journey_start(client_id, args, scope)
+                jr = self._journeys.get(client_id)  # (read inside: a stop may have ended it while this waited)
+                if jr is None:
+                    raise Refused("bad_params", NO_JOURNEY)
+                if mode == "stop":
+                    return await self._journey_stop(client_id, jr, args, scope)
+                return await self._journey_stress(client_id, jr, args, scope)
         jr = self._journeys.get(client_id)
         if jr is None:
             raise Refused("bad_params", NO_JOURNEY)
-        if mode == "stop":
-            return await self._journey_stop(client_id, jr, args, scope)
         if mode == "finding":
             filed = jr.add_finding(args["finding"])
             n = len(jr.findings)
             where = f', screen "{filed["screen"]}"' if filed.get("screen") else ""
             return _d()._answer([f"Finding {n} filed: {filed['severity']}{where}: {filed['what']}"])
-        return await self._journey_stress(client_id, jr, args, scope)
+        raise Refused("bad_params", f"journey: unknown mode {mode}")  # (MODES are all handled above)
 
     def _journey_eyes(self, jr: journey.Journey, eyes: object) -> dict:
         if eyes not in ("user", "agent"):
