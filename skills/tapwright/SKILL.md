@@ -189,8 +189,8 @@ To judge whether a real user can find and finish a feature, not only whether it 
 - **Check each new screen with `ux_check`** and report its facts as findings. Add your own judgment from a screenshot,
   and say it is judgment. If the user has house rules, `ux_check` lists the written ones for you to judge.
 - **Stress moments and the end:** `stress` tests leaving the app, a bad network, a double tap, rotating, relaunching.
-  `journey` with `stop: true` and `reached` writes the visual report and answers its summary; pictures stay in the
-  report folder. Offer `export` only if the user asks.
+  `journey` with `stop: true` and `reached` writes the visual report to its folder and answers its summary with up to
+  two key pictures (the filmstrip, and the first finding's or the last screen's); the rest stays in the folder. Offer `export` only if the user asks.
 - **Photo pickers:** ask your user first whether test pictures may be added to the phone's photo library, and whether
   to remove them afterwards. Then `media` with `add` (paths) and `confirm: true`; `remove: true` deletes only those.
   Tapwright never asks iOS for full access to the library: unless the person gave the runner full access themselves,
