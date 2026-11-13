@@ -244,6 +244,82 @@ def test_a_process_without_a_start_time_that_was_not_sampled_before_the_window_i
     run(go)
 
 
+def test_an_old_process_listed_when_the_window_begins_is_never_the_new_one_whatever_its_start_time_says(world):
+    """Codex and CodeRabbit, PR #4 cycle 3: an old process never sampled during the set-up, with a start time inside
+    the one second of slack (or ahead of this computer's clock), was taken for the launch's new process."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(0.5)},
+                       {"pid": 9, "bundleIdentifier": APP, "startDate": when(-30)}]  # a clock ahead of ours
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        await meter.begin_window(fresh=True)
+        world.batches.put_nowait([world.row(7, 500), world.row(9, 600)])
+        await asyncio.sleep(0.1)
+        world.procs += [{"pid": 8, "bundleIdentifier": APP, "startDate": when(0)}]
+        world.batches.put_nowait([world.row(7, 510), world.row(9, 610), world.row(8, 100)])
+        await settle(lambda: meter.measurement.memory_mb)
+        found = await meter.stop()
+        assert found.memory_mb == [100.0] and found.cpu_pct == [10.0]  # only the process that was not there at the start
+    run(go)
+
+
+def test_a_launch_window_whose_process_list_cannot_be_had_at_the_start_says_so(world):
+    """The old processes can't be told then, so the numbers are not claimed to be the launch's alone."""
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        world.proc_error = RuntimeError("process list unavailable")
+        await meter.begin_window(fresh=True)
+        world.proc_error = None
+        assert meter.measurement.lost >= 1
+        await meter.stop()
+    run(go)
+
+
+def test_batches_still_waiting_when_the_window_stops_are_counted_as_lost(world, monkeypatch):
+    """Codex, PR #4 cycle 3: one 100 MB sample was taken, then a 900 MB batch waited for the process list and more were
+    queued behind it; stop() cancelled them without a trace and memory_mb=300 passed on the first sample alone."""
+    monkeypatch.setattr(device_module, "FINAL_WAIT", 0.2)
+
+    async def go():
+        from tapwright import performance
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        await meter.begin_window(fresh=False)
+        world.batches.put_nowait([world.row(7, 100, 10.0)])
+        await settle(lambda: meter.measurement.memory_mb == [100.0])
+        world.gate = asyncio.Event()  # the process list never answers
+        for _ in range(3):
+            world.batches.put_nowait([world.row(7, 900, 90.0)])
+        await settle(lambda: world.waiting)
+        began = time.monotonic()
+        found = await meter.stop()
+        assert time.monotonic() - began < 2.0
+        assert found.memory_mb == [100.0] and found.lost == 3
+        assert performance.summarize(found, 2.0).samples_lost
+    run(go)
+
+
+def test_a_batch_that_is_nearly_done_when_the_window_stops_is_counted_not_lost(world, monkeypatch):
+    """The bounded wait at the end lets a batch that was only a moment from its process list finish."""
+    monkeypatch.setattr(device_module, "FINAL_WAIT", 2.0)
+
+    async def go():
+        world.procs = [{"pid": 7, "bundleIdentifier": APP, "startDate": when(100)}]
+        meter = device_module.AppMeter(Quiet(), APP)
+        await meter.start()
+        await meter.begin_window(fresh=False)
+        world.gate = asyncio.Event()
+        world.batches.put_nowait([world.row(7, 120)])
+        await settle(lambda: world.waiting)
+        asyncio.get_running_loop().call_later(0.1, world.gate.set)
+        found = await meter.stop()
+        assert found.memory_mb == [120.0] and found.lost == 0
+    run(go)
+
+
 def test_batches_lost_to_a_process_list_that_cannot_be_read_are_counted(world):
     """Codex, PR #4 cycle 2: they were skipped without a trace, so one surviving sample passed memory_mb."""
     async def go():

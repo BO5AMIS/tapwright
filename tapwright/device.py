@@ -701,6 +701,7 @@ METER_START = 15.0  # seconds the instruments service may take to start sampling
 METER_TEARDOWN = 3.0  # seconds one instrument may take to close before it is abandoned
 METER_STOP = 15.0  # seconds stop() waits for the sampling task to end
 PROCLIST_WAIT = 5.0  # seconds the phone's process list may take to answer for one batch of samples
+FINAL_WAIT = 2.0  # seconds stop() lets batches waiting for the process list finish before it counts them as lost
 MB = 1024 * 1024
 
 
@@ -725,6 +726,8 @@ class AppMeter:
         self._fresh_after: float | None = None  # a launch's window keeps only a process started at or after this (epoch s)
         self._seen: set[int] = set()  # the pids of the app's processes sampled so far
         self._stale: set[int] = set()  # ... as the window began: not the new process, whatever their start times say
+        self._info = None  # the instruments' process list, once they are open
+        self._done = 0  # the arrival number of the last batch that was dealt with (kept, dropped or counted lost)
 
     async def start(self) -> None:
         """Begin sampling. However this ends (too slow, a service that won't start, or the call cancelled while it
@@ -748,26 +751,58 @@ class AppMeter:
         the first frame rate after it is not kept (it covers a second that began before it).
         `fresh`: the window is a cold start, so only a process shown to have started after this moment is the app's."""
         from .performance import Measurement
+        old: set[int] | None = set()
+        if fresh:  # the app's processes listed now are the old ones, whatever their start times say
+            old = await self._listed_pids()
         for _ in range(3):  # what the instruments have already delivered is read and stamped before the boundary
             await asyncio.sleep(0)
         self._boundary = self._arrived
         self.measurement = Measurement()
         self._fresh_after = time.time() - START_SLACK if fresh else None
-        self._stale = set(self._seen) if fresh else set()
+        if old is None:  # the list couldn't be had: only what was sampled is known to be old, and the numbers say so
+            self._stale = set(self._seen)
+            self.measurement.lost += 1
+        else:
+            self._stale = old | set(self._seen)
         self._skip_frame = True
+
+    async def _listed_pids(self) -> set[int] | None:
+        """The pids of the app's processes the phone lists now (None when the list can't be had)."""
+        if self._info is None:
+            return None
+        try:
+            listed = await aio.wait_for(self._info.proclist(), PROCLIST_WAIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        return {p["pid"] for p in listed if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
 
     async def stop(self):
         """End the sampling; the Measurement of what was seen. Bounded: an instrument that can't close (a tunnel that
         can't drain) doesn't hold the call."""
         task, self._task = self._task, None
         if task is not None:
+            await self._finish_pending(task)
             task.cancel()
             done, _ = await asyncio.wait({task}, timeout=METER_STOP)
             if not done:
                 self.device.log("performance: the instruments didn't close in time; leaving them")
             elif not task.cancelled():
                 task.exception()  # collected, so it isn't logged as never retrieved
+            pending = self._arrived - max(self._done, self._boundary)  # in the window, and never dealt with
+            if pending > 0 and self.measurement.failed is None:
+                self.measurement.lost += pending  # not sampled: the numbers cover only part of the window
         return self.measurement
+
+    async def _finish_pending(self, task: asyncio.Task) -> None:
+        """Batches that came in the window and wait for the process list (or behind one that does) get FINAL_WAIT
+        seconds to be dealt with; what is still waiting then is counted as lost by stop()."""
+        for _ in range(3):  # what the instruments have already delivered is read and stamped first
+            await asyncio.sleep(0)
+        deadline = time.monotonic() + FINAL_WAIT
+        while not task.done() and self._arrived > max(self._done, self._boundary) and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
 
     async def _enter(self, stack, cm):
         """Open an instrument and register its close, which waits at most METER_TEARDOWN (a close that hangs is
@@ -797,6 +832,7 @@ class AppMeter:
             async with AsyncExitStack() as stack:
                 dvt = await self._enter(stack, DvtProvider(self.device.rsd))
                 info = await self._enter(stack, DeviceInfo(dvt))
+                self._info = info
                 tap = await Sysmontap.create(dvt, SAMPLE_MS)
                 await self._enter(stack, tap)
                 jobs = [asyncio.create_task(self._rows_in(tap)), asyncio.create_task(self._processes(info))]
@@ -845,26 +881,30 @@ class AppMeter:
         part of the window."""
         while True:
             arrived, rows = await self._rows.get()
-            if arrived <= self._boundary:
-                continue  # from before the window
-            try:
-                listed = await aio.wait_for(info.proclist(), PROCLIST_WAIT)
-            except Exception:
-                if arrived > self._boundary:
-                    self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
-                continue
-            if arrived <= self._boundary:
-                continue  # the window began while the list was asked for: the batch is from before it
-            mine = {p["pid"]: _started_of(p) for p in listed
-                    if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
-            ours = [r for r in rows if r.get("pid") in mine and self._is_new(r["pid"], mine[r["pid"]])]
-            self._seen.update(r["pid"] for r in rows if r.get("pid") in mine)
-            memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
-            cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
-            if memory:
-                self.measurement.memory_mb.append(sum(memory) / MB)
-            if cpu:
-                self.measurement.cpu_pct.append(float(sum(cpu)))
+            await self._take(info, arrived, rows)
+            self._done = arrived  # (a cancel in the middle leaves it as it was: stop() counts that batch as lost)
+
+    async def _take(self, info, arrived: int, rows: list) -> None:
+        """One batch of rows: kept, dropped (from before the window) or counted as lost."""
+        if arrived <= self._boundary:
+            return  # from before the window
+        try:
+            listed = await aio.wait_for(info.proclist(), PROCLIST_WAIT)
+        except Exception:
+            self.measurement.lost += 1  # whose pid it is can't be said: this batch isn't kept
+            return
+        if arrived <= self._boundary:
+            return  # the window began while the list was asked for: the batch is from before it
+        mine = {p["pid"]: _started_of(p) for p in listed
+                if p.get("bundleIdentifier") == self.bundle_id and isinstance(p.get("pid"), int)}
+        ours = [r for r in rows if r.get("pid") in mine and self._is_new(r["pid"], mine[r["pid"]])]
+        self._seen.update(r["pid"] for r in rows if r.get("pid") in mine)
+        memory = [r["physFootprint"] for r in ours if isinstance(r.get("physFootprint"), (int, float))]
+        cpu = [r["cpuUsage"] for r in ours if isinstance(r.get("cpuUsage"), (int, float))]
+        if memory:
+            self.measurement.memory_mb.append(sum(memory) / MB)
+        if cpu:
+            self.measurement.cpu_pct.append(float(sum(cpu)))
 
     async def _frames(self, graphics) -> None:
         async for fps in graphics.fps():
