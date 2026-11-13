@@ -34,19 +34,24 @@ class Clock:
 
 class FrameFeeder:
     """Publishes fake frames into a FrameHub from a background task, a few ms apart.
-    `frames` go out once; then `then` repeats forever, or (churn=True) a new picture every time."""
+    `frames` go out once; then `then` repeats forever, or (churn=True) a new picture every time.
+    `then` may be set while the feeder runs: a test that changes the screen on a touch sets it there, so the
+    change doesn't depend on when the feeder's first frame goes out against the action's mark."""
 
     def __init__(self, hub, every: float = 0.004) -> None:
         self.hub, self.every, self._task = hub, every, None
+        self.then: bytes | None = None
 
     def start(self, frames=(), then=None, churn: bool = False) -> "FrameFeeder":
+        self.then = then
+
         async def feed():
             for frame in frames:
                 self.hub.publish(frame)
                 await asyncio.sleep(self.every)
             i = 0
-            while then is not None or churn:
-                self.hub.publish(b"churn%d" % i if churn else then)
+            while self.then is not None or churn:
+                self.hub.publish(b"churn%d" % i if churn else self.then)
                 i += 1
                 await asyncio.sleep(self.every)
         self._task = asyncio.create_task(feed())
@@ -120,6 +125,11 @@ class FakeMeter:
         if self.device.meter_error is not None:
             raise self.device.meter_error
 
+    async def begin_window(self, fresh: bool = False) -> None:
+        self.device.windows.append(fresh)
+        if self.device.on_window is not None:
+            self.device.on_window(fresh)
+
     async def stop(self):
         self.device.metered.append(("stop", self.bundle_id))
         return self.device.measurement
@@ -131,6 +141,8 @@ class FakeDevice:
         self.measurement = Measurement()  # what a meter's stop() returns (tests set it)
         self.metered: list = []  # ("start" | "stop", bundle id) in order
         self.meter_error: Exception | None = None
+        self.windows: list[bool] = []  # one per begin_window of a meter (True: a launch's)
+        self.on_window = None  # called with `fresh` when a window begins (tests look at what has happened by then)
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
@@ -145,15 +157,45 @@ class FakeDevice:
         self.stream_error: Exception | None = None  # app_log_stream raises this when asked
         self.stream_closed: list[int] = []  # the pids whose log streams have ended
         self.replay: dict[int, list] = {}  # pid -> entries every new stream of it gives first (the phone's replay)
+        self.replay_delay = 0.0  # seconds a new stream takes before it gives its replay (a slow phone)
+        self.phone_ms: int | None = 0  # the phone's clock, epoch ms (None: it can't be read)
         self.crash_error: Exception | None = None  # crash_reports / crash_file raise this
         self.crash_unreadable = 0  # how many reports crash_reports says it passed over
+        self.crash_too_big = 0  # how many it says were over the byte cap
         self.app_pids_calls = 0
         self.network_calls: list = []  # ("set", mode) | ("clear",) | ("drop",) in order
         self.network_error: Exception | None = None  # set_network raises this
+        self.starts: dict[int, float] = {}  # pid -> when its process started (epoch s); a pid not listed has no start time
+        self.holders: dict[int, tuple[str, float | None]] = {}  # pid -> (bundle id, start) of whatever holds it now, if
+        #                                                         that is not what `pids` says (a pid taken by another app)
+        self.proc_error: Exception | None = None  # the process list can't be read
 
     async def app_pids(self, bundle_id: str) -> list[int]:
         self.app_pids_calls += 1
         return list(self.pids.get(bundle_id, [1]))
+
+    async def app_processes(self, bundle_id: str):
+        from tapwright.device import Proc
+        self.app_pids_calls += 1
+        if self.proc_error is not None:
+            raise self.proc_error
+        return [Proc(pid, self.starts.get(pid), bundle_id) for pid in self.pids.get(bundle_id, [1])]
+
+    async def phone_time_ms(self) -> int | None:
+        return self.phone_ms
+
+    async def process_holder(self, pid: int):
+        """Who has that pid now (a Proc), or None when nobody does."""
+        from tapwright.device import Proc
+        if self.proc_error is not None:
+            raise self.proc_error
+        if pid in self.holders:
+            bundle, start = self.holders[pid]
+            return Proc(pid, start, bundle)
+        for bundle, pids in self.pids.items():
+            if pid in pids:
+                return Proc(pid, self.starts.get(pid), bundle)
+        return None
 
     def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None) -> None:
         """An entry the log stream of `pid` gives (os_trace level byte `raw`); `from_pid` is the pid the entry says
@@ -168,6 +210,8 @@ class FakeDevice:
             raise self.stream_error
         queue = self.streams.setdefault(pid, asyncio.Queue())
         try:
+            if self.replay_delay:
+                await asyncio.sleep(self.replay_delay)
             for entry in self.replay.get(pid, []):
                 yield entry
             while True:
@@ -183,7 +227,7 @@ class FakeDevice:
         self.crash_asks += 1
         if self.crash_error is not None:
             raise self.crash_error
-        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable)
+        return CrashSearch(list(self.crashes.get(executable, []))[:count], self.crash_unreadable, self.crash_too_big)
 
     async def crash_file(self, filename: str) -> bytes:
         if self.crash_error is not None:
@@ -471,11 +515,14 @@ class _VirtualSelector:
 
 
 class VirtualLoop(asyncio.SelectorEventLoop):
-    """An event loop on fake time: timers fire in order, instantly. Pass as asyncio.run's loop_factory."""
+    """An event loop on fake time: timers fire in order, instantly. Run with test_daemon.run_virtual."""
 
     def __init__(self) -> None:
         super().__init__()
         self.t = 0.0
+        # the loop fires every timer due within one clock tick at once; before Python 3.13 that tick is 15.6 ms on
+        # Windows, which put frames 4 ms apart at the same instant. Fake time ticks as finely as it is asked.
+        self._clock_resolution = 1e-9
         self._selector = _VirtualSelector(self._selector, self)
 
     def time(self) -> float:

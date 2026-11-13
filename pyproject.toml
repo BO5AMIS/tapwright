@@ -27,7 +27,7 @@ dependencies = [
     "starlette>=1.0",  # the daemon's HTTP and WebSocket app
     "uvicorn>=0.30",
     "wsproto>=1.2",  # uvicorn's WebSocket implementation (server.py uses ws="wsproto")
-    "pillow",
+    "pillow>=10.1",  # filmstrip.py draws its numbers with ImageFont.load_default(size), new in 10.1
 ]
 
 [project.urls]
@@ -41,7 +41,7 @@ video = ["av>=14"]  # the H.264 live view (/video): decode the AirPlay stream, e
 ocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]  # look with ocr: true: text read from the picture, on the CPU
 
 [project.scripts]
-tapwright = "tapwright.cli:main"
+tapwright = "tapwright.entry:main"
 
 [tool.setuptools]
 packages = ["tapwright"]

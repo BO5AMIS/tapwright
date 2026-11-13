@@ -1,5 +1,5 @@
 import sys
 
-from .cli import main
+from .entry import main  # checks the source for merge markers before loading the CLI
 
 sys.exit(main())

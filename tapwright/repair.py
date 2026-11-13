@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from . import signing, store
+from . import store
+
+# `signing` is imported where it is used, never when this module loads: `doctor` checks a development checkout
+# for merge markers before anything else, and a conflicted signing.py imported here would fail with a
+# SyntaxError first (CodeRabbit and Codex, PR #5).
 
 WARN_DAYS = 30  # doctor and the agent's first answer warn this long before the signing runs out
 REINSTALL_DAYS = 14  # `doctor --fix` re-signs WebDriverAgent when its signature has less than this left
@@ -42,6 +46,7 @@ class Expiry:
 
 def profile_expiry() -> Expiry | None:
     """The stored profile's expiry, or None when there is no readable profile."""
+    from . import signing
     try:
         p = signing.read_profile()
         return Expiry(f"profile '{p['Name']}'", _aware(p["ExpirationDate"]))
@@ -51,6 +56,7 @@ def profile_expiry() -> Expiry | None:
 
 def certificate_expiry() -> Expiry | None:
     """The stored development certificate's expiry, or None when there is none."""
+    from . import signing
     try:
         from cryptography import x509
         cert = x509.load_der_x509_certificate(signing.CERT_FILE.read_bytes())
@@ -228,6 +234,7 @@ async def run_fixes(phone: Phone, report, now: datetime | None = None) -> int:
 
 def profile_includes_phone() -> bool:
     """Does the stored profile list the phone this computer was set up for? True when it can't tell."""
+    from . import signing
     udid = store.load_state().get("udid")
     try:
         devices = signing.read_profile().get("ProvisionedDevices", [])

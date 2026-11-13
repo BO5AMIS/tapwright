@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import json
 import posixpath
 import re
 from collections import deque
@@ -41,10 +42,13 @@ CRASHED = "the app crashed"  # how both notes begin
 NOTE_CRASHED = CRASHED + ": {what}. logs and crash show more."
 NOTE_CRASHED_AT = CRASHED + " at {time}: {what}. logs and crash show more."  # a crash only known on a later call
 NONE_SINCE = "No crash report for {app} since the session began."
-NONE_AT_ALL = "No crash report for {app}."  # with all: true, which looks at the last 5 whenever they were
 CRASH_NO_EXECUTABLE = ("{app} has no executable name on record (only apps you installed have one), so its crash "
                        "reports can't be told from other apps'.")
 CRASH_UNREADABLE = "{n} crash report(s) of this app couldn't be read (half written, or a format this version doesn't know) and were skipped."
+CRASH_MAX_MB = 8  # a crash report is read only up to this size (real ones are 0.1 to 2 MB); a bigger file is skipped, said so
+CRASH_TOO_BIG = "{n} crash report(s) of this app were too big to read (over {mb} MB) and were skipped."
+CRASH_INCOMPLETE = ("Only the newest {n} crash reports with this app's file name were looked at, so an older one of "
+                    "this app may exist.")
 SAVED = "Saved: {path}"
 CRASH_MARK = "*"  # in front of a frame of the app's own code
 FAILURE_CRASH_FILE = "Crash report: {path}"
@@ -69,11 +73,47 @@ class LogRing:
 
     def __init__(self, size: int = LOG_RING) -> None:
         self.entries: deque[LogEntry] = deque(maxlen=size)
+        self.added = 0  # how many entries were ever added: a mark for discard_since
+        self.unvouched = 0  # how many of the newest entries aren't yet shown to be of the app's own process: no answer has them
 
-    def add(self, entry: LogEntry) -> None:
+    def add(self, entry: LogEntry, vouched: bool = True) -> None:
+        """`vouched=False`: the entry's process isn't yet shown to be the app's (a pid can be reused by another app), so
+        it is kept but not shown by any answer until vouch() says it is the app's."""
         if len(entry.text) > LOG_TEXT_KEPT:
             entry = dataclasses.replace(entry, text=entry.text[:LOG_TEXT_KEPT])
         self.entries.append(entry)
+        self.added += 1
+        if not vouched or self.unvouched:
+            self.unvouched = min(self.unvouched + 1, len(self.entries))
+
+    def vouch(self, upto: int) -> None:
+        """The process was shown to be the app's when `added` was `upto`: what was added until then is shown."""
+        self.unvouched = min(self.unvouched, max(0, self.added - upto))
+
+    def shown(self) -> list[LogEntry]:
+        """The entries an answer may use: all but the newest `unvouched`."""
+        kept = list(self.entries)
+        return kept[:len(kept) - self.unvouched] if self.unvouched else kept
+
+    def discard_since(self, mark: int, from_at: int | None = None) -> int:
+        """Take back what was added after `mark` (the `added` count then): all of it, or only the entries at `from_at`
+        (epoch ms) or later. For lines whose process was found not to be the app's. How many were taken back."""
+        tail = min(self.added - mark, len(self.entries))
+        if tail <= 0:
+            return 0
+        kept = list(self.entries)
+        recent = kept[len(kept) - tail:]
+        keep = [e for e in recent if from_at is not None and e.at < from_at]
+        self.entries.clear()
+        self.entries.extend([*kept[:len(kept) - tail], *keep])
+        self.unvouched = min(self.unvouched, len(keep))
+        return tail - len(keep)
+
+    def discard_unvouched(self, from_at: int | None = None) -> int:
+        """Take back the entries no answer may use yet (all, or only those at `from_at` or later): they were read while
+        another process held the pid, or nothing shows whose they are. (Exact even after an earlier discard, which
+        leaves `added` counting what it took back.)"""
+        return self.discard_since(self.added - self.unvouched, from_at)
 
     def newest(self) -> tuple[int, frozenset[str]] | None:
         """(the newest entry's time, the texts of the entries at that time): where a stream that starts again for the
@@ -83,23 +123,25 @@ class LogRing:
         at = self.entries[-1].at
         return at, frozenset(e.text[:LOG_TEXT_KEPT] for e in self.entries if e.at == at)
 
-    def add_unseen(self, entry: LogEntry, after: tuple[int, frozenset[str]] | None) -> bool:
+    def add_unseen(self, entry: LogEntry, after: tuple[int, frozenset[str]] | None, vouched: bool = True) -> bool:
         """Add `entry` unless `after` (from newest()) says it is already here: older than the newest entry, or the
         same time and text as one. True when it was added."""
         if after is not None and (entry.at < after[0] or (entry.at == after[0] and entry.text[:LOG_TEXT_KEPT] in after[1])):
             return False
-        self.add(entry)
+        self.add(entry, vouched)
         return True
 
-    def latest(self) -> int | None:
-        return self.entries[-1].at if self.entries else None
+    def latest(self, shown: bool = False) -> int | None:
+        """The newest entry's time (`shown`: of the entries an answer may use)."""
+        entries = self.shown() if shown else self.entries
+        return entries[-1].at if entries else None
 
     def select(self, since: int | None = None, level: str = "info", grep: str | None = None,
                limit: int = LOG_DEFAULT_LIMIT) -> list[LogEntry]:
         """The newest `limit` entries newer than `since`, at `level` or above, containing `grep`; oldest first."""
         floor = LOG_LEVELS.index(level)
         needle = grep.casefold() if grep else None
-        found = [e for e in self.entries if (since is None or e.at > since) and LOG_LEVELS.index(e.level) >= floor
+        found = [e for e in self.shown() if (since is None or e.at > since) and LOG_LEVELS.index(e.level) >= floor
                  and (needle is None or needle in e.text.casefold())]
         return found[-limit:]
 
@@ -133,7 +175,7 @@ def no_entries(since: int | None, level: str, grep: str | None) -> str:
 def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str | None, limit: int) -> tuple[str, int]:
     """(the answer's text, the number of entry lines) for a `logs` call."""
     entries = ring.select(since, level, grep, limit) if ring is not None else []
-    latest = (ring.latest() if ring is not None else None) or since or 0
+    latest = (ring.latest(shown=True) if ring is not None else None) or since or 0
     lines = [line_of(e) for e in entries] or [no_entries(since, level, grep)]
     return "\n".join([*lines, LATEST.format(ms=latest)]), len(entries)
 
@@ -184,6 +226,21 @@ class CrashSearch:
     file name couldn't be read (they are passed over, and the answer says so)."""
     reports: list
     unreadable: int = 0
+    too_big: int = 0  # files over CRASH_MAX_MB, never read
+    incomplete: bool = False  # the search stopped at its budget with reports of the file name still unlooked at
+    scanned: int = 0  # how many files the search looked at
+
+
+def skipped_notes(search: "CrashSearch") -> list[str]:
+    """What a crash answer says was left out of the search, one line each."""
+    notes = []
+    if search.unreadable:
+        notes.append(CRASH_UNREADABLE.format(n=search.unreadable))
+    if search.too_big:
+        notes.append(CRASH_TOO_BIG.format(n=search.too_big, mb=CRASH_MAX_MB))
+    if search.incomplete:
+        notes.append(CRASH_INCOMPLETE.format(n=search.scanned))
+    return notes
 
 
 def _safely(fn: Callable[[], object], default=None):
@@ -321,14 +378,44 @@ def _bundle_ids_in(report) -> list[str]:
     info = data.get("bundleInfo") if isinstance(data, dict) else None
     if isinstance(info, dict) and isinstance(info.get("CFBundleIdentifier"), str):
         found.append(info["CFBundleIdentifier"])
+    if isinstance(data, str):  # the old text body: `Identifier:          com.example.app`
+        for line in data.splitlines():
+            if line.startswith("Identifier:") and line[len("Identifier:"):].strip():
+                found.append(line[len("Identifier:"):].strip())
+                break
     return found
+
+
+def names_app(head: bytes, bundle_id: str) -> bool:
+    """Does the start of a report file (as much as it was read) name the app: its header line's `bundleID`, or an old
+    report's `Identifier:` line? For a file that can't be parsed or wasn't read whole: only a file that says it is
+    the app's is counted as the app's skipped report (another app's is not mentioned, not even by a count)."""
+    text = head.decode("utf-8", errors="replace")
+    first, _, _ = text.partition("\n")
+    try:
+        meta = json.loads(first)
+    except ValueError:
+        meta = None
+    if isinstance(meta, dict) and isinstance(meta.get("bundleID"), str):
+        return meta["bundleID"] == bundle_id
+    for line in text.splitlines():
+        if line.startswith("Identifier:") and line[len("Identifier:"):].strip():
+            return line[len("Identifier:"):].strip() == bundle_id
+    return False
 
 
 def only_mine(reports: Iterable, executable: str, bundle_id: str | None = None) -> list:
     """The crash reports of this app: its process is named exactly `executable` (a name that can't be read is not
-    this app's), the report is a crash and not a resource report, and the bundle id inside it, when it has one, is the
-    app's (two installed apps can share an executable name). Anything else is dropped."""
-    return [r for r in reports
-            if _safely(lambda: r.name) == executable
-            and _safely(lambda: r.bug_type_str) in CRASH_BUG_TYPES
-            and all(b == bundle_id for b in _bundle_ids_in(r) if bundle_id is not None)]
+    this app's), the report is a crash and not a resource report, and the bundle id inside the report (its header, its
+    `bundleInfo`, or an old report's `Identifier:` line) is affirmatively the app's and no id in it is another's.
+    Two installed apps can share an executable name, so a report that names no bundle id proves nothing and is left
+    out, as is every report when there is no bundle id to prove it with (AGENT-TOOLS §15.2: only the app's own)."""
+    if bundle_id is None:
+        return []
+    mine = []
+    for r in reports:
+        ids = _bundle_ids_in(r)
+        if (_safely(lambda: r.name) == executable and _safely(lambda: r.bug_type_str) in CRASH_BUG_TYPES
+                and ids and all(b == bundle_id for b in ids)):
+            mine.append(r)
+    return mine

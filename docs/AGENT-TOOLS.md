@@ -984,7 +984,7 @@ Shared values:
 - **Tapwright:** `open_app` takes `language`, `region` and `text_size`. It (re)launches the app with Apple's launch
   arguments (`-AppleLanguages`, `-AppleLocale`, `-UIPreferredContentSizeCategoryName`), for that launch of that app
   only; nothing in Settings changes. A running app is closed first, and the answer's first line says what it opened
-  with: `Opened JLD (app.jld.mobile) in ar, QA, text size xl.` The next `open_app` without them is the app as the phone
+  with: `Opened Wayfare (com.example.wayfare) in ar, QA, text size xl.` The next `open_app` without them is the app as the phone
   sets it.
 - **Tapline:** `app_command` names `language` (`{ language }`), `region` (`{ region }`) and `text_size`
   (`{ size }`), which the app provides (`init` adds them for i18next and expo-localization). `text_size` needs the app
