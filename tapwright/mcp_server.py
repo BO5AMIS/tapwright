@@ -461,4 +461,5 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
         # the agent's session ended (its stdio closed, or the host asked this process to stop): what it set on the phone
         # ends with it. A process that is killed outright sends nothing, and the daemon notices the heartbeat stop.
         stop.set()
+        beat.join(timeout=2.0)  # a ping already on its way finishes first, so no sign of life follows the goodbye
         client.end_session(CLIENT_ID)

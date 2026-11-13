@@ -4789,10 +4789,11 @@ def test_the_next_call_check_is_skipped_after_a_person_acted_or_after_a_while(mo
         assert s.launched == [] and "came to the front" not in r["text"]
         s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
         await d.run_tool("a", "look", {"screenshot": False})
-        monkeypatch.setattr(daemon_module, "RECHECK_WITHIN", 0.0)
+        # negative, so any time at all counts as "after a while": elapsed time is >= 0 even when the clock (Windows,
+        # Python 3.10: ~15.6 ms steps) doesn't tick between the calls, and no sleep is needed
+        monkeypatch.setattr(daemon_module, "RECHECK_WITHIN", -1.0)
         await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
         s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
-        await asyncio.sleep(0.01)
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert s.launched == [] and "came to the front" not in r["text"]
         await finish(stop, task)
