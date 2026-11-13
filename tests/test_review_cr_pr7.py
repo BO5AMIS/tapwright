@@ -130,3 +130,21 @@ def test_media_answers_a_retryable_error_when_the_version_probe_failed_not_an_ol
     run(go)
 
 
+# ---- 4. media: a write the phone did not answer may have happened ----
+def test_media_add_that_got_no_answer_says_it_may_have_happened_and_where_to_look(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        pic = tmp_path / "a.png"
+        pic.write_bytes(bytes([0x89]) + b"PNG" + b"x")
+
+        async def unanswered(pictures):
+            raise Unanswered("the phone didn't answer within 120 s")
+        d.session.photos_add = unanswered
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "media", {"add": [str(pic)], "confirm": True})
+        assert e.value.code == "timeout"
+        assert "may or may not have happened" in str(e.value) and "Photos > Recently Added" in str(e.value)
+        assert "couldn't do it" not in str(e.value)
+        await finish(stop, task)
+    run(go)

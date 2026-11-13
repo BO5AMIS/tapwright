@@ -3251,6 +3251,9 @@ class Daemon(journey_tool.JourneyTools):
             self.lost(e)
             raise Refused("reconnecting", f"the connection dropped while {doing}; it may or may not have happened: "
                                           "wait a few seconds, then check Photos > Recently Added") from None
+        except Unanswered as e:  # the line is alive, but the phone may have done it (CodeRabbit, PR #7)
+            raise Refused("timeout", f"{e} while {doing}; it may or may not have happened: check Photos > Recently "
+                                     "Added before adding again") from None
         except DeviceError as e:
             if "full access" in str(e).lower():
                 raise
