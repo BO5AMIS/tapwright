@@ -648,6 +648,40 @@ REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "clos
             "open_url": ("url",), "compare_screen": ("name",)}
 
 
+LINED_UP = 2.0  # points: how far a match may lie from where the scroll's shift puts one the first look saw
+
+
+def _lined_up(hit: ui.Element, before: list[ui.Element], after: list[ui.Element],
+              on_screen: list[ui.Element]) -> ui.Element | None:
+    """The match on screen after a scroll that is the element `hit` was before it, or None when that can't be told.
+
+    A scroll moves a list's rows together. A match taken as `hit` gives the shift (where it is now, less where `hit`
+    was); with the right one, every match now that falls among the matches the first look saw (`before`) lies where
+    one of them lay, shifted. Matches past them are rows rendered since, and matches the first look saw may be gone
+    (a virtualized list drops the rows it has scrolled past). A shift that puts every match now on one the first look
+    saw, one for one, wins (a list that keeps all its rows: evenly spaced ones also fit a shift of one row, which
+    pushes the last row past them). Else exactly one match on screen must fit: none, or several (evenly spaced rows in
+    a list that drops and adds them), and the element can't be told."""
+    if not before:
+        return None
+    lo_x, hi_x = min(b.x for b in before) - LINED_UP, max(b.x for b in before) + LINED_UP
+    lo_y, hi_y = min(b.y for b in before) - LINED_UP, max(b.y for b in before) + LINED_UP
+    fits, whole = [], []
+    for c in after:
+        if not any(c is e for e in on_screen):
+            continue
+        dx, dy = c.x - hit.x, c.y - hit.y
+        placed = [any(abs(a.x - dx - b.x) <= LINED_UP and abs(a.y - dy - b.y) <= LINED_UP for b in before)
+                  for a in after]
+        if all(p or not (lo_x <= a.x - dx <= hi_x and lo_y <= a.y - dy <= hi_y) for a, p in zip(after, placed)):
+            fits.append(c)
+            if len(after) == len(before) and all(placed):
+                whole.append(c)
+    if len(whole) == 1:
+        return whole[0]
+    return fits[0] if len(fits) == 1 else None
+
+
 async def _first(timeout: float, *events: asyncio.Event) -> None:
     """Wait until any of the events is set, or `timeout` seconds."""
     waits = [asyncio.create_task(e.wait()) for e in events]
@@ -924,9 +958,9 @@ class Daemon:
         the phone isn't left slow for the next agent. A condition another agent set is not touched. The agent is
         marked first, before anything waits: a `network` call of it that is setting a condition right now sees the
         mark when the phone answers, and clears what it set (_network_tool)."""
+        # kept for the daemon's life: a call or a heartbeat of this agent can still arrive or be under way however many
+        # agents end after it (Codex, PR #6 cycle 3: a cap of 256 forgot it). An id is a few dozen bytes.
         self._agents_ended[client_id] = None
-        while len(self._agents_ended) > 256:
-            del self._agents_ended[next(iter(self._agents_ended))]
         self._agent_alive.pop(client_id, None)
         self._network_notes.pop(client_id, None)
         if self._network is not None and self._network_by == client_id:
@@ -3829,14 +3863,32 @@ class Daemon:
                 self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
             self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
         # `hit` was counted through the screen and what lies past it, so the scroll and the look after it count the
-        # same way: the target names the element it named at the start, wherever the scroll has put the rest
-        done = await self._scroll_to(view, target, together=True)
+        # same way. An `index` alone doesn't keep the element: a list that drops the rows it has scrolled past (a
+        # virtualized one) shifts the count (Codex, PR #6 cycle 3). So an indexed target follows the element itself:
+        # by its identifier when no other match has it, else by where it lies among the matches the first look saw.
+        follow, before = target, []
+        if target.index is not None:
+            before = ui.candidates(sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x)),
+                                  target)
+            if hit.identifier and sum(e.identifier == hit.identifier for e in before) == 1:
+                follow = ui.Target(id=hit.identifier)
+        done = await self._scroll_to(view, follow, together=True)
         # The element the target names now: on screen after the scroll, it is the one to touch. The action gets its
         # ref, not the target again: an `index` counted in the visible matches alone would point at another element.
-        try:
-            final = self._anywhere(view, target, together=True)
-        except Refused:
-            final = None
+        if before and follow is target:
+            after = ui.candidates(sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x)),
+                                  target)
+            final = _lined_up(hit, before, after, view.items)
+            if final is None and any(any(c is e for e in view.items) for c in after):
+                raise Refused("stale", f"the matches of the target changed as the list scrolled (it adds and drops "
+                                       f"rows as it moves), so index {target.index} can't be sure to name "
+                                       f"{hit.line(ref=False, actions=False)} any more; nothing was touched. Look, "
+                                       f"then target it by its ref.")
+        else:
+            try:
+                final = self._anywhere(view, follow, together=True)
+            except Refused:
+                final = None
         if not isinstance(final, ui.Element) or not any(final is e for e in view.items):
             note = getattr(done, "note", "") or "it is as far into view as it gets."
             raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
