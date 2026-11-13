@@ -26,6 +26,24 @@ action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
   quiet, the connection drops or the daemon stops. Over Wi-Fi, `offline` and `lossy` are refused, as they would cut
   Tapwright's own link.
 
+**Fixes from the review of this release**
+- A secure field's text never reaches a recording, even when the field was below the screen: the step is saved from the
+  field `type_text` really typed into, after any scroll.
+- A `network` condition lives only as long as the agent that set it. The agent's MCP process sends a heartbeat every
+  few seconds and a goodbye when its stdio closes; the condition is cleared on the goodbye, 20 s after the heartbeat
+  stops (the process was killed), after 10 minutes without a call, and at the 30-minute cap. A condition whose
+  connection to the phone closes is noticed at once. A daemon that starts and finds a condition left by one that
+  crashed clears it before any agent's first call.
+- One agent never clears another's condition by accident: a failing `run` clears only the condition it set, a
+  replaced or ended condition is told to its owner in its next answer, and a goodbye from one agent leaves the
+  other's condition alone.
+- `network` checks a per-app policy against the app in front now, not the one at the last read, and refuses when the
+  phone can't say which it is and a policy blocks `network` for some app.
+- A plain `open_app` (or `text_size: system`) after one with a language, region or text size closes the running app
+  and opens it with the defaults, and says so.
+- `tap`, `long_press`, `toggle` and `type_text` with an `index` on an off-screen match act on that element after the
+  scroll (not on another match, or none), and the policy checks the element that is touched.
+
 **Habits that save calls**
 - The skill has `run` examples for common patterns and a "spend fewer calls" list: read the change list instead of
   calling `look`, target by id, let the action scroll, and put known steps in `run`.
