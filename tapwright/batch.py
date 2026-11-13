@@ -295,26 +295,21 @@ def saved_script(data: dict, redact: Callable[[str], str] | None, where: str) ->
         raise Refused("bad_params", f"can't save {where}: {e}") from None
 
 
-def recorded_target(target: dict | None, items: list[ui.Element],
-                    titled: Callable[[str | None], bool] | None = None) -> dict | None:
+def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
     """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
     `index` when that target matches several elements. A ref is turned into the element it names first.
 
     A test account's value, or the placeholder it is shown as, is never saved (AGENT-TOOLS §18.6; Codex, PR #10 cycle
     2): an id, label or text that holds one is passed over for the next, and the point is the last resort, as for an
     element with none of the three. A selector the agent wrote with a placeholder in it is saved the same way, from
-    the element it finds. `titled` (a navigation title) is held to the same rule for a label or text: a title is never
-    saved in plain text (Codex, PR #10 cycle 2), so one is passed over, and an element named only by a title is saved
-    as its point. An id is no content and is kept."""
+    the element it finds. Any other words are saved as given: a recording keeps what was recorded (a navigation title
+    too; only learned map data keeps titles out, §18.1)."""
     if not isinstance(target, dict):
         return None
     if target.get("x") is not None:
         return {"x": target["x"], "y": target["y"]}
-
-    def unsafe(kind: str, value: object) -> bool:
-        return isinstance(value, str) and (ui.private(value) or (kind != "id" and titled is not None and titled(value)))
     named = {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
-    if not target.get("ref") and not any(unsafe(k, v) for k, v in named.items()):
+    if not target.get("ref") and not holds_value(named):
         return named
     try:
         found = ui.resolve(items, ui.parse_target(target))
@@ -322,8 +317,22 @@ def recorded_target(target: dict | None, items: list[ui.Element],
         return None
     if not isinstance(found, ui.Element):
         return None
+    return recorded_element(found, items)
+
+
+def holds_value(selector: object) -> bool:
+    """Does a selector (a target, an expectation, an ignore entry) hold a test account's value or its placeholder in
+    its id, label or text? Such a selector is never saved (§18.6)."""
+    return isinstance(selector, dict) and any(isinstance(selector.get(k), str) and ui.private(selector[k])
+                                              for k in ("id", "label", "text"))
+
+
+def recorded_element(found: ui.Element, items: list[ui.Element]) -> dict:
+    """How a recording saves the element `found` of the list `items`: its id, else its label, else its text (one that
+    holds no account value, and that finds this very element again among `items`, with `index` when it matches several),
+    else its point."""
     for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
-        if not value or unsafe(kind, value):
+        if not value or ui.private(value):
             continue
         aim = {kind: value}
         # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
@@ -338,15 +347,14 @@ def recorded_target(target: dict | None, items: list[ui.Element],
     return {"x": round(x, 1), "y": round(y, 1)}
 
 
-def recorded_ignore(ignore: list[dict], items: list[ui.Element],
-                    titled: Callable[[str | None], bool] | None = None) -> list[dict]:
+def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
     """The `ignore` list a recording saves (§14.2): a ref becomes the element's id, label or text (with `index` when it
     matches several), because refs don't outlive a session. A ref whose element has none of the three can't be saved
-    (`bad_params`, naming it). Rects and the other targets are kept as given."""
+    (`bad_params`, naming it). Rects and the other targets are kept as given, unless one holds a test account's value."""
     saved = []
     for entry in ignore:
-        if _names_private(entry, titled):
-            saved.append(_ignored_without_name(entry, items, titled))
+        if _names_private(entry):
+            saved.append(_ignored_without_name(entry, items))
             continue
         if not isinstance(entry, dict) or not entry.get("ref"):
             saved.append(entry)
@@ -355,7 +363,7 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element],
             found = ui.resolve(items, ui.parse_target(entry))
         except Refused:
             found = None
-        aim = recorded_target(entry, items, titled) if isinstance(found, ui.Element) else None
+        aim = recorded_target(entry, items) if isinstance(found, ui.Element) else None
         if aim is None or "x" in aim:
             what = found.line(ref=False, actions=False, place=False) if isinstance(found, ui.Element) else entry["ref"]
             account = isinstance(found, ui.Element) and any(ui.private(v) for v in (found.identifier, found.label, found.text))
@@ -367,111 +375,26 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element],
     return saved
 
 
-def any_title(_text: str | None) -> bool:
-    """A `titled` that holds for every text: every label or text is then passed over for the id, else the point."""
-    return True
-
-
-def ignore_fallback(entry: object, items: list[ui.Element]) -> dict | None:
-    """What an `ignore` entry is saved as when its label or text turns out to be a title: the id of the element it
-    finds, else that element's rectangle; None when it finds no one element."""
-    if not isinstance(entry, dict) or entry.get("ref") is None and not any(entry.get(k) for k in ("id", "label", "text")):
-        return None
-    try:
-        found = ui.resolve(items, ui.parse_target(entry))
-    except Refused:
-        return None
-    if not isinstance(found, ui.Element):
-        return None
-    aim = recorded_target({"ref": found.ref}, items, any_title)
-    if aim is not None and "x" not in aim:
-        return aim
-    return {"x": round(found.x, 1), "y": round(found.y, 1), "width": round(found.width, 1), "height": round(found.height, 1)}
-
-
-def without_titles(steps: list[dict], fallbacks: list[tuple[dict, dict | None]],
-                   titled: Callable[[str | None], bool]) -> list[dict]:
-    """A recording's steps as they are saved, checked once more against every title the recording has seen (Codex, PR #10
-    cycle 5: a title can be learned after the step that names it, from the screen the step opened). A selector, at any
-    depth (`target`, a `performance` step's `tap`, an `ignore` list, an expectation's), whose label or text is a title is
-    replaced by its `fallbacks` entry (the element's own id, else its point, worked out when it was captured: `(selector,
-    fallback)` pairs matched by identity), and dropped when it has none; a step that waits for a title, and an
-    expectation on one, are dropped. A step with no selector left to aim by is dropped too."""
-    held = {id(selector): fallback for selector, fallback in fallbacks}
-
-    def names_title(selector: object) -> bool:
-        return isinstance(selector, dict) and any(isinstance(selector.get(k), str) and selector[k] and titled(selector[k])
-                                                  for k in ("label", "text"))
-
-    def ignores(entries: list) -> list:
-        out = []
-        for entry in entries:
-            if not names_title(entry):
-                out.append(entry)
-            elif held.get(id(entry)) is not None:
-                out.append(held[id(entry)])
-        return out
-
-    def expectation(expect: dict) -> dict | None:
-        if any(names_title({k: expect.get(k)}) for k in ("label", "text")):
-            expect = {k: v for k, v in expect.items() if k not in EXPECT_KINDS and k not in ("gone", "timeout")}
-            if "matches" not in expect:
-                return None
-        if isinstance(expect.get("ignore"), list):
-            expect = {**expect, "ignore": ignores(expect["ignore"])}
-            if not expect["ignore"]:
-                del expect["ignore"]
-        return expect
-
-    out = []
-    for step in steps:
-        if step.get("tool") == "wait_for" and names_title(step):
-            continue
-        step = dict(step)
-        dropped = False
-        for key in ("target", "tap"):
-            if key in step and names_title(step[key]):
-                if held.get(id(step[key])) is None:
-                    dropped = True
-                    break
-                step[key] = held[id(step[key])]
-        if dropped:
-            continue
-        if isinstance(step.get("ignore"), list):
-            step["ignore"] = ignores(step["ignore"])
-            if not step["ignore"]:
-                del step["ignore"]
-        if isinstance(step.get("expect"), dict):
-            kept = expectation(step["expect"])
-            if kept is None:
-                del step["expect"]
-            else:
-                step["expect"] = kept
-        out.append(step)
-    return out
-
-
-def _names_private(entry: object, titled: Callable[[str | None], bool] | None) -> bool:
-    """Is this ignore a label or text selector that holds a navigation title or an account's value?"""
+def _names_private(entry: object) -> bool:
+    """Is this ignore an id, label or text selector that holds a test account's value?"""
     if not isinstance(entry, dict) or entry.get("ref") or entry.get("x") is not None:
         return False
-    return any(isinstance(entry.get(k), str) and (ui.private(entry[k]) or (titled is not None and titled(entry[k])))
-               for k in ("label", "text"))
+    return holds_value(entry)
 
 
-def _ignored_without_name(entry: dict, items: list[ui.Element], titled: Callable[[str | None], bool] | None) -> dict:
-    """An ignore selector whose label or text is a title (or an account's value) is saved as the id of the element it
-    finds, else as that element's rectangle: never as the text. `bad_params`, not echoing the text, when it finds no
-    one element (Codex, PR #10 cycle 3)."""
+def _ignored_without_name(entry: dict, items: list[ui.Element]) -> dict:
+    """An ignore selector that holds a test account's value is saved as the id of the element it finds, else as that
+    element's rectangle: never as the value. `bad_params`, not echoing the value, when it finds no one element (Codex,
+    PR #10 cycle 3)."""
     try:
         found = ui.resolve(items, ui.parse_target(entry))
     except Refused:
         found = None
     if not isinstance(found, ui.Element):
-        raise Refused("bad_params", "can't record an ignore whose label or text is a screen's title or a test account's "
-                                    "value and finds no one element; ignore it by an id or a rect {x, y, width, height}")
-    aim = recorded_target({"ref": found.ref}, items, titled)
-    if aim is not None and "x" not in aim:
+        raise Refused("bad_params", "can't record an ignore that holds a test account's value and finds no one element; "
+                                    "ignore it by an id or a rect {x, y, width, height}")
+    aim = recorded_element(found, items)
+    if "x" not in aim:
         return aim
     return {"x": round(found.x, 1), "y": round(found.y, 1), "width": round(found.width, 1), "height": round(found.height, 1)}
 

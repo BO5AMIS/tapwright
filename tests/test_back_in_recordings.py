@@ -1,5 +1,6 @@
-"""Codex, PR #10 cycle 4: a recording saves `back` only for the very button `back` would press (ui.is_back: a button of a
-real NavigationBar, by ui.back_button's own choice), in a script and in a route (AGENT-TOOLS §9; Codex, PR #10 cycles 3, 4)."""
+"""ui.is_back: the very button `back` would press (a button of a real NavigationBar, by ui.back_button's own choice). A
+road learned from a tap on it is `back` (AGENT-TOOLS §18.1); a recording (script, route) keeps the tap as recorded, its
+label too (PR #10, title scope: titles are kept out of learned map data only)."""
 import json
 from xml.etree import ElementTree as ET
 
@@ -57,11 +58,10 @@ def recorded(tmp_path, tree: ui.Tree, target: dict, how: str):
 
 @pytest.mark.parametrize("how", ["script", "route"])
 @pytest.mark.parametrize("target", [{"label": "Chat with Sara"}, {"id": "BackButton"}])
-def test_an_explicit_native_back_marker_is_recorded_as_back_from_a_first_seen_screen(tmp_path, how, target):
+def test_a_tap_on_the_native_back_is_recorded_as_it_was_made(tmp_path, how, target):
     tree = view("Detail", leading=("Chat with Sara", "BackButton"))
     steps = recorded(tmp_path, tree, target, how)
-    assert [s["tool"] for s in steps] == ["back"]
-    assert "Sara" not in json.dumps(steps)
+    assert steps == [{"tool": "tap", "target": target}]  # (what was recorded: replay taps the same button)
 
 
 @pytest.mark.parametrize("how", ["script", "route"])
@@ -72,11 +72,10 @@ def test_a_toolbars_leading_profile_button_is_not_recorded_as_back(tmp_path, how
 
 
 @pytest.mark.parametrize("how", ["script", "route"])
-def test_a_menu_button_on_a_screen_titled_menu_is_not_recorded_as_back_nor_by_its_title(tmp_path, how):
+def test_a_menu_button_on_a_screen_titled_menu_is_recorded_by_its_label(tmp_path, how):
     tree = view("Menu", leading=("Menu", "Menu"))
     steps = recorded(tmp_path, tree, {"label": "Menu", "index": 1}, how)
-    assert [s["tool"] for s in steps] == ["tap"]
-    assert set(steps[0]["target"]) == {"x", "y"} and "label" not in steps[0]["target"]
+    assert steps == [{"tool": "tap", "target": {"label": "Menu", "index": 1}}]
 
 
 def test_is_back_is_the_element_back_would_press_in_a_real_navigation_bar():
