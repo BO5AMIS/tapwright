@@ -1713,7 +1713,7 @@ class Daemon:
             if i == 1:
                 await self._log_boundary(scope)  # the app's log is read, with the phone's replay, before the first mark
             marks = {b: r.latest() for b, r in self._rings.items()}
-            await self._clock_mark(scope, marks)
+            await self._clock_mark(marks)
             if clock() - began > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
@@ -1783,15 +1783,14 @@ class Daemon:
             except Exception:
                 pass
 
-    async def _clock_mark(self, scope: "Scope | None", marks: dict[str, int | None]) -> None:
-        """The boundary of a step: the phone's own clock now (log times are on it), or the ring's newest entry when
-        that is later, whatever its stream still has to replay. An old entry's time alone is no boundary: a replay
-        of older lines can still come during the step. When the clock can't be read the app stays without one, and a
-        failure shows none of its log (an unknown start is not epoch zero)."""
-        try:
-            given = await self._given(scope) if scope is not None else None
-            bundle, _ = self._diag_app(given)
-        except Refused:
+    async def _clock_mark(self, marks: dict[str, int | None]) -> None:
+        """The boundary of a step, for the log of every app that has one: the phone's own clock now (log times are on
+        it), or that ring's newest entry when that is later, whatever its stream still has to replay. Every ring, not
+        only the app in front: a step may bring another app to the front, and a failure then shows that app's log from
+        the step's start. An old entry's time alone is no boundary: a replay of older lines can still come during the
+        step. When the clock can't be read no app has one, and a failure shows none of its log (an unknown start is
+        not epoch zero)."""
+        if not marks:
             return
         try:
             clock = await _wait_for(self.session.device.phone_time_ms(), 3)
@@ -1799,10 +1798,10 @@ class Daemon:
             raise
         except Exception:
             clock = None
-        newest = marks.get(bundle)
-        # the step began at the phone's clock, or at the ring's newest entry when that is later; never at an old
+        # the step began at the phone's clock, or at a ring's newest entry when that is later; never at an old
         # entry alone (the phone may still replay older lines than the newest one during the step)
-        marks[bundle] = None if clock is None else max(clock, newest) if newest is not None else clock
+        for bundle, newest in list(marks.items()):
+            marks[bundle] = None if clock is None else max(clock, newest) if newest is not None else clock
 
     async def _failure_logs(self, scope: "Scope | None", step: int, marks: dict[str, int | None]) -> list[str]:
         """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in

@@ -1015,15 +1015,15 @@ def test_a_step_boundary_is_never_older_than_the_phones_clock():
         ring.add(LogEntry(BASE - 10_000, "error", "old"))
         device.phone_ms = BASE
         marks = {APP: ring.latest()}
-        await d._clock_mark(None, marks)
+        await d._clock_mark(marks)
         assert marks[APP] == BASE
         ring.add(LogEntry(BASE + 500, "error", "newer than the clock reading"))
         marks = {APP: ring.latest()}
-        await d._clock_mark(None, marks)
+        await d._clock_mark(marks)
         assert marks[APP] == BASE + 500
         device.phone_ms = None  # no clock: an old entry's time is not a boundary
         marks = {APP: BASE - 10_000}
-        await d._clock_mark(None, marks)
+        await d._clock_mark(marks)
         assert marks[APP] is None
         await finish(stop, task)
     run(go)
@@ -1092,6 +1092,41 @@ def test_a_replacement_process_the_watcher_itself_saw_stays_out_when_it_has_left
             shown = (await d.run_tool("a", "logs", {}))["text"]
             assert "secret" not in shown and f"Latest: {BASE + 1}" in shown
         assert not any("secret" in e.text for e in ring.entries)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_that_switches_apps_cuts_the_new_apps_log_at_the_steps_start_on_the_phones_clock():
+    """Codex and CodeRabbit, PR #4 cycle 4: the step began in app A at phone time T and went to B, whose ring held an entry
+    from T-10 s; only A's boundary was moved to T, so B's historical error (T-5 s), delivered during the step, was shown
+    as logged since the step."""
+    async def go():
+        other = "com.example.other"
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = BASE
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        d._rings[other] = diagnostics.LogRing()
+        d._rings[other].add(LogEntry(BASE - 10_000, "error", "the other app's first old error"))
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):  # the step opens the other app, already running
+            await asyncio.sleep(0.45)
+            text = await real(target, hold_ms)
+            d.session.app = ("Other", other)
+            return text
+        d.session.tap = tap
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.2, d._rings[other].add, LogEntry(BASE - 5_000, "error", "a delayed historical error"))
+        loop.call_later(0.35, d._rings[other].add, LogEntry(BASE + 10, "error", "a failure during the step"))
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert "first old error" not in text and "a delayed historical error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text
         await finish(stop, task)
     run(go)
 
