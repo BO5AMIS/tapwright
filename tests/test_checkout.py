@@ -57,3 +57,30 @@ def test_no_git_is_skipped_quietly(tmp_path):
         raise subprocess.TimeoutExpired("git", 5)
     assert checkout.check(pkg, missing) is None and checkout.check(pkg, slow) is None
     assert checkout.check(pkg, git_says("", 128)) is None
+
+
+def test_doctor_in_a_fresh_process_reports_a_conflicted_signing_module(tmp_path):
+    """The CLI loads without importing signing.py, so `tapwright doctor` reaches its checkout check even when that
+    file holds merge markers, instead of failing with a SyntaxError first (CodeRabbit and Codex, PR #5)."""
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    import tapwright
+    copy = tmp_path / "src"
+    shutil.copytree(Path(tapwright.__file__).parent, copy / "tapwright",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (copy / "pyproject.toml").write_text('[project]\nname = "tapwright"\n', encoding="utf-8")
+    (copy / ".git").mkdir()  # a source checkout in a git work tree: doctor stops at the conflict, before the phone
+    signing = copy / "tapwright" / "signing.py"
+    signing.write_text("<<<<<<< HEAD\nx = 1\n=======\nx = 2\n>>>>>>> other\n", encoding="utf-8")
+    code = ("import sys; sys.argv = ['tapwright', 'doctor']\n"
+            "from tapwright import cli\n"
+            "raise SystemExit(cli.main())\n")
+    r = subprocess.run([sys.executable, "-c", code], cwd=copy, capture_output=True, text=True, timeout=120,
+                       env={"PYTHONPATH": str(copy), "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", ""),
+                            "TAPWRIGHT_HOME": str(tmp_path / "home")})
+    out = r.stdout + r.stderr
+    assert "SyntaxError" not in out, out
+    assert "merge markers" in out and "signing.py" in out, out
+    assert "device service" not in out, out  # it ended before reaching for the phone
