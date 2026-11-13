@@ -11,7 +11,7 @@
   Whether a tap is a Back button is decided before the screen is read again, so a screen that comes back with another
   title (a chat renamed) doesn't hide it. A recording (script, route) saves such a tap as `back`; any other tap whose
   label or text is a title is saved by its id, else by its point, and a `wait_for` on a title is not kept as a step's
-  expectation, so no title is in a script, a route or a map in plain text. A Back button is told by what iOS's is (the top bar's leading button, no id of its own), so a screen the map hasn't seen yet records it as `back` too; a wait on a title is never kept, even after `performance`; and a `compare_screen` ignore selected by a title is saved by id or rectangle.
+  expectation, so no title is in a script, a route or a map in plain text. A tap is saved as `back` only when its element is exactly the button `back` would press (a button of a real navigation bar, `ui.back_button`'s own choice, with no id of its own or iOS's `BackButton`, whatever its label), so a screen the map hasn't seen yet records it as `back` too, and a toolbar's Profile button or a `Menu` button on a screen titled Menu is never `back`; a wait on a title is never kept, even after `performance`; and a `compare_screen` ignore selected by a title is saved by id or rectangle.
 - A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
   (`<tester2's password>`) in everything that leaves Tapwright, in any form (escaped, collapsed, cut): text answers and
   errors, change lists (a `(was …)` cut no longer keeps a password's end), alerts, the audit's element lines (`id=`) and

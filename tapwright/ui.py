@@ -268,6 +268,7 @@ class Tree:
     # one is covered); what is off screen under a presented sheet is here too
     behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
     structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
+    back: "Back | None" = None  # what `back` would do on this screen (back_button), when the screen's size is known
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -770,6 +771,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
     tree.structure = _structure(root, screen_rect)
+    tree.back = _back_of(root, screen) if screen else None
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
@@ -1279,8 +1281,20 @@ def back_button(source: str, screen: tuple[float, float]) -> Back:
     the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
     leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
     does something else; else no point (a bar without a back button is usually a root screen)."""
-    root = _parse(source, screen)
+    return _back_of(_parse(source, screen), screen)
 
+
+def is_back(element: Element, back: Back | None) -> bool:
+    """Is the element exactly the button `back_button` presses (a button of a real NavigationBar, in its order of
+    choice: named BackButton or labelled Back, else the leftmost button of its left quarter that isn't Cancel, Done, Menu
+    and the like), with no id of its own (`BackButton` is iOS's; an id the app gave it says the app means it as itself)?
+    What a recording saves as `back` is this element and no other: replay then does what the tap did."""
+    return (back is not None and back.point is not None and element.type == "Button" and element.role != "cell"
+            and element.identifier in ("", "BackButton")
+            and abs(element.center[0] - back.point[0]) < 1 and abs(element.center[1] - back.point[1]) < 1)
+
+
+def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect
         return w > 0 and h > 0 and 0 <= x + w / 2 < screen[0] and 0 <= y + h / 2 < screen[1]

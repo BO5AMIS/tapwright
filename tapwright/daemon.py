@@ -2229,7 +2229,7 @@ class Daemon(journey_tool.JourneyTools):
                 inputs = [e for e in items if e.role == "input"]
                 field = inputs[0] if len(inputs) == 1 else None
             self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
-        if name == "tap" and self._native_back_of(args.get("target"), items, titled):
+        if name == "tap" and self._native_back_of(args.get("target"), items):
             self._recording[client_id]["back_next"] = True  # the step is `back`: its label is a title (never saved)
         return batch.recorded_target(args.get("target"), items, titled)
 
@@ -2246,8 +2246,10 @@ class Daemon(journey_tool.JourneyTools):
             return " ".join(text.split()) == shown or (data is not None and bool(places.titled_places(data, text)))
         return test
 
-    def _native_back_of(self, target: object, items: list[ui.Element], titled: "Callable[[str | None], bool]") -> bool:
-        """Is the element a tap is aimed at a native Back button: the top bar's leading button, labelled with a title?"""
+    def _native_back_of(self, target: object, items: list[ui.Element]) -> bool:
+        """Is the element a tap is aimed at exactly what `back` would press (ui.is_back: a button of a real navigation
+        bar, by ui.back_button's own choice)? Only then is the step saved as `back`, whatever its label or id is: the
+        label of a native Back is a title, and replay does what the tap did (Codex, PR #10 cycles 3 and 4)."""
         if not isinstance(target, dict):
             return False
         try:
@@ -2256,18 +2258,7 @@ class Daemon(journey_tool.JourneyTools):
             return False
         if isinstance(found, tuple):
             found = self._element_at(found, items)
-        top = (getattr(self.session, "last_insets", None) or (None, None))[0]
-        if not (isinstance(found, ui.Element) and found.role != "cell" and self._is_native_back(found, top)):
-            return False
-        if any(titled(t) for t in (found.label, found.text, found.value)):
-            return True
-        # a screen first seen (a deep link, a restored screen) has no known title yet: told by what iOS's Back is, the
-        # leading button of the top bar with no id of its own (Codex, PR #10 cycle 3)
-        mirrors = found.identifier in ("", found.label, found.text, found.value)
-        leading = [e for e in items if e.type == "Button" and self._is_native_back(e, top)]
-        return (mirrors and bool(found.label or found.text) and found.name in ("BackButton", found.label, "")
-                and (found.label or found.text).lower() not in ui.NOT_BACK
-                and min(leading, key=lambda e: e.x + e.width / 2) is found)
+        return isinstance(found, ui.Element) and ui.is_back(found, getattr(getattr(self.session, "last_tree", None), "back", None))
 
     def _record_expect(self, client_id: str, args: dict) -> None:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
@@ -3331,7 +3322,7 @@ class Daemon(journey_tool.JourneyTools):
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
-            box["top"] = (getattr(s, "last_insets", None) or (None, None))[0]  # where the top bar ends, before the touch
+            box["back"] = getattr(getattr(s, "last_tree", None), "back", None)  # what `back` would press, before the touch
             box["title_before"] = _title_of(getattr(s, "last_tree", None))  # the title the screen showed before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
@@ -3869,14 +3860,6 @@ class Daemon(journey_tool.JourneyTools):
             held |= {previous}
         return held
 
-    def _is_native_back(self, element: ui.Element, top: float | None) -> bool:
-        """Is the element a navigation bar's leading button (where `back` taps; ui.back_button), by where it was before
-        the touch (`top`: where the top bar ended): a button inside the top bar, in its left quarter."""
-        if element.type != "Button" or top is None:
-            return False
-        width = self.session.screen[0]
-        return element.y + element.height <= top and element.x + element.width / 2 < width / 4
-
     def _move_of(self, name: str, args: dict, box: dict, root: str | None, bundle: str,
                  between: tuple[str, str]) -> dict | None:
         """The move an action made, as a road keeps it (roads.move_of); None when it isn't one that can be kept (an
@@ -3889,8 +3872,9 @@ class Daemon(journey_tool.JourneyTools):
         data = self.maps.data(root, bundle)
         held = box.get("held") or frozenset()
         if (name in roads.TARGETED and element is not None and element.role != "cell"
-                and places.is_title(data, between, element.label, element.text, element.value, held=held)
-                and self._is_native_back(element, box.get("top"))):
+                and ui.is_back(element, box.get("back"))
+                and (element.name == "BackButton"
+                     or places.is_title(data, between, element.label, element.text, element.value, held=held))):
             return {"tool": "back"}
         extra = dict(args)
         if name == "open_url":
