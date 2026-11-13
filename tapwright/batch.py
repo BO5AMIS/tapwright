@@ -295,6 +295,9 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element],
     (`bad_params`, naming it). Rects and the other targets are kept as given."""
     saved = []
     for entry in ignore:
+        if _names_private(entry, titled):
+            saved.append(_ignored_without_name(entry, items, titled))
+            continue
         if not isinstance(entry, dict) or not entry.get("ref"):
             saved.append(entry)
             continue
@@ -312,6 +315,31 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element],
                                         "{x, y, width, height} instead")
         saved.append(aim)
     return saved
+
+
+def _names_private(entry: object, titled: Callable[[str | None], bool] | None) -> bool:
+    """Is this ignore a label or text selector that holds a navigation title or an account's value?"""
+    if not isinstance(entry, dict) or entry.get("ref") or entry.get("x") is not None:
+        return False
+    return any(isinstance(entry.get(k), str) and (ui.private(entry[k]) or (titled is not None and titled(entry[k])))
+               for k in ("label", "text"))
+
+
+def _ignored_without_name(entry: dict, items: list[ui.Element], titled: Callable[[str | None], bool] | None) -> dict:
+    """An ignore selector whose label or text is a title (or an account's value) is saved as the id of the element it
+    finds, else as that element's rectangle: never as the text. `bad_params`, not echoing the text, when it finds no
+    one element (Codex, PR #10 cycle 3)."""
+    try:
+        found = ui.resolve(items, ui.parse_target(entry))
+    except Refused:
+        found = None
+    if not isinstance(found, ui.Element):
+        raise Refused("bad_params", "can't record an ignore whose label or text is a screen's title or a test account's "
+                                    "value and finds no one element; ignore it by an id or a rect {x, y, width, height}")
+    aim = recorded_target({"ref": found.ref}, items, titled)
+    if aim is not None and "x" not in aim:
+        return aim
+    return {"x": round(found.x, 1), "y": round(found.y, 1), "width": round(found.width, 1), "height": round(found.height, 1)}
 
 
 def scripts_dir() -> Path:
