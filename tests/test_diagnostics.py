@@ -1131,6 +1131,56 @@ def test_a_step_that_switches_apps_cuts_the_new_apps_log_at_the_steps_start_on_t
     run(go)
 
 
+
+def test_a_line_a_logs_call_vouched_for_survives_the_watchers_cleanup_when_the_process_lookup_fails():
+    """Codex, PR #4 cycle 5 (P2): the watcher's cleanup took back everything since its own last mark, which a logs call
+    can have moved on (it vouched for a line the watcher never looked at); with the lookup failing, the cleanup then
+    deleted a line already shown to be the app's. A vouched line is never taken back."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0  # the watcher never looks: its mark stays where the stream began
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]  # vouched for by the phone's list
+        device.proc_error = RuntimeError("no process list")  # from now on nobody can be asked
+        device.emit(42, BASE + 2, "not yet proven")
+        await settle(lambda: len(ring.entries) == 2)
+        device.streams[42].put_nowait(None)  # the stream ends; the cleanup's lookups fail
+        await settle(lambda: 42 in device.stream_closed)
+        await asyncio.sleep(0.15)  # the watcher's cleanup is done
+        assert [e.text for e in ring.entries] == ["the app's own line"]  # the unvouched line may go, the vouched one stays
+        device.proc_error = None
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_line_a_logs_call_vouched_for_survives_the_cleanup_when_another_process_holds_the_pid():
+    """The same rule when the lookup works: the other app's start time is no reason to take back what was vouched for."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", BASE / 1000 - 10)  # said to have started before the vouched line's time
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        device.streams[42].put_nowait(None)
+        await settle(lambda: 42 in device.stream_closed)
+        await asyncio.sleep(0.15)
+        assert [e.text for e in ring.entries] == ["the app's own line"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_step_with_no_boundary_and_no_phone_clock_shows_no_logs():
     async def go():
         d = tuned(make())

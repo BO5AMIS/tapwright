@@ -1154,10 +1154,11 @@ class Daemon:
                     # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
                     ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
 
-    async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc, mark: int) -> None:
-        """After a stream of `proc` ended, once: were the lines added since `mark` (the last check that the process was
-        still the app's) the app's? When another process has the pid now, its lines (from its start on) are taken back;
-        when the phone can't say who has it, everything since the mark is, since nothing vouches for it."""
+    async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc) -> None:
+        """After a stream of `proc` ended, once: were the lines no answer has vouched for the app's? When another process
+        has the pid now, its lines (from its start on) are taken back; when the phone can't say who has it, all of them
+        are, since nothing vouches for them. Only the ring knows what is vouched for (a `logs` call vouches without the
+        watcher looking, so the watcher's own mark can be behind): a vouched line is never taken back."""
         try:
             now = await _wait_for(self.session.device.app_processes(bundle), 5)
             if any(p.same_life(proc) for p in now):
@@ -1166,11 +1167,11 @@ class Daemon:
         except asyncio.CancelledError:
             raise
         except Exception:
-            ring.discard_since(mark)
+            ring.discard_unvouched()
             return
         if holder is not None:
             self._log_tainted[bundle] = proc
-            ring.discard_since(mark, None if holder.started is None else int(holder.started * 1000))
+            ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
         elif bundle in self._log_tainted and self._log_tainted[bundle].same_life(proc):
             ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
         # (else: gone, with nobody holding the pid, is an ordinary end: its last lines are its own)
@@ -1249,7 +1250,7 @@ class Daemon:
             finally:
                 reader.cancel()
                 await asyncio.wait({reader})
-            await self._settle_life(bundle, ring, proc, mark)
+            await self._settle_life(bundle, ring, proc)
             error = reader.exception() if not reader.cancelled() else None
             if error is not None:
                 self.log(f"logs: the log stream of {bundle} ended: {error}")
