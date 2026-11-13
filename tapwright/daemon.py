@@ -3151,6 +3151,15 @@ class Daemon(journey_tool.JourneyTools):
         except DeviceError as e:
             notes.append(f"the phone's accessibility audit isn't available here ({e}), so cut-off text, contrast and "
                          "target size were not checked.")
+        given = _GIVEN.get()
+        if given is not None:
+            # Personal mode asked which app was in front before the call; another may have come forward since. Its
+            # labels are not remembered for naming drift, and no finding is filed, unless a given app is in front now
+            # (CodeRabbit, PR #7).
+            front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=False))
+            if front not in given and front != PROMPT_FRONT:
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
+                                                      ", ".join(given.values())))
         rules = uxcheck.rules_in_force()
         result = uxcheck.check(view.items, self.session.screen, client_id, rules, rows)
         app = getattr(self.session, "app", None)
