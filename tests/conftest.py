@@ -45,3 +45,14 @@ def _network_marker_in_tmp(monkeypatch, tmp_path):
     owner's real ~/.tapwright in a test."""
     from tapwright import store
     monkeypatch.setattr(store, "NETWORK_FILE", tmp_path / "network-marker" / "network.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_journey_left_running():
+    """`journey.running` is the module's registry of running journeys, held weakly: a daemon from an earlier test that
+    isn't collected yet can still have one for agent "a", and a test that starts with "no journey running" fails now
+    and then, depending on what ran before it."""
+    from tapwright import journey
+    journey.running.clear()
+    yield
+    journey.running.clear()
