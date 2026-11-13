@@ -332,6 +332,8 @@ async def lockdown_facts(udid: str, connect=None) -> dict:
         return {"trusted": True, "locked": True}
     except Exception:  # can't be read: nothing is claimed
         return {}
+    if getattr(lockdown, "paired", True) is False:  # autopair=False hands back an unpaired client instead of raising
+        return {"trusted": False}
     try:
         mode = await asyncio.wait_for(lockdown.get_developer_mode_status(), 10)
     except Exception:  # an iOS without the setting, or no answer
@@ -363,7 +365,7 @@ async def unattended_stops(usb: list[str], accounts: str | None, connect=None, s
     from . import needs
     facts: dict = {"passcode_given": passcode_given(accounts)}
     if usb:
-        facts.update(await lockdown_facts(usb[0], connect))
+        facts.update(await lockdown_facts(configured_phone(usb), connect))
     if status is not None:
         if status.get("state") == "locked":
             facts["locked"] = True

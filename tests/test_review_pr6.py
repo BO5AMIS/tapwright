@@ -430,13 +430,19 @@ def test_a_real_mcp_process_says_goodbye_when_its_stdin_reaches_its_end(tmp_path
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            heard.append((self.path, self.headers.get("X-Tapwright-Client", "")))
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/api/prove":  # the proof that this process holds the token, asked before it is sent
+                from tapwright.server import proof_of
+                port = self.server.server_address[1]
+                reply = json.dumps({"proof": proof_of("t" * 43, bytes.fromhex(json.loads(body)["challenge"]), port)}).encode()
+            else:
+                heard.append((self.path, self.headers.get("X-Tapwright-Client", "")))
+                reply = b"{}"
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", "2")
+            self.send_header("Content-Length", str(len(reply)))
             self.end_headers()
-            self.wfile.write(b"{}")
+            self.wfile.write(reply)
 
         def log_message(self, *args):
             pass

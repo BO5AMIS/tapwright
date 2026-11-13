@@ -340,6 +340,10 @@ class FakeSession:
         self.touch_checks_front = False
         self.front_apps: tuple[str, ...] | None = None
         self.checked_taps: list = []  # the given apps each checking tap was sent with
+        # with this on, tap and swipe call `touch_hook` (set by the daemon for an agent's action) before they touch,
+        # as Session._touching does; a hook that raises touches nothing. Off: the hook is never called (as before)
+        self.calls_touch_hook = False
+        self.touch_hook = None
 
     def front_by_touch(self) -> bool:
         return self.touch_checks_front
@@ -473,8 +477,13 @@ class FakeSession:
             self.last_keyboard = False
         return self.dismiss_ok
 
+    async def _touching(self, ms):
+        if self.calls_touch_hook and self.touch_hook is not None:
+            await self.touch_hook(ms)
+
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
+        await self._touching(hold_ms)
         if self.front_apps is not None:
             self.checked_taps.append(self.front_apps)
             if self.foreground not in self.front_apps:
@@ -511,6 +520,7 @@ class FakeSession:
         return True
 
     async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
+        await self._touching(duration_ms + hold_ms)
         self._record("swipe")
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"

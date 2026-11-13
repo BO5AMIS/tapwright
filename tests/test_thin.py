@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tapwright import thin
+from tapwright.server import proof_of
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "k" * 43
@@ -26,11 +27,22 @@ class Fake:
         self.seen: list[dict] = []
         self.status = 200
         self.reply: dict = {"text": "Tapped e1.", "image": None, "image_size": None}
+        self.proofs = 0
+        # (signed with this fake's own port, as a daemon signs the port it listens on; a test may swap in a wrong one)
+        self.prove = lambda challenge: proof_of(TOKEN, bytes.fromhex(challenge), self.server.server_address[1])
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if self.path == "/api/prove":  # the daemon's proof that it holds the token (before the token is sent)
+                    outer.proofs += 1
+                    data = json.dumps({"proof": outer.prove(json.loads(body)["challenge"])}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 outer.seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
                                    "body": json.loads(body or b"{}")})
                 data = json.dumps(outer.reply).encode()
@@ -255,7 +267,8 @@ def test_a_silent_daemon_times_out_with_exit_3_and_is_not_asked_again(fake, caps
     original = fake.server.RequestHandlerClass.do_POST
 
     def slow(self):
-        release.wait(5)
+        if self.path != "/api/prove":  # (the proof answers at once; it is the action that is slow)
+            release.wait(5)
         original(self)
 
     fake.server.RequestHandlerClass.do_POST = slow
@@ -321,3 +334,53 @@ def test_a_real_daemon_route_answers_the_thin_call(home, capsys):
         server.should_exit = True
         thread.join(10)
         sock.close()
+
+
+# ---- the token goes only to a process that proved it holds it (1.6 security, Tapline's finding) ----
+
+def test_the_token_is_not_sent_to_a_process_that_cannot_prove_it_holds_it(fake, capsys):
+    """serve.json outlives its daemon: another local process may now listen on that port. It must never get the token."""
+    fake.prove = lambda challenge: "0" * 64
+    code, out, err = run(capsys, "look", "--apps", "com.example.app")
+    assert code == thin.EXIT_UNREACHABLE and out == "" and "did not prove" in err
+    assert fake.seen == [] and fake.proofs == 1  # no request carried the token
+
+
+def test_a_process_that_relays_the_challenge_to_a_live_daemon_gets_no_token(fake, capsys):
+    """Tapline's Codex finding: a listener on serve.json's (stale) port forwards the challenge to a real daemon on
+    another port and returns that daemon's proof. The proof names the port it was made on, so it never matches the port
+    this client dialled, and the token is not sent."""
+    real = Fake()  # a live daemon elsewhere, holding the same token
+    try:
+        fake.prove = real.prove  # the listener relays: the answer is the real daemon's, made for the real daemon's port
+        code, out, err = run(capsys, "look", "--apps", "com.example.app")
+        assert code == thin.EXIT_UNREACHABLE and out == "" and "did not prove" in err
+        assert fake.seen == [] and real.seen == []  # no request carried the token, to either
+    finally:
+        real.close()
+
+
+def test_a_process_with_no_proof_route_gets_no_token(fake, capsys):
+    fake.prove = lambda challenge: None  # answers {"proof": null}, as a server that doesn't know the route might
+    code, _, err = run(capsys, "look", "--apps", "com.example.app")
+    assert code == thin.EXIT_UNREACHABLE and fake.seen == []
+
+
+def test_the_proof_is_asked_before_the_token_goes_out_with_a_fresh_challenge(fake, capsys):
+    asked = []
+    real = fake.prove
+    fake.prove = lambda c: (asked.append(c), real(c))[1]
+    for _ in range(2):
+        assert run(capsys, "look", "--apps", "com.example.app")[0] == 0
+    assert len(asked) == 2 and asked[0] != asked[1] and all(len(c) == 64 for c in asked)
+    assert len(fake.seen) == 2 and all(s["headers"]["authorization"] == f"Bearer {TOKEN}" for s in fake.seen)
+
+
+def test_a_proof_made_for_another_address_on_the_same_port_gets_no_token(fake, capsys):
+    """Tapline's Codex finding: a relay on another address with the same port (::1:P relaying to 127.0.0.1:P, or the
+    reverse) returns a proof signed for that other address. The client dials the literal 127.0.0.1 and checks the proof
+    against it, so the token is not sent."""
+    fake.prove = lambda challenge: proof_of(TOKEN, bytes.fromhex(challenge), fake.port, "::1")
+    code, out, err = run(capsys, "look", "--apps", "com.example.app")
+    assert code == thin.EXIT_UNREACHABLE and out == "" and "did not prove" in err
+    assert fake.seen == []

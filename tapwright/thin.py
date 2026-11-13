@@ -11,12 +11,16 @@ Exit codes: 0 the answer; 2 a refusal or a mistake in the command line; 3 the da
 import argparse
 import base64
 import binascii
+import hashlib
+import hmac
 import http.client
 import json
 import os
+import secrets
 import socket
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 EXIT_REFUSED, EXIT_UNREACHABLE = 2, 3
@@ -96,7 +100,37 @@ def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
         h["X-Tapwright-Maps"] = str(Path(a.maps).expanduser().resolve())
     if a.accounts:
         h["X-Tapwright-Accounts"] = str(Path(a.accounts).expanduser().resolve())
+    if not all(v.isascii() for v in h.values()):  # HTTP carries Latin-1 at best: percent-encode them all, and say so
+        h = {k: v if k in ("Authorization", "Content-Type") else urllib.parse.quote(v, safe="") for k, v in h.items()}
+        h["X-Tapwright-Encoding"] = "percent"
     return h
+
+
+PROOF_PREFIX = b"tapwright-proof-v2\x00"  # as server.PROOF_PREFIX and client.PROOF_PREFIX (copied: see the docstring)
+
+
+def _proved(port: int, token: str, timeout: float) -> bool:
+    """Does whatever listens on `port` hold `token`? A random challenge goes out without the token; the answer must be
+    HMAC-SHA256(token, prefix + challenge), compared in constant time. OSError when nothing answers."""
+    challenge = secrets.token_bytes(32)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request("POST", "/api/prove", body=json.dumps({"challenge": challenge.hex()}).encode(),
+                     headers={"Content-Type": "application/json"})
+        reply = conn.getresponse()
+        raw = reply.read()
+        if reply.status != 200:
+            return False
+        given = json.loads(raw or b"{}").get("proof")
+    except (ValueError, AttributeError):
+        return False
+    finally:
+        conn.close()
+    # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
+    # (the address this call dials: the literal 127.0.0.1, never a name that could resolve elsewhere)
+    signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(port)).encode()
+    want = hmac.new(token.encode(), signed, hashlib.sha256).hexdigest()
+    return isinstance(given, str) and hmac.compare_digest(given.encode(), want.encode())
 
 
 def _picture(answer: dict) -> str | None:
@@ -146,6 +180,16 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"tapwright call: {e}", file=sys.stderr)
         return EXIT_REFUSED
+    try:  # the token goes only to a process that has proved it holds it (serve.json may be stale: a port is reused)
+        proven = _proved(port, token, min(a.timeout, 10.0))
+    except (OSError, http.client.HTTPException) as e:
+        print(f"tapwright call: can't reach tapwright serve ({e}). {NO_DAEMON}", file=sys.stderr)
+        return EXIT_UNREACHABLE
+    if not proven:
+        print("tapwright call: whatever listens on tapwright serve's port did not prove it holds the token (a stale "
+              "address file, or an older tapwright serve); the token was not sent. Stop it and start it again: "
+              "`tapwright serve --stop`, then `tapwright serve`.", file=sys.stderr)
+        return EXIT_UNREACHABLE
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=a.timeout)
     try:  # one request, never sent twice: an action that was delivered must not be repeated
         conn.request("POST", f"/api/{a.tool}", body=json.dumps(args).encode(), headers=headers)

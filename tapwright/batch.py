@@ -36,7 +36,7 @@ def check_steps(steps: object, *, script: bool = False) -> list[dict]:
         if step["tool"] not in STEP_TOOLS:
             raise Refused("bad_params", f"step {n}: {step['tool']!r} can't be a step; a step is one of "
                                         f"{', '.join(STEP_TOOLS)}")
-        params.check(step["tool"], {k: v for k, v in step.items() if k not in STEP_KEYS}, f"step {n}: ")
+        params.check(step["tool"], tool_args(step), f"step {n}: ")
         target = step.get("tap") if step["tool"] == "performance" else step.get("target")
         if script and isinstance(target, dict) and "ref" in target:
             raise Refused("bad_params", f"step {n}: a script can't use refs (they don't outlive a session); use the "
@@ -158,10 +158,15 @@ def check_expect(expect: object, n: int, script: bool = False, tool: str = "") -
         raise Refused("bad_params", f"step {n}: expect's timeout must be from {EXPECT_MIN:g} to {EXPECT_MAX:g} s")
 
 
+def tool_args(step: dict) -> dict:
+    """The step's own parameters for its tool: everything but the batch's keys (`route` is a drive's own argument)."""
+    return {k: v for k, v in step.items() if k not in STEP_KEYS or (k == "route" and step.get("tool") == "drive")}
+
+
 def args_of(step: dict) -> dict:
     """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
     (the batch answers once)."""
-    args = {k: v for k, v in step.items() if k not in STEP_KEYS}
+    args = tool_args(step)
     if step["tool"] not in ("close_app", "performance"):  # (a measurement has no list to show)
         args["look"] = False
     return args

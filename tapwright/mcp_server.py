@@ -167,7 +167,7 @@ def _timeout(tool: str, args: dict) -> float:
     """How long this client waits for the daemon's answer to one tool call."""
     if tool == "journey" and args.get("stop") and args.get("export") is not None:
         return EXPORT_TIMEOUT
-    return LONG_TIMEOUT if tool in ("run", "replay", "media") else TIMEOUT
+    return LONG_TIMEOUT if tool in ("run", "replay", "media", "drive") else TIMEOUT
 
 
 BRIEF_DEFAULT = False  # `tapwright mcp --brief`: every action and run asks for a brief answer unless it says otherwise

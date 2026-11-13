@@ -789,6 +789,15 @@ def _on_screen(node: ET.Element, screen: tuple[float, float, float, float] | Non
     return screen is None or (screen[0] <= x + w / 2 < screen[0] + screen[2] and screen[1] <= y + h / 2 < screen[1] + screen[3])
 
 
+def _reaches(node: ET.Element, screen: tuple[float, float, float, float] | None) -> bool:
+    """Does the node's frame reach into the screen, or has it no frame at all (a root that doesn't render)? Its
+    children may be on screen when its own centre isn't (a tall wrapper of scroll content)."""
+    x, y, w, h = _rect(node)
+    if w <= 0 or h <= 0:
+        return True
+    return screen is None or (x < screen[0] + screen[2] and x + w > screen[0] and y < screen[1] + screen[3] and y + h > screen[1])
+
+
 def _structure(root: ET.Element, screen: tuple[float, float, float, float] | None) -> Structure:
     """What the screen is made of (see Structure), from the parsed tree. Only what is on screen counts; the keyboard
     and an alert are not part of the app's screen. A list row is a Cell and everything inside it: its identifier and
@@ -799,17 +808,22 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
 
     def visit(node: ET.Element, in_container: bool) -> None:
         kind = _kind(node)
-        if kind in ("Keyboard", "Alert", "Cell") or not _on_screen(node, screen) and kind != "Application":
+        if kind in ("Keyboard", "Alert", "Cell"):
             return
+        centred = kind == "Application" or _on_screen(node, screen)
+        if not centred and not _reaches(node, screen):
+            return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        if name and name != label and name not in IOS_NOISE and kind not in ("Application", "Window", "NavigationBar"):
+        if centred and name and name != label and name not in IOS_NOISE and kind not in ("Application", "Window", "NavigationBar"):
             ids.add(name)
         shown = STRUCTURE_KINDS.get(kind)
         if shown == "list" and kind == "ScrollView" and any(_kind(n) in INPUT_TYPES for n in node.iter()):
             shown = "form"
+        if shown is not None and not (centred or _rect(node)[2] > 0 and _rect(node)[3] > 0):
+            shown = None  # (a node with no frame shows nothing of its own)
         if shown is not None and not in_container:
             kinds.append(shown)
-        if kind == "NavigationBar":
+        if kind == "NavigationBar" and centred:
             bars.append(node)
         for child in node:
             visit(child, in_container or shown is not None)

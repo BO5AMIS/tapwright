@@ -74,7 +74,7 @@ def _target_for(element: ui.Element, items: list[ui.Element]) -> dict | None:
     """The element as a target a later read can resolve to it again: id, else label, else text, with an `index` only
     where several elements answer to it. Checked by resolving it against `items`, the way a call would."""
     for kind, value in (("id", element.identifier), ("label", element.label), ("text", element.value or element.text)):
-        if not value:
+        if not value or (kind != "id" and element.role == "cell"):  # a row's label and text are content: its id or nothing
             continue
         target = ui.Target(**{kind: value})
         try:
@@ -129,6 +129,8 @@ def move_of(tool: str, target: ui.Target | None, element: ui.Element | None, ite
         found = _target_for(element, items)
         if found is not None:
             return {"tool": tool, "target": found}
+        if element.role == "cell":
+            return {"tool": tool, "target": {"row": True}}  # its id can't tell it from the others: same placeholder
     if target is not None and target.point is not None and element is None:
         return {"tool": tool, "target": {"x": target.x, "y": target.y}}
     return None
@@ -168,13 +170,14 @@ def record(data: dict, src: str, dst: str, move: dict, names: dict, ms: int, now
     driven cleanly now, so proven for this build) and its failures start over. The same move from `src` that led
     somewhere else before counts a failure against that road, and a road failing twice in a row is dropped. None when
     the move stayed on its place (it is no road)."""
-    if src == dst:
-        return None
     key = _key(move)
     dropped: list[tuple[str, str]] = []
     gone: list[dict] = []
-    for other in [r for r in data["roads"] if r["from"] == src and _key(r["move"]) == key and r["to"] != dst]:
+    failing = [r for r in data["roads"] if r["from"] == src and _key(r["move"]) == key and r["to"] != dst]
+    for other in failing:
         _fail(data, other, dropped, gone)
+    if src == dst:  # no road of its own, but a saved road of this move that no longer leaves the place has failed
+        return Recorded(False, dropped, gone) if failing else None
     found = next((r for r in data["roads"] if r["from"] == src and r["to"] == dst and _key(r["move"]) == key), None)
     if found is None:
         data["roads"].append({"from": src, "to": dst, "move": copy.deepcopy(move), "names": dict(names), "by": by,
@@ -223,12 +226,28 @@ def repair(data: dict, src: str, old_move: dict, dst: str, new_move: dict, names
 
 # ---- the way ----
 
+def _is_row(road: dict) -> bool:
+    """A road whose move aims at a list row with no id: it is kept, but drive can't replay it, so no way goes by it."""
+    target = road.get("move", {}).get("target")
+    return isinstance(target, dict) and bool(target.get("row"))
+
+
 def _allowed(road: dict, tool: str) -> bool:
     return road.get("by", TOOL) in (tool, "both")
 
 
 def plan(data: dict, src: str | None, dst: str, build: str | None, by: str = "any", routes: list[RouteEdge] | tuple = (),
          tool: str = TOOL) -> Way:
+    """`_plan` over the roads drive can replay; only when that finds no way, over the row roads too, so that the drive
+    stops at the row and says it can't be replayed (a row road is kept, but no way is chosen by it while another exists)."""
+    way = _plan(data, src, dst, build, by, routes, tool, rows=False)
+    if way.kind == "none" and any(_is_row(r) for r in data["roads"]):
+        return _plan(data, src, dst, build, by, routes, tool, rows=True)
+    return way
+
+
+def _plan(data: dict, src: str | None, dst: str, build: str | None, by: str, routes: list[RouteEdge] | tuple,
+          tool: str, rows: bool) -> Way:
     """The way `drive` would take from `src` (None: unknown) to `dst` (§18.4). A jump when the place has a link and
     `by` allows one (`any`, `link`); else the chain of this tool's roads (and saved routes, one move per step) with the
     fewest moves, an unproven road counting double; two ways of equal cost: the one used most recently. `by="taps"`
@@ -242,7 +261,7 @@ def plan(data: dict, src: str | None, dst: str, build: str | None, by: str = "an
         return Way("none", src)
     edges: dict[str, list[tuple[str, int, float, dict | RouteEdge, bool]]] = {}
     for road in data["roads"]:
-        if _allowed(road, tool) and road.get("move", {}).get("tool") in SAVED_TOOLS:
+        if _allowed(road, tool) and road.get("move", {}).get("tool") in SAVED_TOOLS and (rows or not _is_row(road)):
             proven = is_proven(road, build)
             edges.setdefault(road["from"], []).append(
                 (road["to"], 1 if proven else UNPROVEN_COST, _epoch(road.get("last")), road, proven))

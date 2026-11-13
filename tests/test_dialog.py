@@ -203,6 +203,105 @@ def test_another_app_in_front_after_the_wait_asks_again():
     run(go)
 
 
+def test_a_pause_while_the_ok_is_awaited_is_honoured_when_it_comes():
+    """(Codex, PR #9 cycle 1) The live view pauses the phone while the dialog waits, then the person allows once: the
+    touch does not go out; the call answers `paused`."""
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        call = asyncio.create_task(d.run_tool("a", "tap", TAP, dialog=True))
+        await asked(d)
+        assert await d.viewer_message({"type": "pause", "on": True}) is None
+        d.dialog_answer("a", "c1-x", "allow")
+        with pytest.raises(Refused) as e:
+            await asyncio.wait_for(call, 2)
+        assert e.value.code == "paused" and "tap" not in d.session.calls
+        assert "c1-x" not in d._confirms  # the OK went with the call: a resume doesn't make it count for another
+        await d.viewer_message({"type": "pause", "on": False})
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_live_view_can_use_the_phone_while_the_ok_is_awaited():
+    """The wait doesn't hold the phone: a person's touch from the live view goes out meanwhile. After the OK the screen
+    is read again, and the touch goes ahead on the same element."""
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        call = asyncio.create_task(d.run_tool("a", "tap", TAP, dialog=True))
+        await asked(d)
+        taps = d.session.calls.count("tap")
+        error = await asyncio.wait_for(d.viewer_message({"type": "gesture", "points": [[0, 0.5, 0.9], [60, 0.5, 0.9]]}), 1)
+        assert error is None and d.session.calls.count("tap") == taps + 1 and not call.done()  # the person's touch
+        reads = d.session.calls.count("refresh")
+        d.dialog_answer("a", "c1-x", "allow")
+        answer = await asyncio.wait_for(call, 2)
+        assert answer["text"].splitlines()[-1] == NOTE_CHAT and d.session.calls.count("tap") == taps + 2
+        assert d.session.calls.count("refresh") > reads  # read again before the touch
+        await finish(stop, task)
+    run(go)
+
+
+def test_after_the_wait_the_touch_goes_to_the_element_as_the_new_read_has_it():
+    """The agent's ref names the element on its own list; after the wait the screen is read again, where another
+    element came first (refs of a fresh read would number it e1). The touch still goes to the allowed element."""
+    async def go():
+        d = make()
+        stop, task = await ready(d, [TRIP, button("e2", "Edit", "edit", rect=(10, 200, 100, 40))])
+        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, dialog=True))
+        await asked(d)
+        d.session.tree = [button("e1", "Banner", "banner", rect=(10, 20, 100, 40)), *d.session.tree]
+        d.dialog_answer("a", "c1-x", "allow")
+        await asyncio.wait_for(call, 2)
+        assert d.session.tap_points == [TRIP.center]
+        await finish(stop, task)
+    run(go)
+
+
+DRAFT = button("e1", "Delete draft", "delete", rect=(10, 100, 100, 40))
+
+
+@pytest.mark.parametrize("now", ["Delete account", "Delete all trips"])
+def test_an_ok_is_for_the_controls_words_too_not_only_its_id(now):
+    """(Codex, PR #9 cycle 1) A control keeps its id and place while its words change during the wait ("Delete draft"
+    to "Delete account", which the policy blocks, or to other words it holds back): the OK for the first is none for
+    it, and nothing is touched."""
+    async def go():
+        d = make()
+        stop, task = await ready(d, [DRAFT])
+        rules = policy.parse({"confirm": ["Delete"], "block": ["Delete account"]})
+        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"id": "delete"}, "look": False}, policy=rules,
+                                              dialog=True))
+        await asked(d)
+        d.session.tree = [button("e1", now, "delete", rect=(10, 100, 100, 40))]
+        d.dialog_answer("a", "c1-x", "allow")
+        with pytest.raises(Refused) as e:
+            await asyncio.wait_for(call, 2)
+        assert e.value.code == "not_allowed" and "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_live_view_ok_is_not_used_by_the_same_id_with_other_words():
+    async def go():
+        d = make()
+        d._queues_seen = d.subscribe()
+        stop, task = await ready(d, [DRAFT])
+        tap = {"target": {"id": "delete"}, "look": False}
+        with pytest.raises(Refused):
+            await d.run_tool("a", "tap", tap)
+        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
+        d.session.tree = [button("e1", "Delete all trips", "delete", rect=(10, 100, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        sent(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", tap)
+        assert str(e.value).startswith('needs_confirmation: button "Delete all trips"') and "tap" not in d.session.calls
+        assert [m["id"] for m in sent(d) if m["type"] == "confirm"] == ["c2-x"]  # asked anew, for the new words
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_blocked_touch_never_reaches_a_dialog():
     async def go():
         d = make()

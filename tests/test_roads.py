@@ -245,3 +245,36 @@ def test_a_road_that_is_not_there_is_repaired_as_a_new_one():
     made = roads.repair(data, "home", {"tool": "tap", "target": {"id": "gone"}}, "settings", {"tool": "tap", "target": {"id": "s"}},
                         {"id": "s"}, 90, LATER, BUILD)
     assert not made.new and made.gone == [] and len(data["roads"]) == 1
+
+
+# ---- CodeRabbit PR #9 ----
+def test_a_cell_is_never_saved_by_its_label_or_text_even_when_its_id_cannot_tell_it_apart():
+    rows = [el(f"e{n}", role="cell", label=f"Chat with Sara {n}", value="3 new", identifier="row") for n in range(roads.MAX_INDEX + 1)]
+    last = rows[-1]  # the 21st that shares the id: no index reaches it
+    made = move_of("tap", last, rows, target={"ref": last.ref})
+    assert made == {"tool": "tap", "target": {"row": True}}
+    assert "Sara" not in json.dumps(made) and "new" not in json.dumps(made)
+
+
+def test_a_road_aimed_at_a_row_is_kept_but_no_way_goes_by_it():
+    data = graph(("a", "b", "slow-1"), ("a", "m", "x"), ("m", "b", "y"))
+    data["roads"][0]["move"] = {"tool": "tap", "target": {"row": True}}  # one move: cheaper than the two by `m`
+    way = roads.plan(data, "a", "b", BUILD)
+    assert [s["to"] for s in way.steps] == ["m", "b"] and len(data["roads"]) == 3
+
+
+def test_a_saved_road_whose_move_now_stays_put_counts_a_failure_and_is_dropped_on_the_second():
+    data = places.empty_map("com.example.app")
+    move = {"tool": "tap", "target": {"id": "go"}}
+    roads.record(data, "a", "b", move, {"id": "go"}, 100, NOW, BUILD)
+    first = roads.record(data, "a", "a", move, {}, 100, LATER, BUILD)
+    assert first is not None and not first.dropped and data["roads"][0]["failed"] == 1
+    second = roads.record(data, "a", "a", move, {}, 100, LATER, BUILD)
+    assert second.dropped == [("a", "b")] and data["roads"] == []
+
+
+def test_a_row_road_is_the_way_only_when_there_is_no_other_so_the_drive_can_stop_and_say_why():
+    data = graph(("a", "b", "x"))
+    data["roads"][0]["move"] = {"tool": "tap", "target": {"row": True}}
+    way = roads.plan(data, "a", "b", BUILD)
+    assert way.kind == "roads" and [s["to"] for s in way.steps] == ["b"]

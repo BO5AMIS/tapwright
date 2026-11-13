@@ -57,6 +57,8 @@ def invalid(data: object) -> str | None:
     if not isinstance(data.get("places"), dict) or not all(
             isinstance(p, dict) and isinstance(p.get("key"), dict) for p in data["places"].values()):
         return "its places aren't an object of places that each have a key"
+    if not all(isinstance(p.get("titles", {}), dict) for p in data["places"].values()):
+        return "a place's titles aren't an object"
     for section, kind in (("roads", list), ("reflexes", list), ("routes", dict)):
         if section in data and not isinstance(data[section], kind):
             return f"its {section} are the wrong kind of thing"
@@ -91,6 +93,17 @@ def _rename(mapping: dict[str, str], name: str) -> str:
     return mapping.get(name, name)
 
 
+def _same_place(a: dict, b: dict) -> bool:
+    """Two records with one signature: one place? A screen with no identifiers is told from the others of its kinds by
+    its title alone (places.locate), so two such records are one place only when a title hash is shared (or neither
+    has a title); with identifiers the signature is the identity."""
+    parts = a["key"].get("parts")
+    if isinstance(parts, dict) and parts.get("ids"):
+        return True
+    ta, tb = set(a.get("titles", {}).values()), set(b.get("titles", {}).values())
+    return bool(ta & tb) or not (ta or tb)
+
+
 def merge(disk: dict, memory: dict) -> dict:
     """The map on disk and the one in memory as one (§18.9). Places go by key (a signature, or a route key), roads by
     (`from`, `move`, `to`); for either the newest `last` wins. A place's name: a person's beats a title's, which beats
@@ -101,15 +114,18 @@ def merge(disk: dict, memory: dict) -> dict:
         for place in mem["places"].values():
             place["titles"] = {}
             place.pop("titleVaries", None)
-    by_key = {places.key_id(p["key"]): name for name, p in out["places"].items()}
+    by_key: dict[str, list[str]] = {}
+    for name, p in out["places"].items():
+        by_key.setdefault(places.key_id(p["key"]), []).append(name)
     disk_names: dict[str, str] = {}
     mem_names: dict[str, str] = {}
     for name, rec in mem["places"].items():
         kid = places.key_id(rec["key"])
-        found = by_key.get(kid)
+        found = next((n for n in by_key.get(kid, []) if _same_place(out["places"][n], rec)), None)
         if found is None:
             final = name if name not in out["places"] else _unique(out["places"], name)
-            out["places"][final], by_key[kid], mem_names[name] = rec, final, final
+            out["places"][final], mem_names[name] = rec, final
+            by_key.setdefault(kid, []).append(final)
             continue
         old = out["places"][found]
         newer, other = (rec, old) if _last(rec) >= _last(old) else (old, rec)
@@ -129,8 +145,9 @@ def merge(disk: dict, memory: dict) -> dict:
             final = final if final not in out["places"] else _unique(out["places"], final)
             out["places"] = {(final if n == found else n): p for n, p in out["places"].items()}
             disk_names[found] = final
+            by_key[kid] = [final if n == found else n for n in by_key[kid]]
         out["places"][final] = joined
-        by_key[kid], mem_names[name] = final, final
+        mem_names[name] = final
     all_roads: dict[tuple[str, str, str], dict] = {}
     for source, names in ((out["roads"], disk_names), (mem["roads"], mem_names)):
         for road in source:
@@ -141,16 +158,17 @@ def merge(disk: dict, memory: dict) -> dict:
                 all_roads[key] = road
                 continue
             newer, other = (road, held) if _last(road) >= _last(held) else (held, road)
-            joined = {**newer, "names": {**other.get("names", {}), **newer.get("names", {})}}
+            joined = {**other, **newer, "names": {**other.get("names", {}), **newer.get("names", {})}}
             if newer.get("by") != other.get("by"):
                 joined["by"] = "both"
             all_roads[key] = joined
     out["roads"] = list(all_roads.values())
-    reflexes = {r.get("name"): r for r in out["reflexes"]}
+    def _at(reflex: dict, names: dict[str, str]) -> dict:
+        return {**reflex, "at": _rename(names, reflex["at"])} if "at" in reflex else reflex
+    reflexes = {r.get("name"): _at(r, disk_names) for r in out["reflexes"]}  # each follows its own map's renames
     for reflex in mem["reflexes"]:
-        reflexes[reflex.get("name")] = reflex
-    out["reflexes"] = [{**r, "at": _rename(mem_names, _rename(disk_names, r["at"]))} if "at" in r else r
-                       for r in reflexes.values()]
+        reflexes[reflex.get("name")] = _at(reflex, mem_names)
+    out["reflexes"] = list(reflexes.values())
     out["routes"] = {**out["routes"], **mem["routes"]}
     for field, value in mem.items():
         out.setdefault(field, value)
@@ -211,11 +229,15 @@ class MapFile:
                         self.lock_path.unlink()  # left behind by a process that died
                         continue
                 except OSError:
+                    if time.monotonic() > deadline:
+                        raise MapError(f"the map's lock {self.lock_path} can't be cleared ({LOCK_WAIT:g} s)") from None
                     continue  # it went away between the two calls
                 if time.monotonic() > deadline:
                     raise MapError(f"the map's lock {self.lock_path} stayed taken for {LOCK_WAIT:g} s") from None
                 time.sleep(LOCK_POLL)
-            except PermissionError:  # Windows: the lock file is being deleted just now
+            except PermissionError as e:  # Windows: the lock file is being deleted just now (or the folder can't be written)
+                if time.monotonic() > deadline:
+                    raise MapError(f"the map's lock {self.lock_path} can't be taken ({e.strerror or e})") from None
                 time.sleep(LOCK_POLL)
             else:
                 os.write(fd, str(os.getpid()).encode())
@@ -314,6 +336,27 @@ class MapFile:
         except (OSError, ValueError, RecursionError):
             return None
         return data if isinstance(data, dict) else None
+
+    def rename_in_routes(self, data: dict, renames: dict[str, str]) -> None:
+        """A place was renamed: the saved routes that start or end there say the new name (a route's start and end are
+        place names, and a route that names a place the map no longer has can't be driven). Never raises."""
+        for rel in data.get("routes", {}).values():
+            route = self._route_file(rel)
+            if not route or not any(route.get(end) in renames for end in ("start", "end")):
+                continue
+            for end in ("start", "end"):
+                if route.get(end) in renames:
+                    route[end] = renames[route[end]]
+            path = (self.folder / rel).resolve()
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            try:
+                tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def route_edges(self, data: dict) -> list[roads.RouteEdge]:
         """The saved routes as ways between places (`drive` counts one move per step). A route that can't be read, or

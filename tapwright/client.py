@@ -1,7 +1,10 @@
 """Find the running `tapwright serve`, or start it, and call its API (standard library only)."""
+import hashlib
+import hmac
 import http.client
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -77,8 +80,38 @@ def set_accounts(file: str | None = None) -> None:
         SCOPE["X-Tapwright-Accounts"] = str(os.path.abspath(os.path.expanduser(file)))
 
 
+PROOF_PREFIX = b"tapwright-proof-v2\x00"  # as server.PROOF_PREFIX (this module must not import server: starlette)
+
+
+def _prove(info: dict, timeout: float) -> None:
+    """Before the token goes anywhere: ask whoever listens on the port to prove it holds it. A stale serve.json (the
+    daemon died, another local process took its port) must not hand the token to that process. The client sends a random
+    challenge and the daemon answers HMAC-SHA256(token, prefix + challenge); the token itself is not sent until the
+    answer is right (constant-time compare). Raises DaemonError("unauthorized") for a wrong or missing proof; OSError
+    (a refused connection) passes up as it did, since nothing was sent."""
+    challenge = secrets.token_bytes(32)
+    req = urllib.request.Request(base_url(info) + "/api/prove", data=json.dumps({"challenge": challenge.hex()}).encode(),
+                                 method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            given = json.loads(r.read() or b"{}").get("proof")
+    except urllib.error.HTTPError:
+        given = None  # (an older daemon has no such route: it answers 401)
+    except (ValueError, AttributeError):
+        given = None
+    # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
+    # (the address this client dials: base_url's literal 127.0.0.1, never a name that could resolve elsewhere)
+    signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(info["port"])).encode()
+    want = hmac.new(str(info["token"]).encode(), signed, hashlib.sha256).hexdigest()
+    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), want.encode()):
+        raise DaemonError("unauthorized", "whatever listens on tapwright serve's port did not prove it holds the token "
+                                          "(a stale serve.json, or an older tapwright serve: `tapwright serve --stop`, "
+                                          "then start it again); the token was not sent")
+
+
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,
              client_id: str | None = None, dialog: bool = False) -> dict:
+    _prove(info, timeout)
     headers = {"Authorization": f"Bearer {info['token']}", "Content-Type": "application/json"}
     if client_id:
         headers["X-Tapwright-Client"] = client_id

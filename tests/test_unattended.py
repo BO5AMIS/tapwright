@@ -19,10 +19,10 @@ def test_a_phone_that_is_ready_has_nothing_in_the_way():
     assert needs.unattended(OK) == []
 
 
-def test_a_locked_phone_with_no_passcode_given_stops_a_run_and_says_how_to_fix_it():
+def test_a_locked_phone_stops_a_run_and_says_how_to_fix_it():
     (stop,) = needs.unattended(OK._replace(locked=True, passcode_given=False))
-    assert stop.what.startswith("The phone is locked and no passcode is given")
-    assert "phone.passcode" in stop.fix and "--accounts" in stop.fix and "Auto-Lock" in stop.fix
+    assert stop.what.startswith("The phone is locked")
+    assert stop.fix == needs.LOCKED
 
 
 def test_an_unlocked_phone_with_no_passcode_given_is_still_a_risk_for_a_long_run():
@@ -30,8 +30,11 @@ def test_an_unlocked_phone_with_no_passcode_given_is_still_a_risk_for_a_long_run
     assert stop.what.startswith("No passcode is given: if the phone locks during a run")
 
 
-def test_a_passcode_given_means_a_lock_is_not_in_the_way():
-    assert needs.unattended(OK._replace(locked=True, passcode_given=True)) == []
+def test_a_passcode_given_does_not_hide_a_lock_because_nothing_types_it():
+    (stop,) = needs.unattended(OK._replace(locked=True, passcode_given=True))
+    assert stop.what.startswith("The phone is locked") and "phone.passcode" not in needs.PASSCODE_FIX
+    (stop,) = needs.unattended(OK._replace(passcode_given=False))
+    assert "--accounts" not in stop.fix
 
 
 def test_enable_ui_automation_unknown_is_listed_and_off_is_listed_harder():
@@ -139,7 +142,7 @@ def test_the_report_names_each_stop_with_its_fix_and_never_prints_the_passcode(t
 def test_the_running_daemon_says_the_phone_is_locked_or_asking_for_its_passcode(tmp_path):
     status = {"state": "locked", "detail": "unlock the phone"}
     found = run(lambda: cli.unattended_stops(["udid"], None, connect=gives(Phone(True, 80)), status=status))
-    assert any(s.what.startswith("The phone is locked and no passcode is given") for s in found)
+    assert any(s.what.startswith("The phone is locked") for s in found)
     asking = {"state": "locked", "detail": "the phone is asking for its passcode to allow UI automation"}
     found = run(lambda: cli.unattended_stops(["udid"], None, connect=gives(Phone(True, 80)), status=asking))
     assert any(s.what.startswith("Enable UI Automation is off") for s in found)
@@ -157,3 +160,16 @@ def test_doctor_takes_unattended_and_an_accounts_file():
     import sys
     out = subprocess.run([sys.executable, "-m", "tapwright", "doctor", "--help"], capture_output=True, text=True, timeout=60)
     assert "--unattended" in out.stdout and "--accounts" in out.stdout
+
+
+def test_an_unpaired_client_that_does_not_raise_is_not_trusted_and_the_configured_phone_is_the_one_read():
+    class Unpaired(Phone):
+        paired = False
+    assert facts_of(Unpaired(True, 80)) == {"trusted": False}
+    asked = []
+
+    async def connect(udid):
+        asked.append(udid)
+        return Phone(True, 80)
+    run(lambda: cli.unattended_stops(["first", "second"], None, connect=connect, status=None))
+    assert asked == [cli.configured_phone(["first", "second"])]

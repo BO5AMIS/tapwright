@@ -3,8 +3,10 @@ switch, and screen generations that tell an agent its element refs went stale. A
 person's pointer path from the live view into a tap, long press or drag. Pure logic: no
 phone, no network."""
 import asyncio
+import contextvars
 import math
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -23,6 +25,22 @@ LONG_PRESS_MS = 500
 TAP_MS = 20
 TAP_MOVE_PT = 10.0
 PATH_POINTS = 20  # a drag is replayed through at most this many points
+
+
+@dataclass
+class _Turn:
+    """One agent action's hold on the queue: `held` is False while it has let go (Controller.aside)."""
+    held: bool = True
+
+
+# the running agent action's turn (set by Controller.agent for the call it runs)
+_TURN: contextvars.ContextVar["_Turn | None"] = contextvars.ContextVar("tapwright_turn", default=None)
+# Is the call's caller still waiting for its answer? Set by the HTTP API for the call it runs (server.py: the client has
+# not disconnected); None (MCP over stdio, the daemon's own calls): always. An action that waited for its turn checks it
+# as the turn comes, and does nothing for a caller that left (it gave up waiting: nobody would see what was done).
+STILL_WANTED: contextvars.ContextVar["Callable[[], Awaitable[bool]] | None"] = contextvars.ContextVar(
+    "tapwright_still_wanted", default=None)
+CALLER_LEFT = "the caller left before the phone was free; nothing was done"
 
 
 class Refused(Exception):
@@ -110,8 +128,9 @@ class Controller:
             self._person_at = self.clock()
             self._lock.release()
 
-    async def agent(self, fn):
-        """An agent's action: refused while paused, waits while a person drives."""
+    async def _take_turn(self) -> None:
+        """The queue's turn for an agent: refused while paused, waits while a person drives (busy after
+        AGENT_MAX_WAIT_S). Returns holding the lock."""
         start = self.clock()
         while True:
             if self.paused:
@@ -121,21 +140,65 @@ class Controller:
                     raise Refused("busy", "a person is using the phone; try again in a moment")
                 await self.sleep(0.25)
                 continue
-            async with self._lock:
-                if self.paused or self.person_active():
-                    continue  # a person got in first: let go of the queue and wait again
-                self._agent_running = True
-                refused = False
-                try:
-                    return await fn()
-                except Refused:
-                    refused = True
-                    raise
-                finally:
-                    self._agent_running = False
-                    if not refused:
-                        self.generation += 1
-                        self._agent_at = self.clock()
+            await self._lock.acquire()
+            if self.paused or self.person_active():
+                self._lock.release()  # a person got in first: let go of the queue and wait again
+                continue
+            wanted = STILL_WANTED.get()
+            try:
+                left = wanted is not None and not await wanted()
+            except BaseException:
+                self._lock.release()
+                raise
+            if left:
+                self._lock.release()
+                raise Refused("timeout", CALLER_LEFT)
+            return
+
+    async def agent(self, fn):
+        """An agent's action: refused while paused, waits while a person drives."""
+        await self._take_turn()
+        turn = _Turn()
+        token = _TURN.set(turn)
+        self._agent_running = True
+        refused = False
+        try:
+            return await fn()
+        except Refused:
+            refused = True
+            raise
+        finally:
+            _TURN.reset(token)
+            if turn.held:  # (an action that let go of its turn and couldn't take it back holds nothing: see aside)
+                self._agent_running = False
+                if not refused:
+                    self.generation += 1
+                    self._agent_at = self.clock()
+                self._lock.release()
+
+    def holds_turn(self) -> bool:
+        """Is the code running now inside an agent action that holds the queue's turn? (False outside any action.)"""
+        turn = _TURN.get()
+        return turn is not None and turn.held
+
+    async def aside(self, wait):
+        """Inside an agent's action: let go of the queue's turn while `wait()` waits for a person's answer (the
+        policy's OK, AGENT-TOOLS 11.3), so the live view can pause the phone or use it meanwhile, then take the turn
+        back the way an action takes it: refused (`paused`) while paused, after a person who drives (`busy` after
+        AGENT_MAX_WAIT_S). Anything may have happened on the phone meanwhile, so the caller checks its touch again
+        before it makes it. When `wait` raises, or the turn can't be taken back, the action ends without a turn.
+        Outside an action (nothing to let go of), `wait()` just runs."""
+        turn = _TURN.get()
+        if turn is None or not turn.held:
+            return await wait()
+        turn.held = False
+        self._agent_running = False
+        self._lock.release()
+        result = await wait()
+        await self._take_turn()
+        turn.held = True
+        self._agent_running = True
+        return result
 
     def touched(self) -> None:
         """A touch was delivered inside the running agent action, and the action may still end as refused (a journey's

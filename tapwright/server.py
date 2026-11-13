@@ -2,12 +2,15 @@
 WebSocket and the agent API, all behind one token; and starting, finding and stopping it.
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
 import socket
 import time
+import urllib.parse
 from importlib.resources import files
 from logging.handlers import RotatingFileHandler
 
@@ -18,7 +21,7 @@ from starlette.websockets import WebSocket
 
 from . import policy, store, trace, uxcheck
 from .ceiling import Ceiling
-from .control import Refused
+from .control import STILL_WANTED, Refused
 from .daemon import Scope
 from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
@@ -54,6 +57,26 @@ def _same(given: str, token: str) -> bool:
     return bool(given) and secrets.compare_digest(given.encode(), token.encode())
 
 
+PROOF_PREFIX = b"tapwright-proof-v2\x00"  # domain separation: the same HMAC key is never asked to sign anything else
+CHALLENGE_BYTES = (8, 64)
+
+
+def proof_of(token: str, challenge: bytes, port: int, host: str = "127.0.0.1") -> str:
+    """What a daemon that holds `token` answers to `challenge` (hex): HMAC-SHA256 over a fixed prefix and the challenge.
+    A client sends its token only to a process that has answered this, so a stale serve.json whose port another process
+    has taken never gets the token (Tapline's finding, 1.6 security). The daemon's own listening port is signed too, and
+    the client checks it against the port it dialled: a process on a stale port that relays the challenge to a live
+    daemon elsewhere gets a proof for that other port, which never matches (Tapline's Codex finding)."""
+    signed = PROOF_PREFIX + challenge + b"\x00" + _normal_host(host).encode() + b"\x00" + str(int(port)).encode()
+    return hmac.new(token.encode(), signed, hashlib.sha256).hexdigest()
+
+
+def _normal_host(host: str) -> str:
+    """The local address as both ends write it: an IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) is its IPv4 form."""
+    host = str(host).strip("[]").lower()
+    return host[len("::ffff:"):] if host.startswith("::ffff:") and "." in host else host
+
+
 def _bearer_ok(conn, token: str) -> bool:
     bearer = conn.headers.get("authorization", "")
     return _same(bearer[7:] if bearer.startswith("Bearer ") else "", token)
@@ -72,6 +95,15 @@ def _cookie_present(conn, token: str) -> bool:
 
 def _error(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+def _hv(request, name: str, default: str | None = None) -> str | None:
+    """A custom request header's value. `tapwright call` percent-encodes them all (and says so) when one has characters
+    outside Latin-1, which HTTP can't carry as they are (an app named 微信)."""
+    value = request.headers.get(name)
+    if value is None:
+        return default
+    return urllib.parse.unquote(value) if request.headers.get("x-tapwright-encoding") == "percent" else value
 
 
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
@@ -105,6 +137,25 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return HTMLResponse("cross-site request refused", status_code=403)
         return HTMLResponse(page, headers=PAGE_HEADERS)
 
+    async def prove(request):
+        """The proof that this process holds the token, asked before a client sends it. It needs no token (the client has
+        not sent it yet) and gives none away: an HMAC of a caller's challenge reveals nothing of its key."""
+        if not _host_ok(request, hosts):
+            return _error("unauthorized", "unknown host", 403)
+        try:
+            given = json.loads(await request.body())
+            challenge = bytes.fromhex(given["challenge"])
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return _error("bad_params", 'send {"challenge": "<8 to 64 random bytes as hex>"}', 400)
+        if not CHALLENGE_BYTES[0] <= len(challenge) <= CHALLENGE_BYTES[1]:
+            return _error("bad_params", 'send {"challenge": "<8 to 64 random bytes as hex>"}', 400)
+        # the port this connection really arrived on (the listening socket's, not the Host header, which a relay sets)
+        server = request.scope.get("server") or (None, None)
+        if not isinstance(server[1], int):
+            return _error("internal", "can't tell which port this daemon listens on", 500)
+        # the address and port this connection really arrived on (the socket's: a relay elsewhere signs its own)
+        return JSONResponse({"proof": proof_of(token, challenge, server[1], str(server[0]))})
+
     async def health(request):
         # `pages`: live-view pages connected now, so an agent's `viewer` can leave an open one be instead of opening
         # another tab (2026-11-12: agents opened two dozen). Only here, not in the status the viewer protocol sends.
@@ -122,16 +173,16 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if not isinstance(args, dict):
             return _error("bad_params", "the body must be a JSON object", 400)
         # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
-        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client") or "anonymous"
+        client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client") or "anonymous"
         # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
-        apps = tuple(a.strip() for a in request.headers.get("x-tapwright-apps", "").split(",") if a.strip())
-        dedicated = request.headers.get("x-tapwright-mode") == "dedicated"
+        apps = tuple(a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip())
+        dedicated = _hv(request, "x-tapwright-mode") == "dedicated"
         scope = None if dedicated else Scope(apps)
         # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
         if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
-        sent = request.headers.get("x-tapwright-policy")
+        sent = _hv(request, "x-tapwright-policy")
         try:
             rules = policy.loads(sent) if sent else None
         except ValueError as e:
@@ -141,17 +192,17 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             if why is not None:
                 return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
-        sent_ux = request.headers.get("x-tapwright-ux-rules")
+        sent_ux = _hv(request, "x-tapwright-ux-rules")
         try:
             ux_rules = uxcheck.loads(sent_ux) if sent_ux else None
         except ValueError as e:
             return _error("bad_params", f"the ux rules this agent was started with are refused: {e}", 400)
         # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
-        via: dict[str, str | bool] = {"via": "call"} if request.headers.get("x-tapwright-via") == "call" else {}
-        if request.headers.get("x-tapwright-dialog") == "1":
+        via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
+        if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
-        sent_maps = request.headers.get("x-tapwright-maps")
+        sent_maps = _hv(request, "x-tapwright-maps")
         if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
             return _error("bad_params", "--maps must be an absolute folder path", 400)
         if ceiling is not None:
@@ -161,7 +212,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if sent_maps is not None:
             via["maps"] = sent_maps
         # The test accounts file (--accounts, §18.6): only its path travels; a thin call may not name one serve wasn't given
-        sent_accounts = request.headers.get("x-tapwright-accounts")
+        sent_accounts = _hv(request, "x-tapwright-accounts")
         if sent_accounts is not None and (not os.path.isabs(sent_accounts) or "\x00" in sent_accounts):
             return _error("bad_params", "--accounts must be an absolute file path", 400)
         thin_call = via.get("via") == "call"
@@ -175,6 +226,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
         if accounts_path is not None:
             via["accounts"] = accounts_path
+
+        async def still_wanted() -> bool:
+            # a client that gave up (its own timeout) while the call waited for the phone gets nothing done for it
+            return not await request.is_disconnected()
+        wanted = STILL_WANTED.set(still_wanted)
         try:
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
                                                       policy=rules, ux_rules=ux_rules, **via))
@@ -183,13 +239,15 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net
             logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
+        finally:
+            STILL_WANTED.reset(wanted)
 
     async def dialog_body(request) -> tuple[str, dict] | Response:
         """The agent's client id and the JSON body of one of the host-dialog calls, or the refusal (dialog.py)."""
         problem = denied(request)
         if problem is not None:
             return problem
-        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client")
+        client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client")
         if not client:
             return _error("bad_params", "the host dialog's calls name their agent (X-Agent-Client)", 400)
         try:
@@ -227,7 +285,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         problem = denied(request)
         if problem is not None:
             return problem
-        client = request.headers.get("x-agent-client") or request.headers.get("x-tapwright-client")
+        client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client")
         if request.path_params["what"] not in ("ping", "end"):
             return _error("not_found", "the session calls are ping and end", 404)
         if not client:
@@ -403,6 +461,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         WebSocketRoute("/ws", ws),
         WebSocketRoute("/video", video),
         Route("/api/health", health),
+        Route("/api/prove", prove, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
         Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
@@ -437,6 +496,13 @@ def _bind(port: int) -> socket.socket | None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if os.name != "nt":  # on Windows this flag would let two servers share the port
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    else:
+        # Windows lets a later socket with SO_REUSEADDR bind the same address and port alongside this one unless this
+        # one claims it exclusively: a local process could then take some of the clients' connections, and a relay on
+        # the very same address and port would pass the token proof (Tapline's Codex review, 1.6 security)
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
     try:
         sock.bind(("127.0.0.1", port))
     except OSError:

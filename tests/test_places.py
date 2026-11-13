@@ -273,6 +273,27 @@ def test_a_screen_with_no_ids_needs_its_title_to_be_the_same_place():
     assert not back.new
 
 
+def test_places_told_apart_by_title_stay_two_through_save_merge_and_load(tmp_path):
+    from tapwright import mapfile
+    file = mapfile.MapFile(tmp_path, "com.example.app")
+    data = file.load()
+    one = seen(data, screen(title="One", body="")).name
+    file.save(data)  # observe and flush
+    two = seen(data, screen(title="Two", body="")).name
+    data["roads"].append({"from": one, "to": two, "move": {"tap": "go"}, "last": "2026-11-12T10:00:01Z"})
+    file.save(data)  # observe and flush again: merges with what the first save wrote
+    loaded = file.load()
+    assert sorted(loaded["places"]) == sorted([one, two]) and one != two
+    [road] = loaded["roads"]
+    assert (road["from"], road["to"]) == (one, two)
+    # and a fresh memory of the same two screens merges onto them without folding
+    again = places.empty_map("com.example.app")
+    again["titleKey"] = loaded["titleKey"]
+    seen(again, screen(title="Two", body=""))
+    seen(again, screen(title="One", body=""))
+    assert len(file.save(again)["places"]) == 2
+
+
 def test_a_tie_between_two_places_is_broken_by_the_title():
     data = new_map()
     a = seen(data, screen(title="Alpha", ids=("a", "b", "c", "d", "e", "f"))).name

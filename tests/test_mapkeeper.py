@@ -146,3 +146,49 @@ def test_a_failed_road_is_dropped_on_the_second_failure_and_from_the_file(tmp_pa
         await maps.flush()
         assert json.loads((tmp_path / APP / "map.json").read_text("utf-8"))["roads"] == []
     asyncio.run(go())
+
+
+# ---- CodeRabbit PR #9 ----
+def test_a_save_that_fails_on_the_disk_is_a_problem_the_flush_can_see_not_a_dead_task(tmp_path, monkeypatch):
+    async def go():
+        maps = mapkeeper.Maps(str(tmp_path))
+        maps.observe(None, APP, tree(), arrived=True)
+
+        def full(self, memory):
+            raise OSError(28, "No space left on device")
+        monkeypatch.setattr(mapkeeper.mapfile.MapFile, "save", full)
+        await maps.flush()
+        assert maps.problem(None, APP) is not None and "couldn't be saved" in maps.problem(None, APP)
+        assert maps.has_map(None, APP)  # what was learned is kept in memory
+    asyncio.run(go())
+
+
+def test_an_edit_after_the_file_turned_unusable_keeps_the_places_in_memory(tmp_path):
+    maps = mapkeeper.Maps(str(tmp_path))
+    seen = maps.observe(None, APP, tree(), arrived=True)
+    maps.edit(None, APP, lambda data: data["reflexes"].append({"name": "r", "do": {"tool": "back"}, "when": {"text": "x"}}))
+    (tmp_path / APP / "map.json").write_text("{ not json", "utf-8")  # broken after the map was cached
+    maps.edit(None, APP, lambda data: data["reflexes"].append({"name": "r2", "do": {"tool": "back"}, "when": {"text": "y"}}))
+    data = maps.data(None, APP)
+    assert seen.name in data["places"] and [r["name"] for r in data["reflexes"]] == ["r", "r2"]
+    assert maps.problem(None, APP) is not None
+
+
+def test_a_saved_route_follows_its_places_when_they_are_renamed(tmp_path):
+    maps = mapkeeper.Maps(str(tmp_path))
+    seen = maps.observe(None, APP, tree(), arrived=True)
+    file = maps.file(None, APP)
+    route = {"format": "agent-tools-script", "version": 2, "name": "go", "app": APP, "start": seen.name, "end": seen.name,
+            "variables": [], "steps": []}
+    file.write_route("go", route)
+    maps.data(None, APP)["routes"]["go"] = "routes/go.json"
+    maps.edit(None, APP, lambda data: places.set_name(data, seen.name, "Home"))
+    saved = json.loads((tmp_path / APP / "routes" / "go.json").read_text("utf-8"))
+    assert (saved["start"], saved["end"]) == ("home", "home")
+
+
+def test_a_screen_with_only_container_kinds_is_not_saved_as_a_place_it_could_never_be_found_again(tmp_path):
+    maps = mapkeeper.Maps(str(tmp_path))
+    bare = tree(title="", ids=())
+    assert places.has_structure(bare) and not places.recognisable(bare)
+    assert maps.observe(None, APP, bare, arrived=True) is None and not maps.has_map(None, APP)

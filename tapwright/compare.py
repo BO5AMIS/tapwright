@@ -391,7 +391,10 @@ def named_changes(result: Result, scale: float, items: list[ui.Element]) -> list
         hits = [e for e in items if (e.text if not big else e.text or e.identifier) and e.width * e.height <= page
                 and e.x < px[0] + px[2] and e.x + e.width > px[0] and e.y < px[1] + px[3] and e.y + e.height > px[1]
                 and _changed_in(result.mask, e.rect, scale)]
-        leaves = [e for e in hits if not any(o is not e and _holds(e.rect, o.rect) for o in hits)]
+        # (two elements of one rect hold each other: the first stays, so a change is never left with no name)
+        leaves = [e for n, e in enumerate(hits)
+                  if not any(o is not e and _holds(e.rect, o.rect) and (not _holds(o.rect, e.rect) or m < n)
+                             for m, o in enumerate(hits))]
         if leaves:
             found += [e.line(actions=False, place=False) for e in leaves if id(e) not in seen]
             seen.update(id(e) for e in leaves)

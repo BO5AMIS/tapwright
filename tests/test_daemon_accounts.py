@@ -216,6 +216,55 @@ def test_the_then_steps_of_a_drive_may_type_an_account(tmp_path):
     run(go)
 
 
+def test_an_accounts_value_is_not_typed_into_an_app_it_isnt_for_even_after_a_step_switched_apps(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.installed.append({"bundle_id": "com.other.app", "name": "Other", "version": "1", "build": "1", "executable": "Other"})
+        stop, task = await started(d)
+        await explore(d)
+        switch = {"tool": "open_app", "app": "com.other.app"}
+        d.session.at = "login"
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:  # a then step
+            await d.run_tool("a", "drive", {"to": "login", "account": "tester2", "then": [
+                switch, {"tool": "type_text", "target": {"id": "password"}, "text": "${account.password}"}]})
+        assert e.value.code == "not_allowed" and "not for this app" in str(e.value) and PASSWORD not in str(e.value)
+        assert d.session.typed == [] and d.session.foreground == "com.other.app"
+        # a route's own step
+        d.session.foreground, d.session.app, d.session.at = BUNDLE, ("Example", BUNDLE), "welcome"
+        await d.run_tool("a", "look", {"screenshot": False})
+        steps = [SIGN_IN[0], switch, SIGN_IN[1]]
+        d.maps.file(None, BUNDLE).write_route("hop", routes.route("hop", BUNDLE, "welcome", "home", ["account"], steps))
+        d.maps.edit(None, BUNDLE, lambda data: data["routes"].__setitem__("hop", "routes/hop.json"))
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "drive", {"route": "hop", "account": "tester2"})
+        assert e.value.code == "not_allowed"
+        assert d.session.typed == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_accounts_value_in_an_element_is_scrubbed_from_the_live_view_and_the_log(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["welcome"] = screen("Welcome", ids=(USER, "w1"))
+        stop, task = await started(d)
+        queue = d.subscribe()
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"id": USER}})
+        sent = []
+        while not queue.empty():
+            sent.append(json.dumps(queue.get_nowait()))
+        shown = "\n".join(sent)
+        assert '"type": "action"' in shown and "<tester2's username>" in shown
+        assert USER not in shown
+        logged = "\n".join(p.read_text("utf-8", errors="replace") for p in (tmp_path / "log").rglob("*") if p.is_file())
+        assert '"tool": "tap"' in logged and "<tester2's username>" in logged
+        assert USER not in logged
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_account_is_checked_before_anything_is_touched(tmp_path):
     async def go():
         d = mapped(tmp_path)

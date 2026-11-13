@@ -36,6 +36,7 @@ class Maps:
         self._dirty: set[Key] = set()
         self._dropped: dict[Key, list[tuple[str, str, str]]] = {}  # roads dropped in memory, to be dropped from the file too
         self._forgotten: dict[Key, set[str | None]] = {}  # reflexes forgotten by an edit, to be dropped from a save under way
+        self._forgotten_places: dict[Key, dict[str, str]] = {}  # places forgotten by an edit (name: key id), likewise
         self._tasks: dict[Key, asyncio.Task] = {}
         self._told: set[Key] = set()
 
@@ -78,7 +79,7 @@ class Maps:
         """The screen the agent is on: the place it is (saved if new). None for a screen with nothing to recognise it by.
         `arrived`: the agent came here from somewhere else (a title counts only on an arrival); None: it did, unless this
         is the place it was at before (`previous`), as a look at the same screen again."""
-        if not places.has_structure(tree):
+        if not places.recognisable(tree):
             return None
         data = self.data(root, app)
         had_map = bool(data["places"])
@@ -87,6 +88,8 @@ class Maps:
             arrived = places.locate(data, read)[0] != previous or previous is None
         visit = places.visit(data, read, mapfile.now(), arrived)
         self._changed(root, app)
+        if visit.renamed_from is not None and self.file(root, app).problem is None:
+            self.file(root, app).rename_in_routes(data, {visit.renamed_from: visit.name})
         return Seen(visit.name, visit.new, visit.renamed_from, had_map)
 
     def record(self, root: str | None, app: str, src: str, dst: str, move: dict, names: dict, ms: int,
@@ -142,16 +145,28 @@ class Maps:
             snapshot = copy.deepcopy(self._memory[key])
             try:
                 merged = await asyncio.to_thread(file.save, snapshot)
-            except mapfile.MapError as e:
+            except (mapfile.MapError, OSError) as e:
                 file.problem = f"The map for {key[1]} couldn't be saved ({e}); what is learned is kept until the daemon stops."
                 self._told.discard(key)
                 continue
+            if file.problem is not None:  # the save found the file unusable: it was left alone, memory is all there is
+                continue
             gone = self._dropped.pop(key, [])
             forgotten = self._forgotten.pop(key, set())  # reflexes forgotten while this save ran, the same way
-            if gone or forgotten:  # a merge would bring them back from the snapshot: take them out of the file
-                merged = await asyncio.to_thread(file.update, lambda d: d.update(
-                    roads=[r for r in d["roads"] if roads.identity(r) not in gone],
-                    reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten]))
+            lost = self._forgotten_places.pop(key, {})  # places forgotten while this save ran, the same way
+            if gone or forgotten or lost:  # a merge would bring them back from the snapshot: take them out of the file
+                def undo(d: dict) -> None:
+                    out = {n for n, kid in lost.items() if n in d["places"] and places.key_id(d["places"][n]["key"]) == kid}
+                    d.update(places={n: p for n, p in d["places"].items() if n not in out},
+                             roads=[r for r in d["roads"] if roads.identity(r) not in gone
+                                    and not ({r.get("from"), r.get("to")} & out)],
+                             reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten and r.get("at") not in out])
+                try:
+                    merged = await asyncio.to_thread(file.update, undo)
+                except (mapfile.MapError, OSError) as e:
+                    file.problem = f"The map for {key[1]} couldn't be saved ({e}); what is learned is kept until the daemon stops."
+                    self._told.discard(key)
+                    continue
             if file.problem is None:
                 self._memory[key] = mapfile.merge(merged, self._memory[key])  # what changed meanwhile stays
 
@@ -170,22 +185,38 @@ class Maps:
         key = self._key(root, app)
         data, file = self.data(root, app), self.file(root, app)
         result: list[T] = []
+        renames: dict[str, str] = {}
         if file.problem is not None:
             result.append(change(data))
             return result[0]
         def edited(d: dict) -> None:
             before = {r.get("name") for r in d["reflexes"]}
+            places_before = {n: places.key_id(p["key"]) for n, p in d["places"].items()}
             result.append(change(d))
+            after_places = {places.key_id(p["key"]): n for n, p in d["places"].items()}
+            renames.update({n: after_places[kid] for n, kid in places_before.items()
+                            if n not in d["places"] and after_places.get(kid, n) != n})  # a place under another name
             after = {r.get("name") for r in d["reflexes"]}
             task = self._tasks.get(key)
             forgotten = self._forgotten.setdefault(key, set())
+            gone_places = self._forgotten_places.setdefault(key, {})
             if task is not None and not task.done():
                 forgotten |= before - after  # a save already under way would bring these back from its snapshot
+                # ...and so would a place (with the roads and reflexes that touched it) from its snapshot or the merge
+                gone_places.update({n: kid for n, kid in places_before.items() if n not in d["places"]})
             forgotten -= after  # (a reflex added again is wanted)
+            for n in [n for n in gone_places if n in d["places"] and places.key_id(d["places"][n]["key"]) == gone_places[n]]:
+                del gone_places[n]  # (a place put back is wanted)
         try:
             file.save(copy.deepcopy(data))
+            if file.problem is not None:  # the file turned out unusable: the edit goes on the map in memory, not on a new one
+                result.append(change(data))
+                self._dirty.discard(key)
+                return result[0]
             self._memory[key] = file.update(edited)
-        except mapfile.MapError as e:
+            if renames:
+                file.rename_in_routes(self._memory[key], renames)
+        except (mapfile.MapError, OSError) as e:
             result.clear()
             file.problem = f"The map for {app} couldn't be saved ({e}); what is learned is kept until the daemon stops."
             result.append(change(data))

@@ -177,6 +177,9 @@ def _read(data: object) -> tuple[dict[str, Account], str | None, str | None]:
         for key in ("username", "password", "passcode"):
             if key in entry and (not isinstance(entry[key], str) or not entry[key]):
                 return {}, None, f"{name}'s {key} must be a non-empty text"
+        for key in ("username", "password"):
+            if key in entry and len(entry[key]) < MIN_SCRUBBED:  # too short to be scrubbed out of text, so not accepted
+                return {}, None, f"{name}'s {key} must be at least {MIN_SCRUBBED} characters: a shorter one can't be kept out of answers and maps"
         apps = entry.get("apps")
         if apps is not None and (not isinstance(apps, list) or not all(isinstance(a, str) and a for a in apps)):
             return {}, None, f"{name}'s apps must be a list of bundle ids"

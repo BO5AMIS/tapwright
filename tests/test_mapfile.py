@@ -278,3 +278,37 @@ def test_no_private_text_reaches_the_file(tmp_path):
     for secret in (*private, "Sara", "Omar", "10432", "3 new"):
         assert secret not in text
     assert any(r["move"]["target"] == {"row": True} for r in json.loads(text)["roads"])
+
+
+# ---- CodeRabbit PR #9 ----
+def test_each_reflex_follows_the_renames_of_its_own_map_only():
+    disk = {**places.empty_map(APP), "places": {"home": place("sa")}, "reflexes": [{"name": "d", "at": "home"}]}
+    memory = {**places.empty_map(APP), "places": {"home": place("sb")}, "reflexes": [{"name": "m", "at": "home"}]}
+    merged = mapfile.merge(disk, memory)
+    assert set(merged["places"]) == {"home", "home_2"}  # the memory's place got the second name
+    assert {r["name"]: r["at"] for r in merged["reflexes"]} == {"d": "home", "m": "home_2"}
+
+
+def test_a_road_field_only_the_file_has_survives_the_merge():
+    disk = {**places.empty_map(APP), "places": {"a": place("sa"), "b": place("sb")}, "roads": [road(extra="kept", last=T1)]}
+    memory = {**places.empty_map(APP), "places": {"a": place("sa"), "b": place("sb")}, "roads": [road(last=T2)]}
+    assert mapfile.merge(disk, memory)["roads"][0]["extra"] == "kept"
+
+
+def test_a_place_whose_titles_are_not_an_object_makes_the_map_unusable():
+    data = {**places.empty_map(APP), "places": {"a": place("sa", titles=[])}}
+    assert "titles" in mapfile.invalid(data)
+
+
+def test_a_lock_that_cannot_be_opened_is_given_up_on_after_the_wait(tmp_path, monkeypatch):
+    f = mapfile.MapFile(tmp_path, APP)
+    monkeypatch.setattr(mapfile, "LOCK_WAIT", 0.2)
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(mapfile.os, "open", denied)
+    began = time.monotonic()
+    with pytest.raises(mapfile.MapError):
+        f.update(lambda data: None)
+    assert time.monotonic() - began < 5
+    assert not mapfile._PROCESS_LOCK.locked()  # the process lock is let go

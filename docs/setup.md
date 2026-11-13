@@ -112,7 +112,8 @@ ones as the daemon's own settings.
 - **`tapwright serve --apps A,B`** (or `--dedicated`): the ceiling, the widest scope any call may ask for, from
   an MCP server or from `tapwright call`. A call may name these apps or fewer, never more, and its own `--policy`
   may add words that need an OK or are blocked, never remove one (`serve --policy FILE` sets the daemon's own).
-  Without `--apps` or `--dedicated` there is no ceiling. The flags apply when the daemon starts: a daemon that is
+  Without `--apps` or `--dedicated` the daemon refuses every call (no scope, nothing allowed), and adding `--apps` to
+  each call doesn't fix that: restart it with a scope. The flags apply when the daemon starts: a daemon that is
   already running keeps its own, so `tapwright serve --stop` first.
 - **`tapwright call TOOL ['JSON']`**: one tool without an MCP connection, for a host that can't keep one. It talks to
   the running daemon (it never starts one: `tapwright serve` does) and loads only Python's standard library, so it

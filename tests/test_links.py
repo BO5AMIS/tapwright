@@ -92,3 +92,30 @@ def test_a_pattern_names_its_params_and_takes_values():
     assert links.fill("wayfare://settings", {}) == "wayfare://settings"
     with pytest.raises(ValueError, match="needs id"):
         links.fill("wayfare://trips/[id]", {})
+
+
+def test_a_percent_encoded_link_is_matched_and_kept_by_what_it_says():
+    """1.6 security (Tapline's finding): `wayfare://trips/%34%38%32` is the id 482 and `%74rips` is `trips`. Segments are
+    compared decoded (again until stable); what is kept is the place's pattern, never the opened text."""
+    data = book(trips_id="wayfare://trips/[id]", settings="wayfare://settings")
+    for url in ("wayfare://%74rips/%34%38%32", "wayfare://trips/%2534%2538%2532", "wayfare://trips/%34%38%32?t=%53ECRET"):
+        kept = links.canonical(data, url)
+        assert kept == "wayfare://trips/[id]" and "482" not in kept and "%" not in kept
+    assert links.canonical(data, "wayfare://%73ettings") == "wayfare://settings"
+    assert links.canonical(data, "wayfare://settings/%34%38%32") is None  # an id after a fixed place: not a known link
+    assert links.canonical(data, "wayfare://trips/%2F") == "wayfare://trips/[id]"  # %2F is text in one segment, not a slash
+    assert links.canonical(data, "wayfare://trips/" + "%25" * 40 + "34") == "wayfare://trips/[id]"  # (bounded decoding)
+    data = book(trips_id="wayfare://trips/[id]", detail=None)
+    done = links.landed(data, "wayfare://trips/%34%38%32", "detail")
+    assert done.link == "wayfare://trips/[id]" and data["places"]["detail"]["link"] == "wayfare://trips/[id]"
+
+
+def test_a_segment_that_cannot_be_read_for_sure_matches_nothing():
+    """Tapline's Codex finding: an escape left after the last decoding round, or one that isn't UTF-8, fails closed."""
+    from tapwright.links import _decoded
+    assert _decoded("%34%38%32") == "482" and _decoded("plain") == "plain"
+    assert _decoded("%FF%64") is None  # not UTF-8
+    deep = "4"
+    for _ in range(10):
+        deep = deep.replace("%", "%25") if "%" in deep else "%34"
+    assert _decoded(deep) is None  # still encoded after the bounded rounds

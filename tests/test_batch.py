@@ -309,3 +309,10 @@ def test_an_element_behind_an_alert_is_not_named_by_a_selector_that_finds_the_al
     assert batch.recorded_target({"ref": "e2"}, items) == {"label": "OK"}
     assert replays_as(items, {"label": "OK"}, front)
     assert "x" in batch.recorded_target({"ref": "e1"}, items)  # "OK" would be the alert's, so only its place is left
+
+
+def test_a_drive_step_keeps_its_route_as_its_own_argument_and_other_tools_do_not():
+    # (CodeRabbit PR #9) the saved route a drive is told to take must reach drive
+    step = {"tool": "drive", "route": "login", "account": "tester1"}
+    assert batch.args_of(step) == {"route": "login", "account": "tester1", "look": False}
+    assert "route" not in batch.args_of({"tool": "tap", "target": {"id": "a"}, "route": "x"})

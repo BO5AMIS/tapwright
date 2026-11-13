@@ -64,9 +64,7 @@ def phone_moment(state: str | None, detail: str | None) -> Moment | None:
 
 # ---- `doctor --unattended`: what would stop a run with nobody at the phone ----
 LOW_BATTERY = 20  # percent under which a long run may lose the phone
-PASSCODE_FIX = ("Give the phone's passcode in the accounts file (`phone.passcode`) and start with `tapwright serve "
-                "--accounts FILE`; or, on a phone kept for testing, set Settings > Display & Brightness > Auto-Lock to "
-                "Never and unlock it.")
+PASSCODE_FIX = ("On a phone kept for testing, set Settings > Display & Brightness > Auto-Lock to Never and unlock it.")
 UI_AUTOMATION_FIX = "Settings > Developer > Enable UI Automation: turn it on."
 
 
@@ -99,11 +97,11 @@ def unattended(f: Facts) -> list[Stop]:
         stops.append(Stop("Enable UI Automation can't be read from the computer: if it's off, iOS asks for the passcode "
                           "before each start, and nothing can answer it without a person.",
                           "Check that it's on. " + UI_AUTOMATION_FIX))
-    if not f.passcode_given:
-        what = ("The phone is locked and no passcode is given: a call that needs the phone stops at the lock screen."
-                if f.locked else
-                "No passcode is given: if the phone locks during a run (Auto-Lock), nothing can unlock it.")
-        stops.append(Stop(what, PASSCODE_FIX))
+    if f.locked:  # (a given passcode is never typed on the lock screen: it doesn't lift this stop)
+        stops.append(Stop("The phone is locked: a call that needs the phone stops at the lock screen.", LOCKED))
+    elif not f.passcode_given:
+        stops.append(Stop("No passcode is given: if the phone locks during a run (Auto-Lock), nothing can unlock it.",
+                          PASSCODE_FIX))
     if f.battery is not None and f.battery < LOW_BATTERY:
         stops.append(Stop(f"The battery is at {f.battery}%: the phone may switch itself off in a long run.",
                           "Charge it, and keep it on a cable during the run."))

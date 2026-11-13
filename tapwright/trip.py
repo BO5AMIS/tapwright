@@ -88,6 +88,7 @@ class Trip:
         self.edges: list[roads.RouteEdge] = []
         self.bid = ""
         self.may_jump = True
+        self.foreign = False  # the app in front at the last read isn't the trip's app
 
     # ---- the map ----
     @property
@@ -96,7 +97,7 @@ class Trip:
 
     def place_of(self, tree: ui.Tree | None) -> str | None:
         """The saved place a read is; None when it is none (nothing is saved here: a drive only recognises)."""
-        if tree is None or not places.has_structure(tree):
+        if tree is None or self.foreign or not places.has_structure(tree):
             return None
         return places.locate(self.data, places.read_place(tree, self.d._language.get(self.bundle)))[0]
 
@@ -134,6 +135,7 @@ class Trip:
         tree = d.session.last_tree
         if tree is None:
             raise Refused("internal", "the phone gave no screen to read; look, then try again")
+        self.foreign = bool(self.bundle) and d._bundle() != self.bundle  # another allowed app: the map here isn't its map
         return tree
 
     def ready(self, hop: Hop | None) -> bool:
@@ -171,8 +173,10 @@ class Trip:
                 other = (place, other[1] + 1) if other and other[0] == place else (place, 1)
                 if other[1] >= SETTLE_READS:
                     return Seen(place, False, tree)
+                await self.between(tree)
             else:
                 other = None
+                await self.between(tree)  # a sheet over the page isn't the page: its dismissing reflex still has its moment
             if self.clock() >= deadline:
                 return Seen(place, False, tree)
             await self.d.control.sleep(POLL)
@@ -361,7 +365,7 @@ class Trip:
         if fixed is not None:
             hop.fixed, hop.move = fixed, fixed.move
             return hop
-        if hop.road is not None and hop.src is not None:
+        if self.writes and hop.road is not None and hop.src is not None:  # (a replay never writes the map)
             self.dropped(self.d.maps.fail(self.root, self.bundle, hop.src, hop.road["move"]))
         await self.off_route(step, total, hop.move, NOT_HERE, seen.place)
         return hop
@@ -416,7 +420,7 @@ class Trip:
             return
         if seen.place == hop.dst:
             if hop.fixed is not None:
-                made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, hop.fixed.names, ms, self.build)
+                made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, d._loaded().clean(hop.fixed.names), ms, self.build)
                 self.dropped([(a, b) for a, b in made.dropped])
                 self.repairs.append(hop.fixed)
                 self.lines.append(driving.repaired_line(hop.fixed))

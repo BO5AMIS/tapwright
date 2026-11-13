@@ -196,6 +196,12 @@ def test_only_the_elements_that_changed_are_named_and_a_container_gives_way_to_w
     assert names(((110, 505, 150, 515), BLACK), items=[card]) == ['e8 text "Card"']  # nothing smaller there
 
 
+def test_a_cell_and_its_text_with_the_same_rect_still_leave_one_name():
+    # (CodeRabbit PR #9) each held the other, so both were dropped and a small change had no name at all
+    cell = el("e7", "cell", "from €1,362", rect=(100, 500, 120, 20))
+    assert names(((110, 505, 118, 510), BLACK), items=[cell, PRICE]) == ['e7 cell "from €1,362"']
+
+
 def test_regions_are_in_pixels_and_elements_in_points_so_the_scale_is_applied():
     price = el("e3", "text", "€1", rect=(50, 250, 60, 10))  # points; the picture is 2 px to a point
     assert names(((110, 505, 118, 510), BLACK), items=[price], scale=2.0) == ['e3 text "€1"']

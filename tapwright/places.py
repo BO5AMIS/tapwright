@@ -109,6 +109,12 @@ def has_structure(tree: ui.Tree) -> bool:
     return bool(tree.structure.kinds or tree.structure.ids)
 
 
+def recognisable(tree: ui.Tree) -> bool:
+    """Could a later read tell this screen from the others of its kinds? Only by an identifier or a title (`locate`): a
+    screen with only container kinds would be saved as a new place at every visit and never found again."""
+    return has_structure(tree) and bool(tree.structure.ids or " ".join(tree.structure.title.split()))
+
+
 def read_place(tree: ui.Tree, lang: str | None = None) -> PlaceRead:
     """The place a screen read shows: its signature key, and its title with the language bucket. `lang`: the
     language the app was started with, when it is known."""

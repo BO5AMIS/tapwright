@@ -232,7 +232,9 @@ Once the tool knows the app, a trip is one call. Your rules:
   lines of changes, then `…<n> more: look shows them.` `look` is always whole. Never cut an answer with head, grep or sed.
 - **A person's OK** (`needs_confirmation`) shows as a question in your user's chat when the host can show the
   dialog, and in the live view. The call waits for the answer; if it still answers `needs_confirmation` after they
-  allowed it, make the same call again once. `locked` and `paused`: stop and tell the user.
+  allowed it, make the same call again once, for a single action. A `run` or `drive` with `then` that stopped at one
+  has already done its earlier steps: read the reported progress and the screen, and go on from the stopped step,
+  never the whole batch again. `locked` and `paused`: stop and tell the user.
 - **`session_report`** gives seconds as well as calls: the `Time:` line splits them into thinking time between
   calls and the tool's own time, by tool, and it flags calls that each started a new process (load the MCP server
   once). Read it after a driver's run: when the thinking time between its calls is most of the total, a faster model

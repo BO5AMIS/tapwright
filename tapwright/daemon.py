@@ -590,7 +590,7 @@ class Confirm:
     `declined`. `until` is the clock time (the controller's) a pending request expires, or an allow lapses."""
     id: str
     tool: str
-    key: tuple[str, ...]  # the element: its id, else its role, label and text
+    key: tuple[str, ...]  # the element: its app, id, role, label and text (Daemon._police_key)
     until: float
     state: str = "pending"
     message: dict | None = None  # what viewers were sent, for one that connects while it is open
@@ -790,6 +790,8 @@ _SCOPE_BY_READ: contextvars.ContextVar["dict[str, str] | None"] = contextvars.Co
 # Set by _within for a tap the fork's tap checks itself (route version 4, Session.front_by_touch): the runner touches only
 # while a given app is in front, so no question is asked first (1.6 E3). Holds the given apps.
 _SCOPE_BY_TOUCH: contextvars.ContextVar["dict[str, str] | None"] = contextvars.ContextVar("tapwright_scope_by_touch", default=None)
+# The touches a tap with _SCOPE_BY_READ has made so far, each checked by _touch_in_scope (set in act_as_agent)
+_SCOPE_TOUCHED: contextvars.ContextVar["list[bool] | None"] = contextvars.ContextVar("tapwright_scope_touched", default=None)
 FILM_LIMITS = {"frames": filmlib.FRAMES, "interval_ms": filmlib.INTERVAL_MS, "frame_width": filmlib.FRAME_WIDTH}
 BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 # not on the phone's queue: the first three sleep before they answer, network talks to the instruments service
@@ -1006,6 +1008,11 @@ class Daemon(journey_tool.JourneyTools):
 
     def _announce(self, by: str, kind: str, label: str | None = None, point=None, ok: bool = True,
                   code: str | None = None, caption: str | None = None, reason: str | None = None) -> None:
+        # an account's value is scrubbed before it is broadcast or logged, as in an answer (Codex, PR #9 cycle 1)
+        scrub = self._loaded().scrub
+        label = scrub(label) if label else label
+        caption = scrub(caption) if caption else caption
+        reason = scrub(reason) if reason else reason
         message = {"type": "action", "by": by, "kind": kind, "at": int(time.time() * 1000), "ok": ok}
         if label:
             message["label"] = label
@@ -1769,10 +1776,15 @@ class Daemon(journey_tool.JourneyTools):
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
         said = answer["text"] if answer is not None else message
+        scrub = self._loaded().scrub  # an account's value is never in the log (a label, a target's text)
+        target = actionlog.target_of(args.get("target"))
+        if target is not None:
+            target = {k: scrub(v) if isinstance(v, str) else v for k, v in target.items()}
+        element = told.get("label")
         self.actions.write({
             "source": "tapwright", "by": "agent", "client": client, "tool": name, "kind": "read" if read else None,
-            "target": actionlog.target_of(args.get("target")),
-            "element": told.get("label"), "ok": error is None, "code": error.code if error is not None else None,
+            "target": target,
+            "element": scrub(element) if isinstance(element, str) else element, "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000), "via": _VIA.get(),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "answer_chars": len(said) if isinstance(said, str) else None,
@@ -2921,6 +2933,26 @@ class Daemon(journey_tool.JourneyTools):
         if root is None or alert or not root[1] or root[1] == SPRINGBOARD or root[1] not in given:
             raise Rescope()
 
+    def _touch_in_scope(self) -> None:
+        """Personal mode, a tap whose scope check came from its own read (_SCOPE_BY_READ): just before each touch it
+        makes (the session's touch hook, and the keyboard's own dismissal), the newest read since its last touch must
+        name a given app (_scope_from_read). A read of another app (a loading wait's poll that found app B, a scroll
+        or a keyboard closed on the way), or no read since its last touch, touches nothing: Rescope, the separate
+        question, as before (Codex, PR #9 cycle 1). A check that passed is used up by its touch. Elsewhere: nothing."""
+        given = _SCOPE_BY_READ.get()
+        if given is None:
+            return
+        touched = _SCOPE_TOUCHED.get()
+        try:
+            self._scope_from_read(given)
+        except Rescope:
+            if touched:  # a touch of this call went out before (a keyboard closed): refs from before it are stale
+                self.control.touched()
+            raise
+        self._read_root = None
+        if touched is not None:
+            touched.append(True)
+
     async def _within(self, scope: "Scope", client_id: str, name: str, args: dict, bounced: bool = False) -> dict:
         """One tool call in personal mode, failing closed. Nothing runs without an app list. Opening or closing an
         app outside the list is refused. Reading or touching is refused while another app is in front (asked of
@@ -3169,6 +3201,10 @@ class Daemon(journey_tool.JourneyTools):
                 self._scope_from_read(scoped)
             if by_lookup and target.kind != "point" and not dry and self._missing(s.items, target) and reflex.loading(s.items):
                 await self._wait_loading(view, target)  # (§18.7) a loading indicator: what it loads may be the target
+                if scoped is not None:
+                    # the wait's reads replaced the list: what they found may be another app's screen, and the check
+                    # above was on the first read only (Codex, PR #9 cycle 1)
+                    self._scope_from_read(scoped)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
                 if self._missing(s.items, dataclasses.replace(target, index=None)):
                     # an alert hides the app's elements: say so, not "not found". (When only the `index` is
@@ -3202,20 +3238,42 @@ class Daemon(journey_tool.JourneyTools):
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
+            if scoped is not None:
+                # the newest read is the one the touch is aimed from (a keyboard closed or a scroll on the way read
+                # again): it names a given app, or nothing is asked of a person and nothing is touched (Codex, PR #9
+                # cycle 1). Each touch is checked once more as it goes out (_touch_in_scope), and the runner's own
+                # tap checks the app in front too where it can (1.6 E3)
+                self._scope_from_read(scoped)
+                if not dry and s.front_by_touch():
+                    s.front_apps = tuple(scoped)
             handler = self._handlers.get(name)
             if dry and name == "swipe":
                 self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
-            return await (handler(view, use) if handler else call(s, use))
+            people = self.control.person_generation
+            try:
+                return await (handler(view, use) if handler else call(s, use))
+            finally:
+                if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
+                    fresh[0] = False
 
         async def act_as_agent():
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
             # person's input from the live view, queued separately, is never announced as the agent's
-            self.session.touch_hook, self.session.banner_guard = self._agent_touches.notify, True
+            notify = self._agent_touches.notify
+
+            async def touching(ms: float) -> None:
+                self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
+                await notify(ms)
+            self.session.touch_hook = notify if _SCOPE_BY_READ.get() is None else touching
+            self.session.banner_guard = True
+            touched_token = _SCOPE_TOUCHED.set([])
             try:
                 return await act()
             finally:
-                self.session.touch_hook, self.session.banner_guard = None, False
-                self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
+                _SCOPE_TOUCHED.reset(touched_token)
+                if self.control.holds_turn():  # (an action that let go of its turn and ended without it set nothing now)
+                    self.session.touch_hook, self.session.banner_guard = None, False
+                    self.session.front_apps = None  # (a tap that checked the app in front cleared it already)
 
         try:
             result = await self.control.agent(act_as_agent)
@@ -4610,7 +4668,15 @@ class Daemon(journey_tool.JourneyTools):
         else:
             self._guard(view, field)
             at = self._touch_point(field)
-        real = accountlib.typed(a["text"], _ACCOUNT.get(), field.secure, field.ref)  # (a placeholder is checked against this field)
+        active = _ACCOUNT.get()
+        if active is not None and active.apps is not None and accountlib.mentions(a["text"]):
+            # the account's app limit is checked where its value would be typed, against the app in front now: a step
+            # (a route's, or drive's `then`) may have switched apps since drive began
+            front = await self._connected_only(self.session.foreground_bundle_id)  # (inside the agent's turn: no queue)
+            if front not in active.apps:
+                raise Refused("not_allowed", f"account {active.name} is not for this app: it may be used only in "
+                                             f"{', '.join(active.apps)}; this is {front or 'no app'}. Nothing was typed.")
+        real = accountlib.typed(a["text"], active, field.secure, field.ref)  # (a placeholder is checked against this field)
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
 
@@ -4902,6 +4968,7 @@ class Daemon(journey_tool.JourneyTools):
             elif step == "dismiss" and app not in self._no_dismiss:
                 # WebDriverAgent's dismissal looks for a key that hides the keyboard; an iPhone keyboard often has none,
                 # and the search takes about 4 s: once it failed in an app, it isn't tried there again this session
+                self._touch_in_scope()  # (it goes out with no touch hook: checked here)
                 if await s.dismiss_keyboard():
                     await self._silent_read(view)
                     how = "the keyboard's own dismiss key"
@@ -5172,13 +5239,15 @@ class Daemon(journey_tool.JourneyTools):
         message, request = self._ask(tool, a, key, element, word, what, now)
         if request is None:
             raise Refused("not_allowed", message)
-        await self._wait_for_person(request, message, tool, key, element)
+        await self._wait_for_person(request, message, tool, a, key, element)
         return ""
 
     def _police_key(self, element: ui.Element) -> tuple[str, ...]:
-        """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1)."""
-        return (self._app_bundle() or "", *((element.identifier and ("id", element.identifier))
-                                            or ("role", element.role, element.label, element.text)))
+        """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1). Its
+        words are part of it even when it has an identifier: a control whose id stays while its words change ("Delete
+        draft" to "Delete account") is another touch, and an OK for the first is none for it (Codex, PR #9 cycle 1)."""
+        return (self._app_bundle() or "", "id", element.identifier or "", "role", element.role,
+                "label", element.label, "text", element.text)
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float) -> tuple[str, Confirm | None]:
@@ -5223,47 +5292,98 @@ class Daemon(journey_tool.JourneyTools):
                 "now; when they allow it, make the same call again. If nobody is watching, ask your user."
                 + ("" if waits else said)), (request if waits else None)
 
-    async def _wait_for_person(self, request: Confirm, message: str, tool: str, key: tuple[str, ...],
+    async def _wait_for_person(self, request: Confirm, message: str, tool: str, a: dict, key: tuple[str, ...],
                                element: ui.Element) -> None:
         """A call with a host dialog waits for the request's answer, up to its 120 s (§11.3). The time doesn't count
-        toward a batch's own limit. Allowed: the screen is read again, and the touch goes ahead only if it is the same
+        toward a batch's own limit. While it waits the action lets go of its turn on the phone (_aside), so the live
+        view can pause it or use the phone; the turn is taken back as an action takes it (`paused` while paused, after
+        a person who drives). Allowed: the screen is read again, and the touch goes ahead only if it is the same
         element in the same app (else `needs_confirmation` again); the OK is used up. Refused or expired: the usual
         refusal with `They declined.` or `Nobody answered.` added; the host's dialog is closed when nobody answered it."""
         began = self.control.clock()
-        try:
-            while request.state == "pending" and self.control.clock() < request.until:
-                try:
-                    await asyncio.wait_for(request.answered.wait(), CONFIRM_TICK)
-                except asyncio.TimeoutError:
-                    pass
-        finally:
-            self.held(self.control.clock() - began)
-            if request.state == "pending" and request.dialog:  # it ran out, or the call was given up on
-                self.dialog_channel(request.owner or "").push({"type": "close", "id": request.id})
-        if request.state == "declined":
-            raise Refused("not_allowed", message + " They declined.")
-        if request.state != "allowed":
-            raise Refused("not_allowed", message + " Nobody answered.")
-        self._confirms.pop(request.id, None)  # used up, whatever the re-check finds
-        await self._still_there(tool, key, element)
+
+        async def answered() -> None:
+            try:
+                while request.state == "pending" and self.control.clock() < request.until:
+                    try:
+                        await asyncio.wait_for(request.answered.wait(), CONFIRM_TICK)
+                    except asyncio.TimeoutError:
+                        pass
+            finally:
+                self.held(self.control.clock() - began)
+                if request.state == "pending" and request.dialog:  # it ran out, or the call was given up on
+                    self.dialog_channel(request.owner or "").push({"type": "close", "id": request.id})
+            if request.state == "declined":
+                raise Refused("not_allowed", message + " They declined.")
+            if request.state != "allowed":
+                raise Refused("not_allowed", message + " Nobody answered.")
+            self._confirms.pop(request.id, None)  # used up, whatever happens next (a pause, the re-check)
+        await self._aside(answered)
+        await self._still_there(tool, a, key, element)
         _GRANTED.get().append(request.origin or "the live view")
 
-    async def _still_there(self, tool: str, key: tuple[str, ...], element: ui.Element) -> None:
+    async def _aside(self, wait: Callable[[], Awaitable[None]]) -> None:
+        """Inside an agent's action: `wait()` for a person's answer without holding the phone (Controller.aside), so a
+        pause from the live view, or a person's own input, isn't held up behind a wait of up to 120 s (Codex, PR #9
+        cycle 1). What the action set on the session for its touches (Tapline's notice, the banner guard, the runner's
+        app check) is set aside meanwhile, so another action's or a person's input isn't taken for this one's, and put
+        back once the turn is taken back. Outside an agent's action, just `wait()`."""
+        s = self.session
+        if not self.control.holds_turn():
+            await wait()
+            return
+        kept = (s.touch_hook, s.banner_guard, s.front_apps)
+        s.touch_hook, s.banner_guard, s.front_apps = None, False, None
+        try:
+            await self.control.aside(wait)
+        finally:
+            if self.control.holds_turn():  # (when the turn wasn't taken back, another action may hold it now)
+                s.touch_hook, s.banner_guard, s.front_apps = kept
+
+    async def _still_there(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element) -> None:
         """After a wait for an OK: is the touch still what was allowed? The same element (key, label, place), still
-        touchable, with the same app in front. Reads the screen again; a failure of that read is the call's own."""
+        touchable, with the same app in front (in personal mode, one of the given apps), and the call's target still
+        names it. Reads the screen again, and leaves that read as the list the touch is aimed with, the refs of the
+        list before carried onto it (the turn was let go meanwhile: anything may have happened on the phone). A
+        failure of that read is the call's own."""
         changed = Refused("not_allowed", "needs_confirmation: the screen changed while waiting for the OK; ask again.")
-        tree = await self.session.refresh()
-        front = await self.session.foreground_bundle_id()
+        s = self.session
+        before = list(s.items)
+        tree = await s.refresh()
+        self._read_root = (tree.app, tree.alert is not None)  # (what a tap's own scope check looks at: _touch_in_scope)
+        front = await s.foreground_bundle_id()
         if key[0] and front is not None and front != key[0]:
             raise changed
+        given = _GIVEN.get()
+        if given is not None and tool != "alert" and front not in given:
+            raise changed  # (an alert's answer is checked by the alert's buttons below, as _within allowed it)
         if tool == "alert":  # the alert's button, not an element of the list
-            alert = getattr(self.session, "last_alert", None)
+            alert = getattr(s, "last_alert", None)
             if alert is None or element.label not in alert.buttons:
                 raise changed
             return
-        now = next((e for e in tree.items if self._police_key(e) == key and e.rect == element.rect), None)
-        if now is None or not now.enabled or (not now.in_alert and getattr(self.session, "last_alert", None) is not None):
+        s.items = changes.carry_refs(before, tree.items, changes.highest(before), moves_content=None)
+        now = next((e for e in s.items if self._police_key(e) == key and e.rect == element.rect), None)
+        if now is None or not now.enabled or (not now.in_alert and getattr(s, "last_alert", None) is not None):
             raise changed
+        # the policy has its say on the element as it is now (the same words as the one allowed: the key holds them)
+        if (verdict := _POLICY.get().check(key[0] or self._app_bundle(), now.label if now.role == "input" else now.text)) \
+                is not None and verdict[0] == safety.BLOCKED:
+            raise Refused("not_allowed", f'blocked: {now.role} {ui.clip(now.text)} is blocked by the policy '
+                                         f'("{verdict[1]}"); don\'t try another way.')
+        target = a.get("target")
+        if isinstance(target, ui.Target):  # what the touch will be aimed at must be that element, as the list is now
+            if target.kind == "point":
+                x, y = target.point
+                if not (now.x <= x < now.x + now.width and now.y <= y < now.y + now.height):
+                    raise changed
+            else:
+                try:
+                    aimed = ui.resolve(s.items, target)
+                except Refused:
+                    raise changed from None
+                if not isinstance(aimed, ui.Element) or self._police_key(aimed) != key or aimed.rect != element.rect:
+                    raise changed
 
     def dialog_channel(self, client_id: str) -> dialog.Channel:
         """What this agent's host is asked: made when first needed."""
@@ -5426,7 +5546,10 @@ class Daemon(journey_tool.JourneyTools):
                 given = _GIVEN.get()
                 if given is not None and front not in given:
                     raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), ", ".join(given.values())))
-                items = (await self.session.refresh()).items
+                again = await self.session.refresh()
+                items = again.items
+                # the app in front, as just asked, and this read: what the second touch's own scope check looks at
+                self._read_root = ((self.session.app_names.get(front or "", ""), front or ""), again.alert is not None)
                 try:
                     under = self._double_aim(target, items)
                 except Refused as e:
@@ -5489,7 +5612,12 @@ class Daemon(journey_tool.JourneyTools):
             return done
         self._guard(view, found)
         point = self._touch_point(found)
+        aimed_with = s.items
         said = await self._police(tool, a, found)
+        if s.items is not aimed_with:  # the policy waited for a person's OK and read the screen again (_still_there)
+            found = ui.resolve(s.items, target)  # (it checked that the target still names that very element)
+            self._guard(view, found)
+            point = self._touch_point(found)  # what is drawn over it now
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         if point is None:
@@ -5601,7 +5729,20 @@ class Daemon(journey_tool.JourneyTools):
         want = a.get("value")
         if want is not None and found.checked == want:
             return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
+        aimed_with = self.session.items
         said = await self._police("toggle", a, found)
+        if self.session.items is not aimed_with:  # the policy waited for a person's OK and read the screen again
+            key = self._police_key(found)  # (_still_there checked the same switch is there, at the same place)
+            found = next(e for e in self.session.items if self._police_key(e) == key and e.rect == found.rect)
+            if found.checked is None or (want is not None and found.checked == want):
+                raise Refused("not_allowed", "needs_confirmation: the screen changed while waiting for the OK; ask again.")
+            if a.get("force"):
+                forced = self._forced(view, found)
+            else:
+                self._guard(view, found)
+                point = shown = self._touch_point(found)
+                if found.width > WIDE_SWITCH * found.height:
+                    point = self._switch_control(self.session.items, found, shown)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))

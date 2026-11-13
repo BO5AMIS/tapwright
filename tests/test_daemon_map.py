@@ -137,6 +137,38 @@ def test_a_forgotten_reflex_is_not_brought_back_by_a_save_under_way(tmp_path):
     run(go)
 
 
+def test_a_forgotten_place_and_its_roads_are_not_brought_back_by_a_save_under_way(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "map", {"name": "home"})
+        d.session.at = "settings"
+        await d.run_tool("a", "map", {"name": "settings"})
+        data = d.maps.data(None, BUNDLE)
+        data["roads"].append({"from": "home", "to": "settings", "move": {"tool": "tap", "target": {"id": "settings-btn"}},
+                              "names": {}, "by": "tapwright", "seen": 1, "failed": 0, "ms": 90, "last": "2026-11-12T10:00:00Z",
+                              "build": "1.0 (7)"})
+        await d.maps.flush()
+        file = d.maps.file(None, BUNDLE)
+        real_save, entered, release = file.save, threading.Event(), threading.Event()
+
+        def held_save(memory):  # the snapshot holds home and its road; the save waits before it reaches the file
+            entered.set()
+            assert release.wait(10)
+            return real_save(memory)
+        file.save = held_save
+        d.maps._changed(None, BUNDLE)
+        assert await asyncio.get_running_loop().run_in_executor(None, entered.wait, 10)
+        file.save = real_save
+        assert (await d.run_tool("a", "map", {"forget": "home"}))["text"] == "Forgot home and its 1 road."  # the phone is at settings
+        release.set()
+        await d.maps.flush()
+        assert list(file_of(tmp_path)["places"]) == ["settings"] and file_of(tmp_path)["roads"] == []
+        assert list(d.maps.data(None, BUNDLE)["places"]) == ["settings"] and d.maps.data(None, BUNDLE)["roads"] == []
+        await finish(stop, task)
+    run(go)
+
+
 def test_bad_arguments(tmp_path):
     async def go():
         d = mapped(tmp_path)

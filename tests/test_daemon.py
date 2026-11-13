@@ -6035,6 +6035,83 @@ def test_tap_with_a_current_list_or_by_ref_keeps_the_separate_check():
     run(go)
 
 
+MAIL = (("Mail box", "com.example.mail"), "com.example.mail")  # (what a read names, what the phone says is in front)
+SPINNER = el("e9", "activityindicator", "In progress", "", rect=(150, 300, 40, 40), type="ActivityIndicator")
+
+
+def switch_apps_when(s: FakeSession, when, tree: list) -> None:
+    """From the first read at which `when()` holds, the fake's reads show the Mail app with `tree`, and the phone has
+    it in front (another app came up while the tap was on its way)."""
+    real = s.refresh
+
+    async def refresh(timeout=None):
+        if when():
+            s.tree, (s.tree_app, s.foreground) = list(tree), MAIL
+        return await real(timeout)
+    s.refresh = refresh
+
+
+def test_a_loading_wait_that_reads_another_app_touches_nothing_there():
+    """(Codex, PR #9 cycle 1) The tap's read shows the given app loading, with no target; a poll of the loading wait
+    reads another app with that target. The scope check is made again on that read: nothing is touched, and the
+    separate question answers outside_apps."""
+    async def go():
+        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
+        reads = []
+        switch_apps_when(s, lambda: reads.append(1) or len(reads) > 2, [button("e1", "OK", "ok-button", rect=(10, 500, 100, 40))])
+        s.tap_points.clear()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert len(reads) > 2  # the loading wait read again, and found the target in the other app
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
+        assert s.tap_points == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_loading_wait_that_ends_in_the_given_app_still_taps_and_hands_the_runner_the_check():
+    async def go():
+        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
+        s.touch_checks_front, s.calls_touch_hook = True, True
+        reads = []
+        real = s.refresh
+
+        async def refresh(timeout=None):
+            reads.append(1)
+            if len(reads) > 2:
+                s.tree = [button("e1", "OK", "ok-button")]
+            return await real(timeout)
+        s.refresh = refresh
+        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
+        assert r["text"].startswith("Tapped") and len(s.tap_points) == 1 and len(reads) > 2
+        assert s.checked_taps == [("com.example.app",)]  # the runner's tap checked the app in front too (E3)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_touch_on_the_way_to_the_tap_is_checked_against_the_read_before_it():
+    """The keyboard is closed before the tap: a touch where nothing responds, then (the keyboard still up) a drag and
+    the keyboard's own dismissal. When the read after the first touch shows another app, neither of the others, nor
+    the tap, is made there."""
+    async def go():
+        form = [el("e1", "text", "Title", rect=(10, 70, 100, 20), type="StaticText"),
+                el("e2", "input", "Field A", "a", rect=(10, 100, 300, 40)),
+                button("e4", "Save", "save", rect=(10, 300, 100, 40)),
+                el("e8", "scroll", "", "form", rect=(0, 60, 400, 440))]
+        s, mine, d, stop, task = await personal_stale(tree=form, tree_app=("Example", "com.example.app"))
+        s.last_keyboard, s.last_insets, s.focused, s.blank_tap_closes = True, (60.0, 300.0), "a", False
+        s.calls_touch_hook = True
+        s.tap_points.clear()
+        switch_apps_when(s, lambda: bool(s.tap_points), form)  # the read after the first touch: the Mail app's form
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "save"}, "look": False}, scope=mine)
+        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box")
+        assert s.tap_points == [(60.0, 80.0)]  # only the first touch, made while the given app was read in front
+        assert "swipe" not in s.calls and "dismiss_keyboard" not in s.calls
+        await finish(stop, task)
+    run(go)
+
+
 # ---- a touch's scope check made by the runner's tap itself (route version 4, 1.6 E3) ----
 
 def test_tap_lets_the_runner_check_the_app_in_front_and_asks_nothing_first():

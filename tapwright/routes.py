@@ -78,6 +78,10 @@ def check(data: dict) -> None:
                                     " (a variable's name can't have spaces)")
     if isinstance(name, str) and not NAME.match(name):
         raise Refused("bad_params", f"a route's name is lower-case ASCII letters, digits and _, not {name!r}")
+    for text in _strings(data.get("steps", [])):
+        if "$${" + ACCOUNT + "." in text:  # filled to a literal ${account.…}, which typing would then take for a placeholder
+            raise Refused("bad_params", "a literal account placeholder can't be written in a route: it would be typed as "
+                                        f"the account's value, not as text: {text!r}")
     for ref, text, tool in references(data.get("steps", [])):
         if ref.startswith(ACCOUNT + "."):
             field = ref[len(ACCOUNT) + 1:]

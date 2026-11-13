@@ -43,7 +43,7 @@ def test_the_passcode_is_kept_and_shown_nowhere(tmp_path):
     ({"version": 1, "accounts": {"a b": {"username": "x", "password": "y"}}}, "name"),
     ({"version": 1, "accounts": {"a": {"username": 3}}}, "username"),
     ({"version": 1, "accounts": {"a": {"color": "red"}}}, "color"),
-    ({"version": 1, "accounts": {"a": {"username": "x", "apps": "com.a"}}}, "apps"),
+    ({"version": 1, "accounts": {"a": {"username": "xyz", "apps": "com.a"}}}, "apps"),
     ([], "object"),
 ])
 def test_a_file_that_isnt_right_is_a_problem_not_a_crash(tmp_path, data, why):
@@ -136,6 +136,15 @@ def test_what_is_scrubbed_is_every_value_of_every_account(tmp_path):
 def test_short_values_are_not_scrubbed_out_of_ordinary_words(tmp_path):
     loaded = accounts.load(str(write(tmp_path, {"version": 1, "accounts": {"t": {"username": "ab", "password": "xy"}}})))
     assert loaded.scrub("a table and an xylophone") == "a table and an xylophone"
+
+
+def test_a_credential_too_short_to_be_scrubbed_is_not_accepted(tmp_path):
+    # (CodeRabbit PR #9) "12" would stay in answers and maps: the file is refused rather than kept half-protected
+    for key in ("username", "password"):
+        loaded = accounts.load(str(write(tmp_path, {"version": 1, "accounts": {"t": {key: "12"}}})))
+        assert loaded.problem is not None and key in loaded.problem and loaded.names == ()
+    ok = accounts.load(str(write(tmp_path, {"version": 1, "accounts": {"t": {"password": "123"}}})))
+    assert ok.problem is None and ok.names == ("t",)
 
 
 def test_names_that_hold_a_value_are_dropped_before_the_map_keeps_them(tmp_path):

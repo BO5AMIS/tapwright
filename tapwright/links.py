@@ -10,7 +10,7 @@ A jump is an `open_url` of a place's link: it goes through the app's linking, as
 """
 import re
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 NOT_SAVED = "Link not saved: it may hold a value; add it with map link."
 _PARAM = re.compile(r"^\[([A-Za-z_][A-Za-z0-9_]*)\]$")
@@ -39,6 +39,26 @@ def _split(url: str) -> tuple[str, list[str]] | None:
     return scheme.lower(), segments
 
 
+_ENCODED = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _decoded(segment: str, rounds: int = 8) -> str | None:
+    """A path segment with its percent-encoding undone, again until nothing changes (bounded): `%34%38%32` is `482`,
+    `%2534` is `4`. A segment is compared decoded, so an encoding can't make fixed text, or a value, look like something
+    else (Tapline's finding, 1.6 security). What is kept is never the URL's own text: it is a place's pattern.
+    None (fail closed: the link matches nothing) when it still holds an escape after the last round, or an escape
+    that isn't UTF-8 (`%FF%64…`): such a segment can't be read for sure (Tapline's Codex finding)."""
+    for _ in range(rounds):
+        try:
+            plain = unquote(segment, errors="strict")
+        except UnicodeDecodeError:
+            return None
+        if plain == segment:
+            return segment
+        segment = plain
+    return None if _ENCODED.search(segment) else segment
+
+
 def _matches(pattern: tuple[str, list[str]], url: tuple[str, list[str]]) -> bool:
     if pattern[0] != url[0] or len(pattern[1]) != len(url[1]):
         return False
@@ -50,6 +70,10 @@ def canonical(data: dict, url: str) -> str | None:
     opened = _split(url)
     if opened is None:
         return None
+    plain = [_decoded(seg) for seg in opened[1]]  # (the pattern is kept as written: it is not decoded)
+    if any(seg is None for seg in plain):
+        return None  # a segment that can't be read for sure: not kept
+    opened = (opened[0], [seg for seg in plain if seg is not None])
     for place in data["places"].values():
         link = place.get("link")
         pattern = _split(link) if isinstance(link, str) else None
