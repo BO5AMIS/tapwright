@@ -193,6 +193,12 @@ def _norm(label: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", label.casefold()).split())
 
 
+def _is_back_label(label: str) -> bool:
+    """A way-back label: a symbol (x, close mark, chevron, <) is compared as it is, since the punctuation strip would
+    leave nothing of it; words are compared normalized."""
+    return label.strip().casefold() in BACK_WORDS or _norm(label) in BACK_WORDS
+
+
 def _named(items: list[ui.Element]) -> tuple[str, ...]:
     return tuple(e.text for e in items if e.role in ("button", "link", "tab") and e.text)
 
@@ -244,7 +250,9 @@ class Result:
 
 
 def actionable(items: list[ui.Element]) -> list[ui.Element]:
-    return [e for e in items if e.enabled and e.role in ACTION_ROLES and any(a in ACTIONABLE for a in e.actions)]
+    # (a slider has no tap, toggle or type action in the list: it is counted by its role)
+    return [e for e in items if e.enabled and e.role in ACTION_ROLES
+            and (e.role == "slider" or any(a in ACTIONABLE for a in e.actions))]
 
 
 def main_candidates(items: list[ui.Element], screen: tuple[float, float]) -> list[ui.Element]:
@@ -266,7 +274,7 @@ def has_way_back(items: list[ui.Element], screen: tuple[float, float]) -> bool:
         if e.role == "tab":
             return True
         if e.role == "button" and e.enabled:
-            if e.identifier == "BackButton" or e.name == "BackButton" or _norm(e.text) in BACK_WORDS:
+            if e.identifier == "BackButton" or e.name == "BackButton" or _is_back_label(e.text):
                 return True
             if e.center[1] < screen[1] * 0.15 and e.center[0] < screen[0] * 0.25 and e.text:
                 return True

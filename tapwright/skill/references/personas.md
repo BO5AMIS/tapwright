@@ -29,7 +29,7 @@ walking. Notices every extra step and every changed button name. Conditions: `ne
 
 **Older user with large text.** Reads slowly, avoids small targets, does not guess what an unlabelled icon does. Wants
 the same task with text at the largest size, so cut-off text and overlapping controls show up.
-Conditions: `text_size: ax3`.
+Conditions: `text_size: ax5`.
 
 **Right-to-left speaker.** Reads Arabic; expects the layout mirrored, back arrows pointing the other way, numbers and
 mixed text in order. Wants a task done in their own language. Conditions: `language: ar · region: QA`.

@@ -376,9 +376,9 @@ def test_a_failed_start_leaves_no_journey_and_no_folder(reports):
         d = daemon()
         stop, task = await started(d)
         d.session.fail["look"] = Refused("reconnecting", "lost")  # the start's own look fails
-        d.session.fail["look"] = ConnectionError("x")
-        with pytest.raises(Exception):
+        with pytest.raises(Refused) as e:
             await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        assert e.value.code == "reconnecting"
         assert d._journeys == {} and not [p for p in reports.iterdir()]
         await finish(stop, task)
     run(go)
@@ -540,7 +540,7 @@ def test_stress_rotate_goes_there_and_back_and_network_sets_the_condition_until_
         d.session.calls.clear()
         r = await d.run_tool("a", "journey", {"stress": "rotate"})
         assert r["text"].splitlines()[0] == "Stress: rotate."
-        assert d.session.actions().count("rotate") == 0 or True
+        assert [c for c in d.session.actions() if c.startswith("rotate")] == ["rotate:landscape_left", "rotate:portrait"]
         r = await d.run_tool("a", "journey", {"stress": "network", "mode": "3g", "survives": {"text": "Today"}})
         assert r["text"].splitlines()[0] == 'Stress: network 3g; it survived: text "Today" is still on screen.'
         assert d._network == "3g"
@@ -1292,3 +1292,72 @@ def test_codex_pr7_c1_background_resumes_the_running_app_and_relaunch_keeps_the_
         await d.run_tool("a", "journey", {"stop": True, "reached": True})
         await finish(stop, task)
     run(go)
+
+
+def test_cr_export_uploads_the_screen_pictures_the_report_links_and_only_those(report_folder):
+    (report_folder / "screens/002.jpg").write_bytes(b"\x89data")
+    (report_folder / "report.md").write_text("1. Home\n   ![screen 1](screens/001.jpg)\n", "utf-8")
+    names = [p.relative_to(report_folder).as_posix() for p in journey_export.files_of(report_folder)]
+    assert "screens/001.jpg" in names and "screens/002.jpg" not in names
+    assert "report.md" in names and "findings/finding-1.jpg" in names
+
+
+def test_cr_every_switch_of_the_eyes_is_in_the_report(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g", "eyes": "agent"})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "journey", {"eyes": "user"})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "journey", {"eyes": "agent"})
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        text = (only_folder(reports) / "report.md").read_text("utf-8")
+        assert "the agent's eyes until call 1, then a user's eyes until call 2, then the agent's eyes" in text
+        await finish(stop, task)
+    run(go)
+
+
+def test_cr_the_eyes_report_keeps_its_wording_for_the_simple_cases(tmp_path):
+    j = journey.Journey("g", None, {}, (), "user", 0.0, __import__("datetime").datetime(2026, 1, 1), tmp_path)
+    j.eyes, j.eyes_switches = "agent", [(4, "agent")]
+    facts = dict(journey_report.model(j, True, None, 1.0, {}, tmp_path)["facts"])
+    assert facts["Seen through"] == "a user's eyes until call 4, then the agent's eyes"
+    j.eyes, j.eyes_switches = "user", [(2, "user")]  # started in the agent's eyes, then a user's
+    facts = dict(journey_report.model(j, True, None, 1.0, {}, tmp_path)["facts"])
+    assert facts["Seen through"] == "the agent's eyes until call 2, then a user's eyes"
+
+
+def test_cr_a_start_whose_undo_raises_still_leaves_no_journey_registered(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+
+        async def broken(*a, **k):
+            raise RuntimeError("undo broke")
+
+        async def fails(*a, **k):
+            raise RuntimeError("start broke")
+        d._calls_of_its_own = fails
+        d._journey_undo = broken
+        with pytest.raises(RuntimeError, match="undo broke"):
+            await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        assert d._journeys == {} and "a" not in journey.running
+        assert not reports.exists() or not list(reports.iterdir())
+        await finish(stop, task)
+    run(go)
+
+
+def test_cr_a_later_visit_to_a_known_screen_counts_wrong_turns_and_dead_ends_on_its_own(tmp_path):
+    j = new_journey(tmp_path)
+    home, food = full(("button", "Log meal"), ("text", "Today")), full(("header", "Add food"), ("input", "Search"))
+    j.note_call("look", {}, home, 0, None)
+    j.note_call("tap", {}, food, 0, None)
+    j.note_call("scroll", {}, "Same screen.", 0, None)
+    j.note_call("type_text", {"text": "a"}, "Same screen.", 0, None)  # worked here at the first visit
+    j.note_call("back", {}, home, 0, None)
+    assert (j.wrong_turns, j.dead_ends) == (0, 0)
+    j.note_call("tap", {}, food, 0, None)  # a second visit: nothing done, and it is not a dead end
+    j.note_call("back", {}, home, 0, None)
+    assert (j.wrong_turns, j.dead_ends) == (1, 0)
+    assert j.screens[1].acted  # the report still says something was done there
