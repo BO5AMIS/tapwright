@@ -3552,10 +3552,14 @@ class Daemon:
                 return True
         return False
 
-    def _anywhere(self, view, target: ui.Target) -> ui.Element:
+    def _anywhere(self, view, target: ui.Target, together: bool = False) -> ui.Element:
         """The element a target names, on the agent's list or, failing that, among what the last read found off
-        screen. Raises as `resolve` does when it is in neither."""
+        screen. Raises as `resolve` does when it is in neither. `together`: always count through both, in reading
+        order (a scroll that follows an off-screen element: as it moves, more of its matches come on screen, and an
+        `index` counted in the visible ones alone would name another element)."""
         off = getattr(self.session, "offscreen", [])
+        if together and target.ref is None and target.point is None:
+            return ui.resolve(sorted([*view.items, *off], key=lambda e: (e.y, e.x)), target)
         if target.text is not None:
             # {text} is an exact match first, then a part of one: an element off screen that is exactly the text
             # comes before one on screen that only contains it (seen on the phone 2026-11-10: "Alert" found the
@@ -3575,7 +3579,7 @@ class Daemon:
 
             return ui.resolve(everything, target)
 
-    async def _scroll_to(self, view, target: ui.Target) -> Scrolled:
+    async def _scroll_to(self, view, target: ui.Target, together: bool = False) -> Scrolled:
         """`scroll` with `to: "target"` (AGENT-TOOLS v1.6): drag the scroll view that holds the element until the
         element is on screen and clear of the bars. The tree gives the place of an element that is off screen, and
         an eased drag doesn't slide on, so each drag covers a known distance; the screen is read after each one,
@@ -3587,7 +3591,7 @@ class Daemon:
         seen: list[tuple[float, ...]] = []  # where the element was before each drag
         for drags in range(MAX_SCROLL_SWIPES + 1):
             try:
-                element = self._anywhere(view, target)
+                element = self._anywhere(view, target, together)
             except Refused:
                 if seen:  # the screen has moved under the agent's list, and this answer carries none
                     view.moved = True
@@ -3823,12 +3827,13 @@ class Daemon:
                 n = len(args["text"])
                 self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
             self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
-        done = await self._scroll_to(view, target)
-        # The element the target names now, counted as _scroll_to counted it (`index` runs through the screen and what
-        # lies past it): on screen after the scroll, it is the one to touch. The action gets its ref, not the target
-        # again: an `index` counted in the visible matches alone would point at another element or at none.
+        # `hit` was counted through the screen and what lies past it, so the scroll and the look after it count the
+        # same way: the target names the element it named at the start, wherever the scroll has put the rest
+        done = await self._scroll_to(view, target, together=True)
+        # The element the target names now: on screen after the scroll, it is the one to touch. The action gets its
+        # ref, not the target again: an `index` counted in the visible matches alone would point at another element.
         try:
-            final = self._anywhere(view, target)
+            final = self._anywhere(view, target, together=True)
         except Refused:
             final = None
         if not isinstance(final, ui.Element) or not any(final is e for e in view.items):
