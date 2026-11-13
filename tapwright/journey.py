@@ -133,7 +133,7 @@ class Journey:
     started_wall: datetime.datetime
     folder: Path
     app: str | None = None  # the app under test (bundle id) when it began, for stress moments and undoing conditions
-    eyes_off_at_call: int | None = None
+    eyes_switches: list[tuple[int, str]] = field(default_factory=list)  # (call number, eyes switched to), in order
     calls: int = 0
     taps: int = 0
     typing: int = 0

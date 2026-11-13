@@ -166,8 +166,10 @@ def model(j: jr.Journey, reached: bool, why: str | None, elapsed: float, picture
         facts.append(("Conditions", ", ".join(f"{k} {v}" for k, v in j.conditions.items())))
     eyes = "a user's eyes (no ids, nothing off screen, no jump-scrolling)" if j.users_eyes else \
         "the agent's eyes (ids and off-screen elements shown)"
-    if j.eyes_off_at_call is not None:
-        eyes = f"a user's eyes until call {j.eyes_off_at_call}, then the agent's eyes"
+    if j.eyes_switches:
+        name = {"user": "a user's eyes", "agent": "the agent's eyes"}
+        first = "agent" if j.eyes_switches[0][1] == "user" else "user"  # the eyes it started in
+        eyes = name[first] + "".join(f" until call {call}, then {name[to]}" for call, to in j.eyes_switches)
     facts.append(("Seen through", eyes))
     if j.allow:
         facts.append(("Shortcuts allowed", ", ".join(j.allow)))

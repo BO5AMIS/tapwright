@@ -1300,3 +1300,49 @@ def test_cr_export_uploads_the_screen_pictures_the_report_links_and_only_those(r
     names = [p.relative_to(report_folder).as_posix() for p in journey_export.files_of(report_folder)]
     assert "screens/001.jpg" in names and "screens/002.jpg" not in names
     assert "report.md" in names and "findings/finding-1.jpg" in names
+
+
+def test_cr_every_switch_of_the_eyes_is_in_the_report(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g", "eyes": "agent"})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "journey", {"eyes": "user"})
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "journey", {"eyes": "agent"})
+        await d.run_tool("a", "journey", {"stop": True, "reached": True})
+        text = (only_folder(reports) / "report.md").read_text("utf-8")
+        assert "the agent's eyes until call 1, then a user's eyes until call 2, then the agent's eyes" in text
+        await finish(stop, task)
+    run(go)
+
+
+def test_cr_the_eyes_report_keeps_its_wording_for_the_simple_cases(tmp_path):
+    j = journey.Journey("g", None, {}, (), "user", 0.0, __import__("datetime").datetime(2026, 1, 1), tmp_path)
+    j.eyes, j.eyes_switches = "agent", [(4, "agent")]
+    facts = dict(journey_report.model(j, True, None, 1.0, {}, tmp_path)["facts"])
+    assert facts["Seen through"] == "a user's eyes until call 4, then the agent's eyes"
+    j.eyes, j.eyes_switches = "user", [(2, "user")]  # started in the agent's eyes, then a user's
+    facts = dict(journey_report.model(j, True, None, 1.0, {}, tmp_path)["facts"])
+    assert facts["Seen through"] == "the agent's eyes until call 2, then a user's eyes"
+
+
+def test_cr_a_start_whose_undo_raises_still_leaves_no_journey_registered(reports):
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+
+        async def broken(*a, **k):
+            raise RuntimeError("undo broke")
+
+        async def fails(*a, **k):
+            raise RuntimeError("start broke")
+        d._calls_of_its_own = fails
+        d._journey_undo = broken
+        with pytest.raises(RuntimeError, match="undo broke"):
+            await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        assert d._journeys == {} and "a" not in journey.running
+        assert not reports.exists() or not list(reports.iterdir())
+        await finish(stop, task)
+    run(go)

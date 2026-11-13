@@ -195,8 +195,8 @@ class JourneyTools:
         if eyes == jr.eyes:
             return _d()._answer([f"Already in {'a user' if eyes == 'user' else 'the agent'}'s eyes."])
         jr.eyes = eyes
+        jr.eyes_switches.append((jr.calls, eyes))
         if eyes == "agent":
-            jr.eyes_off_at_call = jr.calls
             return _d()._answer(["Now in the agent's eyes: ids, labels and off-screen elements are shown, and the shortcuts "
                                  "are open. The report says so."])
         return _d()._answer(["Back in a user's eyes."])
@@ -245,13 +245,15 @@ class JourneyTools:
                 jr.launched_with = dict(launch)
             looked = await self._calls_of_its_own(client_id, jr, scope, "look", {"screenshot": False})
         except BaseException:  # (a cancelled start too: no journey left registered, no empty folder)
-            await self._journey_undo(client_id, jr, scope, [])
-            self._journeys.pop(client_id, None)
-            journey.running.pop(client_id, None)
             try:
-                folder.rmdir()
-            except OSError:
-                pass
+                await self._journey_undo(client_id, jr, scope, [])
+            finally:  # (even when the undo raises: the next start must not find this journey registered)
+                self._journeys.pop(client_id, None)
+                journey.running.pop(client_id, None)
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
             raise
         jr.see(looked["text"])
         await self._journey_frame(jr, "look", looked["text"], scope)
