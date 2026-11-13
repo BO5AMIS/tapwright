@@ -83,35 +83,49 @@ def set_accounts(file: str | None = None) -> None:
 PROOF_PREFIX = b"tapwright-proof-v2\x00"  # as server.PROOF_PREFIX (this module must not import server: starlette)
 
 
-def _prove(info: dict, timeout: float) -> None:
+def _prove(info: dict, timeout: float) -> http.client.HTTPConnection:
     """Before the token goes anywhere: ask whoever listens on the port to prove it holds it. A stale serve.json (the
     daemon died, another local process took its port) must not hand the token to that process. The client sends a random
     challenge and the daemon answers HMAC-SHA256(token, prefix + challenge); the token itself is not sent until the
     answer is right (constant-time compare). Raises DaemonError("unauthorized") for a wrong or missing proof; OSError
-    (a refused connection) passes up as it did, since nothing was sent."""
+    (a refused connection) passes up as it did, since nothing was sent.
+    Returns the connection that was proved: the token goes over THAT connection (keep-alive) and never over a new one,
+    or a process that bound the port between the two connections would get it. The connection never reconnects by
+    itself (auto_open off): if the daemon closed it after the proof, the request fails and no token is sent."""
     challenge = secrets.token_bytes(32)
-    req = urllib.request.Request(base_url(info) + "/api/prove", data=json.dumps({"challenge": challenge.hex()}).encode(),
-                                 method="POST", headers={"Content-Type": "application/json"})
+    conn = http.client.HTTPConnection("127.0.0.1", int(info["port"]), timeout=timeout)  # the literal address, never a name
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            given = json.loads(r.read() or b"{}").get("proof")
-    except urllib.error.HTTPError:
-        given = None  # (an older daemon has no such route: it answers 401)
-    except (ValueError, AttributeError):
+        conn.request("POST", "/api/prove", body=json.dumps({"challenge": challenge.hex()}).encode(),
+                     headers={"Content-Type": "application/json"})
+        sock = conn.sock
+        reply = conn.getresponse()
+        raw = reply.read()
         given = None
-    # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
-    # (the address this client dials: base_url's literal 127.0.0.1, never a name that could resolve elsewhere)
-    signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(info["port"])).encode()
-    want = hmac.new(str(info["token"]).encode(), signed, hashlib.sha256).hexdigest()
-    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), want.encode()):
-        raise DaemonError("unauthorized", "whatever listens on tapwright serve's port did not prove it holds the token "
-                                          "(a stale serve.json, or an older tapwright serve: `tapwright serve --stop`, "
-                                          "then start it again); the token was not sent")
+        if reply.status == 200:  # (an older daemon has no such route: it answers 401)
+            try:
+                given = json.loads(raw or b"{}").get("proof")
+            except (ValueError, AttributeError):
+                given = None
+        # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
+        signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(info["port"])).encode()
+        want = hmac.new(str(info["token"]).encode(), signed, hashlib.sha256).hexdigest()
+        if not isinstance(given, str) or not hmac.compare_digest(given.encode(), want.encode()):
+            raise DaemonError("unauthorized", "whatever listens on tapwright serve's port did not prove it holds the "
+                                              "token (a stale serve.json, or an older tapwright serve: `tapwright serve "
+                                              "--stop`, then start it again); the token was not sent")
+        if sock is None or conn.sock is not sock:  # the line was closed after the proof: not the proved peer any more
+            raise DaemonError("unauthorized", "the connection that proved tapwright serve's token was closed; the token "
+                                              "was not sent")
+        conn.auto_open = 0  # a closed line raises NotConnected on the next request instead of dialling again
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _request(info: dict, method: str, path: str, body: dict | None = None, timeout: float = 10.0,
              client_id: str | None = None, dialog: bool = False) -> dict:
-    _prove(info, timeout)
+    conn = _prove(info, timeout)
     headers = {"Authorization": f"Bearer {info['token']}", "Content-Type": "application/json"}
     if client_id:
         headers["X-Tapwright-Client"] = client_id
@@ -119,16 +133,21 @@ def _request(info: dict, method: str, path: str, body: dict | None = None, timeo
     if dialog:
         headers["X-Tapwright-Dialog"] = "1"  # this agent's host can show a dialog, and is polling for it (dialog.py)
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(base_url(info) + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
+        conn.request(method, path, body=data, headers=headers)  # the proved connection: never a new one
+        reply = conn.getresponse()
+        raw = reply.read()
+    finally:
+        conn.close()
+    if reply.status >= 400:
         try:
-            err = json.loads(e.read() or b"{}").get("error") or {}
-        except ValueError:
+            err = json.loads(raw or b"{}").get("error") or {}
+        except (ValueError, AttributeError):
             err = {}
-        raise DaemonError(err.get("code", f"http-{e.code}"), err.get("message", f"HTTP {e.code}")) from None
+        if not isinstance(err, dict):
+            err = {}
+        raise DaemonError(err.get("code", f"http-{reply.status}"), err.get("message", f"HTTP {reply.status}"))
+    return json.loads(raw or b"{}")
 
 
 def healthy(info: dict, timeout: float = 2.0) -> dict | None:

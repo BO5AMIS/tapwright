@@ -597,6 +597,7 @@ class Confirm:
     owner: str | None = None  # the agent (client id) whose call asked: only its host's dialog may answer
     dialog: bool = False  # the host was asked too (a `dialog.CONFIRM` ask went to the owner's channel)
     origin: str = ""  # where the answer came from: "chat" or "the live view"
+    used: bool = False  # an allow was taken by one call (Daemon._claim): no other call touches under it
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # set at the first answer
 
 
@@ -5216,7 +5217,10 @@ class Daemon(journey_tool.JourneyTools):
         if hit is None:
             return ""
         kind, word = hit
-        what = f"{element.role} {ui.clip(element.text)}"
+        # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
+        # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
+        # the key the OK is matched by keeps the element's own words
+        what = f"{element.role} {ui.clip(self._loaded().scrub(element.text))}"
         if _DOUBLE.get():  # two touches under one check would act twice on what the policy holds back
             raise Refused("not_allowed", f'double_tap on an element the safety policy holds: {what} (policy word '
                                          f'"{word}"). Do one tap instead; a person\'s OK is for a single touch.')
@@ -5232,15 +5236,26 @@ class Daemon(journey_tool.JourneyTools):
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
         if a.get("dry_run"):
             return "" if grant else f' It needs a person\'s OK (policy word "{word}").'
-        if grant is not None:
-            del self._confirms[grant.id]
+        if grant is not None and self._claim(grant):
             _GRANTED.get().append(grant.origin or "the live view")
             return ""
         message, request = self._ask(tool, a, key, element, word, what, now)
         if request is None:
             raise Refused("not_allowed", message)
-        await self._wait_for_person(request, message, tool, a, key, element)
+        taken = (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and the OK given was used by "
+                 "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
+        await self._wait_for_person(request, message, tool, a, key, element, taken)
         return ""
+
+    def _claim(self, grant: Confirm) -> bool:
+        """Take an allow for the one call about to touch under it: True once; False for every later call (it was
+        taken, or forgotten). No await between the check and the mark, so two calls woken by the same answer can't
+        both take it."""
+        if grant.used or grant.state != "allowed" or self._confirms.get(grant.id) is not grant:
+            return False
+        grant.used = True
+        del self._confirms[grant.id]
+        return True
 
     def _police_key(self, element: ui.Element) -> tuple[str, ...]:
         """The element in this app: an OK for "Delete" in one app is no OK for another app's (safety review M1). Its
@@ -5276,16 +5291,20 @@ class Daemon(journey_tool.JourneyTools):
             # not guessable: an answer must come from someone who was shown the request
             request = Confirm(f"c{self._confirm_seq}-{secrets.token_hex(4)}", tool, key, now + CONFIRM_TTL, owner=caller)
             self._confirms[request.id] = request
+            # an account's value is never in what a person is shown (as in an answer, _announce): `what` is scrubbed
+            # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
+            scrub = self._loaded().scrub
+            caption = step_caption(tool, what, a)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                               "caption": step_caption(tool, what, a), "word": word,
+                               "caption": scrub(caption) if caption else caption, "word": word,
                                "expires": int((time.time() + CONFIRM_TTL) * 1000)}
             self.broadcast(request.message)
             if caller is not None:  # the host's dialog, at the same moment (§11.3)
                 request.dialog = True
-                label = element.label if element.role == "input" else element.text
+                label = scrub(element.label if element.role == "input" else element.text)
                 app = (self.session.app or (None, None))[0]
                 self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
-                                                  "message": dialog.caption(tool, label, app, word),
+                                                  "message": scrub(dialog.caption(tool, label, app, word)),
                                                   "choices": dialog.CHOICES[dialog.CONFIRM]})
         waits = request.dialog and request.owner == caller  # (a retry while its request is open waits on it too)
         return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"). The live view asks them "
@@ -5293,13 +5312,14 @@ class Daemon(journey_tool.JourneyTools):
                 + ("" if waits else said)), (request if waits else None)
 
     async def _wait_for_person(self, request: Confirm, message: str, tool: str, a: dict, key: tuple[str, ...],
-                               element: ui.Element) -> None:
+                               element: ui.Element, taken: str) -> None:
         """A call with a host dialog waits for the request's answer, up to its 120 s (§11.3). The time doesn't count
         toward a batch's own limit. While it waits the action lets go of its turn on the phone (_aside), so the live
         view can pause it or use the phone; the turn is taken back as an action takes it (`paused` while paused, after
         a person who drives). Allowed: the screen is read again, and the touch goes ahead only if it is the same
-        element in the same app (else `needs_confirmation` again); the OK is used up. Refused or expired: the usual
-        refusal with `They declined.` or `Nobody answered.` added; the host's dialog is closed when nobody answered it."""
+        element in the same app (else `needs_confirmation` again); the OK is used up, by one call only (`taken`
+        answers any other that waited on it). Refused or expired: the usual refusal with `They declined.` or `Nobody
+        answered.` added; the host's dialog is closed when nobody answered it."""
         began = self.control.clock()
 
         async def answered() -> None:
@@ -5317,7 +5337,10 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("not_allowed", message + " They declined.")
             if request.state != "allowed":
                 raise Refused("not_allowed", message + " Nobody answered.")
-            self._confirms.pop(request.id, None)  # used up, whatever happens next (a pause, the re-check)
+            # used up, whatever happens next (a pause, the re-check); taken by one call only: another call of the same
+            # touch that waited on this request too, or repeated it after the allow, got there first (Codex, PR #9 c2)
+            if not self._claim(request):
+                raise Refused("not_allowed", taken)
         await self._aside(answered)
         await self._still_there(tool, a, key, element)
         _GRANTED.get().append(request.origin or "the live view")

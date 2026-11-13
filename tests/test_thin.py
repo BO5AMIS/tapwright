@@ -33,6 +33,8 @@ class Fake:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # keep-alive: the token goes over the connection that proved it
+
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 if self.path == "/api/prove":  # the daemon's proof that it holds the token (before the token is sent)
@@ -384,3 +386,44 @@ def test_a_proof_made_for_another_address_on_the_same_port_gets_no_token(fake, c
     code, out, err = run(capsys, "look", "--apps", "com.example.app")
     assert code == thin.EXIT_UNREACHABLE and out == "" and "did not prove" in err
     assert fake.seen == []
+
+
+def test_a_listener_that_changes_between_the_proof_and_the_request_gets_no_token(home, capsys):
+    """Codex PR #9 c2: the proof was made on one connection and the request opened another, so a process that bound the
+    released port in between got the token. Now the proof answers, then the line is closed: nothing is sent anywhere."""
+    heard: list[dict] = []
+
+    class Daemon(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            heard.append({k.lower(): v for k, v in self.headers.items()})
+            if self.path == "/api/prove":
+                data = json.dumps({"proof": proof_of(TOKEN, bytes.fromhex(json.loads(body)["challenge"]),
+                                                     self.server.server_address[1])}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Connection", "close")  # the daemon exits: whoever binds the port next gets the next line
+                self.end_headers()
+                self.wfile.write(data)
+                self.close_connection = True
+                return
+            data = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Daemon)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    (home / "serve.json").write_text(json.dumps({"pid": 1, "port": httpd.server_address[1], "token": TOKEN}))
+    try:
+        code, out, err = run(capsys, "look", "--apps", "com.example.app")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert code == thin.EXIT_UNREACHABLE and out == ""
+    assert all("authorization" not in h for h in heard) and not any(TOKEN in json.dumps(h) for h in heard)

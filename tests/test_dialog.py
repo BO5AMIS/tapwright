@@ -242,6 +242,57 @@ def test_the_live_view_can_use_the_phone_while_the_ok_is_awaited():
     run(go)
 
 
+def test_one_ok_is_used_by_one_call_when_two_wait_on_the_same_request():
+    """(Codex, PR #9 cycle 2) Two calls of the same agent tap the same Send while the first waits for its OK (the
+    wait lets go of the phone, so the second gets in and waits on the same request). One allow wakes both: exactly one
+    touch goes out; the other call is refused with nothing touched."""
+    async def go():
+        d = make()
+        d._queues_seen = d.subscribe()
+        stop, task = await ready(d)
+        first = asyncio.create_task(d.run_tool("a", "tap", TAP, dialog=True))
+        await asked(d)
+        second = asyncio.create_task(d.run_tool("a", "tap", TAP, dialog=True))
+        await asyncio.sleep(0.1)
+        assert not second.done() and len(d._confirms) == 1  # it waits on the open request (no second dialog)
+        taps = d.session.calls.count("tap")
+        assert d.dialog_answer("a", "c1-x", "allow") is True
+        done = await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), 3)
+        assert d.session.calls.count("tap") == taps + 1  # one OK, one touch
+        errors = [r for r in done if isinstance(r, Refused)]
+        assert len(errors) == 1 and errors[0].code == "not_allowed" and "needs_confirmation" in str(errors[0])
+        assert sum(1 for r in done if isinstance(r, dict) and r["text"].splitlines()[-1] == NOTE_CHAT) == 1
+        assert "c1-x" not in d._confirms
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_ok_taken_by_a_call_without_a_dialog_is_not_used_again_by_the_one_that_waited():
+    """The OK goes to whichever call claims it first: here a call without a dialog that repeats the touch after the
+    allow, before the call that waited for it wakes. That one touches; the waiter is refused, with nothing touched."""
+    from tapwright import daemon
+
+    async def go():
+        d = make()
+        stop, task = await ready(d)
+        waiting = asyncio.create_task(d.run_tool("a", "tap", TAP, dialog=True))
+        await asked(d)
+        request = d._confirms["c1-x"]
+        woken, request.answered = request.answered, asyncio.Event()  # (the waiter is slow to see the answer)
+        taps = d.session.calls.count("tap")
+        assert d.dialog_answer("a", "c1-x", "allow") is True
+        answer = await asyncio.wait_for(d.run_tool("b", "tap", TAP), 2)  # the same touch, without a dialog: it uses the OK
+        assert answer["text"].splitlines()[-1] == NOTE_CHAT and d.session.calls.count("tap") == taps + 1
+        woken.set()
+        with pytest.raises(Refused) as e:
+            await asyncio.wait_for(waiting, 2)
+        assert e.value.code == "not_allowed" and d.session.calls.count("tap") == taps + 1
+        await finish(stop, task)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(daemon, "CONFIRM_TICK", 30.0)
+        run(go)
+
+
 def test_after_the_wait_the_touch_goes_to_the_element_as_the_new_read_has_it():
     """The agent's ref names the element on its own list; after the wait the screen is read again, where another
     element came first (refs of a fresh read would number it e1). The touch still goes to the allowed element."""
@@ -354,6 +405,38 @@ def test_a_dialog_that_vanishes_leaves_the_live_view_able_to_answer():
         await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
         answer = await d.run_tool("a", "tap", TAP)  # the retry goes through on the live view's OK
         assert answer["text"].splitlines()[-1] == NOTE_VIEW
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("label", ["Delete tester2@example.com", 'Delete "pw" hunter2-PW"9x', "Delete " + "x" * 60
+                                   + " tester2@example.com"])
+def test_an_accounts_value_is_scrubbed_from_the_request_the_live_view_and_the_dialog_are_sent(tmp_path, label):
+    """(Codex, PR #9 cycle 2) With a test accounts file, a button that shows an account's value: the confirm request
+    broadcast to live views (and replayed to one that connects later) and the host dialog's caption say
+    `<tester2's username>`, never the value, even where the caption cuts or cleans the label. The OK still goes to
+    that element."""
+    user, password = "tester2@example.com", 'hunter2-PW"9x'
+    accounts = tmp_path / "accounts.json"
+    accounts.write_text(json.dumps({"version": 1, "accounts": {"tester2": {"username": user, "password": password}}}),
+                        "utf-8")
+
+    async def go():
+        d = make()
+        d._queues_seen = d.subscribe()
+        stop, task = await ready(d, [button("e1", label, "send")])
+        sent(d)
+        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"id": "send"}, "look": False}, dialog=True,
+                                              accounts=str(accounts)))
+        ask, _ = await asked(d)
+        shown = json.dumps([ask, *sent(d), *d.open_confirms()], ensure_ascii=False)
+        assert '"type": "confirm"' in shown and "<tester2's" in shown and "<tester2's" in ask["message"]
+        for value in (user, password, "tester2@exa", "hunter2-PW'9x", "hunter2"):
+            assert value not in shown
+        d.dialog_answer("a", "c1-x", "allow")
+        answer = await asyncio.wait_for(call, 2)
+        assert answer["text"].splitlines()[-1] == NOTE_CHAT and d.session.calls.count("tap") == 1
+        assert user not in answer["text"]
         await finish(stop, task)
     run(go)
 

@@ -497,3 +497,26 @@ def test_a_road_with_no_visible_text_cant_be_driven_in_a_users_eyes(tmp_path):
         assert e.value.code == "off_route" and "it has no text a person could read" in str(e.value)
         await finish(stop, task)
     run(go)
+
+
+def test_a_tap_that_opens_another_app_is_not_an_arrival_and_records_no_road(tmp_path):
+    """Codex PR #9 c2: Session.refresh updates the tree and never `session.app`, so the drive took allowed app B's matching
+    screen for app A's arrival. The read tree's own app is checked against the trip's, in the same read."""
+    async def go():
+        other = screen("Settings", ids=("general-row", "about-row", "s1", "s2", "s3"), bundle="com.other.app")
+        d = mapped(tmp_path, extra={"settings_b": other})
+        stop, task = await started(d)
+        await learn(d)
+        await d.maps.flush()
+        def roads():  # (what the road is, and how often it was driven: a failure of the old road may be counted)
+            return [(r["from"], r["to"], r["seen"]) for r in file_of(tmp_path)["roads"]]
+        roads_before = roads()
+        d.session.goes[("home", "settings-btn")] = "settings_b"  # the tap now opens the other app, same-looking screen
+        d.session.at = "home"
+        with pytest.raises(Refused) as e:  # not an arrival: the road led to a screen the map doesn't know
+            await drive(d, to="settings", screenshot=False)
+        assert e.value.code == "off_route"
+        await d.maps.flush()
+        assert roads() == roads_before  # no road recorded, none counted as driven
+        await finish(stop, task)
+    run(go)

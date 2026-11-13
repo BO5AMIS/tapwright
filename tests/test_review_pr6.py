@@ -429,6 +429,8 @@ def test_a_real_mcp_process_says_goodbye_when_its_stdin_reaches_its_end(tmp_path
     heard: list[tuple[str, str]] = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # keep-alive: the token goes over the connection that proved it
+
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             if self.path == "/api/prove":  # the proof that this process holds the token, asked before it is sent

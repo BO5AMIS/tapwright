@@ -192,3 +192,79 @@ def test_a_screen_with_only_container_kinds_is_not_saved_as_a_place_it_could_nev
     bare = tree(title="", ids=())
     assert places.has_structure(bare) and not places.recognisable(bare)
     assert maps.observe(None, APP, bare, arrived=True) is None and not maps.has_map(None, APP)
+
+
+def _two_places_one_signature(tmp_path):
+    """A map with places `one` and `two`: the same structural signature, different titles (so two places, one key id)."""
+    maps = mapkeeper.Maps(str(tmp_path))
+    seen = maps.observe(None, APP, tree(title="Alpha", ids=("a",)), arrived=True)
+    data = maps.data(None, APP)
+    first = data["places"].pop(seen.name)
+    second = json.loads(json.dumps(first))
+    second["titles"] = {k: "f" * 16 for k in first.get("titles", {"en": 0})}
+    data["places"] = {"one": first, "two": second}
+    assert places.key_id(first["key"]) == places.key_id(second["key"])
+    return maps
+
+
+def test_forgetting_a_place_never_rewrites_a_route_to_another_place_with_its_signature(tmp_path):
+    """Codex PR #9 c2: the signature-only lookup took `forget one` for a rename `one -> two` and rewrote the routes."""
+    async def go():
+        maps = _two_places_one_signature(tmp_path)
+        file = maps.file(None, APP)
+        file.save(maps.data(None, APP))
+        file.write_route("there", {"start": "one", "end": "two", "steps": [{"tool": "tap"}]})
+        maps.data(None, APP)["routes"] = file.load()["routes"]
+        maps.edit(None, APP, lambda data: places.forget(data, "one"))
+        route = json.loads((tmp_path / APP / "routes" / "there.json").read_text("utf-8"))
+        assert route["start"] == "one" and route["end"] == "two"  # a forget rewrites no route
+        assert sorted(maps.data(None, APP)["places"]) == ["two"]
+    asyncio.run(go())
+
+
+def test_a_real_rename_still_rewrites_the_routes(tmp_path):
+    async def go():
+        maps = mapkeeper.Maps(str(tmp_path))
+        seen = maps.observe(None, APP, tree(title="Alpha", ids=("a",)), arrived=True)
+        other = maps.observe(None, APP, tree(title="Beta", ids=("x", "y", "z")), arrived=True)
+        file = maps.file(None, APP)
+        file.save(maps.data(None, APP))
+        file.write_route("there", {"start": seen.name, "end": other.name, "steps": [{"tool": "tap"}]})
+        maps.data(None, APP)["routes"] = file.load()["routes"]
+        maps.edit(None, APP, lambda data: places.set_name(data, seen.name, "home"))
+        route = json.loads((tmp_path / APP / "routes" / "there.json").read_text("utf-8"))
+        assert route["start"] == "home" and route["end"] == other.name
+    asyncio.run(go())
+
+
+def test_a_place_forgotten_while_the_cleanup_runs_is_not_put_back(tmp_path, monkeypatch):
+    """Codex PR #9 c2: a forget starts the background cleanup (`file.update(undo)`); a second forget made while it ran added
+    its tombstone after the batch was taken, the cleanup's map still held the place, and memory took it back."""
+    async def go():
+        maps = mapkeeper.Maps(str(tmp_path))
+        a = maps.observe(None, APP, tree(title="Alpha", ids=("a",)), arrived=True)
+        b = maps.observe(None, APP, tree(title="Beta", ids=("x", "y", "z")), arrived=True)
+        await maps.flush()
+        assert sorted(json.loads((tmp_path / APP / "map.json").read_text("utf-8"))["places"]) == sorted([a.name, b.name])
+        maps.observe(None, APP, tree(title="Gamma", ids=("p", "q", "r", "s")), arrived=True)  # a save is now under way
+        real, fired = asyncio.to_thread, []
+
+        async def interleaved(fn, *args):
+            done = await real(fn, *args)
+            name = getattr(fn, "__name__", "")
+            if name == "save" and not fired:  # the save has returned: an edit forgets `a` (its tombstone: the cleanup is due)
+                fired.append("a")
+                maps.edit(None, APP, lambda data: places.forget(data, a.name))
+            elif name == "update" and fired == ["a"]:  # the cleanup's file update has just returned: a second edit
+                fired.append("b")
+                maps.edit(None, APP, lambda data: places.forget(data, b.name))
+            return done
+        monkeypatch.setattr(mapkeeper.asyncio, "to_thread", interleaved)
+        await maps.flush()
+        monkeypatch.undo()
+        assert fired == ["a", "b"] and b.name not in maps.data(None, APP)["places"], "the cleanup's map put the forgotten place back"
+        maps.observe(None, APP, tree(title="Delta", ids=("m", "n", "o", "p", "q")), arrived=True)  # a later save
+        await maps.flush()
+        for held in (maps.data(None, APP), json.loads((tmp_path / APP / "map.json").read_text("utf-8"))):
+            assert a.name not in held["places"] and b.name not in held["places"]
+    asyncio.run(go())

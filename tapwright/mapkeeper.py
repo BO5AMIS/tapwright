@@ -151,24 +151,35 @@ class Maps:
                 continue
             if file.problem is not None:  # the save found the file unusable: it was left alone, memory is all there is
                 continue
-            gone = self._dropped.pop(key, [])
-            forgotten = self._forgotten.pop(key, set())  # reflexes forgotten while this save ran, the same way
-            lost = self._forgotten_places.pop(key, {})  # places forgotten while this save ran, the same way
-            if gone or forgotten or lost:  # a merge would bring them back from the snapshot: take them out of the file
-                def undo(d: dict) -> None:
-                    out = {n for n, kid in lost.items() if n in d["places"] and places.key_id(d["places"][n]["key"]) == kid}
-                    d.update(places={n: p for n, p in d["places"].items() if n not in out},
-                             roads=[r for r in d["roads"] if roads.identity(r) not in gone
-                                    and not ({r.get("from"), r.get("to")} & out)],
-                             reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten and r.get("at") not in out])
+            failed = False
+            # What an edit forgot while the save ran (or while the cleanup below ran: its tombstones are made after the
+            # batch was taken) is taken out of the file; the batch is taken again until an edit has added none, and only
+            # then does memory take the result, so a place an edit forgot is never put back (Codex, PR #9 cycle 2).
+            while (batch := (self._dropped.pop(key, []), self._forgotten.pop(key, set()),
+                             self._forgotten_places.pop(key, {})))[0] or batch[1] or batch[2]:
                 try:
-                    merged = await asyncio.to_thread(file.update, undo)
+                    merged = await asyncio.to_thread(file.update, self._undo(*batch))
                 except (mapfile.MapError, OSError) as e:
                     file.problem = f"The map for {key[1]} couldn't be saved ({e}); what is learned is kept until the daemon stops."
                     self._told.discard(key)
-                    continue
+                    failed = True
+                    break
+            if failed:
+                continue
             if file.problem is None:
                 self._memory[key] = mapfile.merge(merged, self._memory[key])  # what changed meanwhile stays
+
+    @staticmethod
+    def _undo(gone: list[tuple[str, str, str]], forgotten: set[str | None], lost: dict[str, str]) -> Callable[[dict], None]:
+        """The change that takes dropped roads, forgotten reflexes and forgotten places (with the roads and reflexes that
+        touched them) out of a map the merge brought them back into."""
+        def undo(d: dict) -> None:
+            out = {n for n, kid in lost.items() if n in d["places"] and places.key_id(d["places"][n]["key"]) == kid}
+            d.update(places={n: p for n, p in d["places"].items() if n not in out},
+                     roads=[r for r in d["roads"] if roads.identity(r) not in gone
+                            and not ({r.get("from"), r.get("to")} & out)],
+                     reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten and r.get("at") not in out])
+        return undo
 
     async def flush(self) -> None:
         """Wait until everything learned so far is in the files."""
@@ -193,9 +204,19 @@ class Maps:
             before = {r.get("name") for r in d["reflexes"]}
             places_before = {n: places.key_id(p["key"]) for n, p in d["places"].items()}
             result.append(change(d))
-            after_places = {places.key_id(p["key"]): n for n, p in d["places"].items()}
-            renames.update({n: after_places[kid] for n, kid in places_before.items()
-                            if n not in d["places"] and after_places.get(kid, n) != n})  # a place under another name
+            # a place under another name: one name went and one came, for the same key. Only a name that is NEW in this
+            # edit can be a rename's target, so a forget (nothing new) never rewrites a route, even when another place
+            # shares the forgotten one's structural signature (Codex, PR #9 cycle 2)
+            vanished: dict[str, list[str]] = {}
+            for n, kid in places_before.items():
+                if n not in d["places"]:
+                    vanished.setdefault(kid, []).append(n)
+            appeared: dict[str, list[str]] = {}
+            for n, p in d["places"].items():
+                if n not in places_before:
+                    appeared.setdefault(places.key_id(p["key"]), []).append(n)
+            renames.update({gone[0]: appeared[kid][0] for kid, gone in vanished.items()
+                            if len(gone) == 1 and len(appeared.get(kid, [])) == 1})
             after = {r.get("name") for r in d["reflexes"]}
             task = self._tasks.get(key)
             forgotten = self._forgotten.setdefault(key, set())

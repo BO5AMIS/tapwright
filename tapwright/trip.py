@@ -126,16 +126,25 @@ class Trip:
     async def _read(self) -> ui.Tree:
         d = self.d
         await self._stop_if_needed()
-        await d._read(lambda: d._silent_read(self.view))
+        front: list[str | None] = []
+
+        async def turn() -> bool:
+            more = await d._silent_read(self.view)
+            tree = d.session.last_tree
+            # the app in front as THIS read has it: the tree's own root, else asked now, in the same turn. `session.app`
+            # is as the last look left it (Session.refresh never updates it), so a tap that opened another app doesn't show
+            front.append(tree.app[1] if tree is not None and tree.app else await d.session.foreground_bundle_id())
+            return more
+        await d._read(turn)
+        now = front[-1] if front else None
         given = await d._given(self.scope) if self.scope is not None else None
-        if given is not None and d._bundle() not in given:
+        if given is not None and now not in given:
             from .daemon import _outside
-            app = getattr(d.session, "app", None)
-            raise self._stopped(Refused("not_allowed", _outside(d._bundle(), app[0] if app else None, ", ".join(given.values()))))
+            raise self._stopped(Refused("not_allowed", _outside(now, d.session.app_names.get(now or ""), ", ".join(given.values()))))
         tree = d.session.last_tree
         if tree is None:
             raise Refused("internal", "the phone gave no screen to read; look, then try again")
-        self.foreign = bool(self.bundle) and d._bundle() != self.bundle  # another allowed app: the map here isn't its map
+        self.foreign = bool(self.bundle) and now != self.bundle  # another allowed app: the map here isn't its map
         return tree
 
     def ready(self, hop: Hop | None) -> bool:

@@ -565,6 +565,64 @@ def test_stress_rotate_goes_there_and_back_and_network_sets_the_condition_until_
     run(go)
 
 
+@pytest.mark.parametrize("left", ["during", "before"])
+def test_stress_rotate_puts_the_phone_back_upright_when_the_http_caller_leaves_during_it(left):
+    """(Codex, PR #9 cycle 2) An HTTP caller of `journey {"stress": "rotate"}` disconnects while the phone is in
+    landscape: the tool's own restoration still turns it back upright (the caller-left check would leave it in
+    landscape). When the caller left before the phone was free, nothing is started: the stress is refused."""
+    from tapwright.control import CALLER_LEFT, STILL_WANTED
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        d.session.calls.clear()
+
+        async def wanted() -> bool:  # (server.py's check: the request isn't disconnected)
+            return left == "during" and "rotate:landscape_left" not in d.session.actions()
+        token = STILL_WANTED.set(wanted)
+        try:
+            if left == "during":
+                r = await d.run_tool("a", "journey", {"stress": "rotate"})
+                assert r["text"].splitlines()[0] == "Stress: rotate."
+            else:
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "journey", {"stress": "rotate"})
+                assert e.value.code == "timeout" and str(e.value) == CALLER_LEFT
+        finally:
+            STILL_WANTED.reset(token)
+        turned = [c for c in d.session.actions() if c.startswith("rotate")]
+        assert turned == (["rotate:landscape_left", "rotate:portrait"] if left == "during" else [])
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_pause_still_holds_back_the_stress_restoration():
+    """The restoration is exempt from the caller-left check only: a pause from the live view during the stress delay
+    still refuses it (the person stopped the phone; nothing more is done)."""
+    from tapwright import daemon as daemon_module
+
+    async def go():
+        d = daemon()
+        stop, task = await started(d)
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
+        d.session.calls.clear()
+        real_sleep = d.control.sleep
+
+        async def sleep(s):
+            if s == daemon_module.STRESS_ROTATE_S:
+                d.control.set_paused(True)
+            await real_sleep(s)
+        d.control.sleep = sleep
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stress": "rotate"})
+        assert e.value.code == "paused"
+        assert [c for c in d.session.actions() if c.startswith("rotate")] == ["rotate:landscape_left"]
+        d.control.set_paused(False)
+        await finish(stop, task)
+    run(go)
+
+
 def test_stress_double_tap_sends_the_same_touch_twice_and_is_not_counted_as_a_tap(reports):
     async def go():
         d = daemon()

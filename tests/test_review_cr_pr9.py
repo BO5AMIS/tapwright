@@ -40,6 +40,9 @@ class Switching(MapSession):
     def _go(self, key) -> None:
         super()._go(key)
         if self.other and self.at == "settings":
+            # the tree the phone gives now is the other app's (its own root says so; Session.refresh never sets `app`)
+            self.screens["settings"] = screen("Settings", ids=("general-row", "about-row", "s1", "s2", "s3"),
+                                              bundle="com.other.app")
             self.app = ("Other", "com.other.app")
 
 

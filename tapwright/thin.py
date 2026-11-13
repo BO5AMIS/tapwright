@@ -109,28 +109,41 @@ def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
 PROOF_PREFIX = b"tapwright-proof-v2\x00"  # as server.PROOF_PREFIX and client.PROOF_PREFIX (copied: see the docstring)
 
 
-def _proved(port: int, token: str, timeout: float) -> bool:
+def _proved(port: int, token: str, timeout: float) -> http.client.HTTPConnection | None:
     """Does whatever listens on `port` hold `token`? A random challenge goes out without the token; the answer must be
-    HMAC-SHA256(token, prefix + challenge), compared in constant time. OSError when nothing answers."""
+    HMAC-SHA256(token, prefix + challenge), compared in constant time. OSError when nothing answers.
+    On success returns the connection that was proved, still open: the token goes over that same connection and never
+    over a new one (a process that bound the port in between would get it). It never reconnects by itself (auto_open
+    off). None when the proof is wrong, or the line was closed after it."""
     challenge = secrets.token_bytes(32)
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request("POST", "/api/prove", body=json.dumps({"challenge": challenge.hex()}).encode(),
                      headers={"Content-Type": "application/json"})
+        sock = conn.sock
         reply = conn.getresponse()
         raw = reply.read()
-        if reply.status != 200:
-            return False
-        given = json.loads(raw or b"{}").get("proof")
-    except (ValueError, AttributeError):
-        return False
-    finally:
+        given = None
+        if reply.status == 200:
+            try:
+                given = json.loads(raw or b"{}").get("proof")
+            except (ValueError, AttributeError):
+                given = None
+        # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
+        # (the address this call dials: the literal 127.0.0.1, never a name that could resolve elsewhere)
+        signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(port)).encode()
+        want = hmac.new(token.encode(), signed, hashlib.sha256).hexdigest()
+        if not (isinstance(given, str) and hmac.compare_digest(given.encode(), want.encode())):
+            conn.close()
+            return None
+        if sock is None or conn.sock is not sock:  # closed after the proof: not the proved peer any more
+            conn.close()
+            return None
+        conn.auto_open = 0
+        return conn
+    except BaseException:
         conn.close()
-    # signed with the port this client dialled: a proof relayed from a daemon on another port never matches
-    # (the address this call dials: the literal 127.0.0.1, never a name that could resolve elsewhere)
-    signed = PROOF_PREFIX + challenge + b"\x00127.0.0.1\x00" + str(int(port)).encode()
-    want = hmac.new(token.encode(), signed, hashlib.sha256).hexdigest()
-    return isinstance(given, str) and hmac.compare_digest(given.encode(), want.encode())
+        raise
 
 
 def _picture(answer: dict) -> str | None:
@@ -181,16 +194,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"tapwright call: {e}", file=sys.stderr)
         return EXIT_REFUSED
     try:  # the token goes only to a process that has proved it holds it (serve.json may be stale: a port is reused)
-        proven = _proved(port, token, min(a.timeout, 10.0))
+        conn = _proved(port, token, min(a.timeout, 10.0))
     except (OSError, http.client.HTTPException) as e:
         print(f"tapwright call: can't reach tapwright serve ({e}). {NO_DAEMON}", file=sys.stderr)
         return EXIT_UNREACHABLE
-    if not proven:
+    if conn is None:
         print("tapwright call: whatever listens on tapwright serve's port did not prove it holds the token (a stale "
-              "address file, or an older tapwright serve); the token was not sent. Stop it and start it again: "
-              "`tapwright serve --stop`, then `tapwright serve`.", file=sys.stderr)
+              "address file, or an older tapwright serve), or the proved connection was closed; the token was not "
+              "sent. Stop it and start it again: `tapwright serve --stop`, then `tapwright serve`.", file=sys.stderr)
         return EXIT_UNREACHABLE
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=a.timeout)
+    conn.timeout = a.timeout  # (the proof used the short one)
+    if conn.sock is not None:
+        conn.sock.settimeout(a.timeout)
     try:  # one request, never sent twice: an action that was delivered must not be repeated
         conn.request("POST", f"/api/{a.tool}", body=json.dumps(args).encode(), headers=headers)
         reply = conn.getresponse()
