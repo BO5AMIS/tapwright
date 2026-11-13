@@ -6,8 +6,9 @@ sheet or an alert). The keyboard isn't counted. `parts` keeps those pieces, so t
 part.
 
 Never in a key, a name or the map file: a list row's text, a param's value, typed text, anything from a secure field.
-A navigation title is the one piece of content that is looked at: it breaks a tie between two places, and it names a
-place once it showed the same title on two visits. In the map it is kept only as an HMAC (`title_hash`), per language.
+A navigation title is the one piece of content that is looked at: it breaks a tie between two places. It never names
+one (1.13.2): a place is `place_<n>` until a person names it. In the map it is kept only as an HMAC (`title_hash`), per
+language.
 
 The functions here work on the map as plain JSON (the `agent-tools-map` of §18.9, built by `empty_map`), so they are
 testable without a file or a phone. mapfile.py reads and writes it.
@@ -152,14 +153,6 @@ def title_hash(title_key: str, lang: str, title: str) -> str:
     return mac.hexdigest()[:HASH_CHARS]
 
 
-def slugify(title: str) -> str | None:
-    """A title as a name: ASCII, lower case, `_` for spaces. None when it has no ASCII letter left (Arabic, or only
-    digits): such a place stays `place_<n>`, so a name never depends on the language of the first visit."""
-    plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii").lower()
-    slug = re.sub(r"[^a-z0-9]+", "_", plain).strip("_")
-    return slug[:NAME_MAX].strip("_") if re.search(r"[a-z]", slug) else None
-
-
 def clean_name(text: str) -> str:
     """A name a person gave, as `[a-z0-9_]`: lower case, spaces and dashes as `_`. ValueError when it can't be one."""
     name = re.sub(r"[\s-]+", "_", text.strip().lower())
@@ -223,8 +216,8 @@ def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
 
 def visit(data: dict, read: PlaceRead, now: str, arrived: bool = True) -> Visit:
     """The screen the agent is on: the saved place it is, or a new one (`place_<n>`). `arrived`: the agent came here
-    from somewhere else (a look at the same screen again is not a second visit). A place whose title shows the same
-    on a second arrival is named after it, unless a person named it or its title has changed between visits."""
+    from somewhere else (a look at the same screen again is not a second visit). A place stays `place_<n>` until a
+    person names it: a title never names it (AGENT-TOOLS 1.13.2, §18.1)."""
     name, score = locate(data, read)
     if name is None:
         name = _unique(data, f"place_{_next_number(data)}")
@@ -233,24 +226,9 @@ def visit(data: dict, read: PlaceRead, now: str, arrived: bool = True) -> Visit:
         return Visit(name, True, None, 1.0)
     place = data["places"][name]
     place["last"] = now
-    renamed = None
-    if arrived and read.title:
-        titles = place.setdefault("titles", {})
-        now_hash, before = title_hash(data["titleKey"], read.lang, read.title), titles.get(read.lang)
-        varies = place.setdefault("titleVaries", [])
-        if before is None:
-            titles[read.lang] = now_hash
-        elif before != now_hash:  # a title that changes between visits is content, not a name
-            titles[read.lang] = now_hash
-            if read.lang not in varies:
-                varies.append(read.lang)
-        elif not place.get("named") and read.lang not in varies and (slug := slugify(read.title)):
-            if _NUMBERED.match(name):  # only a number is replaced; a title's name stays as it is
-                renamed, name = name, _unique(data, slug, besides=name)
-                _move(data, renamed, name)
-        if not varies:
-            del place["titleVaries"]
-    return Visit(name, False, renamed, score)
+    if arrived and read.title:  # the latest title's hash, for the tie-break; it never names the place (1.13.2)
+        place.setdefault("titles", {})[read.lang] = title_hash(data["titleKey"], read.lang, read.title)
+    return Visit(name, False, None, score)
 
 
 def _move(data: dict, old: str, new: str) -> None:

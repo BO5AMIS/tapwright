@@ -55,7 +55,7 @@ def test_no_place_line_until_the_app_has_a_map_then_new_places_say_so(tmp_path):
     run(go)
 
 
-def test_a_name_comes_back_in_the_place_line_and_a_title_seen_twice_names_a_place(tmp_path):
+def test_a_title_seen_twice_does_not_name_a_place(tmp_path):
     async def go():
         d = mapped(tmp_path)
         stop, task = await started(d)
@@ -63,12 +63,12 @@ def test_a_name_comes_back_in_the_place_line_and_a_title_seen_twice_names_a_plac
         await tap(d, {"id": "settings-btn"})  # place_2, first visit
         d.session.at = "home"
         r = await d.run_tool("a", "look", {"screenshot": False})
-        assert "Place: home." in r["text"]  # Home on a second visit with the same title: it is named after it
-        r = await tap(d, {"id": "settings-btn"})  # Settings again: the same title on a second visit
-        assert r["text"].splitlines()[1] == "Place: settings."
+        assert "Place: place_1." in r["text"]  # the same title on a second visit: still numbered (1.13.2)
+        r = await tap(d, {"id": "settings-btn"})
+        assert r["text"].splitlines()[1] == "Place: place_2."
         await d.maps.flush()
-        assert list(file_of(tmp_path)["places"]) == ["home", "settings"]
-        assert [(r["from"], r["to"]) for r in file_of(tmp_path)["roads"]] == [("home", "settings")]  # the roads followed the rename
+        assert list(file_of(tmp_path)["places"]) == ["place_1", "place_2"]
+        assert [(r["from"], r["to"]) for r in file_of(tmp_path)["roads"]] == [("place_1", "place_2")]
         await finish(stop, task)
     run(go)
 
@@ -312,9 +312,9 @@ def test_a_road_that_leads_somewhere_else_twice_is_dropped_and_the_answer_says_s
             d.session.at = "home"
             await d.run_tool("a", "look", {"screenshot": False})
             said.append((await tap(d, {"id": "settings-btn"}))["text"])
-        assert "road dropped" not in said[0] and "Note: road dropped: home > place_2 (it failed twice)." in said[1]
+        assert "road dropped" not in said[0] and "Note: road dropped: place_1 > place_2 (it failed twice)." in said[1]
         await d.maps.flush()
-        assert [(r["from"], r["to"]) for r in file_of(tmp_path)["roads"]] == [("home", "language")]
+        assert [(r["from"], r["to"]) for r in file_of(tmp_path)["roads"]] == [("place_1", "place_3")]
         await finish(stop, task)
     run(go)
 

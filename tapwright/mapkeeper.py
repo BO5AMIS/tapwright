@@ -20,7 +20,7 @@ Key = tuple[str, str]
 
 @dataclass(frozen=True)
 class Seen:
-    """A screen observed: its place's name, whether the place is new, its earlier name when a title just named it, and
+    """A screen observed: its place's name, whether the place is new, its earlier name when a place was just renamed (never by a title since 1.13.2), and
     whether the app had a map (a place saved) before this screen."""
     name: str
     new: bool
