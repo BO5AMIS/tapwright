@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.1 (unreleased)
+
+- A place is `place_<n>` until a person names it. Tapwright no longer names a place after a repeated navigation title
+  (a private title such as "Chat with Sara" would have become a stored place name). Maps that already hold
+  title-derived names keep them. Same rule as AGENT-TOOLS 1.13.2, §18.1.
+- QUALITY-BAR 2.5 (`docs/QUALITY-BAR.md`).
+- The spec is AGENT-TOOLS 1.13.2. (PLACEHOLDER: the lead fills this once the spec is swapped in.)
+
 ## 1.6.0, "the Speed Update" (2026-11-13)
 
 An agent on the phone should feel almost instant. A real run (10 workers, 760 calls) showed the largest cost was
