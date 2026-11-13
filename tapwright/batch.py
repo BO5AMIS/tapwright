@@ -3,6 +3,7 @@ answer, the script file, and the target a recording saves. The daemon runs the s
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -217,10 +218,11 @@ def value_of(element: ui.Element) -> str:
 
 
 def has_value(element: ui.Element, want: str) -> bool:
-    """Does the element hold the expected value? A switch also takes "true" and "false", as its line shows it."""
+    """Does the element hold the expected value? A switch also takes "true" and "false", as its line shows it. A value
+    that is a test account's also matches the placeholder an answer shows for it (Codex, PR #10 cycle 3)."""
     if element.checked is not None:
         want = {"true": "on", "false": "off"}.get(want.strip().lower(), want.strip().lower())
-    return value_of(element) == want
+    return want in (value_of(element), ui.shown(value_of(element)))
 
 
 def load_script(path: str) -> dict:
@@ -231,6 +233,11 @@ def load_script(path: str) -> dict:
         raise Refused("bad_params", f"can't read the script {path}: {e.strerror or e}") from None
     except ValueError as e:
         raise Refused("bad_params", f"the script {path} isn't valid JSON: {e}") from None
+    return check_script(data, path)
+
+
+def check_script(data: object, path: str) -> dict:
+    """A script's data (§9.4), checked as `load_script` checks a file's (`bad_params` naming `path`)."""
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise Refused("bad_params", f'the script {path} isn\'t an agent-tools script (its "format" must be "{FORMAT}")')
     if data.get("version") not in VERSIONS:
@@ -243,6 +250,49 @@ def load_script(path: str) -> dict:
         from . import routes
         routes.check(data)
     return data
+
+
+# the keys whose string values are the screen's words or the agent's text in a script's steps (a target's, an
+# expectation's, an `if`'s, an ignore entry's, a typed or waited-for text, a link): the persistence backstop redacts
+# these, and nothing else (a key, a tool, a format, a script's or a picture's name, an app is never the screen's)
+CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url"})
+# what a step's text keeps as it is: a variable (`${name}`, an account's `${account.username}`) and a literal `$${`
+_KEPT = re.compile(r"(\$\$\{|\$\{(?:account\.(?:username|password)|[A-Za-z_][A-Za-z0-9_]*)\})")
+
+
+def redacted_content(data: object, redact: Callable[[str], str]) -> object:
+    """A script (or a route) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
+    never a key, a tool's name, the format, the version or another structural field, and never a variable's
+    `${…}` syntax (Codex, PR #10 cycle 3: an account whose username is `tap` had made the saved step's tool
+    `<tester2's username>`)."""
+    def text(value: str) -> str:
+        parts = _KEPT.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
+        return "".join(p if n % 2 else redact(p) for n, p in enumerate(parts))
+
+    def walk(value: object, content: bool) -> object:
+        if isinstance(value, str):
+            return text(value) if content else value
+        if isinstance(value, dict):
+            return {k: walk(v, k in CONTENT_KEYS) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v, content) for v in value]
+        return value
+    return walk(data, False)
+
+
+def saved_script(data: dict, redact: Callable[[str], str] | None, where: str) -> dict:
+    """What `record` writes: the script redacted (`redacted_content`). When the redaction changed it, it is checked as
+    it will be read back, so the redaction never makes a file that `replay` or `drive` would refuse reported saved
+    (`bad_params` naming `where`). One it left alone is written as before (an empty recording too)."""
+    if redact is None:
+        return data
+    out = json.loads(json.dumps(redacted_content(data, redact), ensure_ascii=False))
+    if out == json.loads(json.dumps(data, ensure_ascii=False)):
+        return data
+    try:
+        return check_script(out, where)
+    except Refused as e:
+        raise Refused("bad_params", f"can't save {where}: {e}") from None
 
 
 def recorded_target(target: dict | None, items: list[ui.Element],

@@ -80,7 +80,6 @@ def shown(text: str) -> str:
 
 # the placeholder an account's value is shown as (accounts.Loaded.scrub): `<tester2's password>`
 PRIVATE = re.compile(r"<[A-Za-z0-9_-]{1,40}'s (?:username|password)>")
-TEXT_ATTRIBUTES = ("label", "name", "value", "placeholderValue", "title")  # what the tree's text is read from
 
 
 def private(text: str) -> bool:
@@ -90,9 +89,11 @@ def private(text: str) -> bool:
     return bool(text) and (shown(text) != text or PRIVATE.search(text) is not None)
 
 
-def redacted(data: object, redact: Callable[[str], str] | None = None) -> object:
-    """`data` (strings, lists, tuples, dicts) with every string redacted (`redact`, else this call's REDACT); keys too.
-    What comes in from the phone goes through this where it enters, and what is written to a file before it is."""
+def redacted(data: object, redact: Callable[[str], str] | None = None, keep: frozenset[str] = frozenset()) -> object:
+    """`data` (strings, lists, tuples, dicts) with every string VALUE redacted (`redact`, else this call's REDACT). A
+    dict's keys are never touched (they are the data's structure, not the screen's words: an account whose username is
+    `tap` must not rename a key), nor the values under the keys in `keep` (a file's path, a format's name). For what
+    is written to a file, after the screen's own words have been redacted where they were put in."""
     redact = redact or REDACT.get()
     if redact is None:
         return data
@@ -101,7 +102,7 @@ def redacted(data: object, redact: Callable[[str], str] | None = None) -> object
         if isinstance(v, str):
             return redact(v)
         if isinstance(v, dict):
-            return {walk(k): walk(x) for k, x in v.items()}
+            return {k: (x if k in keep else walk(x)) for k, x in v.items()}
         if isinstance(v, (list, tuple)):
             if isinstance(v, list):
                 return [walk(x) for x in v]
@@ -200,7 +201,7 @@ class Element:
         elif self.text:
             parts.append(clip(self.text))
         if self.identifier and not eyes:  # a user sees no ids
-            parts.append(f"id={self.identifier}")
+            parts.append(f"id={shown(self.identifier)}")
         # a switch's value ("1", "0") is already `checked=`; an empty input's placeholder is `placeholder=` (v1.7)
         if self.shows_placeholder:
             parts.append(f"placeholder={clip(self.placeholder)}")
@@ -533,23 +534,16 @@ def rn_label(label: str) -> str:
     return found.label if found else label
 
 
-def _parse(source: str, screen: tuple[float, float] | None,
-           redact: Callable[[str], str] | None = None) -> ET.Element:
+def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
     """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError.
 
-    Every text attribute is redacted here, where the screen comes in (`redact`, else this call's REDACT): a test
-    account's username or password a field shows becomes its placeholder, so no element, alert, title, change list,
-    selector, name or report made from the tree ever holds the value (AGENT-TOOLS §18.6; Codex, PR #10 cycle 2)."""
+    The tree keeps the screen's own words, a test account's value too: the policy, matching, typing and the recorder
+    decide with them. Everything that leaves the process redacts them (`shown`, `clip`, `quoted`; AGENT-TOOLS §18.6;
+    Codex, PR #10 cycle 3: redacting here hid a `Delete` from the policy and cut a field's erase short)."""
     try:
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
-    redact = redact or REDACT.get()
-    if redact is not None:
-        for node in root.iter():
-            for key in TEXT_ATTRIBUTES:
-                if (value := node.get(key)) and (now := redact(value)) != value:
-                    node.set(key, now)
     trace.parsed()
     if screen is not None and screen[0] > screen[1]:
         _upright_keyboard(root, screen)
@@ -588,8 +582,7 @@ def _alert(node: ET.Element) -> Alert:
     return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
 
 
-def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False,
-         redact: Callable[[str], str] | None = None) -> Tree:
+def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
     """Flatten WDA's XML tree into the elements worth showing, in reading order, numbered e1...
     Skips what has no size or whose centre (where a tap would land) is clipped by the screen or a
     scroll container, and the keyboard's keys unless `keyboard`. Raises DeviceError on a broken tree."""
@@ -757,7 +750,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                     hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
-    root = _parse(source, screen, redact)
+    root = _parse(source, screen)
     parents = {child: up for up in root.iter() for child in up}
     # On the phone the keyboard has a window of its own: Window > a full-screen view > [an empty view, the strip
     # with the globe key, the views holding the Keyboard node].
@@ -1016,7 +1009,7 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
 
 
 def alert_line(alert: Alert) -> str:
-    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{b}]" for b in alert.buttons)
+    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
 
 
 ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon
@@ -1182,27 +1175,46 @@ def more_candidates(total: int, shown: int) -> list[str]:
     return [f'  (+{total - shown} more; use a ref or "index")'] if total > shown else []
 
 
+def _forms(text: str) -> set[str]:
+    """A text as a selector may name it: the screen's own words, and as an answer shows them (a test account's value
+    as its placeholder), each stripped and casefolded. An agent that read `<tester2's username>` finds the element by
+    it, and a script saved before with the words themselves still does (Codex, PR #10 cycle 3)."""
+    return {_norm(text), _norm(shown(text))} if text else {""}
+
+
+def _same_id(e: Element, want: str) -> bool:
+    return bool(e.identifier) and want in (e.identifier, shown(e.identifier))
+
+
 def _hits(items: list[Element], target: Target) -> tuple[list[Element], str, str]:
     """The elements an id, label or text target matches, in reading order, with how a message names the target and
-    what it says when nothing matches. The matches before the alert rule (`resolve` applies that)."""
+    what it says when nothing matches. The matches before the alert rule (`resolve` applies that). A target matches
+    the screen's words or the placeholder an answer shows for a test account's value in them (`_forms`)."""
     if target.id is not None:
         # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
-        hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
+        hits = [e for e in items if _same_id(e, target.id)] or             [e for e in items if e.name and target.id in (e.name, shown(e.name))]
         what, miss = f'id "{target.id}"', f'nothing on screen has id "{target.id}"; look, then pick another target.'
     elif target.label is not None:
-        hits = _without_nested([e for e in items if _norm(e.label) == _norm(target.label)])
+        want = _norm(target.label)
+        hits = _without_nested([e for e in items if want in _forms(e.label)])
         what = f'label "{target.label}"'
         miss = f'nothing on screen has label "{target.label}"; use {{text}} for a partial match, or look.'
     else:
         want = _norm(target.text)
         # in a user's eyes (a journey) text is what shows on the glass: an icon-only button's label is VoiceOver's
         pool = [e for e in items if not (USERS_EYES.get() and e.icon_only)]
-        hits = [e for e in pool if _norm(e.label) == want or _norm(e.value) == want]
+        hits = [e for e in pool if want in _forms(e.label) | _forms(e.value)]
         if not hits:
-            hits = [e for e in pool if want in _norm(e.label) or want in _norm(e.value)]
+            hits = [e for e in pool if shows(e, want)]
         hits = _without_nested(hits)
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     return hits, what, miss
+
+
+def shows(e: Element, want: str) -> bool:
+    """Does the element's label or value hold `want` (stripped and casefolded) as a part, in the screen's words or as
+    an answer shows them?"""
+    return any(want in form for form in _forms(e.label) | _forms(e.value))
 
 
 def _in_alert(hits: list[Element]) -> tuple[list[Element], str]:
@@ -1262,12 +1274,12 @@ DISMISS_MARGIN = 60.0  # points a closing touch keeps from the screen's top (the
 NOT_BACK = {"cancel", "close", "done", "save", "edit", "delete", "clear", "discard", "menu", "sign out"}
 
 
-def back_button(source: str, screen: tuple[float, float], redact: Callable[[str], str] | None = None) -> Back:
+def back_button(source: str, screen: tuple[float, float]) -> Back:
     """Where to tap to go back, from WebDriverAgent's XML. NavigationBar is a container, so it isn't in
     the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
     leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
     does something else; else no point (a bar without a back button is usually a root screen)."""
-    root = _parse(source, screen, redact)
+    root = _parse(source, screen)
 
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect

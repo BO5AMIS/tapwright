@@ -13,12 +13,20 @@
   label or text is a title is saved by its id, else by its point, and a `wait_for` on a title is not kept as a step's
   expectation, so no title is in a script, a route or a map in plain text.
 - A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
-  (`<tester2's password>`) where the screen comes in: every tree read, alert, XCTest audit issue and OCR reading, so
-  nothing made from them holds it, in any form (escaped, collapsed, cut). That covers the text answers and change lists
-  (a `(was …)` cut no longer keeps a password's end), the audit's element lines (`id=`), recorded scripts and routes,
-  maps, journey reports (`report.md`, `report.html`, `journey.json`) and the action log. A recording never saves a
-  selector that holds a value or its placeholder: it takes the element's id, else its label, else the point. Scripts,
-  routes and journey reports are also checked as they are written.
+  (`<tester2's password>`) in everything that leaves Tapwright, in any form (escaped, collapsed, cut): text answers and
+  errors, change lists (a `(was …)` cut no longer keeps a password's end), alerts, the audit's element lines (`id=`) and
+  XCTest's words, OCR lines, the live view's captions and confirmation requests, the host's OK dialog, recorded scripts
+  and routes, maps (ids and title hashes), journey reports (`report.md`, `report.html`, `journey.json`, an exported
+  issue's title) and the action log. Each is redacted before it is cut.
+  Inside, Tapwright keeps the screen's own words, so the safety policy, typing and matching work as they do without
+  accounts: a password `Delete` doesn't hide a Delete button (or an alert's Delete) from the confirmation or a block
+  rule, and replacing a field's text erases all of it, not as many characters as its placeholder has. A target or an
+  expectation matches the screen's words or their placeholder, so `{"text": "<tester2's username>"}` finds what an
+  answer showed that way, and a script that names the value itself still replays.
+  A recording never saves a selector that holds a value or its placeholder: it takes the element's id, else its label,
+  else the point. As a script or route is written, only its content (labels, texts, ids, values, links) is redacted,
+  never a key, a tool, the format or a `${account.…}`, so an account whose username is `tap` leaves the saved tool
+  `tap`. A redacted file is checked as `replay` reads it before it is reported saved.
 - `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
   console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
   sent.

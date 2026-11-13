@@ -831,9 +831,6 @@ class Daemon(journey_tool.JourneyTools):
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
                  actions: ActionLog | None = None) -> None:
         self.session = session
-        # every read of the screen redacts the test accounts' values where it comes in (ui._parse), in a call or not
-        if hasattr(session, "redactor"):
-            session.redactor = self._redactor
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
@@ -1276,7 +1273,7 @@ class Daemon(journey_tool.JourneyTools):
             self.stuck = stuck
         if self.state in ("live", "locked"):
             self.log(f"connection lost: {reason}")
-            self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
+            self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
         # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
@@ -1466,10 +1463,10 @@ class Daemon(journey_tool.JourneyTools):
                         self.log(f"connected, but {e}")
                     self.stuck = e
                     state = "reconnecting" if self._ever_connected else "connecting"
-                    self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, str(e)[:200])
+                    self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, self._redact(str(e))[:200])
                 except Exception as e:
                     self.stuck = None
-                    self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
+                    self._set_state("reconnecting" if self._ever_connected else "connecting", self._redact(str(e))[:200])
                 else:
                     attempt = failures = 0
                     self.stuck = None
@@ -1642,7 +1639,7 @@ class Daemon(journey_tool.JourneyTools):
 
     def _redactor(self) -> "Callable[[str], str] | None":
         """The redactor in force now: this call's (ui.REDACT), else the accounts' scrub; None when no account has a value
-        (nothing to redact, so a read skips the work)."""
+        (nothing to redact: every string then goes out as it is)."""
         if (inside := ui.REDACT.get()) is not None:
             return inside
         loaded = self._loaded()
@@ -2497,8 +2494,10 @@ class Daemon(journey_tool.JourneyTools):
             path = str(batch.writable(path or str(batch.named(rec["name"]))))
             try:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-                # (a backstop: the steps' selectors were chosen without an account's value, §18.6)
-                saved = ui.redacted(batch.script(rec["name"], rec["app"], rec["steps"]), self._redact)
+                # (a backstop: the steps' selectors were chosen without an account's value, §18.6; what is left of the
+                # screen's words in them, a typed text or an expectation, is redacted, never a key, a tool or a format,
+                # and the result must still be a script that loads: Codex, PR #10 cycle 3)
+                saved = batch.saved_script(batch.script(rec["name"], rec["app"], rec["steps"]), self._redact, path)
                 pathlib.Path(path).write_text(json.dumps(saved,
                                                          ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             except OSError as e:
@@ -2539,7 +2538,9 @@ class Daemon(journey_tool.JourneyTools):
         app's map folder (§18.5)."""
         bundle, end = await self._route_place(scope)
         route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], rec["steps"])
-        route = ui.redacted(route, self._redact)  # (a backstop: no step holds an account's value, §18.6)
+        # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
+        # checked as a script before it is saved)
+        route = batch.saved_script(route, self._redact, f"route {rec['route']}")
         routes.check(route)
         root = self._maps_root()
         try:
@@ -3368,7 +3369,7 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("ambiguous", f'{head}\nLook again, then add "index" (0-based) or use a ref.') from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
-                said = str(e)
+                said = self._redact(str(e))  # (before element_name and the caption cut it, §18.6)
                 word = said.split(":", 1)[0] if ":" in said else ""
                 self._announce("agent", name, label=element_name(said) or None, ok=False, code=e.code,
                                reason=word if word.isidentifier() else None, caption=step_caption(name, said, args))
@@ -3389,7 +3390,8 @@ class Daemon(journey_tool.JourneyTools):
         view.moved = view.moved or not looks
         if not reads_only:
             self.unsettled = not looks
-        self._announce("agent", name, label=element_name(str(result)), caption=step_caption(name, str(result), args),
+        said_done = self._redact(str(result))  # (before element_name and the caption cut it, §18.6)
+        self._announce("agent", name, label=element_name(said_done), caption=step_caption(name, said_done, args),
                        point=self._point(self.session.last_point))
         if not looks and name == "back" and settle is not None:
             # back exists to change the screen: even with `look: false` it checks that something did (the stream's
@@ -3417,16 +3419,16 @@ class Daemon(journey_tool.JourneyTools):
         if isinstance(result, Toggled):
             landed = await self._toggle_landed(view, result)
         elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
-            # the text the keys made, as the tree shows it: an account's value as its placeholder, as every read has it
+            # the text the keys made (an account's value, not the ${account.…} the agent wrote), as the tree reads it
             typed = result.typed if result.typed is not None else args["text"]
-            landed = await self._typed_landed(view, result, self._redact(typed))
-            if landed is None and not result.field.secure and await self._typed_wrong(result, self._redact(typed)) and \
+            landed = await self._typed_landed(view, result, typed)
+            if landed is None and not result.field.secure and await self._typed_wrong(result, typed) and \
                     await self.control.agent(lambda: self.session.retype(typed)):
                 # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
                 # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
                 # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
                 notes = [*notes, NOTE_RETYPED]
-                landed = await self._typed_landed(view, result, self._redact(typed))
+                landed = await self._typed_landed(view, result, typed)
         else:
             landed = None
         if landed is not None:
@@ -3640,7 +3642,7 @@ class Daemon(journey_tool.JourneyTools):
                     break
                 return snap, loop.time() - began
             why = (f"{len(same)} matching fields" if len(same) != 1 else "the field is secure" if same[0].secure
-                   else f"the field reads {same[0].value!r}, not the typed text")
+                   else f"the field reads {self._redact(same[0].value)!r}, not the typed text")
             await asyncio.sleep(TOGGLE_POLL)
         if session_module.TRACE:  # (a typing that doesn't land here waits for the screen to settle: 1.6 USB took 2.1 s)
             self.log(f"trace type_text not landed after {loop.time() - began:.2f} s: {why}")
@@ -3853,7 +3855,7 @@ class Daemon(journey_tool.JourneyTools):
         road (Codex, PR #10 cycle 1)."""
         target, element, items = box.get("aim") or (None, None, [])
         if element is not None and any(self._loaded().holds(v) for v in (element.identifier, element.label, element.value)):
-            return None  # a field that shows an account's value (its placeholder, as the tree reads it) is no name for a road
+            return None  # a field that shows an account's value (or the placeholder an agent may have aimed by) is no name for a road
         data = self.maps.data(root, bundle)
         held = box.get("held") or frozenset()
         if (name in roads.TARGETED and element is not None and element.role != "cell"
@@ -4102,8 +4104,8 @@ class Daemon(journey_tool.JourneyTools):
         else:
             picture = await self._read(self.session.screenshot_png)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
-        # the picture's text comes in redacted, as the tree's does: a password the picture shows is its placeholder
-        seen = [dataclasses.replace(s, text=ui.shown(s.text)) for s in seen]
+        # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
+        # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
@@ -4112,7 +4114,7 @@ class Daemon(journey_tool.JourneyTools):
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
         head = OCR_HEAD if new else OCR_NONE
-        lines[cut:cut] = [head, *(s.line(f"o{n}") for n, s in enumerate(new, 1))]
+        lines[cut:cut] = [head, *(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1))]
         return {**answer, "text": "\n".join(lines)}
 
     async def _audit(self, view, args: dict, notes: list) -> dict:
@@ -4929,8 +4931,8 @@ class Daemon(journey_tool.JourneyTools):
             # comes before one on screen that only contains it (seen on the phone 2026-11-10: "Alert" found the
             # state line, which reads "… alert=none …", and the Alert button below the screen was never reached)
             want = ui._norm(target.text)
-            if (not any(want in (ui._norm(e.label), ui._norm(e.value)) for e in view.items)
-                    and any(want in (ui._norm(e.label), ui._norm(e.value)) for e in off)):
+            if (not any(want in ui._forms(e.label) | ui._forms(e.value) for e in view.items)
+                    and any(want in ui._forms(e.label) | ui._forms(e.value) for e in off)):
                 return ui.resolve(sorted([*view.items, *off], key=lambda e: (e.y, e.x)), target)
         try:
             return ui.resolve(view.items, target)
@@ -5248,7 +5250,7 @@ class Daemon(journey_tool.JourneyTools):
             tree = [*view.items, *getattr(s, "offscreen", [])]
             if final.identifier != hit.identifier or sum(e.identifier == hit.identifier for e in tree) != 1:
                 raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
-                                       f"scroll (its identifier \"{hit.identifier}\" is gone or no longer its own), "
+                                       f"scroll (its identifier \"{ui.shown(hit.identifier)}\" is gone or no longer its own), "
                                        f"so nothing was touched. Look, then target what is there.")
         if name != "type_text" and self._police_key(final) != self._police_key(hit):
             # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
@@ -5403,8 +5405,9 @@ class Daemon(journey_tool.JourneyTools):
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
             scrub = self._loaded().scrub
             caption = step_caption(tool, what, a)
+            # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                               "caption": scrub(caption) if caption else caption, "word": word,
+                               "caption": scrub(caption) if caption else caption, "word": scrub(word),
                                "expires": int((time.time() + CONFIRM_TTL) * 1000)}
             self.broadcast(request.message)
             if caller is not None:  # the host's dialog, at the same moment (§11.3)
@@ -6410,7 +6413,7 @@ class Daemon(journey_tool.JourneyTools):
             self._announce("person", action, point=self._point(point))
             return None
         except Refused as e:
-            return {"type": "error", "code": e.code, "message": str(e)}
+            return {"type": "error", "code": e.code, "message": self._redact(str(e))}
         except ConnectionLost as e:
             self.lost(e)
             return {"type": "error", "code": "reconnecting",
@@ -6418,7 +6421,7 @@ class Daemon(journey_tool.JourneyTools):
         except (ValueError, KeyError, TypeError, IndexError) as e:
             return {"type": "error", "code": "unsupported", "message": f"bad {kind} message: {e}"}
         except Exception as e:
-            return {"type": "error", "message": str(e)[:300]}
+            return {"type": "error", "message": self._redact(str(e))[:300]}
 
     def _person_action(self, kind: str, m: dict):
         """(coroutine function to run, kind for the action message, start point in points)."""

@@ -7,7 +7,6 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable
 
 from . import store, trace, ui
 from .control import TAP_MS, Refused
@@ -112,10 +111,6 @@ class Session:
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
-        # A test account's value is redacted from every string read from the screen (ui._parse): the daemon sets this to
-        # give the redactor in force (its accounts' scrub, None with no values), so a read made outside any agent's call
-        # (a person's tap) is redacted too. Asked once per read: finding the accounts file isn't free.
-        self.redactor: Callable[[], Callable[[str], str] | None] | None = None
         self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
         # what a sheet hides, each with the element in front that names the sheet (for `covered`)
         self.behind: list[tuple[ui.Element, ui.Element | None]] = []
@@ -371,9 +366,6 @@ class Session:
         self.last_compact = (token, source)
         return source
 
-    def _redact_now(self) -> Callable[[str], str] | None:
-        return self.redactor() if self.redactor is not None else None
-
     async def foreground_bundle_id(self) -> str | None:
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
@@ -449,7 +441,7 @@ class Session:
     async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
         source = await self._source(timeout)
-        return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard, redact=self._redact_now()))
+        return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard))
 
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
         """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
@@ -486,9 +478,9 @@ class Session:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
         source = await self._source()
         # what is open on top, as this read shows it: `back` names it when it could close nothing
-        tree = ui.read(source, self.screen, redact=self._redact_now())
+        tree = ui.read(source, self.screen)
         self.behind, self.front_items = tree.behind, tree.items  # (and what the layer in front shows, for `back`)
-        return ui.back_button(source, self.screen, self._redact_now())
+        return ui.back_button(source, self.screen)
 
     async def audit(self, types: list[str]) -> list[dict]:
         """XCTest's accessibility audit of the app in front (iOS 17+), through WebDriverAgent: one dict per issue
@@ -496,16 +488,13 @@ class Session:
         rect). `types` are XCUIAccessibilityAuditType names; empty is all of them."""
         found = (await self._call("POST", "/session/{sid}/wda/performAccessibilityAudit", {"auditTypes": types},
                                   timeout=AUDIT_TIMEOUT)).get("value")
-        # redacted where it comes in, as the tree is: an issue names an element by its label and quotes its text
-        if not isinstance(found, list):
-            return []
-        redact = self._redact_now()
-        return [ui.redacted(i, redact) if redact else i for i in found if isinstance(i, dict)]
+        # (kept as XCTest says it, to be matched with the tree's elements: audit.rows_of redacts what it shows)
+        return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = await self._source(timeout)
-        tree = ui.read(source, self.screen, redact=self._redact_now())
+        tree = ui.read(source, self.screen)
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
@@ -632,7 +621,7 @@ class Session:
     async def peek_alert(self, timeout: float = 5.0) -> ui.Alert | None:
         """The system alert on screen now, read apart from `items` (media's watch asks it while the runner waits for
         the person: the list the agent works with isn't touched)."""
-        return ui.read(await self._source(timeout), self.screen, redact=self._redact_now()).alert
+        return ui.read(await self._source(timeout), self.screen).alert
 
     async def photos_access(self) -> dict:
         """The runner's access to the photo library: {"add": "authorized|denied|notDetermined|…", "full": …}."""
@@ -822,8 +811,6 @@ class Session:
             got = await self._attribute(element, "name") if field.identifier else None
             if got is None and not field.identifier:
                 got = await self._attribute(element, "label")
-            if got and (redact := self._redact_now()) is not None:
-                got = redact(got)  # the field's names were redacted where the tree came in: compare like with like
             if got == wanted:
                 return True
         now = await self._field_now(field)
@@ -838,7 +825,7 @@ class Session:
         source = await self._source()
         if not isinstance(source, str):
             return None
-        same = [e for e in ui.read(source, self.screen, redact=self._redact_now()).items if e.role == field.role
+        same = [e for e in ui.read(source, self.screen).items if e.role == field.role
                 and (e.identifier == field.identifier if field.identifier else e.label == field.label)]
         return same[0].rect if len(same) == 1 else None
 

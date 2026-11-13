@@ -52,7 +52,6 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     place and label), else a line made from XCTest's attributes, without a ref. Empty when there is none."""
     if not attrs:
         return ""
-    attrs = ui.redacted(attrs)  # (Session.audit redacted it where it came in; any other caller's is here)
     ident = str(attrs.get("name") or attrs.get("identifier") or "")
     label = str(attrs.get("label") or "")
     box = _box(attrs.get("rect") or attrs.get("frame"))
@@ -70,7 +69,9 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     # what the app's own text says is shown as element lines show text: one line, quoted and capped (review 1.3.1:
     # a raw label could add a line of its own to the answer)
     named = f" {ui.clip(label)}" if label else ""
-    plain_id = " ".join(str(ident).split())[:ui.TEXT_LIMIT] if ident else ""
+    # (matched above in XCTest's own words; shown redacted, before it is collapsed or cut: a test account's value
+    # as its placeholder, §18.6)
+    plain_id = " ".join(ui.shown(str(ident)).split())[:ui.TEXT_LIMIT] if ident else ""
     shown = f" id={plain_id}" if plain_id else ""
     if not kind:
         if not (label or ident or any(box[2:])):
@@ -127,12 +128,12 @@ def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> li
     """(type, element line, what) for each issue of the asked types, XCTest's first, then `duplicate_id`. Shared by
     `audit`'s report and `ux_check`."""
     rows: list[tuple[str, str, str]] = []
-    issues = [ui.redacted(i) for i in issues]  # XCTest's words quote the element's text: a revealed password too
     for issue in issues:
         kind = FROM_XCTEST.get(str(issue.get("auditType") or ""), "")
         if not kind or kind not in types:
             continue
-        what = str(issue.get("compactDescription") or "").strip().rstrip(".") or WHAT[kind]
+        # XCTest's words quote the element's text (a revealed password too): shown redacted, as every answer is
+        what = ui.shown(str(issue.get("compactDescription") or "")).strip().rstrip(".") or WHAT[kind]
         rows.append((kind, element_of(issue.get("elementAttributes") or {}, items), what))
     if "trait" in types:
         told = {line for kind, line, _ in rows if kind == "trait"}  # XCTest's own row for an element stands for ours

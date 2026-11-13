@@ -316,7 +316,7 @@ def write(j: jr.Journey, reached: bool, why: str | None, elapsed: float) -> dict
     j.notes.extend(problems)
     # a backstop for AGENT-TOOLS §18.6: the findings and steps came from redacted screen data already; anything that
     # still holds a test account's value is redacted before it is written (this call's accounts, ui.REDACT)
-    m = ui.redacted(model(j, reached, why, elapsed, pictures, folder))
+    m = ui.redacted(model(j, reached, why, elapsed, pictures, folder), keep=frozenset({"image", "strip", "gif"}))  # (paths kept)
     (folder / "report.md").write_text(markdown(m), encoding="utf-8")
     (folder / "report.html").write_text(page(m), encoding="utf-8")
     (folder / "journey.json").write_text(json.dumps({k: v for k, v in m.items() if k != "extra"}, indent=1), encoding="utf-8")

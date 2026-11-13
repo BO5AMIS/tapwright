@@ -76,7 +76,8 @@ def _tab(tree: ui.Tree) -> str | None:
 
 def parts_of(tree: ui.Tree) -> dict:
     layer = "alert" if tree.alert is not None else "sheet" if tree.behind else None
-    return {"ids": list(tree.structure.ids), "kinds": list(tree.structure.kinds), "tab": _tab(tree), "layer": layer}
+    # (an id is kept in the map as an answer shows it: a test account's value as its placeholder, §18.6)
+    return {"ids": [ui.shown(i) for i in tree.structure.ids], "kinds": list(tree.structure.kinds), "tab": _tab(tree), "layer": layer}
 
 
 def signature(parts: dict) -> str:
@@ -149,7 +150,8 @@ def _flat(title: str) -> str:
 def title_hash(title_key: str, lang: str, title: str) -> str:
     """A title as it is kept in the map: HMAC-SHA-256 with the map's random key, over the language and the title,
     cut to 16 hex characters. Equality is all a tie-break needs; no title can be read back."""
-    mac = hmac.new(bytes.fromhex(title_key), f"{lang}\0{_flat(title)}".encode("utf-8"), hashlib.sha256)
+    # (over the title as an answer shows it: a test account's value in it as its placeholder, §18.6)
+    mac = hmac.new(bytes.fromhex(title_key), f"{lang}\0{_flat(ui.shown(title))}".encode("utf-8"), hashlib.sha256)
     return mac.hexdigest()[:HASH_CHARS]
 
 

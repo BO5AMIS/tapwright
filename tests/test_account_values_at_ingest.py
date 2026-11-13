@@ -1,8 +1,7 @@
-"""A test account's username or password is redacted where screen data comes in (the tree, XCTest's audit issues, OCR),
-so nothing downstream holds it: no change list, audit line, recording, route, journey report or trace has it in any
-form (AGENT-TOOLS §18.6; Codex, PR #10 cycle 2). The fake phone here builds its tree from XML inside each call, as
-WebDriverAgent's /source is read, so the ingest is the real one."""
-import dataclasses
+"""A test account's username or password is in no output: no answer, change list, audit line, recording, route, journey
+report or trace has it in any form (AGENT-TOOLS §18.6; Codex, PR #10 cycle 2). The tree keeps the screen's own words
+for the policy, matching and typing, and every edge redacts them (Codex, PR #10 cycle 3). The fake phone here builds its
+tree from XML inside each call, as WebDriverAgent's /source is read, so the read is the real one."""
 import json
 from xml.etree import ElementTree as ET
 
@@ -233,8 +232,8 @@ def test_the_trace_file_and_the_action_log_never_hold_a_revealed_value(tmp_path)
     run(go)
 
 
-# ---- the ingest itself ----
-def test_a_tree_read_redacts_every_string_it_takes_in():
+# ---- the tree keeps the screen's words; what it shows never does (Codex, PR #10 cycle 3) ----
+def test_a_tree_read_keeps_the_words_and_everything_it_shows_redacts_them():
     loaded = accountlib.Loaded(path="x", accounts={"t": accountlib.Account("t", "user-name@example.com", QUOTED)})
     app = node("Application", bundleId=BUNDLE, label=APP[0], x=0, y=0, width=400, height=800)
     bar = node("NavigationBar", name=QUOTED, x=0, y=40, width=400, height=60)
@@ -248,12 +247,17 @@ def test_a_tree_read_redacts_every_string_it_takes_in():
     token = ui.REDACT.set(loaded.scrub)
     try:
         tree = ui.read(ET.tostring(app, encoding="unicode"), SCREEN)
+        # inside: the screen's own words (the policy, matching and typing decide with them)
+        held = repr([(e.label, e.identifier, e.value, e.name, e.placeholder) for e in tree.items]) + repr(tree.alert)
+        assert QUOTED in held and "user-name@example.com" in held
+        # outside: every line, the alert and the title as an answer shows them
+        said = "\n".join([ui.describe(tree.items, SCREEN, 3.0, APP, tree.alert, tree.keyboard, 0, (0, 0)),
+                          *(e.line() for e in tree.items), ui.clip(tree.structure.title or "")])
     finally:
         ui.REDACT.reset(token)
-    held = repr([(e.label, e.identifier, e.value, e.name, e.placeholder) for e in tree.items]) + repr(tree.alert) \
-        + repr(tree.structure) + repr(tree.app)
-    assert "<t's password>" in held and "<t's username>" in held
-    assert QUOTED not in held and "user-name@example.com" not in held
+    assert "<t's password>" in said and "<t's username>" in said
+    assert_absent(QUOTED, said)
+    assert_absent("user-name@example.com", said)
 
 
 def test_a_scrub_is_idempotent_even_when_the_name_holds_the_value():
@@ -272,8 +276,10 @@ def test_a_selector_that_holds_a_value_or_its_placeholder_is_never_recorded():
         named = ui.Element("e2", "input", "Password shown", "pw-field", value=QUOTED, rect=(10, 200, 100, 40), type="TextField")
         items = [field, named]
         assert batch.recorded_target({"ref": "e1"}, items) == {"x": 60.0, "y": 120.0}
-        as_read = [dataclasses.replace(field, value="<t's password>"), named]  # (as the tree's ingest makes it)
-        assert batch.recorded_target({"text": "<t's password>"}, as_read) == {"x": 60.0, "y": 120.0}
+        # the placeholder an answer shows, and the value itself, find the field (and the other that shows it): neither
+        # is saved, the point is
+        assert batch.recorded_target({"text": "<t's password>", "index": 0}, items) == {"x": 60.0, "y": 120.0}
+        assert batch.recorded_target({"text": QUOTED, "index": 0}, items) == {"x": 60.0, "y": 120.0}
         assert batch.recorded_target({"ref": "e2"}, items) == {"id": "pw-field"}
         with pytest.raises(Exception) as e:
             batch.recorded_ignore([{"ref": "e1"}], items)
