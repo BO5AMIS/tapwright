@@ -239,6 +239,22 @@ def test_websocket_cookie_origin_and_cleanup():
     assert d.ws_clients == 0 and not d._queues
 
 
+def test_status_pages_counts_browser_pages_not_scripts():
+    """CodeRabbit, PR #8: a script's socket (no Origin) made `viewer` think a page was open."""
+    app, d = app_and_daemon()
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws", headers=AUTH) as script:  # a script: the token, no Origin
+            assert script.receive_json()["type"] == "status"
+            assert d.ws_clients == 1
+            assert c.get("/api/health", headers=AUTH).json()["pages"] == 0
+            c.get(f"/?token={TOKEN}", follow_redirects=False)
+            with c.websocket_connect("/ws", headers={"origin": "http://testserver"}) as page:
+                assert page.receive_json()["type"] == "status"
+                assert d.ws_clients == 2 and c.get("/api/health", headers=AUTH).json()["pages"] == 1
+            assert c.get("/api/health", headers=AUTH).json()["pages"] == 0
+    assert d.ws_clients == 0 and d.ws_pages == 0
+
+
 def test_websocket_refuses_strangers():
     app, d = app_and_daemon()
     with TestClient(app) as c:

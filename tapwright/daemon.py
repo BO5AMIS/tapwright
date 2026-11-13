@@ -787,6 +787,7 @@ class Daemon(journey_tool.JourneyTools):
         if self.preset not in PRESETS:
             self.preset = "balanced"
         self.ws_clients = 0
+        self.ws_pages = 0  # of those, the browser pages (a socket with an Origin): what `viewer` finds open
         self.video = None  # a tapwright.video.VideoHub while the H.264 live view is set up (see start_video)
         self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
         # `--settle-on-video`: actions watch the video's frames and the JPEG stream stays closed. Off unless asked:
