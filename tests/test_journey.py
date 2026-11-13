@@ -1203,8 +1203,10 @@ def test_codex_pr7_c1_double_tap_does_not_touch_again_in_an_app_the_agent_was_no
     run(go)
 
 
-def test_codex_pr7_c1_a_picture_from_a_frame_that_came_after_a_switch_to_an_unlisted_app_is_not_kept(reports):
-    """The wait for the stream's next frame ends in another app's screen: the foreground is read again and the picture dropped."""
+def test_codex_pr7_c1_a_picture_taken_while_the_app_in_front_changes_is_not_kept(reports):
+    """Personal mode: the picture is a screenshot between two reads of the app in front, kept only when both name the same
+    given app. A switch while it is taken (to an unlisted app, or back and forth) drops it; a frame of the stream, which
+    could come from before the check or from another app, is never used."""
     async def go():
         session = DescribingSession()
         session.tree = list(HOME)
@@ -1215,18 +1217,25 @@ def test_codex_pr7_c1_a_picture_from_a_frame_that_came_after_a_switch_to_an_unli
         await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
         jr = d._journeys["a"]
         kept, left = len(jr.frames), jr.left_out
-        waited = d._newest_frame
+        shoot = session.screenshot_png
 
         async def switching():
             session.foreground, session.app = "com.other.app", ("Other", "com.other.app")  # the person switches meanwhile
-            return await waited()
-        d._newest_frame = switching
+            return await shoot()
+        session.screenshot_png = switching
+
+        async def no_stream():
+            raise AssertionError("personal mode never takes a stream frame for the report")
+        d._newest_frame = no_stream
         await d._journey_frame(jr, "tap", "Tapped Log meal\nApp: Example (com.example.app)", scope)
         assert len(jr.frames) == kept and jr.left_out == left + 1
-        session.foreground, session.app = "com.example.app", ("Example", "com.example.app")
-        d._newest_frame = waited
+        # in front of the call already: dropped before any picture is taken
         await d._journey_frame(jr, "tap", "Tapped Log meal\nApp: Example (com.example.app)", scope)
-        assert len(jr.frames) == kept + 1  # the same call with the given app in front still keeps its picture
+        assert len(jr.frames) == kept and jr.left_out == left + 2
+        session.foreground, session.app = "com.example.app", ("Example", "com.example.app")
+        session.screenshot_png = shoot
+        await d._journey_frame(jr, "tap", "Tapped Log meal\nApp: Example (com.example.app)", scope)
+        assert len(jr.frames) == kept + 1  # the given app in front throughout: its picture is kept
         await finish(stop, task)
     run(go)
 

@@ -92,6 +92,13 @@ class JourneyTools:
         return bundle == d.SPRINGBOARD and await self._prompt_of_given(
             {jr.app: jr.app}, self.control.client(self._journey_owner(jr)), read=False)
 
+    async def _front_now(self) -> str | None:
+        """The app in front, read through the phone's queue now; None when the phone can't say."""
+        try:
+            return await self._read(self.session.foreground_bundle_id) or None
+        except Refused:
+            return None
+
     def _journey_owner(self, jr: journey.Journey) -> str:
         return next((c for c, j in self._journeys.items() if j is jr), "")
 
@@ -108,31 +115,37 @@ class JourneyTools:
             jr.left_out += 1
             return
         try:
-            frame = await self._newest_frame()
-            source = None
-            if frame is not None:
-                try:
-                    source = await d.jpeg_of(frame)
-                except d.PictureGone:
-                    source = None
-                turn = getattr(self.session, "turn", 0)
-                if source is not None and turn and getattr(frame, "picture", None) is None:
-                    source = await self.turned(frame.seq, source, turn)
-            if source is None:
+            if scope is not None:
+                # Personal mode: the picture is the phone's own screenshot, taken between two reads of the app in front
+                # on the same queue, and kept only when both name the same given app. A stream frame could be one from
+                # before the check, or the next one the stream sends, of another app (Codex, PR #7 cycle 1).
+                before = await self._front_now()
+                if before is None or not await self._journey_bundle_ok(jr, scope, before):
+                    jr.left_out += 1
+                    return
                 source = await self._read(self.session.screenshot_png)
-            # The check above trusted the answer's own `App:` line, and the frame can be the next one the stream sends, which
-            # may be another app's: the picture is kept only for a screen whose app is read again now (through the same
-            # queue as every read) and allowed. In personal mode a foreground that can't be read is no scope, so the picture
-            # is dropped; on a dedicated device the last read's app stands in (Codex, PR #7 cycle 1)
-            try:
-                after = await self._read(self.session.foreground_bundle_id)
-            except Refused:
-                after = None
-            if after is None and scope is None:
-                after = (self.session.app or (None, None))[1]
-            if after is None or not await self._journey_bundle_ok(jr, scope, after):
-                jr.left_out += 1
-                return
+                if await self._front_now() != before:
+                    jr.left_out += 1
+                    return
+            else:
+                frame = await self._newest_frame()
+                source = None
+                if frame is not None:
+                    try:
+                        source = await d.jpeg_of(frame)
+                    except d.PictureGone:
+                        source = None
+                    turn = getattr(self.session, "turn", 0)
+                    if source is not None and turn and getattr(frame, "picture", None) is None:
+                        source = await self.turned(frame.seq, source, turn)
+                if source is None:
+                    source = await self._read(self.session.screenshot_png)
+                # Dedicated: the frame can be the next one the stream sends; the app is read again after it, and the
+                # picture kept only for the journey's app (the last read's app stands in when the phone can't say)
+                after = await self._front_now() or (self.session.app or (None, None))[1]
+                if not await self._journey_bundle_ok(jr, scope, after):
+                    jr.left_out += 1
+                    return
             path = jr.folder / "screens" / f"{len(jr.frames) + 1:03d}.jpg"
             await asyncio.to_thread(journey_report.store_shot, source, path)
         except Exception as e:  # noqa: BLE001
