@@ -779,6 +779,9 @@ class Daemon:
         # {agent: when it last said it lives}: an MCP process sends a heartbeat every few seconds (agent_alive) and a
         # goodbye as it ends (agent_ended); a condition whose agent is silent for NETWORK_OWNER_LOST is cleared
         self._agent_alive: dict[str, float] = {}
+        # agents that said goodbye (a client id is one MCP process's, never used again): a call of theirs that arrives
+        # late, or is still setting a condition when the goodbye comes, must not leave one on the phone
+        self._agents_ended: dict[str, None] = {}
         # the device reports a condition that ended by itself or with its tunnel (L6)
         self.session.device.on_network_end = self._network_over
 
@@ -911,12 +914,18 @@ class Daemon:
             return True
 
     def agent_alive(self, client_id: str) -> None:
-        """A heartbeat from an agent's MCP process."""
-        self._agent_alive[client_id] = time.monotonic()
+        """A heartbeat from an agent's MCP process (one that has said goodbye is not heard again)."""
+        if client_id not in self._agents_ended:
+            self._agent_alive[client_id] = time.monotonic()
 
     async def agent_ended(self, client_id: str) -> None:
         """An agent's MCP process ended (its stdio closed, or it said goodbye): the condition it set ends with it, so
-        the phone isn't left slow for the next agent. A condition another agent set is not touched."""
+        the phone isn't left slow for the next agent. A condition another agent set is not touched. The agent is
+        marked first, before anything waits: a `network` call of it that is setting a condition right now sees the
+        mark when the phone answers, and clears what it set (_network_tool)."""
+        self._agents_ended[client_id] = None
+        while len(self._agents_ended) > 256:
+            del self._agents_ended[next(iter(self._agents_ended))]
         self._agent_alive.pop(client_id, None)
         self._network_notes.pop(client_id, None)
         if self._network is not None and self._network_by == client_id:
@@ -1001,7 +1010,10 @@ class Daemon:
             raise Refused("unsupported", f"{mode} would cut Tapwright's own link, which runs over the network here "
                                          f"({getattr(device, 'via', None) or 'not USB'}); connect the phone with a cable, "
                                          "or use 3g.")
+        gone = Refused("not_allowed", "this agent's session has ended; the network condition was not set.")
         async with self._network_lock:  # set, replace and clear take turns: the generation says which one is on
+            if client_id in self._agents_ended:
+                raise gone
             try:
                 profile = await device.set_network(mode)
             except ConnectionLost as e:
@@ -1010,6 +1022,20 @@ class Daemon:
                                               "then look and set it again") from None
             except DeviceError as e:
                 raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
+            if client_id in self._agents_ended:
+                # the goodbye came while the phone was answering: nobody owns this condition, and nobody would clear it
+                if self._network is not None:  # (the phone has one condition: this call's set replaced any other)
+                    if self._network_by != client_id:
+                        self._tell_network_setter("another agent's call replaced your network condition just as its "
+                                                  "session ended; set it again if the test needs it.")
+                    self._network = None
+                    self._stop_network_watch()
+                    self._forget_network_marker()
+                try:
+                    await device.clear_network()
+                except Exception as e:
+                    self.log(f"network: couldn't clear a condition its agent had already left: {e}")
+                raise gone
             if self._network is not None and self._network_by not in (None, client_id):
                 # the phone has one condition: this replaces another agent's, and that agent is told
                 self._tell_network_setter(f"another agent set the network to {mode}, replacing yours.")

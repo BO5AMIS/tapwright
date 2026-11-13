@@ -271,8 +271,8 @@ def test_a_condition_ends_when_its_agent_ends_and_a_neighbours_does_not():
         await d.agent_ended("a")
         assert d._network is None and d._network_by is None
         assert d.session.device.network_calls == [("set", "3g"), ("clear",)]
-        await d.run_tool("b", "network", {"mode": "lossy"})
-        await d.agent_ended("a")  # a is long gone: b's condition stays
+        await d.run_tool("c", "network", {"mode": "lossy"})  # (b has said goodbye: its id sets nothing any more)
+        await d.agent_ended("a")  # a is long gone: c's condition stays
         assert d._network == "lossy"
         await finish(stop, task)
     run(go)
