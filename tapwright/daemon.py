@@ -83,6 +83,9 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# whether the field type_text really typed into is secure, appended by _type_text once it has resolved the field (after
+# any scroll or re-read), so a recording never trusts a guess made before the call (Codex, PR #6)
+_TYPED_SECURE: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar("tapwright_typed_secure", default=None)
 # True while a replay's fresh start runs: its calls are real steps of a recording in progress (the app restart), but the
 # first-answer note goes on the replay's own answer, not on theirs
 _GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_greeting_held", default=False)
@@ -1246,13 +1249,17 @@ class Daemon:
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
             aimed = self._aim_for_recording(client_id, name, args)
+            typed_secure: list[bool] = []
+            secure_token = _TYPED_SECURE.set(typed_secure)
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
                 self._log_action(name, args, started, e, client=client_id, known_off=known)
                 raise
+            finally:
+                _TYPED_SECURE.reset(secure_token)
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
-            self._record_step(client_id, name, args, aimed)
+            self._record_step(client_id, name, args, aimed, secure=any(typed_secure))
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
             started = time.monotonic()
@@ -1808,14 +1815,17 @@ class Daemon:
             step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
-    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
-        """An action that succeeded while this agent records becomes a step of its script."""
+    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False) -> None:
+        """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
+        text really went into is a secure one (read by type_text itself, after any scroll); the guess made before
+        the call (`next_secure`) counts too, and either hides the text."""
         rec = self._recording.get(client_id)
         if rec is None or name not in batch.STEP_TOOLS or _NESTED.get():
             return
         key = "tap" if name == "performance" else "target"  # the argument that aims at an element
         step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
-        if name == "type_text" and rec.pop("next_secure", False):
+        guessed = rec.pop("next_secure", False)
+        if name == "type_text" and (guessed or secure):
             # a password is never written to a file (safety review M4): the user puts a test password in the script
             step["text"] = ""
             step["secure"] = True
@@ -3295,6 +3305,8 @@ class Daemon:
                 raise Refused("not_actionable", f"no_action: {field.line(actions=False)} is not an input")
         # the focusing tap is a touch: refused where tap would be, and made where it shows; `force` as for tap
         self._refuse_disabled(field)
+        if (typed_secure := _TYPED_SECURE.get()) is not None:
+            typed_secure.append(bool(field.secure))  # the field this call types into, for a recording
         forced, at = "", None
         if a.get("force"):
             forced = self._forced(view, field)
