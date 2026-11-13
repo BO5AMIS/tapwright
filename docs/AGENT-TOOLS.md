@@ -901,10 +901,6 @@ Answer: a first line, then the numbers in one line, then what wasn't measured.
 - fps is the average over the window; `lowest` is the lowest one-second sample (the whole window when it is shorter),
   the number `fps_min` checks.
 - Last line, when anything wasn't measured: `Not measured here: CPU, process memory.`
-- Tapwright counts samples by when they arrive, not by when the phone took them. A batch already in flight when the
-  window opens carries no timestamp, so it can't be told apart from the window's own and can skew a number at the
-  very edge of the window. Samples still waiting when the window ends, or lost to a process list that couldn't be
-  read, are said, and fail `memory_mb` and `cpu_percent`.
 
 **In `run` and scripts** a `performance` step is allowed (§9.1) and may carry `expect: {"under": {…}}`, with keys
 `launch_s`, `memory_mb` (process; Tapwright), `js_heap_mb` (Tapline), `cpu_percent` (Tapwright), `fps_min` (the lowest
