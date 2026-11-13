@@ -303,3 +303,21 @@ def test_media_add_that_got_no_answer_says_it_may_have_happened_and_where_to_loo
         assert "couldn't do it" not in str(e.value)
         await finish(stop, task)
     run(go)
+
+
+def test_a_finding_on_a_screen_without_a_picture_marks_no_other_screens_picture(tmp_path):
+    """Codex, PR #7 cycle 6: the matched screen has no saved frame yet; the finding gets no picture, not the newest
+    picture of another screen."""
+    from tapwright.journey import Frame, Journey, Screen
+    import datetime
+    jr = Journey("g", None, {}, (), "user", 0.0, datetime.datetime(2026, 1, 1), tmp_path)
+    jr.see("Screen 400x800 pt · 1 elements\ne1 button \"Home\" @10,100 100x40")
+    jr.frames.append(Frame(tmp_path / "001.jpg", "Home", None, (400.0, 800.0), jr.current.index))
+    jr.see("Screen 400x800 pt · 1 elements\ne1 button \"Settings\" @10,100 100x40")
+    settings = jr.current
+    assert isinstance(settings, Screen) and settings.index == 2
+    filed = jr.add_finding({"severity": "high", "what": "x", "basis": "measured"}, settings)
+    assert filed["screen_index"] == 2 and filed["frame"] is None
+    jr.frames.append(Frame(tmp_path / "002.jpg", "Settings", None, (400.0, 800.0), 2))
+    again = jr.add_finding({"severity": "high", "what": "y", "basis": "measured"}, settings)
+    assert again["frame"] == 1

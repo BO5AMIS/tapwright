@@ -233,7 +233,9 @@ class Journey:
         if isinstance(at, Screen):
             clean["screen_index"] = at.index
             clean["screen"] = f"{at.index}. {at.title}"
-            clean["frame"] = self.last_frame_of(at.index)
+            # that screen's own picture, or none: never another screen's (Codex, PR #7 cycle 6)
+            clean["frame"] = next((i for i in range(len(self.frames) - 1, -1, -1)
+                                   if self.frames[i].screen == at.index), None)
             self.findings.append(clean)
             return clean
         if at is NOWHERE:  # a screen the journey hasn't listed: filed without a screen or a picture to mark
