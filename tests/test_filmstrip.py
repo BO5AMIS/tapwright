@@ -357,3 +357,20 @@ def test_the_mcp_tool_carries_the_shared_description_and_the_parameters(monkeypa
     asyncio.run(mcp_server.filmstrip(frames=4, tap=mcp_server.Target(id="go")))
     assert seen == [("filmstrip", {"frames": 6, "interval_ms": 250, "frame_width": 200}),
                     ("filmstrip", {"frames": 4, "interval_ms": 250, "frame_width": 200, "tap": {"id": "go"}})]
+
+
+def test_a_skinny_frame_is_refused_before_it_is_resized(monkeypatch):
+    from tapwright import filmstrip
+    sizes = []
+    real = Image.Image.resize
+
+    def resize(self, size, *args, **kwargs):
+        sizes.append(size)
+        assert size[0] * size[1] <= 4000 * 4000, f"asked to allocate {size[0]}x{size[1]}"
+        return real(self, size, *args, **kwargs)
+    monkeypatch.setattr(Image.Image, "resize", resize)
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 100_000)).save(buf, "PNG")  # 100,000 px in the file, 400 x 40,000,000 once scaled
+    with pytest.raises(ValueError, match="frame"):
+        filmstrip.compose([image_bytes((80, 160), BLUE), buf.getvalue()], 400)
+    assert sizes == [(400, 800)]  # only the sound frame was resized

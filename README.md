@@ -174,7 +174,10 @@ same files inside your app.
 step) holds when the screen matches the reference picture of that name. `record` keeps the pictures next to the
 script, in `sign-up.references/`, so they travel together. After an intended design change, `tapwright replay
 sign-up.json --apps com.example.app --update-references` saves the new look; a failed check writes its picture
-with the changes in red to `sign-up.diff/`.
+with the changes in red to `sign-up.diff/`. Reference pictures and those two folders are written whole or not at
+all, and never through a link; on Windows that narrows, but can't close, the window for a folder that another process
+of the same user swaps at that very moment. With `--screenshots DIR`, filmstrips and the difference picture an agent
+gets back are saved to that folder by the ordinary screenshot writer, outside this guarantee.
 
 ## Live view
 

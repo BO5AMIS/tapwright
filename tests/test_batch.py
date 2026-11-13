@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from tapwright import batch
+from tapwright import batch, ui
 from tapwright.control import Refused
-from fakes import el
+from fakes import button, el
 from test_daemon import finish, make, started
 
 
@@ -276,3 +276,36 @@ def test_a_recording_never_saves_what_was_typed_into_a_secure_field(tmp_path):
         assert json.loads(saved)["steps"][1] == {"tool": "type_text", "text": "", "secure": True, "target": {"id": "pw"}}
         await finish(stop, task)
     run(go)
+
+
+# ---- a recorded ref must replay as the same element (review of PR #3) ----
+def replays_as(items, aim, element) -> bool:
+    return ui.resolve(items, ui.parse_target(aim)) is element
+
+
+def test_a_recorded_ref_among_nested_duplicates_replays_as_the_same_element():
+    items = [button("e1", "Clock", rect=(10, 100, 100, 40)), el("e2", "text", "Clock", rect=(20, 105, 50, 20)),
+             button("e3", "Clock", rect=(10, 200, 100, 40)), button("e4", "Clock", rect=(10, 300, 100, 40))]
+    aim = batch.recorded_target({"ref": "e3"}, items)
+    assert aim == {"label": "Clock", "index": 1}  # the nested text isn't one of replay's candidates
+    assert batch.recorded_ignore([{"ref": "e3"}], items) == [aim]
+    for ref, element in (("e1", items[0]), ("e3", items[2]), ("e4", items[3])):
+        assert replays_as(items, batch.recorded_target({"ref": ref}, items), element)
+    assert "x" in batch.recorded_target({"ref": "e2"}, items)  # nothing names the nested text but its place
+    only_two = [items[0], items[1], items[2]]
+    assert replays_as(only_two, batch.recorded_target({"ref": "e3"}, only_two), only_two[2])
+
+
+def test_a_recorded_id_among_several_picks_its_place_among_the_candidates():
+    items = [button("e1", "Row", "row", rect=(0, 0, 50, 20)), button("e2", "Row", "row", rect=(0, 30, 50, 20)),
+             button("e3", "Row", "row", rect=(0, 60, 50, 20))]
+    assert batch.recorded_target({"ref": "e3"}, items) == {"id": "row", "index": 2}
+    assert batch.recorded_target({"ref": "e1"}, items) == {"id": "row", "index": 0}
+
+
+def test_an_element_behind_an_alert_is_not_named_by_a_selector_that_finds_the_alerts():
+    behind, front = button("e1", "OK", rect=(0, 0, 50, 20)), button("e2", "OK", rect=(0, 100, 50, 20), in_alert=True)
+    items = [behind, front]
+    assert batch.recorded_target({"ref": "e2"}, items) == {"label": "OK"}
+    assert replays_as(items, {"label": "OK"}, front)
+    assert "x" in batch.recorded_target({"ref": "e1"}, items)  # "OK" would be the alert's, so only its place is left

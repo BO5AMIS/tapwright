@@ -235,7 +235,8 @@ def test_only_8_frames_and_the_top_frame_when_none_is_the_apps():
 
 def test_reports_of_other_processes_are_dropped():
     reports = [FakeReport(name="Example"), FakeReport(name="ExampleHelper"), FakeReport(name="Other")]
-    assert [r.name for r in diagnostics.only_mine(reports, "Example")] == ["Example"]
+    reports = [FakeReport(name=r.name, bundle_id=APP) for r in reports]
+    assert [r.name for r in diagnostics.only_mine(reports, "Example", APP)] == ["Example"]
     pattern = re.compile(diagnostics.crash_pattern("Example"))
     assert pattern.search("Example-2026-11-12-101010.ips") and pattern.search("Example-2026-11-12-101010-1.ips")
     for other in ("Example-Dev-2026-11-12-101010.ips", "Example.cpu_resource-2026-11-12-101010.ips",
@@ -259,14 +260,21 @@ def test_crash_answers_the_newest_report_since_the_session_began(tmp_path, monke
         d.session.device.crash_files["/Example-new.ips"] = b'{"full": "report"}'
         r = await d.run_tool("a", "crash", {})
         assert r["text"].count("Crash of ") == 1 and "File: Example-new.ips" in r["text"] and "Saved:" not in r["text"]
+        # AGENT-TOOLS §15.2: the reports "since the session began, and only the app's own": `all` shows up to 5 of
+        # those, never one from before the session (Codex, PR #4)
         r = await d.run_tool("a", "crash", {"all": True})
-        assert r["text"].count("Crash of ") == 2 and "File: Example-old.ips" in r["text"]
+        assert r["text"].count("Crash of ") == 1 and "Example-old.ips" not in r["text"]
+        r = await d.run_tool("a", "crash", {"all": True, "pull": True})
+        assert "Example-old.ips" not in r["text"] and not (tmp_path / "crashes" / APP / "Example-old.ips").exists()
         r = await d.run_tool("a", "crash", {"pull": True})  # copies the whole report, and names it
         path = tmp_path / "crashes" / APP / "Example-new.ips"
         assert f"Saved: {path}" in r["text"] and path.read_bytes() == b'{"full": "report"}'
         d.session.device.crashes["Example"] = []
         r = await d.run_tool("a", "crash", {"all": True})
-        assert r["text"] == f"No crash report for {shown}."
+        assert r["text"] == f"No crash report for {shown} since the session began."
+        d.session.device.crashes["Example"] = [FakeReport(filename=f"/Example-{n}.ips") for n in range(7)]
+        r = await d.run_tool("a", "crash", {"all": True})  # the last 5 of this session
+        assert r["text"].count("Crash of ") == diagnostics.CRASH_RECENT == 5
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "crash", {"pull": "yes"})
         assert e.value.code == "bad_params"
@@ -443,7 +451,7 @@ def test_a_failure_without_warnings_adds_no_logs_and_a_crash_adds_its_note():
 def test_a_report_is_the_apps_only_by_exact_name_type_and_bundle_id():
     mine = FakeReport(name="Example", bundle_id=APP)
     other_app = FakeReport(name="Example", bundle_id="com.other.app")  # same executable name, another app
-    no_bundle = FakeReport(name="Example")  # an old-format report names no bundle: the name decides
+    no_bundle = FakeReport(name="Example")  # names no bundle: nothing proves it is this app's (Codex, PR #4)
     unnamed = FakeReport(name=None)
 
     class Unreadable:
@@ -456,7 +464,7 @@ def test_a_report_is_the_apps_only_by_exact_name_type_and_bundle_id():
     helper = FakeReport(name="Example-Dev", bundle_id=APP)
     resource = FakeReport(name="Example", bundle_id=APP, bug_type="385")  # a resource report is not a crash
     kept = diagnostics.only_mine([mine, other_app, no_bundle, unnamed, helper, resource], "Example", APP)
-    assert kept == [mine, no_bundle]
+    assert kept == [mine]
     assert diagnostics.only_mine([unreadable], "Example", APP) == []
 
 
@@ -528,6 +536,147 @@ def test_a_stream_that_starts_again_for_the_same_process_does_not_repeat_what_th
     run(go)
 
 
+def test_personal_mode_keeps_the_apps_logs_and_crash_note_when_the_crash_leaves_the_home_screen_in_front():
+    """CodeRabbit, PR #4: _withheld cut a stopped run to its first line once the app's screen was gone, taking the
+    app-scoped logs and crash note (which the CLI replay needs for its junit and crash pull) with it."""
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        d.session.app = ("Home screen", SPRINGBOARD)  # the crash left the home screen in front
+        message = ("Ran 0 of 1 steps; stopped at step 1 (tap e1): its action ran, but text \"x\" didn't appear.\n"
+                   "Screen 400x800 pt @3x · 1 elements\ne2 button \"OK\" id=ok-button @10,100 100x40\n"
+                   "Logs (since step 1):\n12:00:01.123 error fatal: lost the database\n"
+                   f"{NOTE}")
+        kept = await d._withheld("a", "run", {"text": message, "image": None}, {APP: "Example (com.example.app)"}, "Example")
+        lines = kept["text"].splitlines()
+        assert "Logs (since step 1):" in lines and "12:00:01.123 error fatal: lost the database" in lines
+        assert lines[-1] == NOTE or NOTE in lines
+        assert "outside_apps" in kept["text"] and "ok-button" not in kept["text"]  # the home screen's list is still not shown
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_batch_that_starts_before_log_collection_does_not_report_the_replay_as_since_the_step():
+    """CodeRabbit, PR #4: with no ring at the step's start the boundary was epoch zero, so the phone's replay of what
+    the app logged before the batch was labelled `since step 1`."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)  # in front, and logs never asked for
+        stop, task = await started(d)
+        assert APP not in d._rings
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        assert e.value.code == "expect_failed" and "an old error" not in str(e.value) and "Logs (since" not in str(e.value)
+        assert [x.text for x in d._rings[APP].entries] == ["an old error from before the batch"]  # (it is in the ring)
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_executable_lookup_of_the_crash_check_has_the_same_deadline_as_the_report_search():
+    """CodeRabbit, PR #4: only crash_reports was bounded, so an installation proxy that never answered held the answer."""
+    async def go():
+        d = tuned(make())
+        d.crash_lookup = 0.05
+
+        async def never():
+            await asyncio.sleep(3600)
+        stop, task = await started(d)
+        d.session.apps = never  # (after start-up, which lists the apps itself)
+        d._executables.clear()
+        began = asyncio.get_running_loop().time()
+        assert await d._find_crash(APP, 1) is None
+        assert asyncio.get_running_loop().time() - began < 1.0
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_crash_found_by_the_tap_inside_performance_is_in_its_answer():
+    """CodeRabbit, PR #4: the nested tap consumed the report and its note was thrown away, so the outer check had none."""
+    from tapwright.performance import Measurement
+
+    async def go():
+        d = tuned(make())
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.device.measurement = Measurement(memory_mb=[100.0])
+        die(d, FakeReport())
+        r = await d.run_tool("a", "performance", {"seconds": 1, "tap": {"ref": "e1"}})
+        assert r["text"].splitlines()[-1] == NOTE and r["text"].count("the app crashed") == 1
+        await finish(stop, task)
+    run(go)
+
+
+START = BASE / 1000 - 100  # when the app's process started (epoch s): 100 s before BASE
+
+
+def at(ms: int) -> int:
+    """An entry time `ms` after the process started."""
+    return int(START * 1000) + ms
+
+
+def test_a_reused_pid_is_not_read_as_the_app_and_what_it_logged_is_dropped():
+    """Codex, PR #4 (P1): the app's pid goes to another app before the next ownership poll."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        device.starts[42] = START
+        stop, task = await started(d)
+        await opened(d)
+        device.emit(42, at(5_000), "own line")
+        await settle(lambda: len(d._rings[APP].entries) == 1)
+        device.pids[APP] = []  # the app is gone ...
+        device.holders[42] = ("com.private.app", START + 200)  # ... and another app has its pid, from 200 s on
+        device.emit(42, at(250_000), "another app's private line")
+        await settle(lambda: 42 in device.stream_closed)
+        device.emit(42, at(260_000), "after the stream was closed")
+        await asyncio.sleep(0.15)
+        assert [e.text for e in d._rings[APP].entries] == ["own line"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_what_the_phone_replays_from_before_the_process_started_is_dropped():
+    async def go():
+        d = tuned(make())
+        device = d.session.device
+        device.starts[42] = START
+        device.replay[42] = [(at(-60_000), 0, "the previous owner of pid 42", 42), (at(-1_500), 0, "also before", 42),
+                             (at(5), 0, "mine", 42)]
+        stop, task = await started(d)
+        await opened(d)
+        await settle(lambda: len(d._rings[APP].entries) >= 1)
+        await asyncio.sleep(0.05)
+        assert [e.text for e in d._rings[APP].entries] == ["mine"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_stream_whose_owner_cannot_be_checked_is_closed_and_the_unchecked_lines_are_dropped():
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        device.starts[42] = START
+        stop, task = await started(d)
+        await opened(d)
+        device.emit(42, at(1_000), "checked line")
+        await settle(lambda: len(d._rings[APP].entries) == 1)
+        checks = device.app_pids_calls
+        await settle(lambda: device.app_pids_calls > checks + 1)  # a check has passed since that line
+        device.proc_error = RuntimeError("the process list can't be read")
+        device.emit(42, at(2_000), "line nobody can vouch for")
+        await settle(lambda: 42 in device.stream_closed)  # it does not stay open on a phone that can't say
+        await settle(lambda: [e.text for e in d._rings[APP].entries] == ["checked line"])  # the unchecked line is taken back
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_phone_without_a_log_service_is_tried_a_few_times_and_logs_says_so():
     async def go():
         d = tuned(make())
@@ -573,6 +722,37 @@ def test_the_meter_stops_its_sampling_when_start_is_cancelled(monkeypatch):
     run(go)
 
 
+def test_a_cancel_in_the_turn_the_meter_becomes_ready_is_not_lost(monkeypatch):
+    """Codex, PR #4: on Python 3.10 asyncio.wait_for returned normally when the inner wait and the cancel came in one
+    loop turn, so a cancelled `performance(launch=True)` went on to close and open the app."""
+    from tapwright import device as device_module
+    stopped = []
+
+    class Quiet:
+        rsd = None
+
+        def log(self, text):
+            pass
+
+    async def sampling(self):
+        try:
+            await asyncio.sleep(60)
+        finally:
+            stopped.append("sampling closed")
+    monkeypatch.setattr(device_module.AppMeter, "_run", sampling)
+
+    async def go():
+        meter = device_module.AppMeter(Quiet(), APP)
+        starting = asyncio.create_task(meter.start())
+        await asyncio.sleep(0.05)
+        meter._ready.set()  # ready ...
+        starting.cancel()  # ... and cancelled in the same turn
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert stopped == ["sampling closed"] and meter._task is None
+    run(go)
+
+
 def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_report_is_told():
     async def go():
         d = tuned(make())
@@ -594,6 +774,9 @@ def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_rep
         device.crashes["Example"] = [FakeReport()]
         r = await d.run_tool("a", "crash", {})
         assert "Crash of " in r["text"] and "couldn't be read" in r["text"]
+        device.crash_too_big = 2  # a report over the byte cap: never read, and the answer says so
+        r = await d.run_tool("a", "crash", {})
+        assert diagnostics.CRASH_TOO_BIG.format(n=2, mb=diagnostics.CRASH_MAX_MB) in r["text"]
         await finish(stop, task)
     run(go)
 
@@ -729,3 +912,306 @@ def test_a_failure_without_diagnostics_has_no_system_out_and_pulls_nothing(tmp_p
     assert cli.replay(a) == 1 and calls == ["replay"]
     assert ET.parse(out).getroot().find("testcase[@name='plain']/system-out") is None
     assert not (tmp_path / "plain.diff").exists()
+
+
+def test_a_line_of_a_process_that_is_not_proven_the_apps_is_in_no_logs_answer():
+    """Codex, PR #4 cycle 2: the app's pid went to another app, whose line was in the ring before the watcher's next
+    check, and `logs` answered with it. Lines count only once the phone's own list has shown the process is the app's."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0  # the watcher does not look again: only logs' own check stands between the line and the answer
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]  # proven: it is shown
+        device.pids[APP] = []  # pid 42 goes to another app, which logs at once
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        shown = (await d.run_tool("a", "logs", {}))["text"]
+        assert "secret" not in shown and "the app's own line" in shown and f"Latest: {BASE + 1}" in shown
+        device.holders.clear()  # the app has its pid again, but the phone can't be asked whose the process is
+        device.pids[APP] = [42]
+        device.emit(42, BASE + 3, "not yet proven")
+        await settle(lambda: len(ring.entries) == 2)  # (the other app's secret was taken back when it was seen holding the pid)
+        device.proc_error = RuntimeError("no process list")
+        assert "not yet proven" not in (await d.run_tool("a", "logs", {}))["text"]
+        device.proc_error = None
+        assert "not yet proven" in (await d.run_tool("a", "logs", {}))["text"]  # asked and answered: shown
+        await finish(stop, task)
+    run(go)
+
+
+def slow_down(d: Daemon, seconds: float) -> None:
+    """The next tap takes `seconds` of real time (the batch's own clock is a fake one, so a step would be over at once)."""
+    session = d.session
+    real = session.tap
+
+    async def tap(target, hold_ms=60):
+        await asyncio.sleep(seconds)
+        return await real(target, hold_ms)
+    session.tap = tap
+
+
+def test_a_replay_that_arrives_during_the_step_is_not_shown_as_since_the_step():
+    """Codex and CodeRabbit, PR #4: the replay of the phone's older lines came after the step began, the ring had no
+    boundary, and they were shown from epoch zero as `since step 1`. The boundary is the phone's clock then."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.replay_delay = 0.2  # the stream gives its replay after the warm-up ended, while the step runs
+        device.phone_ms = BASE
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)  # in front, and logs never asked for
+        stop, task = await started(d)
+        slow_down(d, 0.45)
+        asyncio.get_running_loop().call_later(0.35, device.emit, 42, BASE + 10, "a failure during the step", 0x10)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert e.value.code == "expect_failed" and "an old error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text  # what happened in the step is shown
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_replay_that_arrives_during_a_step_is_not_the_steps_even_when_the_ring_already_has_an_old_entry():
+    """Codex and CodeRabbit, PR #4 cycle 3: the ring held an error from T-10 s, so the step's boundary stayed there and a
+    second historical error (T-5 s), replayed during the step, was shown as logged since the step."""
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = BASE
+        device.replay[42] = [(BASE - 10_000, 0x10, "the first old error, in the warm-up", 42)]
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        slow_down(d, 0.45)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.2, device.emit, 42, BASE - 5_000, "a delayed historical error", 0x10)
+        loop.call_later(0.35, device.emit, 42, BASE + 10, "a failure during the step", 0x10)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert "the first old error" not in text and "a delayed historical error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_boundary_is_never_older_than_the_phones_clock():
+    """Nor newer than the ring's newest entry, when that is the later of the two."""
+    async def go():
+        d = tuned(make())
+        device = d.session.device
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        ring = d._rings.setdefault(APP, diagnostics.LogRing())
+        ring.add(LogEntry(BASE - 10_000, "error", "old"))
+        device.phone_ms = BASE
+        marks = {APP: ring.latest()}
+        await d._clock_mark(marks)
+        assert marks[APP] == BASE
+        ring.add(LogEntry(BASE + 500, "error", "newer than the clock reading"))
+        marks = {APP: ring.latest()}
+        await d._clock_mark(marks)
+        assert marks[APP] == BASE + 500
+        device.phone_ms = None  # no clock: an old entry's time is not a boundary
+        marks = {APP: BASE - 10_000}
+        await d._clock_mark(marks)
+        assert marks[APP] is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_lines_of_a_replacement_process_stay_out_when_it_exits_and_logs_is_asked_again():
+    """Codex, PR #4 cycle 3: another app took the app's pid and logged a secret; it was withheld while that app held the
+    pid, but stayed in the ring, and was published once that app was gone and nobody held the pid."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        assert "secret" not in (await d.run_tool("a", "logs", {}))["text"]
+        device.emit(42, BASE + 3, "its second secret")  # more from the pid's new holder, after it was seen holding it
+        await settle(lambda: len(ring.entries) >= 2)
+        device.holders.clear()  # the other app exits: the app is still absent and nobody holds the pid
+        for _ in range(2):
+            shown = (await d.run_tool("a", "logs", {}))["text"]
+            assert "secret" not in shown and f"Latest: {BASE + 1}" in shown
+        assert not any("secret" in e.text for e in ring.entries)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_replacement_process_the_watcher_itself_saw_stays_out_when_it_has_left_before_the_next_look():
+    """Codex, PR #4 cycle 4 (P1): the log watcher's own look found another app holding the app's pid, and left the lines it
+    had read (a secret) unchecked; that app exited during the reader's cleanup, so no later look found a holder, and a
+    logs call found nobody on the pid, vouched for the lines and published them."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 0.02
+        device = d.session.device
+        stop, task = await started(d)
+        await opened(d)
+        ring = d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        seen: list[int] = []
+        real = device.process_holder
+
+        async def holder(pid):
+            seen.append(pid)
+            if len(seen) > 1:
+                return await real(pid)
+            await settle(lambda: len(ring.entries) == 2)  # the watcher's look finds the other app after its line was read
+            found = await real(pid)
+            device.holders.clear()  # and that app exits at once: every later look finds nobody on the pid
+            return found
+        device.process_holder = holder
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", START + 60)
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(seen) >= 1 and 42 in device.stream_closed)
+        await asyncio.sleep(0.15)  # the reader's cleanup and the watcher's last look are done
+        for _ in range(2):
+            shown = (await d.run_tool("a", "logs", {}))["text"]
+            assert "secret" not in shown and f"Latest: {BASE + 1}" in shown
+        assert not any("secret" in e.text for e in ring.entries)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_that_switches_apps_cuts_the_new_apps_log_at_the_steps_start_on_the_phones_clock():
+    """Codex and CodeRabbit, PR #4 cycle 4: the step began in app A at phone time T and went to B, whose ring held an entry
+    from T-10 s; only A's boundary was moved to T, so B's historical error (T-5 s), delivered during the step, was shown
+    as logged since the step."""
+    async def go():
+        other = "com.example.other"
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = BASE
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        d._rings[other] = diagnostics.LogRing()
+        d._rings[other].add(LogEntry(BASE - 10_000, "error", "the other app's first old error"))
+        real = d.session.tap
+
+        async def tap(target, hold_ms=60):  # the step opens the other app, already running
+            await asyncio.sleep(0.45)
+            text = await real(target, hold_ms)
+            d.session.app = ("Other", other)
+            return text
+        d.session.tap = tap
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.2, d._rings[other].add, LogEntry(BASE - 5_000, "error", "a delayed historical error"))
+        loop.call_later(0.35, d._rings[other].add, LogEntry(BASE + 10, "error", "a failure during the step"))
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        text = str(e.value)
+        assert "first old error" not in text and "a delayed historical error" not in text
+        assert "Logs (since step 1):" in text and "a failure during the step" in text
+        await finish(stop, task)
+    run(go)
+
+
+
+def test_a_line_a_logs_call_vouched_for_survives_the_watchers_cleanup_when_the_process_lookup_fails():
+    """Codex, PR #4 cycle 5 (P2): the watcher's cleanup took back everything since its own last mark, which a logs call
+    can have moved on (it vouched for a line the watcher never looked at); with the lookup failing, the cleanup then
+    deleted a line already shown to be the app's. A vouched line is never taken back."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0  # the watcher never looks: its mark stays where the stream began
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]  # vouched for by the phone's list
+        device.proc_error = RuntimeError("no process list")  # from now on nobody can be asked
+        device.emit(42, BASE + 2, "not yet proven")
+        await settle(lambda: len(ring.entries) == 2)
+        device.streams[42].put_nowait(None)  # the stream ends; the cleanup's lookups fail
+        await settle(lambda: 42 in device.stream_closed)
+        await asyncio.sleep(0.15)  # the watcher's cleanup is done
+        assert [e.text for e in ring.entries] == ["the app's own line"]  # the unvouched line may go, the vouched one stays
+        device.proc_error = None
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_line_a_logs_call_vouched_for_survives_the_cleanup_when_another_process_holds_the_pid():
+    """The same rule when the lookup works: the other app's start time is no reason to take back what was vouched for."""
+    async def go():
+        d = tuned(make())
+        d.log_check = 60.0
+        stop, task = await started(d)
+        await opened(d)
+        device, ring = d.session.device, d._rings[APP]
+        device.emit(42, BASE + 1, "the app's own line")
+        await settle(lambda: len(ring.entries) == 1)
+        assert "the app's own line" in (await d.run_tool("a", "logs", {}))["text"]
+        device.pids[APP] = []
+        device.holders[42] = ("com.private.app", BASE / 1000 - 10)  # said to have started before the vouched line's time
+        device.emit(42, BASE + 2, "another app's secret")
+        await settle(lambda: len(ring.entries) == 2)
+        device.streams[42].put_nowait(None)
+        await settle(lambda: 42 in device.stream_closed)
+        await asyncio.sleep(0.15)
+        assert [e.text for e in ring.entries] == ["the app's own line"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_step_with_no_boundary_and_no_phone_clock_shows_no_logs():
+    async def go():
+        d = tuned(make())
+        d.log_warmup = 0.05
+        device = d.session.device
+        device.phone_ms = None  # the clock can't be read
+        device.replay_delay = 0.2
+        slow_down(d, 0.45)
+        device.replay[42] = [(BASE - 5_000, 0x10, "an old error from before the batch", 42)]
+        d.session.app = ("Example", APP)
+        stop, task = await started(d)
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}, "expect": {"text": "Never there", "timeout": 0.5}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps})
+        assert "Logs (since" not in str(e.value) and "an old error" not in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_unvouched_entry_is_kept_but_in_no_answer_until_it_is_vouched_for():
+    ring = LogRing()
+    ring.add(LogEntry(BASE, "info", "proven"))
+    mark = ring.added
+    ring.add(LogEntry(BASE + 1, "error", "unproven"), vouched=False)
+    ring.add(LogEntry(BASE + 2, "error", "unproven too"))  # (after an unproven one, it is no more proven than that)
+    assert [e.text for e in ring.select()] == ["proven"] and ring.latest(shown=True) == BASE and ring.latest() == BASE + 2
+    assert diagnostics.logs_answer(ring, None, "info", None, 10)[0].endswith(f"Latest: {BASE}")
+    ring.vouch(mark)  # vouching for what was added before `mark` changes nothing about what came after
+    assert [e.text for e in ring.select()] == ["proven"]
+    ring.vouch(ring.added)
+    assert [e.text for e in ring.select()] == ["proven", "unproven", "unproven too"]
+    ring.add(LogEntry(BASE + 3, "info", "x"), vouched=False)
+    ring.discard_since(ring.added - 1)
+    assert ring.unvouched == 0 and len(ring.entries) == 3

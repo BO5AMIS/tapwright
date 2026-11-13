@@ -9,27 +9,29 @@ import io
 import json
 import dataclasses
 import datetime
+import hashlib
 import math
 import os
 import pathlib
 import re
 import secrets
 import time
+import unicodedata
 import traceback
 from contextlib import nullcontext
-from typing import NamedTuple
+from typing import Awaitable, NamedTuple, TypeVar
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (actionlog, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
+from . import (actionlog, aio, audit, batch, changes, compare, diagnostics, filmstrip as filmlib, needs, ocr, params,
                performance, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
-from .device import (AppNotAnswering, ConnectionLost, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered,
-                     PhoneNotFound)
+from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
+                     Unanswered, PhoneNotFound)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -78,11 +80,37 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# Set to a list by the recording branch of run_tool; a compare_screen call puts what it found there (the folder, the
+# bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
+# change it.
+_COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
+# While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
+# digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _name_key(name: str) -> str:
+    """What a file system may make of a reference name: Windows and macOS ignore case (`home.png`, `HOME.png`), and
+    macOS also treats a name's Unicode forms as one (NFC and NFD Hangul or accents). Names with one key are one file."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _refuse_case_only(seen: str, name: str) -> None:
+    """A recording that compared one name refuses another with the same key (_name_key), so a later picture can't
+    replace an earlier check's (Codex, PR #3 cycles 9 and 10)."""
+    if seen != name:
+        raise Refused("bad_params", f'record: "{name}" differs from "{seen}", already compared in this recording, only in '
+                                    "case or in Unicode form, and on Windows or macOS they are one file; give this check "
+                                    "another name.")
+
+
+_BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
+    contextvars.ContextVar("tapwright_baselines", default=None)
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
 NOTE_ALLOWED = "a person allowed this."
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
+
+
+_wait_for = aio.wait_for  # cancellation-safe, and it joins its child (aio.py)
 
 
 class Scope(NamedTuple):
@@ -446,6 +474,16 @@ class Compared:
     reason: str | None = None
     image: bytes | None = None
     percent: float | None = None
+    folder: str | None = None  # the references folder (bundle id) it was compared in
+    # the exact bytes the check used: those it read from the reference it compared with, or wrote as the one it saved.
+    # A recording keeps these, never the path, so a later write to the file by anyone changes nothing it exports.
+    picture: bytes | None = None
+
+
+def _picture_digest(data: bytes | None) -> str | None:
+    """The hash of the bytes a check used (None when it used none): two checks of one name in a recording are the same
+    baseline only when this is the same."""
+    return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
 def _reference_names(steps: list[dict]) -> set[str]:
@@ -565,7 +603,10 @@ NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls afte
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
 LOG_RETRY, LOG_IDLE, LOG_WARMUP = 2.0, 60.0, 0.5
 LOG_DRAIN = 1.0  # seconds a log stream may go on after its process is gone: the last lines (the crash's) are still on their way
-LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0  # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
+CRASH_LOOKUP = 15.0  # seconds each step of the optional crash check (the apps' executable names, the report search) may take
+LOG_VERIFY_FAILS = 2 # checks of whose process a log stream is reading that may fail in a row before the stream is left
+LOG_START_SLACK_MS = 1000  # an entry this much before a process's start time still counts as its own (clocks, rounding)
+LOG_CHECK, LOG_BACKOFF_MAX = 3.0, 60.0 # seconds between looks at whether the app's process is still the one read; the longest wait between tries to start a stream
 # looks for a report once the app is gone, seconds between them, later calls that look again
 CRASH_POLLS, CRASH_POLL, CRASH_LATE_TRIES = 3, 1.0, 3
 CRASH_CUT_CODES = ("not_connected", "not_answering", "reconnecting", "timeout")  # errors a crash can end a call with
@@ -607,13 +648,19 @@ class Daemon:
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
+        # while a client records, its calls run one at a time: a check's guard, its save and its registration in the
+        # recording are one step, so two overlapping checks can't both pass the guard (Codex, PR #3 cycle 6)
+        self._record_locks: dict[str, asyncio.Lock] = {}
         self._batch_ids = itertools.count(1)
         # diagnostics (AGENT-TOOLS §15): the app's log in a ring per bundle id, read by a task per app
         self._rings: dict[str, diagnostics.LogRing] = {}
         self._log_tasks: dict[str, asyncio.Task] = {}
         self._log_pids: dict[str, int] = {}  # the process each task reads
+        self._log_tainted: dict[str, Proc] = {}  # the process whose pid another process was seen holding: absence won't vouch for it
+        self._log_life: dict[str, tuple[Proc, int]] = {}  # that process, and the ring's `added` count when it was last vouched for
         self.log_retry, self.log_idle, self.log_warmup = LOG_RETRY, LOG_IDLE, LOG_WARMUP
         self.log_check, self.log_drain = LOG_CHECK, LOG_DRAIN
+        self.crash_lookup = CRASH_LOOKUP
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
         self._opened: str | None = None  # the app open_app last started: the app under test
@@ -1002,14 +1049,29 @@ class Daemon:
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
-        outer = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
-        if outer and name in params.ALLOWED:
+        top_level = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
+        if top_level and name in params.ALLOWED:
             params.check(name, args)
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
         ptoken = _POLICY.set(policy) if policy is not None else None
+        # While a client records, or starts or stops a recording, its outer calls run one at a time (a batch's steps are
+        # inside its call): a check's guard, its save and its registration are one step, and the recording a call checks
+        # against is the one in force once it holds the lock, read inside it (Codex, PR #3 cycles 6 and 7: a call queued
+        # behind a recording's restart checked the old one). Other clients, and a person's input, never wait on it.
+        outer = _BASELINES.get() is None
+        locks = outer and (client_id in self._recording or name == "record")
         try:
-            answer = await self._run_tool_policed(client_id, name, args, scope)
-            return self._first_answer(client_id, answer) if outer else answer
+            if not locks:
+                answer = await self._run_tool_policed(client_id, name, args, scope)
+                return self._first_answer(client_id, answer) if top_level else answer
+            async with self._record_locks.setdefault(client_id, asyncio.Lock()):
+                rec = self._recording.get(client_id)
+                btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
+                try:
+                    answer = await self._run_tool_policed(client_id, name, args, scope)
+                finally:
+                    _BASELINES.reset(btoken)
+            return self._first_answer(client_id, answer) if top_level else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
@@ -1034,10 +1096,17 @@ class Daemon:
             answer = await self._run_tool_inner(client_id, name, args, scope)
             self._record_expect(client_id, args)
             return answer
-        if name == "compare_screen" and client_id in self._recording and BATCH.get() is None:
+        if name == "compare_screen" and client_id in self._recording:
             ignore = self._recorded_ignore(client_id, args)  # before the call: a ref that can't be saved is refused first
-            answer = await self._run_tool_inner(client_id, name, args, scope)
-            self._record_compare(client_id, args, ignore)
+            compared: list[Compared] = []
+            token = _COMPARED.set(compared)
+            try:
+                answer = await self._run_tool_inner(client_id, name, args, scope)
+            finally:
+                _COMPARED.reset(token)
+            # a step of a run stays the step the agent wrote; a call of its own is folded into the action before it
+            self._record_compare(client_id, args, ignore, compared[0].folder if compared else None,
+                                 compared[0].picture if compared else None, fold=BATCH.get() is None)
             return answer
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
@@ -1093,13 +1162,39 @@ class Daemon:
         self._log_dead.pop(bundle, None)  # a new start is a new try
         self.ensure_logs(bundle)
 
-    async def _read_log(self, bundle: str, pid: int, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
+    async def _read_log(self, bundle: str, proc: Proc, ring: "diagnostics.LogRing", after, got: list[int]) -> None:
         """One log stream of one process into the ring; `got[0]` counts the entries it gave. `after`: where an earlier
-        stream of the same process stopped (the phone replays what it logged just before, which the ring has)."""
-        async for at, raw, text, entry_pid in self.session.device.app_log_stream(pid):
-            if entry_pid == pid:
+        stream of the same process stopped (the phone replays what it logged just before, which the ring has). An
+        entry from before the process started is the previous owner of that pid's, and is dropped."""
+        floor = None if proc.started is None else int(proc.started * 1000) - LOG_START_SLACK_MS
+        async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
+            if entry_pid == proc.pid:
                 got[0] += 1
-                ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after)
+                if floor is None or at >= floor:
+                    # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
+                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
+
+    async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc) -> None:
+        """After a stream of `proc` ended, once: were the lines no answer has vouched for the app's? When another process
+        has the pid now, its lines (from its start on) are taken back; when the phone can't say who has it, all of them
+        are, since nothing vouches for them. Only the ring knows what is vouched for (a `logs` call vouches without the
+        watcher looking, so the watcher's own mark can be behind): a vouched line is never taken back."""
+        try:
+            now = await _wait_for(self.session.device.app_processes(bundle), 5)
+            if any(p.same_life(proc) for p in now):
+                return
+            holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            ring.discard_unvouched()
+            return
+        if holder is not None:
+            self._log_tainted[bundle] = proc
+            ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
+        elif bundle in self._log_tainted and self._log_tainted[bundle].same_life(proc):
+            ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
+        # (else: gone, with nobody holding the pid, is an ordinary end: its last lines are its own)
 
     async def _watch_logs(self, bundle: str) -> None:
         """Keep the app's own process's log entries in its ring. An entry of any other pid is never kept (the stream is
@@ -1111,39 +1206,71 @@ class Daemon:
         ring, idle, told, fails = self._rings[bundle], 0.0, False, 0
         while True:
             try:
-                pids = await self.session.device.app_pids(bundle)
+                procs = await self.session.device.app_processes(bundle)
             except Exception as e:
                 if not told:
                     self.log(f"logs: couldn't find {bundle}'s process: {e}")
                     told = True
-                pids = []
-            if not pids:
+                procs = []
+            if not procs:
                 idle += self.log_retry
                 if idle > self.log_idle:
                     self._log_pids.pop(bundle, None)
                     return
                 await asyncio.sleep(self.log_retry)
                 continue
-            idle, pid = 0.0, pids[0]
-            self._log_pids[bundle] = pid
+            idle, proc = 0.0, procs[0]
+            self._log_pids[bundle] = proc.pid
+            prior = self._log_life.get(bundle)
+            if prior is not None and not prior[0].same_life(proc):
+                # an earlier reader may have taken lines of this process for the old one's (its pid came back): those
+                # are from this process's start on
+                if proc.started is not None:
+                    ring.discard_since(prior[1], int(proc.started * 1000))
+                elif proc.pid == prior[0].pid:
+                    ring.discard_since(prior[1])
+            mark = ring.added  # lines added after this are not yet vouched for as this process's
+            self._log_life[bundle] = (proc, mark)
             got: list[int] = [0]
             after = ring.newest()  # (a new process logs later than the old one, so this never drops its entries)
-            reader = asyncio.create_task(self._read_log(bundle, pid, ring, after, got), name=f"logs-stream-{bundle}")
+            reader = asyncio.create_task(self._read_log(bundle, proc, ring, after, got), name=f"logs-stream-{bundle}")
+            unchecked = 0
             try:
                 while not reader.done():
                     await asyncio.wait({reader}, timeout=self.log_check)
                     if reader.done():
                         break
+                    asked = ring.added  # (what came before the question is what its answer vouches for)
                     try:
-                        now = await asyncio.wait_for(self.session.device.app_pids(bundle), 5)
+                        now = await _wait_for(self.session.device.app_processes(bundle), 5)
                     except Exception:
-                        continue  # the phone can't say now: the stream stays
-                    if pid not in now:  # the process is gone, or the app started again as another
-                        await asyncio.wait({reader}, timeout=self.log_drain)  # its last lines first
+                        unchecked += 1
+                        if unchecked >= LOG_VERIFY_FAILS:
+                            break  # the phone can't say whose the pid is: nothing more is read (and see _settle_life)
+                        continue
+                    unchecked = 0
+                    if any(p.same_life(proc) for p in now):
+                        mark = asked  # what came before the question is vouched for
+                        ring.vouch(asked)
+                        self._log_life[bundle] = (proc, mark)
+                        continue
+                    # not this process any more: gone, or the pid is another process's now. Its last lines come first,
+                    # but only when nobody holds the pid, which is the one case they can't be someone else's
+                    try:
+                        holder = await _wait_for(self.session.device.process_holder(proc.pid), 5)
+                    except Exception:
                         break
+                    if holder is None:
+                        await asyncio.wait({reader}, timeout=self.log_drain)
+                    else:  # seen here, so kept here: the other process may be gone by the time anything looks again
+                        self._log_tainted[bundle] = proc
+                        # (what a logs call has vouched for since the watcher's last look stays: it was shown to be the app's)
+                        ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
+                    break
             finally:
                 reader.cancel()
                 await asyncio.wait({reader})
+            await self._settle_life(bundle, ring, proc)
             error = reader.exception() if not reader.cancelled() else None
             if error is not None:
                 self.log(f"logs: the log stream of {bundle} ended: {error}")
@@ -1164,15 +1291,46 @@ class Daemon:
         self.ensure_logs(bundle)
         if bundle in self._log_tasks and self._connected.is_set():
             try:
-                pids = await asyncio.wait_for(self.session.device.app_pids(bundle), 5)
+                procs = await _wait_for(self.session.device.app_processes(bundle), 5)
             except Exception:
-                pids = []
-            current = self._log_pids.get(bundle)
-            if pids and current is not None and current not in pids:
+                procs = []
+            life = self._log_life.get(bundle)
+            if procs and life is not None and not any(p.same_life(life[0]) for p in procs):
                 self.restart_logs(bundle)
                 fresh = True
         if fresh and self.log_warmup:
             await asyncio.sleep(self.log_warmup)  # the phone replays what the app logged just before
+        await self._vouch_logs(bundle)
+
+    async def _vouch_logs(self, bundle: str) -> None:
+        """Lines of a stream are shown by no answer until the phone's process list has shown that the process read is
+        the app's, after they were read: a pid can go to another app between the watcher's looks. Asked now, so that an
+        answer is as good as the phone's word at that moment, and a list that can't be had vouches for nothing."""
+        ring, life = self._rings.get(bundle), self._log_life.get(bundle)
+        if ring is None or life is None or not ring.unvouched or not self._connected.is_set():
+            return
+        asked = ring.added
+        try:
+            procs = await _wait_for(self.session.device.app_processes(bundle), 5)
+        except Exception:
+            return
+        if not any(p.same_life(life[0]) for p in procs):
+            if procs:  # the app is another process now: restart_logs reads that one
+                return
+            try:  # gone: when nobody holds its pid, what it logged last (a crash's lines) is its own; else it is not shown
+                holder = await _wait_for(self.session.device.process_holder(life[0].pid), 5)
+            except Exception:
+                return
+            if holder is not None:  # another process holds the pid: what was read since is not the app's, and is taken back
+                self._log_tainted[bundle] = life[0]
+                ring.discard_unvouched(None if holder.started is None else int(holder.started * 1000))
+                return
+            if bundle in self._log_tainted and self._log_tainted[bundle].same_life(life[0]):
+                ring.discard_unvouched()  # another process was seen holding the pid: its absence proves nothing
+                return
+        ring.vouch(asked)
+        if self._log_life.get(bundle) is life:
+            self._log_life[bundle] = (life[0], max(life[1], asked))
 
     def _diag_app(self, given: dict[str, str] | None) -> tuple[str, str]:
         """(bundle id, how to show it) of the app `logs` and `crash` speak of: the app in front at the last read, else
@@ -1233,12 +1391,12 @@ class Daemon:
         search = await self._phone_files("read the phone's crash reports",
                                          self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT, bundle))
         infos = [diagnostics.describe_crash(r, exe) for r in search.reports]
-        skipped = ([diagnostics.CRASH_UNREADABLE.format(n=search.unreadable)] if search.unreadable else [])
-        if not args["all"]:  # the newest, and only one since the session began
-            infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:1]
+        skipped = diagnostics.skipped_notes(search)
+        # AGENT-TOOLS §15.2: only reports since the session began; `all` is the last 5 of those, not the newest alone
+        infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:diagnostics.CRASH_RECENT if args["all"] else 1]
         self._diag_count = len(infos)
         if not infos:
-            return _answer([(diagnostics.NONE_AT_ALL if args["all"] else diagnostics.NONE_SINCE).format(app=shown)], skipped)
+            return _answer([diagnostics.NONE_SINCE.format(app=shown)], skipped)
         lines: list[str] = []
         for info in infos:
             lines += ["" if lines else None, *diagnostics.crash_lines(info, shown)]
@@ -1248,7 +1406,13 @@ class Daemon:
 
     async def _pull_crash(self, bundle: str, info: "diagnostics.CrashInfo") -> str:
         """Copy the whole report from the phone into ~/.tapwright/crashes/<bundle id>/; its path."""
-        data = await self._phone_files("copy the crash report", self.session.device.crash_file(info.remote))
+        async def read() -> bytes:
+            try:
+                return await self.session.device.crash_file(info.remote)
+            except CrashTooBig:
+                raise Refused("unsupported", f"the crash report {info.filename} is too big to copy (over "
+                                             f"{diagnostics.CRASH_MAX_MB} MB)") from None
+        data = await self._phone_files("copy the crash report", read())
         path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1261,14 +1425,15 @@ class Daemon:
         """The newest report of that app, not yet told of, from `since` on; looked for `polls` times, as a report
         reaches the phone's folder a moment after the app has gone. None when there is none."""
         try:
-            exe = await self._executable(bundle)
+            # the whole lookup is optional and bounded, the installed-apps read as well as the report search
+            exe = await _wait_for(self._executable(bundle), self.crash_lookup)
         except Exception:
             return None
         if not exe:
             return None
         for n in range(polls):
             try:
-                found = await asyncio.wait_for(self.session.device.crash_reports(exe, 3, bundle), 15)
+                found = await _wait_for(self.session.device.crash_reports(exe, 3, bundle), self.crash_lookup)
             except Exception:
                 return None
             for report in found.reports:
@@ -1360,6 +1525,10 @@ class Daemon:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
         rec = self._recording[client_id]
         kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
+        if rec["steps"] and kind is not None and rec["steps"][-1]["tool"] == "performance":
+            # a performance step takes only `expect.under` (§15.3): the wait is a step of its own
+            self._record_step(client_id, "wait_for", args, None)
+            return
         if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
             return
         expect: dict = {kind: args[kind]}
@@ -1375,24 +1544,47 @@ class Daemon:
             return None
         return batch.recorded_ignore(args["ignore"], self.control.client(client_id).items)
 
-    def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None) -> None:
+    def _record_compare(self, client_id: str, args: dict, ignore: list[dict] | None, folder: str | None,
+                        picture: bytes | None,
+                        fold: bool = True) -> None:
         """While recording: a `compare_screen` right after an action becomes that step's `expect.matches` (beside the
-        text, id or label already expected, if any); otherwise it is a step of its own. Its `name` is remembered, so
-        `stop` can copy the reference next to the script (§14.3)."""
+        text, id or label already expected, if any), when `fold`; otherwise it is a step of its own. Its `name`, the
+        `folder` (bundle id) it was compared in and the `picture` (the exact bytes the check used: read from the
+        reference it was compared with, or written as the one it saved) are remembered, so `stop` writes those very
+        bytes next to the script (§14.3), whatever anyone writes to the store or the script's folder in between. A
+        script keeps one picture per name: the same name in another app is refused, and so is the same name against
+        other bytes in the same app."""
         rec = self._recording[client_id]
+        folder = folder or self._bundle() or "unknown"
+        digest = _picture_digest(picture)
+        for bundle, seen, before in rec.get("references", ()):
+            if _name_key(seen) != _name_key(args["name"]):
+                continue
+            _refuse_case_only(seen, args["name"])
+            if bundle != folder:
+                raise Refused("bad_params", f'this recording already compares "{args["name"]}" in {bundle}, and a script '
+                                            f"keeps one picture for each name; give the one in {folder} another name")
+            if digest is not None and digest != before:
+                raise Refused("bad_params", f'record: "{args["name"]}" was already compared against another picture in '
+                                            "this recording; give this check another name.")
         extra: dict = {}
         if args.get("threshold") not in (None, compare.DEFAULT_THRESHOLD):  # (the default isn't written down)
             extra["threshold"] = args["threshold"]
         if ignore:
             extra["ignore"] = ignore
-        rec.setdefault("references", []).append((getattr(self, "_compared_in", None) or self._bundle(), args["name"]))
-        last = rec["steps"][-1] if rec["steps"] else None
-        if last is not None and last["tool"] != "compare_screen" and "matches" not in last.get("expect", {}):
+        if digest is not None:
+            # Bounded: a name has one picture in a recording (the guard above refuses any other), so `pictures` holds at
+            # most one PNG per name and `references` one entry per (app, name, picture), however many checks are made.
+            rec.setdefault("pictures", {}).setdefault(args["name"], picture)
+            if (folder, args["name"], digest) not in rec.setdefault("references", []):
+                rec["references"].append((folder, args["name"], digest))
+        last = rec["steps"][-1] if fold and rec["steps"] else None
+        if last is not None and last["tool"] not in ("compare_screen", "performance") and "matches" not in last.get("expect", {}):
             last["expect"] = {**last.get("expect", {}), "matches": args["name"], **extra}
             return
         step = {"tool": "compare_screen", "name": args["name"], **extra}
         if args.get("width") not in (None, shotlib.DEFAULT_WIDTH):
-            step["width"] = args["width"]
+            step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None) -> None:
@@ -1517,17 +1709,17 @@ class Daemon:
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
             del self._recording[client_id]
-            # the references the steps use travel with the script (§14.3), as the app they were saved for last had them
+            # the references the steps use travel with the script (§14.3): the exact bytes the checks used, never read
+            # from the store again (another client may have rewritten it since)
             wanted = _reference_names(rec["steps"])
-            bundles = {name: bundle for bundle, name in rec.get("references", ()) if name in wanted}
+            kept = {name: data for name, data in rec.get("pictures", {}).items() if name in wanted}
             folder = compare.script_references(pathlib.Path(path))
             secure = rec.get("secure_steps") or []
             note = ([f"Step{'s' if len(secure) > 1 else ''} {', '.join(map(str, secure))} typed into a secure field: "
                      "the text isn't saved. Put a test password in the file's \"text\" before replaying."]
                     if secure else [])
             try:  # the script is saved already: a copy that fails is said, not an error that loses the answer
-                copied = sum(compare.copy_to_script([name], bundle, pathlib.Path(path))[1]  # (small files: a few ms)
-                             for name, bundle in bundles.items())
+                copied = compare.export_to_script(kept, pathlib.Path(path))[1]
             except OSError as e:
                 copied = 0
                 note.append(f"the reference pictures couldn't be copied to {folder}: {e.strerror or e}; copy them from "
@@ -1551,15 +1743,20 @@ class Daemon:
         marks: dict[str, int | None] = {}
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
-            # not this computer's, so the start is the newest time each ring had then, on the phone's own clock
+            # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
+            if i == 1:
+                await self._log_boundary(scope)  # the app's log is read, with the phone's replay, before the first mark
             marks = {b: r.latest() for b, r in self._rings.items()}
+            await self._clock_mark(marks)
             if clock() - began > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
+            before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
+                recorded = before is not None and len(self._recording[client_id]["steps"]) > before
                 lines = answer["text"].splitlines()
                 step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
                                for line in lines if line.startswith("Note: ")]
@@ -1572,7 +1769,7 @@ class Daemon:
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
-                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes)
+                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
                               if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
@@ -1603,6 +1800,43 @@ class Daemon:
             raise Refused(failed[0], answer["text"])
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
 
+    async def _log_boundary(self, scope: "Scope | None") -> None:
+        """Before a batch's first step: start reading the app's log if it isn't read, and wait for the phone's replay of
+        what the app logged before. Without that the ring is empty at the step's start, and the replay, arriving after,
+        would be shown as logged `since step 1`. Nothing when no app under test is known yet (a ring made later by
+        open_app has only the new process's lines)."""
+        try:
+            given = await self._given(scope) if scope is not None else None
+            bundle, _ = self._diag_app(given)
+        except Refused:
+            return
+        task = self._log_tasks.get(bundle)
+        if (task is None or task.done()) and bundle not in self._log_dead:
+            try:
+                await asyncio.wait_for(self._refresh_logs(bundle), 8)
+            except Exception:
+                pass
+
+    async def _clock_mark(self, marks: dict[str, int | None]) -> None:
+        """The boundary of a step, for the log of every app that has one: the phone's own clock now (log times are on
+        it), or that ring's newest entry when that is later, whatever its stream still has to replay. Every ring, not
+        only the app in front: a step may bring another app to the front, and a failure then shows that app's log from
+        the step's start. An old entry's time alone is no boundary: a replay of older lines can still come during the
+        step. When the clock can't be read no app has one, and a failure shows none of its log (an unknown start is
+        not epoch zero)."""
+        if not marks:
+            return
+        try:
+            clock = await _wait_for(self.session.device.phone_time_ms(), 3)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            clock = None
+        # the step began at the phone's clock, or at a ring's newest entry when that is later; never at an old
+        # entry alone (the phone may still replay older lines than the newest one during the step)
+        for bundle, newest in list(marks.items()):
+            marks[bundle] = None if clock is None else max(clock, newest) if newest is not None else clock
+
     async def _failure_logs(self, scope: "Scope | None", step: int, marks: dict[str, int | None]) -> list[str]:
         """`Logs (since step N):` and up to 20 entries at warning or above, of the app under test (a given app, in
         personal mode), when there are any. `marks`: the newest log time of each ring when the step began (the phone's
@@ -1617,13 +1851,16 @@ class Daemon:
         except Exception:
             pass
         mark = marks.get(bundle)
-        return diagnostics.failure_logs(self._rings.get(bundle), step, 0 if mark is None else mark + 1)
+        if mark is None:  # where the step began on the phone's clock isn't known: what is older can't be told from what isn't
+            return []
+        return diagnostics.failure_logs(self._rings.get(bundle), step, mark + 1)
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
-                      notes: list[str] | None = None) -> str | None:
+                      notes: list[str] | None = None, fold: bool = False) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
         for up to the timeout; `matches` is then checked once, on the screen as it is by then (§14.2). `notes`
-        collects what a picture check has to say (an ignored element that isn't there)."""
+        collects what a picture check has to say (an ignored element that isn't there). While this client records,
+        a check that held is saved with the step (`fold`: the step itself was saved, so it goes in its `expect`)."""
         if any(expect.get(k) is not None for k in batch.EXPECT_KINDS):
             missed = await self._expect_element(client_id, view, scope, expect)
             if missed is not None:
@@ -1631,10 +1868,15 @@ class Daemon:
         if expect.get("matches") is None:
             return None
         given = await self._given(scope) if scope is not None else None
+        recording = client_id in self._recording
+        kept = batch.recorded_ignore(expect["ignore"], view.items) if recording and expect.get("ignore") else None
         done = await self._compare(view, expect["matches"], threshold=expect.get("threshold"),
                                    ignore=expect.get("ignore"), check=True, given=given)
         if notes is not None:
             notes.extend(done.notes)
+        if recording and done.reason is None and client_id in self._recording:
+            self._record_compare(client_id, {"name": expect["matches"], "threshold": expect.get("threshold")}, kept,
+                                 done.folder, done.picture, fold=fold)
         return done.reason
 
     async def _expect_element(self, client_id: str, view, scope: "Scope | None", expect: dict) -> str | None:
@@ -1872,7 +2114,11 @@ class Daemon:
                 raise Refused("not_allowed", _outside(bundle, named, names, alert))
             first = answer["text"].splitlines()[0]
             first = "" if first.startswith("Screen ") else first + "\n"  # a look's first line is the screen itself
-            return {"text": f"{first}Note: {_outside(bundle, named, names, alert)}", "image": None, "image_size": None}
+            # what a stopped batch says of the given app itself (its logs since the step, its crash note) was made for
+            # that app alone, in personal mode, and stays when its screen is gone (CLI replay reads it)
+            app_only = diagnostics.junit_output(answer["text"])
+            text = f"{first}Note: {_outside(bundle, named, names, alert)}" + (f"\n{app_only}" if app_only else "")
+            return {"text": text, "image": None, "image_size": None}
         return answer
 
     async def _run_tool(self, client_id: str, name: str, args: dict) -> dict:
@@ -2410,6 +2656,11 @@ class Daemon:
         launch = bool(args.get("launch"))
         seconds = float(args.get("seconds", performance.SECONDS_DEFAULT))
         meter, opened, unsettled = self.session.device.meter(bundle), None, False
+        crashes: list[str] = []  # the crash notes of the calls inside: their report is taken, the outer check won't find it
+
+        def keep_crash(answer: dict) -> None:
+            crashes.extend(ln[len("Note: "):] for ln in answer["text"].splitlines()
+                           if ln.startswith(CRASH_NOTE) and ln[len("Note: "):] not in crashes)
         token = _NESTED.set(True)
         try:
             # The meter starts before a launch closes the app: a phone that can't sample answers `unsupported` with the
@@ -2420,15 +2671,19 @@ class Daemon:
                 raise Refused("unsupported", f"the phone can't sample the app: {e}") from None
             try:
                 if launch:
-                    await self.run_tool(client_id, "close_app", {"app": bundle}, scope)
+                    keep_crash(await self.run_tool(client_id, "close_app", {"app": bundle}, scope))
+                # the window begins here: what the instruments gave while they were set up, and the app that was
+                # running before a launch, are dropped (the instruments stay ready)
+                await meter.begin_window(fresh=launch)
                 began = clock()
                 if launch:
                     answer = await self.run_tool(client_id, "open_app", {"app": bundle}, scope)
+                    keep_crash(answer)
                     opened = clock() - began
                     unsettled = NOTE_CAPPED.split("{cap")[0] in answer["text"]
                 else:
                     if args.get("tap") is not None:
-                        await self.run_tool(client_id, "tap", {"target": args["tap"], "look": False}, scope)
+                        keep_crash(await self.run_tool(client_id, "tap", {"target": args["tap"], "look": False}, scope))
                     await self.control.sleep(max(0.0, seconds - (clock() - began)))
             finally:
                 found = await meter.stop()
@@ -2436,11 +2691,13 @@ class Daemon:
             _NESTED.reset(token)
         if found.failed:  # sampling broke during the window: what was gathered is only part of it
             notes = [*notes, performance.SAMPLING_STOPPED.format(why=found.failed)]
+        if found.lost:
+            notes = [*notes, performance.SAMPLES_LOST.format(n=found.lost)]
         reading = performance.summarize(found, clock() - began, opened, unsettled)
         self._performed[client_id] = reading
         self._measured = {k: round(v, 2) if isinstance(v, float) else v for k, v in dataclasses.asdict(reading).items()
                           if v is not None and v is not False}
-        return _answer(performance.answer_lines(reading), notes)
+        return _answer(performance.answer_lines(reading), [*notes, *crashes])
 
     async def _filmstrip_logged(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
         """`filmstrip` as one tool call, with its line in the action log (its tap is logged as a tap, as usual)."""
@@ -2542,7 +2799,10 @@ class Daemon:
         arrivals = [at for _, at, _ in shots]
         later = arrivals[1:] if tap is not None and count >= 3 else arrivals  # the tap's own time isn't a spacing
         spacing = round((later[-1] - later[0]) / (len(later) - 1))
-        strip, _ = await asyncio.to_thread(filmlib.compose, [picture for _, _, picture in shots], width)
+        try:
+            strip, _ = await asyncio.to_thread(filmlib.compose, [picture for _, _, picture in shots], width)
+        except ValueError as e:  # a frame far larger than any screen
+            raise Refused("internal", str(e)) from None
         head = (f"Filmstrip: {count} frames about {spacing} ms apart, numbered in order, left to right and top to "
                 f"bottom{'; frame 1 is just before the tap, the rest follow it' if tap is not None else ''}.")
         return _answer([head], notes, strip)
@@ -2561,6 +2821,8 @@ class Daemon:
                 raise Refused("locked", "the phone is locked; ask the user to unlock it")
             done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
                                        threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
+            if (held := _COMPARED.get()) is not None:
+                held.append(done)
             if check and done.reason is not None:
                 raise Refused("expect_failed", done.reason)
         except Refused as e:
@@ -2599,24 +2861,31 @@ class Daemon:
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
                                                       ", ".join(given.values())))
             bundle = front
-        folder = self._compared_in = bundle or "unknown"  # (record copies the reference from this folder)
+        folder = bundle or "unknown"  # (a recording copies the reference from this folder: it comes back in Compared)
         rects, notes = compare.ignored(view.items, ignore or [])
         found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
         if found is None and check and not keep:
-            return Compared("missing", [], notes, compare.missing(name))
+            return Compared("missing", [], notes, compare.missing(name), folder=folder)
         png = await self._read(self.session.screenshot_png)
         if given is not None:  # the picture is saved or compared only if a given app was still in front for it
             await self._still_given(given)
-        before = await asyncio.to_thread(compare.load, found) if found is not None else None
+        before, before_bytes = await asyncio.to_thread(compare.read, found) if found is not None else (None, None)
         size = width or (before.width if before is not None and check else shotlib.DEFAULT_WIDTH)
+        if not shotlib.MIN_WIDTH <= size <= shotlib.MAX_WIDTH:  # a reference's own width is a script's, not ours
+            raise Refused("bad_params", f'the reference "{name}" is {size} px wide, and a screen picture is '
+                                        f"{shotlib.MIN_WIDTH}-{shotlib.MAX_WIDTH} px wide; save the reference again with "
+                                        "update: true.")
         after = await asyncio.to_thread(compare.fit, png, size)
         if before is None:
             dest = compare.script_references(script["path"]) / f"{name}.png" if keep else compare.reference_path(folder, name)
+            trusted = script["path"].parent if keep else compare.references_dir()  # nothing below it may be a link
+            await asyncio.to_thread(self._refuse_changed_baseline, name, folder, after)  # before anything is written
             try:
-                await asyncio.to_thread(compare.save, dest, after)
+                written = await asyncio.to_thread(compare.save, dest, after, trusted)
             except OSError as e:
                 raise Refused("internal", f"couldn't save the reference to {dest}: {e.strerror or e}") from None
-            return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes)
+            return Compared("saved", [f'Saved the reference "{name}" ({after.width}x{after.height} px).'], notes,
+                            folder=folder, picture=written)
         if before.size != after.size:
             raise Refused("bad_params", f'the reference "{name}" is {before.width}x{before.height} px and this screen is '
                                         f"{after.width}x{after.height}; take it at the same width, or update: true.")
@@ -2629,25 +2898,49 @@ class Daemon:
         share = compare.shown(result.percent, result.changed, threshold)
         if result.percent <= threshold:
             return Compared("matches", [f'Matches the reference "{name}": {share} changed.'], notes, None, None,
-                            result.percent)
+                            result.percent, folder, before_bytes)
         reason = compare.failure(name, result, threshold, scale)
         if check:
             if script is not None and (where := await asyncio.to_thread(self._write_diff, script["path"], name, result)):
                 reason += f" (diff: {where})"
-            return Compared("differs", [], notes, reason, None, result.percent)
+            return Compared("differs", [], notes, reason, None, result.percent, folder, before_bytes)
         n = len(result.regions)
         lines = [f'Differs from the reference "{name}": {share} changed, in {n} region{"s" if n != 1 else ""} (points):',
                  *compare.region_lines(result.regions, scale, view.items)]
         image = await asyncio.to_thread(result.picture)
-        return Compared("differs", lines, notes, reason, image, result.percent)
+        return Compared("differs", lines, notes, reason, image, result.percent, folder, before_bytes)
+
+    @staticmethod
+    def _refuse_changed_baseline(name: str, folder: str, picture: "Image.Image") -> None:
+        """While a client records: a reference about to be saved under a name the recording already compared (in this
+        app), as a picture that isn't the one it compared, is refused before anything is written, so the stored file
+        and what `record stop` exports stay the baseline. The same bytes are no change (the same screen again)."""
+        seen = _BASELINES.get()
+        if not seen:
+            return
+        # the same name in another app is refused here too, before the save (it was refused only after, so a replay
+        # with update_references had already replaced the first app's picture: Codex, PR #3 cycle 5)
+        for _, was, _ in seen:
+            if _name_key(was) == _name_key(name):
+                _refuse_case_only(was, name)
+        other = next((bundle for bundle, was, _ in seen if was == name and bundle != folder), None)
+        if other is not None:
+            raise Refused("bad_params", f'this recording already compares "{name}" in {other}, and a script keeps one '
+                                        f"picture for each name; give the one in {folder} another name")
+        wanted = [digest for bundle, was, digest in seen if was == name and bundle == folder]
+        if not wanted:
+            return
+        if hashlib.sha256(compare.encode(picture)).hexdigest() not in wanted:  # (the bytes compare.save would write)
+            raise Refused("bad_params", f'record: "{name}" was already compared against another picture in this '
+                                        "recording; give this check another name.")
 
     @staticmethod
     def _write_diff(script: pathlib.Path, name: str, result: "compare.Result") -> str | None:
         """A failed check's picture, next to the script (§14.3): its path, or None when it can't be written."""
         path = compare.script_diffs(script) / f"{name}.png"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(result.picture("PNG"))
+            data = result.picture("PNG")
+            compare.write_file(path, lambda out: out.write(data), script.parent)  # not through a link; see write_file
         except OSError:
             return None
         return str(path)

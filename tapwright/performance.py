@@ -41,6 +41,8 @@ FAIL_CPU = "CPU averaged {got:.0f}%, over {limit}%"
 FAIL_FPS = "frames dipped to {got:.0f} fps, under {limit} fps"
 FAIL_DROPS = "{got} drops, over {limit}"
 FAIL_UNMEASURED = "{what} wasn't measured, so it can't be checked"
+FAIL_PARTIAL = "{what}: only part of the window was measured, so it can't be checked"
+FAIL_UNSETTLED = "the screen was still changing when the launch wait ended, so the launch time can't be checked"
 UNMEASURED_WHAT = {"launch_s": "the launch (the step has no launch: true)", "memory_mb": "memory", "cpu_percent": "CPU",
                    "fps_min": "frames", "drops": "frames"}
 
@@ -53,9 +55,12 @@ class Measurement:
     cpu_pct: list[float] = dataclasses.field(default_factory=list)
     fps: list[float] = dataclasses.field(default_factory=list)
     failed: str | None = None  # why sampling stopped before the call ended (the samples are then only part of the window)
+    lost: int = 0  # batches of process samples dropped because the phone's process list couldn't say whose they were
 
 
 SAMPLING_STOPPED = "sampling stopped early ({why}); the numbers cover only part of the window."
+SAMPLES_LOST = ("{n} memory and CPU sample(s) were lost (the phone's process list couldn't be read); "
+                "those numbers cover only part of the window.")
 
 
 @dataclasses.dataclass
@@ -73,6 +78,8 @@ class Reading:
     fps_min: float | None = None
     drops: int | None = None
     still: bool = False  # frames were sampled and none was drawn
+    partial: bool = False  # sampling stopped early: the sampled numbers cover only part of the window
+    samples_lost: bool = False  # process samples were lost: memory and CPU cover only part of the window
 
     def missing(self) -> list[str]:
         out = []
@@ -88,16 +95,19 @@ class Reading:
 def summarize(m: Measurement, seconds: float, opened_s: float | None = None, unsettled: bool = False) -> Reading:
     """The numbers of a Measurement. A second with no frame at all is a still screen, not a slow one: it is left out
     of the frame rate and the drops."""
-    r = Reading(opened_s=opened_s, unsettled=unsettled, seconds=seconds)
-    if m.memory_mb:
-        r.memory_avg, r.memory_peak = sum(m.memory_mb) / len(m.memory_mb), max(m.memory_mb)
-    if m.cpu_pct:
-        r.cpu_avg, r.cpu_peak = sum(m.cpu_pct) / len(m.cpu_pct), max(m.cpu_pct)
-    drawn = [f for f in m.fps if f > 0]
+    r = Reading(opened_s=opened_s, unsettled=unsettled, seconds=seconds, partial=m.failed is not None,
+                samples_lost=m.lost > 0)
+    # a sample that isn't a finite number is no sample (a NaN would pass every limit and serialize as NaN)
+    memory, cpu, fps = ([x for x in xs if math.isfinite(x)] for xs in (m.memory_mb, m.cpu_pct, m.fps))
+    if memory:
+        r.memory_avg, r.memory_peak = sum(memory) / len(memory), max(memory)
+    if cpu:
+        r.cpu_avg, r.cpu_peak = sum(cpu) / len(cpu), max(cpu)
+    drawn = [f for f in fps if f > 0]
     if drawn:
         r.fps_avg, r.fps_min = sum(drawn) / len(drawn), min(drawn)
         r.drops = sum(1 for f in drawn if f < DROP_FPS)
-    elif m.fps:
+    elif fps:
         r.still = True
     return r
 
@@ -161,11 +171,14 @@ def failures(r: Reading, under: dict) -> list[str]:
         got = {"launch_s": r.opened_s, "memory_mb": r.memory_peak, "cpu_percent": r.cpu_avg, "fps_min": r.fps_min,
                "drops": r.drops}[key]
         if got is None:
-            if key in ("fps_min", "drops") and r.still:
-                continue  # nothing drawn: no slow frame (fps_min has nothing to be under, either)
-            out.append(FAIL_UNMEASURED.format(what=UNMEASURED_WHAT[key]))
+            still = key in ("fps_min", "drops") and r.still
+            if still and not r.partial:
+                continue  # nothing drawn all the window: no slow frame (fps_min has nothing to be under, either)
+            out.append((FAIL_PARTIAL if still else FAIL_UNMEASURED).format(what=UNMEASURED_WHAT[key]))  # (a stopped window may have had a slow frame)
         elif key == "launch_s" and got > limit:
             out.append(FAIL_LAUNCH.format(got=_seconds(got), limit=_seconds(limit)))
+        elif key == "launch_s" and r.unsettled:  # the wait hit its cap: that is not the first settled screen (15.3)
+            out.append(FAIL_UNSETTLED)
         elif key == "memory_mb" and got > limit:
             out.append(FAIL_MEMORY.format(got=got, limit=f"{limit:g}"))
         elif key == "cpu_percent" and got > limit:
@@ -174,4 +187,7 @@ def failures(r: Reading, under: dict) -> list[str]:
             out.append(FAIL_FPS.format(got=got, limit=f"{limit:g}"))
         elif key == "drops" and got > limit:
             out.append(FAIL_DROPS.format(got=got, limit=f"{limit:g}"))
+        elif key != "launch_s" and (r.partial or (r.samples_lost and key in ("memory_mb", "cpu_percent"))):
+            # under the limit so far, but the window wasn't all sampled
+            out.append(FAIL_PARTIAL.format(what=UNMEASURED_WHAT[key]))
     return out
