@@ -21,6 +21,10 @@ A failure now comes with its cause: the app's log, its crash, and how it perform
   from a cold start to the first settled screen (`launch: true`).
 - In `run` and scripts a `performance` step can hold limits: `"expect": {"under": {"launch_s": 2, "memory_mb": 300,
   "drops": 0}}`.
+- A limit of its own: a batch of samples already in flight when the window opens carries no timestamp, so it can't be
+  told apart from the window's own and can skew a number at the very edge of the window. Samples are counted by when
+  they arrive, not by when the phone took them. Samples still waiting when the window ends, or lost to a process list
+  that couldn't be read, are said, and fail memory and CPU limits.
 
 **Failures explain themselves**
 - A `run` or `replay` step that fails adds the app's warnings and errors since that step began. `tapwright replay
