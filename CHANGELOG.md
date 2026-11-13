@@ -41,11 +41,11 @@ action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
   phone can't say which it is and a policy blocks `network` for some app.
 - A plain `open_app` (or `text_size: system`) after one with a language, region or text size closes the running app
   and opens it with the defaults, and says so.
-- `tap`, `long_press`, `toggle` and `type_text` with an `index` on an off-screen match act on that element after the
-  scroll (not on another match, or none), and the policy checks the element that is touched. The element is followed
-  by its identifier when nothing else has it, else by how far the elements that moved with the list moved; when
-  neither tells (a list of identical rows and nothing else), it is scrolled into view but not touched: `stale`, look
-  and target it by its ref.
+- `tap`, `long_press`, `toggle` and `type_text` with an `index` on an off-screen match follow that element through the
+  scroll by its own identifier (when nothing else in the tree has it) and act on it, never on another match, and the
+  policy checks the element that is touched. A match without an identifier of its own is scrolled into view and not
+  touched (`stale`: look, then target it by its ref): as a list scrolls its matches move, drop and change, and an
+  `index` can then name another one.
 
 **Habits that save calls**
 - The skill has `run` examples for common patterns and a "spend fewer calls" list: read the change list instead of

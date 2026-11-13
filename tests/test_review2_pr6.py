@@ -84,16 +84,15 @@ def test_an_indexed_off_screen_tap_hits_the_element_it_named_when_two_matches_co
         stop, task = await started(d)
         s = d.session
         s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800)),
-                  el("e2", "button", "Account", "", rect=(10, 100, 100, 40))]
-        s.offscreen = [el("", "text", "Billing", "", rect=(10, 950, 100, 30)),  # a heading that moves with the form
-                       el("", "button", "Account", "", rect=(10, 1000, 100, 40)),
-                       el("", "button", "Account", "", rect=(10, 1050, 100, 40))]
+                  el("e2", "button", "Account", "a", rect=(10, 100, 100, 40))]
+        s.offscreen = [el("", "button", "Account", "b", rect=(10, 1000, 100, 40)),
+                       el("", "button", "Account", "c", rect=(10, 1050, 100, 40))]
         real = s.scroll
 
         async def scroll(x0, y0, x1, y1):  # the form moves up by 700: the 2nd and the 3rd Account are on screen
-            s.tree = [s.tree[0], el("", "text", "Billing", "", rect=(10, 250, 100, 30)), el("e3", "button", "Account", "", rect=(10, 300, 100, 40)),
-                      el("e4", "button", "Account", "", rect=(10, 350, 100, 40))]
-            s.offscreen = [el("", "button", "Account", "", rect=(10, -600, 100, 40))]
+            s.tree = [s.tree[0], el("e3", "button", "Account", "b", rect=(10, 300, 100, 40)),
+                      el("e4", "button", "Account", "c", rect=(10, 350, 100, 40))]
+            s.offscreen = [el("", "button", "Account", "a", rect=(10, -600, 100, 40))]
             return await real(x0, y0, x1, y1)
         s.scroll = scroll
         await d.run_tool("a", "look", {"screenshot": False})
@@ -180,15 +179,14 @@ def test_an_indexed_target_among_four_matches_is_the_same_element_after_the_scro
         stop, task = await started(d)
         s = d.session
         s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800)),
-                  el("e2", "button", "Account", "", rect=(10, 100, 100, 40))]
-        s.offscreen = [el("", "text", "Billing", "", rect=(10, 950, 100, 30)), *(el("", "button", "Account", "", rect=(10, y, 100, 40))
-                                                                for y in (1000, 1050, 1100))]
+                  el("e2", "button", "Account", "a", rect=(10, 100, 100, 40))]
+        s.offscreen = [el("", "button", "Account", f"r{y}", rect=(10, y, 100, 40)) for y in (1000, 1050, 1100)]
         real = s.scroll
 
         async def scroll(x0, y0, x1, y1):  # B, C and D are on screen now (A above it)
-            s.tree = [s.tree[0], el("", "text", "Billing", "", rect=(10, 250, 100, 30))] + [el(f"e{i}", "button", "Account", "", rect=(10, y, 100, 40))
+            s.tree = [s.tree[0]] + [el(f"e{i}", "button", "Account", f"r{y + 700}", rect=(10, y, 100, 40))
                                    for i, y in ((3, 300), (4, 350), (5, 400))]
-            s.offscreen = [el("", "button", "Account", "", rect=(10, -600, 100, 40))]
+            s.offscreen = [el("", "button", "Account", "a", rect=(10, -600, 100, 40))]
             return await real(x0, y0, x1, y1)
         s.scroll = scroll
         await d.run_tool("a", "look", {"screenshot": False})
