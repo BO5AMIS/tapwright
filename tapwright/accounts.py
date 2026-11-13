@@ -195,6 +195,26 @@ def upper_escapes(text: str) -> str:
     return _ESCAPE.sub(lambda m: m.group(0).upper(), text) if "%" in text else text
 
 
+# A token is a maximal run without whitespace, quotes, angle brackets, braces, brackets or a backslash, so a URL or a query
+# string stays whole. One that holds a percent escape is decoded (Codex, PR #10 cycle 9).
+_TOKEN = re.compile(r"[^\s'\"`<>{}\[\]\\]*%[^\s'\"`<>{}\[\]\\]*")
+DECODE_DEPTH = 3
+
+
+def _decoded(token: str) -> list[str]:
+    """The token decoded up to DECODE_DEPTH times with `unquote` and with `unquote_plus` (each stage kept)."""
+    out = []
+    for step in (urllib.parse.unquote, urllib.parse.unquote_plus):
+        text = token
+        for _ in range(DECODE_DEPTH):
+            made = step(text)
+            if made == text:
+                break
+            out.append(made)
+            text = made
+    return out
+
+
 def _swap(text: str, norm: str, value: str, label: str) -> tuple[str, str]:
     """`text` and its `norm` (upper_escapes of it) with every `value` found in `norm` replaced by `label` in both."""
     out, out_norm, at = [], [], 0
@@ -214,6 +234,12 @@ class Redaction:
         pairs = [(upper_escapes(form), f"<{name}'s {kind}>") for name, kind, value in entries for form in forms(value)]
         pairs.sort(key=lambda pair: -len(pair[0]))
         self.values: list[tuple[str, str]] = pairs
+        bases: dict[str, str] = {}
+        for name, kind, value in entries:
+            for base in (value, value.translate(BIDI_MARKS), " ".join(value.split()), " ".join(value.translate(BIDI_MARKS).split())):
+                if base:
+                    bases.setdefault(base, f"<{name}'s {kind}>")
+        self._bases = sorted(bases.items(), key=lambda pair: -len(pair[0]))
         shown = sorted({label for _, label in pairs}, key=len, reverse=True)
         self.placeholders = re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
 
@@ -226,11 +252,29 @@ class Redaction:
         """One search for every form at once (a value has up to a few hundred: a loop over them was 3 times slower)."""
         return re.compile("|".join(re.escape(value) for value, _ in self.values)) if self.values else None
 
+    def _token_label(self, token: str) -> str | None:
+        """The placeholder for a token whose decoded versions hold a value, else None."""
+        for decoded in _decoded(token):
+            for base, label in self._bases:
+                if base in decoded:
+                    return label
+        return None
+
+    def _tokens_scrubbed(self, text: str) -> str:
+        """Every token with a percent escape whose decoded versions hold a value, replaced whole."""
+        def swap(m: "re.Match[str]") -> str:
+            return self._token_label(m.group(0)) or m.group(0)
+        return _TOKEN.sub(swap, text)
+
     def scrub(self, text: str) -> str:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
         values = self.values
-        if not text or self._any is None or self._any.search(upper_escapes(text)) is None:
+        if not text or self._any is None:
+            return text
+        if "%" in text:
+            text = self._tokens_scrubbed(text)
+        if self._any.search(upper_escapes(text)) is None:
             return text
         parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
         for n in range(0, len(parts), 2):
@@ -245,6 +289,8 @@ class Redaction:
     def holds(self, text: str) -> bool:
         if not text:
             return False
+        if "%" in text and any(self._token_label(m.group(0)) for m in _TOKEN.finditer(text)):
+            return True
         return bool(self._any is not None and self._any.search(upper_escapes(text))) or bool(
             self.placeholders is not None and self.placeholders.search(text))
 
@@ -384,6 +430,10 @@ class Store:
         if fresh:
             self._ever.update(dict.fromkeys(fresh))
             self._redaction = Redaction(tuple(self._ever))
+
+    def holds(self, text: str) -> bool:
+        """Does the text hold any value ever loaded, or a placeholder?"""
+        return self._redaction.holds(text)
 
     def scrub(self, text: str) -> str:
         """The text without any value ever loaded (a log line has no call whose accounts to use)."""

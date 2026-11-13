@@ -50,6 +50,7 @@
   a value its bytes hold only escaped is caught too. The map writer redacts only content fields (never the format, a hash, a key or a
   name), and a redacted map that wouldn't read never replaces the file.
   Percent escapes match in any case of their hex digits (`%2f` is `%2F`) without making the rest of a value case-insensitive.
+  A token with a percent escape (a URL, a query string) is decoded up to three times; if any version holds a value, the whole token is replaced. A recording refuses to save typed text that holds a value from before an accounts-file reload, as it does for a current one.
   Typed account values are recorded as `${account.username}` / `${account.password}` (text that is exactly the value, a
   username in a text field, a password in a secure one); text that only holds a value is refused naming the step. A
   recorded selector is counted and checked the way the replaying tool resolves it (a toggle counts switches first), and a

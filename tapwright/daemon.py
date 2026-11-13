@@ -2331,7 +2331,8 @@ class Daemon(journey_tool.JourneyTools):
         (`${account.username}` / `${account.password}`, filled from drive's account); that variable is returned. Text that
         merely holds a value, or is the placeholder an answer shows, has no variable to stand for it, and a value that
         doesn't suit the field (a password in a text field) isn't one the variable would type: the step is left unsaved,
-        so the save is refused naming it, and its text is cleared. None for any other text (saved as typed)."""
+        so the save is refused naming it, and its text is cleared. A value from before a reload (not in the file now) is
+        refused the same way, whole or held (Codex, PR #10 cycle 9). None for any other text (saved as typed)."""
         if accountlib.mentions(text):
             return None  # the placeholder itself, checked by the typing
         loaded = self._loaded()
@@ -2340,8 +2341,8 @@ class Daemon(journey_tool.JourneyTools):
             kind = "password" if secure else "username"
             if kind in kinds:
                 return "${account." + kind + "}"
-        elif not loaded.holds(text):
-            return None
+        elif not (loaded.holds(text) or self.accounts.holds(text)):
+            return None  # (accounts: every value of the daemon's life, current or older)
         rec.setdefault("unsaved_text", []).append(len(rec["steps"]) + 1)
         step["text"] = ""
         return None
