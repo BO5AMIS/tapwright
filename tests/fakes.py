@@ -257,6 +257,9 @@ class FakeDevice:
     def drop_network(self) -> None:
         self.network_calls.append(("drop",))
 
+    async def clear_leftover(self) -> None:
+        self.network_calls.append(("leftover",))
+
 
 def button(ref: str, label: str, identifier: str = "", rect=(10, 100, 100, 40), **fields) -> ui.Element:
     """An element for a fake screen."""

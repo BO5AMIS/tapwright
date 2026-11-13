@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -360,6 +361,21 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
     return await _tool("rotate", to=to, look=look, screenshot=screenshot)
 
 
+HEARTBEAT = 5.0  # s between the signs this process gives the daemon that it lives (a network condition is kept meanwhile)
+
+
+def _heartbeat(stop: threading.Event) -> None:
+    """Tell a running daemon, every HEARTBEAT seconds, that this agent's process is alive. Never starts a daemon and
+    never fails: a daemon that isn't there has nothing to keep."""
+    while True:
+        try:
+            client.ping(CLIENT_ID)
+        except Exception:
+            pass
+        if stop.wait(HEARTBEAT):
+            return
+
+
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
         rules: policy.Policy | None = None) -> None:
     client.set_scope(apps, dedicated)
@@ -373,4 +389,13 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
             logger.warning(warning)
     except Exception:
         pass
-    device.run(server.run_stdio_async)
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat, args=(stop,), name="tapwright-heartbeat", daemon=True)
+    beat.start()
+    try:
+        device.run(server.run_stdio_async)
+    finally:
+        # the agent's session ended (its stdio closed, or the host asked this process to stop): what it set on the phone
+        # ends with it. A process that is killed outright sends nothing, and the daemon notices the heartbeat stop.
+        stop.set()
+        client.end_session(CLIENT_ID)

@@ -1032,6 +1032,26 @@ class NetworkHold:
         if task is not None:
             task.cancel()
 
+    async def _wait_for_release_or_loss(self, dvt) -> None:
+        """Wait until stop() is asked for, or until the condition's own connection closes. pymobiledevice3 closes it
+        in a background reader (the phone ended the session, the tunnel under it dropped): nothing raises here by
+        itself, and the condition is gone with it, so the wait ends in an error that says so."""
+        waiter = getattr(getattr(dvt, "_dtx", None), "wait_disconnected", None)
+        if waiter is None:  # a library without the signal: stop() is the only way out, and the idle clear the backstop
+            await self._release.wait()
+            return
+        released = asyncio.ensure_future(self._release.wait())
+        lost = asyncio.ensure_future(waiter())
+        try:
+            await asyncio.wait({released, lost}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for pending in (released, lost):
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(released, lost, return_exceptions=True)
+        if lost.done() and not lost.cancelled() and not self._release.is_set():
+            raise ConnectionLost("the connection closed")
+
     async def _run(self) -> None:
         from pymobiledevice3.services.dvt.instruments.condition_inducer import ConditionInducer
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
@@ -1045,7 +1065,7 @@ class NetworkHold:
                 await inducer.set(profile)
                 if not self._ready.done():
                     self._ready.set_result(profile)
-                await self._release.wait()
+                await self._wait_for_release_or_loss(dvt)
                 try:
                     await inducer.clear()
                 except Exception as e:  # the connection closing ends the condition anyway

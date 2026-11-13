@@ -137,6 +137,23 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
 
+    async def session(request):
+        """`/api/session/ping` and `/api/session/end`: an agent's MCP process says it lives, or that it is going. A
+        condition it set on the phone is kept while it is heard from, and cleared when it is gone."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        client = request.headers.get("x-tapwright-client")
+        if request.path_params["what"] not in ("ping", "end"):
+            return _error("not_found", "the session calls are ping and end", 404)
+        if not client:
+            return _error("bad_params", "no client named (X-Tapwright-Client)", 400)
+        if request.path_params["what"] == "ping":
+            daemon.agent_alive(client)
+        else:
+            await daemon.agent_ended(client)
+        return JSONResponse({"ok": True})
+
     async def shutdown(request):
         problem = denied(request)
         if problem is not None:
@@ -300,6 +317,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         WebSocketRoute("/video", video),
         Route("/api/health", health),
         Route("/api/shutdown", shutdown, methods=["POST"]),
+        Route("/api/session/{what:str}", session, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/{name}", tool, methods=["POST"]),
     ])
 

@@ -24,7 +24,7 @@ from typing import Awaitable, NamedTuple, TypeVar
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (actionlog, aio, audit, batch, changes, closest, compare, diagnostics, filmstrip as filmlib,
-               launch as launchlib, needs, network, ocr, params, performance, report, ui)
+               launch as launchlib, needs, network, ocr, params, performance, report, store, ui)
 from . import policy as safety
 from .actionlog import ActionLog
 from . import session as session_module
@@ -606,7 +606,8 @@ PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its promp
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
 FRONT_WATCH = 0.15  # s between front-app questions while a filmstrip films in personal mode
 NETWORK_IDLE = 600.0  # s without a call from the agent that set a network condition before it is cleared
-NETWORK_CHECK = 30.0  # s between those checks
+NETWORK_CHECK = 5.0  # s between those checks
+NETWORK_OWNER_LOST = 20.0  # s without a heartbeat or a call from an agent that sends heartbeats (its process is gone)
 NETWORK_MAX = 1800.0  # s a condition may last from the moment it was set, whatever its agent does (30 min)
 MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide) is no place to touch
 # The status bar across the top of a phone held upright: a touch there scrolls the app's list to its top (iOS),
@@ -770,6 +771,14 @@ class Daemon:
         self._network_set_at = 0.0  # when it was set (the hard cap NETWORK_MAX counts from here)
         self._network_watch: asyncio.Task | None = None
         self._network_notes: dict[str, str] = {}  # {agent: why its condition ended}, told in its next answer
+        # Which condition is on: a number that grows with every one set. A clear that names the number it means ends
+        # that condition only, so an agent's cleanup can't end the condition another agent set after it. Setting and
+        # clearing run one at a time under the lock, and the check and the clear are one step.
+        self._network_gen = 0
+        self._network_lock = asyncio.Lock()
+        # {agent: when it last said it lives}: an MCP process sends a heartbeat every few seconds (agent_alive) and a
+        # goodbye as it ends (agent_ended); a condition whose agent is silent for NETWORK_OWNER_LOST is cleared
+        self._agent_alive: dict[str, float] = {}
         # the device reports a condition that ended by itself or with its tunnel (L6)
         self.session.device.on_network_end = self._network_over
 
@@ -846,18 +855,73 @@ class Daemon:
         self._tell_network_setter(f"the network condition ended: {why}.")
         self._network = None
         self._stop_network_watch()
+        self._forget_network_marker()
 
     def _tell_network_setter(self, text: str) -> None:
         if self._network_by is not None:
             self._network_notes[self._network_by] = text
 
-    async def _clear_network(self) -> None:
-        """Back to normal, politely (the phone's condition ends when the connection that holds it closes)."""
-        self._network = None
-        self._stop_network_watch()
-        clear = getattr(self.session.device, "clear_network", None)
-        if clear is not None:
-            await clear()
+    def _write_network_marker(self, mode: str) -> None:
+        """A note on disk that a condition is on, so a daemon that is killed without clearing it finds it at its next
+        start (_clear_leftover_network). Never fails the call."""
+        try:
+            store.NETWORK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            store.NETWORK_FILE.write_text(json.dumps({"mode": mode, "pid": os.getpid()}), encoding="utf-8")
+        except OSError as e:
+            self.log(f"network: couldn't write {store.NETWORK_FILE}: {e}")
+
+    @staticmethod
+    def _forget_network_marker() -> None:
+        try:
+            store.NETWORK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    async def _clear_leftover_network(self) -> None:
+        """A condition that a daemon left on the phone when it ended without clearing it (killed, crashed, the
+        computer lost power): its marker is still on disk. Cleared once the line is up, before any agent's first call,
+        so the phone isn't slow for whoever comes next (AGENT-TOOLS §16.4). No marker, or a condition of this very
+        daemon's: nothing to do. A failure leaves the marker for the next connect."""
+        if self._network is not None or not store.NETWORK_FILE.exists():
+            return
+        clear = getattr(self.session.device, "clear_leftover", None)
+        if clear is None:
+            return
+        try:
+            async with self._network_lock:
+                await asyncio.wait_for(clear(), 15)
+        except Exception as e:
+            self.log(f"network: couldn't clear a condition left from before: {e}")
+            return
+        self._forget_network_marker()
+        self.log("network: cleared a condition left on the phone by a daemon that ended without clearing it")
+
+    async def _clear_network(self, gen: int | None = None) -> bool:
+        """Back to normal, politely (the phone's condition ends when the connection that holds it closes). With `gen`,
+        only the condition that was set under that number: false, and nothing done, when another has replaced it."""
+        async with self._network_lock:
+            if gen is not None and gen != self._network_gen:
+                return False
+            self._network = None
+            self._stop_network_watch()
+            self._forget_network_marker()
+            clear = getattr(self.session.device, "clear_network", None)
+            if clear is not None:
+                await clear()
+            return True
+
+    def agent_alive(self, client_id: str) -> None:
+        """A heartbeat from an agent's MCP process."""
+        self._agent_alive[client_id] = time.monotonic()
+
+    async def agent_ended(self, client_id: str) -> None:
+        """An agent's MCP process ended (its stdio closed, or it said goodbye): the condition it set ends with it, so
+        the phone isn't left slow for the next agent. A condition another agent set is not touched."""
+        self._agent_alive.pop(client_id, None)
+        self._network_notes.pop(client_id, None)
+        if self._network is not None and self._network_by == client_id:
+            self.log(f"network: {self._network} cleared, its agent {client_id} has gone")
+            await self._clear_network(self._network_gen)
 
     def _stop_network_watch(self) -> None:
         watch, self._network_watch, self._network_by = self._network_watch, None, None
@@ -876,17 +940,22 @@ class Daemon:
             await asyncio.sleep(NETWORK_CHECK)
             if self._network is None:
                 return
-            now = time.monotonic()
+            now, gen = time.monotonic(), self._network_gen
+            heard = max(self._agent_alive.get(self._network_by or "", float("-inf")), self._network_seen)
             if now - self._network_set_at > NETWORK_MAX:
                 # the hard cap: an agent that keeps calling can't keep the owner's phone slow for good
                 self.log(f"network: {self._network} cleared, it had been on for {NETWORK_MAX:g} s")
                 self._tell_network_setter(f"the network condition ended after {NETWORK_MAX / 60:g} min; set it again "
                                           "if the test needs it.")
-                await self._clear_network()
+                await self._clear_network(gen)
+            elif self._network_by in self._agent_alive and now - heard > NETWORK_OWNER_LOST:
+                # an agent that sends heartbeats stopped: its process is gone, killed or cut off, with no goodbye
+                self.log(f"network: {self._network} cleared, its agent {self._network_by} stopped sending heartbeats")
+                await self._clear_network(gen)
             elif now - self._network_seen > NETWORK_IDLE:
                 self.log(f"network: {self._network} cleared, its agent {self._network_by} has been quiet "
                          f"{NETWORK_IDLE:g} s")
-                await self._clear_network()
+                await self._clear_network(gen)
 
     async def _network_tool(self, client_id: str, args: dict, notes: list) -> dict:
         """`network`: put the whole phone's network in a bad condition, or back to normal. Over Wi-Fi, offline and
@@ -896,6 +965,8 @@ class Daemon:
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
         device = self.session.device
         if mode == "normal":
+            if self._network is not None and self._network_by not in (None, client_id):
+                self._tell_network_setter("another agent set the network back to normal.")  # its condition is ended
             await self._clear_network()
             self.log("network: normal")
             self._announce("agent", "network", label="normal")
@@ -930,18 +1001,24 @@ class Daemon:
             raise Refused("unsupported", f"{mode} would cut Tapwright's own link, which runs over the network here "
                                          f"({getattr(device, 'via', None) or 'not USB'}); connect the phone with a cable, "
                                          "or use 3g.")
-        try:
-            profile = await device.set_network(mode)
-        except ConnectionLost as e:
-            self.lost(e)
-            raise Refused("reconnecting", "the connection dropped while setting the network; wait a few seconds, "
-                                          "then look and set it again") from None
-        except DeviceError as e:
-            raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
-        self._network = mode
-        self._network_by, self._network_seen = client_id, time.monotonic()
-        self._network_set_at = self._network_seen
-        self._network_notes.pop(client_id, None)
+        async with self._network_lock:  # set, replace and clear take turns: the generation says which one is on
+            try:
+                profile = await device.set_network(mode)
+            except ConnectionLost as e:
+                self.lost(e)
+                raise Refused("reconnecting", "the connection dropped while setting the network; wait a few seconds, "
+                                              "then look and set it again") from None
+            except DeviceError as e:
+                raise Refused("unsupported", f"couldn't set the network to {mode}: {e}") from None
+            if self._network is not None and self._network_by not in (None, client_id):
+                # the phone has one condition: this replaces another agent's, and that agent is told
+                self._tell_network_setter(f"another agent set the network to {mode}, replacing yours.")
+            self._network_gen += 1
+            self._network = mode
+            self._network_by, self._network_seen = client_id, time.monotonic()
+            self._network_set_at = self._network_seen
+            self._network_notes.pop(client_id, None)
+            self._write_network_marker(mode)
         if self._network_watch is None:
             self._network_watch = asyncio.create_task(self._watch_network(), name="network-watch")
         self.log(f"network: {mode} ({profile})")
@@ -1154,6 +1231,8 @@ class Daemon:
                 else:
                     attempt = failures = 0
                     self.stuck = None
+                    if not self._ever_connected:  # this daemon's first line to the phone: before any agent's call
+                        await self._clear_leftover_network()
                     self._ever_connected = True
                     self._lost.clear()  # a drop noticed while reconnecting is already dealt with
                     self._set_state("live")
@@ -1990,7 +2069,7 @@ class Daemon:
         failed: tuple[str, str] | None = None
         done = 0
         marks: dict[str, int | None] = {}
-        set_here = False
+        set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -2007,7 +2086,7 @@ class Daemon:
             try:
                 answer = await self.run_tool(client_id, step["tool"], batch.args_of(step), scope)
                 if step["tool"] == "network":  # a condition this script set, until a step sets it back to normal
-                    set_here = step.get("mode") != "normal"
+                    set_here = self._network_gen if step.get("mode") != "normal" and self._network_by == client_id else None
                 recorded = before is not None and len(self._recording[client_id]["steps"]) > before
                 lines = answer["text"].splitlines()
                 step_notes += [line if line.startswith(CRASH_NOTE) else f"Note (step {i}): {line[6:]}"
@@ -2037,11 +2116,13 @@ class Daemon:
                                            f"{why}")
                 break
             done += 1
-        if failed and set_here and self._network is not None:
+        if failed and set_here is not None and self._network is not None:
             # a script that stops before its own `normal` step would leave the phone slow until the idle clear; one
-            # that finishes decides for itself
-            await self._clear_network()
-            step_notes.append("Note: the network condition this script set was cleared because it stopped at a failing step.")
+            # that finishes decides for itself. Only the condition this script set: if another agent has set one since,
+            # that one is theirs (the generation says which is on)
+            if await self._clear_network(set_here):
+                step_notes.append("Note: the network condition this script set was cleared because it stopped at a "
+                                  "failing step.")
         first = failed[1] if failed else f"Ran {n} of {n} steps in {clock() - began:.1f} s."
         if args.get("look", True):
             view.unlooked = 0  # the block covers the batch: one call, not "N actions ago"
