@@ -105,7 +105,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         return HTMLResponse(page, headers=PAGE_HEADERS)
 
     async def health(request):
-        return denied(request) or JSONResponse(daemon.status())
+        # `pages`: live-view pages connected now, so an agent's `viewer` can leave an open one be instead of opening
+        # another tab (2026-11-12: agents opened two dozen). Only here, not in the status the viewer protocol sends.
+        return denied(request) or JSONResponse({**daemon.status(), "pages": daemon.ws_pages})
 
     async def tool(request):
         problem = denied(request)
@@ -264,6 +266,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
         await websocket.accept()
         queue = daemon.subscribe()
         daemon.ws_clients += 1
+        page = websocket.headers.get("origin") is not None  # ws_allowed checked it is this server's own
+        if page:
+            daemon.ws_pages += 1
         queue.put_nowait(daemon.status())
         for ask in getattr(daemon, "open_confirms", lambda: [])():  # a request made before this viewer came
             queue.put_nowait(ask)
@@ -277,8 +282,6 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
                 await asyncio.sleep(1.0)
                 if not queue.full():
                     queue.put_nowait(daemon.status())
-
-        page = websocket.headers.get("origin") is not None  # ws_allowed checked it is this server's own
 
         async def receive_all():
             while True:
@@ -307,6 +310,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None) -> Starlette
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:  # whichever ends first, the rest stop
             daemon.ws_clients -= 1  # first: nothing below may skip it, even if this handler is cancelled
+            if page:
+                daemon.ws_pages -= 1
             daemon.unsubscribe(queue)
             for task in tasks:
                 task.cancel()
@@ -405,10 +410,13 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
     """Run the daemon until it is stopped. A healthy daemon already running counts as success."""
     import uvicorn
 
-    from .client import healthy, viewer_url
+    from .client import healthy
 
+    # Nothing here prints the live view's link with its key: an app around the terminal that hides keys in what it
+    # shows (T3 Code shows ?token=SECRET) opened that hidden copy as a browser tab each time a daemon started, and the
+    # tab could only fail (2026-11-12). `tapwright view` opens the real link.
     def running(found: dict) -> int:
-        print(f"already running: {viewer_url(found)}", flush=True)
+        print(f"already running on port {found.get('port')}; open the live view with `tapwright view`", flush=True)
         if new_token:
             print("the running daemon keeps its token; stop it first (tapwright serve --stop) to get a new one",
                   flush=True)
@@ -454,7 +462,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,
                                     "started": int(time.time())})
             log.info("listening on http://127.0.0.1:%d", actual)
-            print(f"Tapwright live view: http://127.0.0.1:{actual}/?token={token}", flush=True)
+            print(f"Tapwright is serving on port {actual}; open the live view with `tapwright view`", flush=True)
             serving = asyncio.create_task(server.serve(sockets=[sock]))
             helpers = [asyncio.create_task(daemon.supervise(stop))]
             if not keep_alive:

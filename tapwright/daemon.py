@@ -45,6 +45,8 @@ STILL = 0.1  # seconds without a changed frame before a screen counts as still (
 RESOLVE_SETTLE = 1.0  # the longest a silent re-read waits for the screen to be still
 CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
+CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
+CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
@@ -219,6 +221,14 @@ NOTE_SPAN = "changes are since your last list, {n} actions ago."  # after answer
 # (an app tester's RC pass, 2026-11-12). Said plainly, so an agent asks a person instead of trying again.
 NOTE_HEALTH = ("this is iOS's Health access sheet; iOS doesn't let automation change it. Ask a person to choose and "
                "tap Allow.")
+# 1.5.1: a tap or long press that changed nothing. "No visible change." alone left agents unsure whether the touch
+# landed, so they looked again and retried; the note says it did, and what to try by what was touched.
+NOTE_DELIVERED = "the tap was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
+HINT_FIELD = "It is a text field: type_text types into it."
+HINT_BARE_POINT = "No element is at that point."
+HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
+                "report it as a finding.")
+DELIVERED_TOOLS = ("tap", "long_press")
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
@@ -638,6 +648,21 @@ ACTIONS = {
     "rotate": (lambda s, a: s.rotate(a["to"]), CAP),
 }
 SPRINGBOARD = "com.apple.springboard"
+MEDIA_WATCH = 1.0  # seconds between looks for iOS's photo prompt while media waits on the runner
+MEDIA_PEEK = 3.0  # seconds one such look may take (the runner may be busy with the add itself)
+MEDIA_KEEP = 600.0  # seconds a cut-short add stays the one a repeated media call picks up
+PHOTO_WAIT_MAX = 130.0  # seconds the runner may be held by iOS's photo prompt (its add waits 120 s for the answer)
+PHOTO_WAIT_BUSY = ("busy: the phone's runner is waiting for the person to answer iOS's photo prompt (from media) and "
+                   "answers nothing else until they do, {left} s at most. Ask your user to answer it on the phone, "
+                   "then try again.")
+PHOTO_WAIT_FREE = frozenset({"media", "session_report", "viewer"})  # calls that don't need the runner meanwhile
+RUNNER_NAME = "WebDriverAgentRunner"  # what iOS's own prompts call the runner ("“WebDriverAgentRunner-Runner” Would Like …")
+NEEDS_PHOTO_ANSWER = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person "
+                      "answers it on the phone (to add pictures: \"Allow\" or \"Limit Access…\"; never needed: full "
+                      "access), then call media again. Until they answer (2 minutes at most) the runner answers no other "
+                      "call: ask your user now, and wait for them.")
+NEEDS_ALERT_ANSWER = ("needs_a_person: iOS is showing an alert on the phone while the runner waits for access to Photos. "
+                      "A person answers it on the phone, then call media again.")
 PROMPT_FRONT = "(a given app's prompt)"  # Daemon._front: a given app's own system prompt is in front
 PROMPT_RETURN_WAIT = 2.0  # seconds the app may take to come back once its prompt is answered
 FRONT_RETRIES, FRONT_RETRY = 16, 0.5  # see Daemon._front: as long as a notification banner stays
@@ -725,6 +750,7 @@ class Daemon(journey_tool.JourneyTools):
         self._log_dead: dict[str, str] = {}  # bundle id -> why its log stream can't be started (tries gave up)
         self.crash_polls, self.crash_poll = CRASH_POLLS, CRASH_POLL
         self._opened: str | None = None  # the app open_app last started: the app under test
+        self._launched_with: dict[str, dict] = {}  # app -> the language/region/text size its last launch was given
         self._executables: dict[str, str] = {}  # bundle id -> the name of its process, from the installed apps
         self._wall = datetime.datetime.now  # the phone's reports carry local time without a zone
         self._began_wall = self._crash_since = self._wall()  # the session began; the last answer without news of a crash
@@ -752,6 +778,11 @@ class Daemon(journey_tool.JourneyTools):
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
+        self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
+        # the add that iOS's photo prompt holds, and until when: the runner answers nothing else meanwhile (Codex, PR #8)
+        self._photo_wait: "tuple[asyncio.Future, float] | None" = None
+        self._media_adds: dict[str, tuple[tuple[tuple[str, str], ...], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short, by its pictures (name, SHA-256), in order
+        self._closing: set[asyncio.Future] = set()  # WebDriverAgent terminates after a close_app's kill, left to finish
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
         # on a short wait and a tree read. To learn whether the stream is what stalls requests over Wi-Fi.
         self.agent_stream = os.environ.get("TAPWRIGHT_AGENT_STREAM", "1") != "0"
@@ -763,6 +794,7 @@ class Daemon(journey_tool.JourneyTools):
         if self.preset not in PRESETS:
             self.preset = "balanced"
         self.ws_clients = 0
+        self.ws_pages = 0  # of those, the browser pages (a socket with an Origin): what `viewer` finds open
         self.video = None  # a tapwright.video.VideoHub while the H.264 live view is set up (see start_video)
         self.want_video = False  # `tapwright serve --video`: set the video up once the phone is connected
         # `--settle-on-video`: actions watch the video's frames and the JPEG stream stays closed. Off unless asked:
@@ -804,7 +836,6 @@ class Daemon(journey_tool.JourneyTools):
         self._journey_locks: dict[str, asyncio.Lock] = {}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
-        self._overridden: set[str] = set()  # apps launched with a language, region or text size (§16.3) and not closed since
         self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
         # who set it and when they last called: a condition whose agent has gone quiet for NETWORK_IDLE is cleared, so
         # the phone isn't left slow after that agent's session ends (the daemon itself may live on for others)
@@ -1095,9 +1126,30 @@ class Daemon(journey_tool.JourneyTools):
         return _answer([network.line(mode)], notes)
 
     # ---- the connection ----
+    def _photo_wait_left(self) -> float | None:
+        """Seconds iOS's photo prompt may still hold the runner (a media add waits on the person), else None."""
+        if self._photo_wait is None:
+            return None
+        task, until = self._photo_wait
+        left = until - self.control.clock()
+        if task.done() or left <= 0:
+            self._photo_wait = None
+            return None
+        return left
+
+    async def _after_photo_wait(self) -> None:
+        """Wait until iOS's photo prompt no longer holds the runner (the person answered, or the wait's deadline)."""
+        while (left := self._photo_wait_left()) is not None and self._photo_wait is not None:
+            await asyncio.wait({self._photo_wait[0]}, timeout=left)
+
     def lost(self, reason: "str | Exception") -> None:
         """A request found the line dead: the supervisor reconnects. When the request was cut because the app in
         front doesn't answer (AppNotAnswering), that is what agents and the live view are told meanwhile."""
+        if self._photo_wait_left() is not None:
+            # a request that got no answer while iOS's photo prompt holds the runner: not a dead line, and reconnecting
+            # would stop the runner and the add with it. The add reports a real drop itself when it ends.
+            self.log(f"no answer while the runner waits on iOS's photo prompt: {reason}")
+            return
         stuck = reason if isinstance(reason, AppNotAnswering) else None
         if stuck is not None:
             self.stuck = stuck
@@ -1321,6 +1373,8 @@ class Daemon(journey_tool.JourneyTools):
                 if self.state in ("live", "locked"):
                     self._set_state("reconnecting", "connection lost")
                 continue
+            if self._photo_wait_left() is not None:
+                continue  # the runner is held by iOS's photo prompt: no answer is expected, and none is a drop
             try:
                 locked = await self.control.read(lambda: self._connected_only(self.session.locked))
             except ConnectionLost as e:
@@ -1349,6 +1403,15 @@ class Daemon(journey_tool.JourneyTools):
         `scope` is the apps this agent was given (personal mode); None is a dedicated device: no limit.
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one. `ux_rules` are its house
         rules (§17.3); None is none."""
+        left = self._photo_wait_left()
+        if left is not None and name not in PHOTO_WAIT_FREE:
+            if _NESTED.get() or _JOURNEY_OWN.get():
+                # a tool's own call (a journey's stress putting the phone back upright): it waits for the person's
+                # answer and then runs, instead of being lost from a cleanup that nothing retries (Codex, PR #8 cycle 3)
+                await self._after_photo_wait()
+            else:
+                # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
+                raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(left))))
         jr = self._journeys.get(client_id)
         if jr is None or name == "journey":
             return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
@@ -2482,6 +2545,12 @@ class Daemon(journey_tool.JourneyTools):
             return False  # the phone can't say: refuse, the safe side
         return bool(running & set(named))
 
+    async def _prompt_of_runner(self, view) -> bool:
+        """Is the system alert on screen iOS's own question to the runner (WebDriverAgentRunner), such as the photo
+        prompt `media` raises? Its title names the runner. Read on the live screen first."""
+        await self._read(lambda: self._silent_read(view))
+        return view.alert_now is not None and RUNNER_NAME in view.alert_now[0]
+
     async def _back_from_prompt(self, client_id: str, given: dict[str, str], answer: dict) -> dict:
         """After a given app's own permission prompt is answered, the app comes back as the prompt fades. The
         answer's read can come mid-fade and show SpringBoard, which personal mode withholds; a first-time agent then
@@ -2525,6 +2594,12 @@ class Daemon(journey_tool.JourneyTools):
             view = self.control.client(client_id)
             front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=True))
             if front not in given and front != PROMPT_FRONT:
+                if name == "alert" and front == SPRINGBOARD and await self._prompt_of_runner(view):
+                    # iOS's photo prompt for the runner (media waits on it): its text may be read; answering it is a
+                    # person's, never the tool's
+                    if args.get("action") != "text":
+                        raise Refused("not_allowed", NEEDS_PHOTO_ANSWER)
+                    return await self._run_tool(client_id, name, args)
                 raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names,
                                                       alert=getattr(self.session, "last_alert", None) is not None))
         if name in DIAG_TOOLS:  # the answer is of one given app only, so it needs no screen check below
@@ -2670,7 +2745,12 @@ class Daemon(journey_tool.JourneyTools):
             aim = target  # what the touch is aimed at: after a scroll to an off-screen element, that element's ref
             # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
             # from it is read for again before it is not_found
-            live = by_lookup and (not self._current(view) or (target.kind != "point" and self._missing(view.items, target)))
+            # (the first list after a launch is read again too: the app may still have been drawing, and a touch
+            # aimed with it lands under a search field that came after; seen on iOS Settings, 4 taps in 5)
+            live = by_lookup and (view.opened or not self._current(view)
+                                  or (target.kind != "point" and self._missing(view.items, target)))
+            if by_lookup:
+                view.opened = False
             if not live:  # a silent re-read settles for itself
                 await self._settle_pending()
             s.items = view.items
@@ -2714,6 +2794,9 @@ class Daemon(journey_tool.JourneyTools):
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
+            box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
+            if name in DELIVERED_TOOLS and not dry:
+                box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
             handler = self._handlers.get(name)
             if dry and name == "swipe":
                 self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
@@ -2819,6 +2902,10 @@ class Daemon(journey_tool.JourneyTools):
             # Not when something lies off screen: the action's effect may be there, and only a read shows it
             view.read_at, view.read_mark = self.control.clock(), self._mark()
             view.unlooked = 0  # this block covers them: nothing changed since the list
+            if _health_sheet(view.items):  # iOS's own Health access sheet takes touches and changes nothing
+                notes = [*notes, NOTE_HEALTH]
+            elif box.get("hint"):
+                notes = [*notes, NOTE_DELIVERED.format(seconds=time.monotonic() - box["began"], hint=box["hint"])]
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -2827,7 +2914,9 @@ class Daemon(journey_tool.JourneyTools):
         moves = None if name in MAY_MOVE_CONTENT else name in MOVES_CONTENT and not to_target
         answer = await self._after(view, str(result), notes, full[0], moves, done.seconds,
                                    drifted=to_target or bool(box.get("scrolled")),
-                                   snap=landed[0] if landed is not None else None)
+                                   snap=landed[0] if landed is not None else None,
+                                   hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
+                                   watched=time.monotonic() - box["began"])
         if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
@@ -3038,44 +3127,110 @@ class Daemon(journey_tool.JourneyTools):
                                        + "\n".join(app_line(a) for a in hits[:10]))
         return hits[0]["bundle_id"], f"{hits[0]['name']} ({hits[0]['bundle_id']})"
 
+    @property
+    def _overridden(self) -> set[str]:
+        """The apps launched with a language, region or text size (§16.3) and not closed since: _launched_with's apps."""
+        return set(self._launched_with)
+
     async def _open_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"])
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
+        before = self._launched_with.get(bundle_id)  # the app may still be running with what its last launch was given
         # an app this daemon launched with them still runs with them: WebDriverAgent would bring that process forward as
         # it is, so a plain open (or text_size: system) closes it and launches it again with the defaults (Codex, PR #6)
         resume = _RESUME.get() and not extra  # (a journey brings its app back from the background: the process stays as it is)
-        back = not extra and not resume and bundle_id in self._overridden
+        back = bool(before) and not extra and not resume
         try:
-            if extra or back:
-                try:
-                    await self.session.terminate(bundle_id)  # a running app is closed first
-                except ConnectionLost:
-                    raise
-                except DeviceError:
-                    pass  # not running
-                await self.session.launch(bundle_id, extra)
+            if extra or back:  # a running app is closed first, as close_app does (WebDriverAgent's terminate alone is slow)
+                if (await self._end_app(bundle_id))[1]:
+                    await self._tell_runner_closed(bundle_id)
+                else:
+                    try:
+                        await self.session.terminate(bundle_id)
+                    except ConnectionLost:
+                        raise
+                    except DeviceError:
+                        pass  # not running
+                await self.session.launch(bundle_id, extra or None)
             else:
                 await self.session.launch(bundle_id)
         except ConnectionLost:
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
-        if extra:
-            self._overridden.add(bundle_id)
+        conditions = launchlib.check(a)
+        if conditions:
+            self._launched_with[bundle_id] = conditions
         elif not resume:
-            self._overridden.discard(bundle_id)
+            self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
+        view.opened = True
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
-        if back:
-            return f"Opened {shown}, back to the phone's own language and text size."
+        if back:  # the plain open after one with conditions: they are undone, which the answer says
+            return f"Opened {shown},{launchlib.undone(before)}."
         return f"Opened {shown}{launchlib.said(a)}."
 
     async def _close_app(self, view, a: dict) -> str:
+        """End the app through iOS's process control, which doesn't wait on the app, then tell WebDriverAgent so its
+        own bookkeeping matches (the app already gone, it has nothing to wait for). WebDriverAgent's terminate alone,
+        as before and with no cap, when there is no tunnel, iOS refuses or is slow, TAPWRIGHT_CLOSE=wda, or the kill
+        found no process (the app may not have been running, or the kill missed it: its terminate is then quick or
+        the right one). On a real app it waited a median of 46 s for the app to finish quitting."""
         bundle_id, shown = await self._app(a["app"], partial=False)
-        await self.session.terminate(bundle_id)
-        self._overridden.discard(bundle_id)  # the process is gone, and its launch overrides with it
+        began = time.monotonic()
+        way, found = await self._end_app(bundle_id)
+        if found:
+            if not await self._tell_runner_closed(bundle_id):
+                way += f"; WebDriverAgent's terminate took over {CLOSE_TERMINATE_CAP:g} s and was left to finish"
+        else:
+            try:
+                await self.session.terminate(bundle_id)
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                if shown == bundle_id:  # named by a bundle id that no installed app and no built-in app name has
+                    raise Refused("not_found", f"couldn't close {bundle_id}: {e}; call apps for the installed "
+                                               "apps") from None
+                raise
+        # closed (iOS ended it, or WebDriverAgent's terminate did): the process is gone, and its launch conditions with
+        # it. A close that failed leaves the app running as it was launched, so they are kept (Codex, PR #8).
+        self._launched_with.pop(bundle_id, None)
+        self.log(f"closed {bundle_id} through {way} in {time.monotonic() - began:.1f} s")
         return f"Closed {shown}."
+
+    async def _end_app(self, bundle_id: str) -> tuple[str, int]:
+        """Ask iOS's process control to end the app: (the way it went, for the log; how many processes it ended).
+        None ended, with no tunnel, TAPWRIGHT_CLOSE=wda, or iOS refusing or slow: WebDriverAgent's terminate is the
+        caller's to make."""
+        way, device = "WebDriverAgent alone", self.session.device
+        if os.environ.get("TAPWRIGHT_CLOSE") == "wda":
+            return way + " (TAPWRIGHT_CLOSE=wda)", 0
+        if device.rsd is None:
+            return way + " (no tunnel)", 0
+        try:
+            found = await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+        except asyncio.TimeoutError:
+            return way + f" (iOS process control took over {CLOSE_KILL_CAP:g} s)", 0
+        except Exception as e:
+            return way + f" (iOS process control failed: {e})", 0
+        return ("iOS process control", found) if found else (way + " (iOS process control found no process)", 0)
+
+    async def _tell_runner_closed(self, bundle_id: str) -> bool:
+        """After a kill that ended the app: tell WebDriverAgent, for at most CLOSE_TERMINATE_CAP. False if it was
+        still going by then. Its request is never cancelled (that tears down the connection and leaves the request
+        in flight on the phone): it is left to end by its own timeout, and a failure is only logged. The app is
+        closed either way."""
+        task = asyncio.ensure_future(self.session.terminate(bundle_id))
+        self._closing.add(task)
+
+        def ended(done: asyncio.Future) -> None:
+            self._closing.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                self.log(f"closed {bundle_id}; WebDriverAgent's terminate afterwards failed: {done.exception()}")
+        task.add_done_callback(ended)
+        finished, _ = await asyncio.wait({task}, timeout=CLOSE_TERMINATE_CAP)
+        return bool(finished)
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
         """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
@@ -3246,6 +3401,14 @@ class Daemon(journey_tool.JourneyTools):
                 pictures = await asyncio.to_thread(medialib.read_pictures, add)
             except ValueError as e:
                 raise Refused("bad_params", str(e)) from None
+        if self._photo_wait_left() is not None:
+            # iOS's photo prompt holds the runner: nothing can be asked of it (its version, its access) until the person
+            # answers. An add of the same pictures picks up the waiting one; anything else waits its turn (Codex, PR #8).
+            if not add:
+                raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(self._photo_wait_left() or 1))))
+            names = [name for name, _ in pictures]
+            await self._media_adding(client_id, pictures, names, asks=True)
+            return _answer([medialib.added_text(names)], notes)
         await self.wait_connected()
         try:
             version = await self._read(lambda: self.session.runner_version())
@@ -3260,13 +3423,10 @@ class Daemon(journey_tool.JourneyTools):
                                              "user to allow WebDriverAgentRunner in Settings > Privacy & Security > "
                                              "Photos, then try again.")
             names = [name for name, _ in pictures]
-            ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures")
-            if len(ids) != len(names):
-                if ids:  # what it did make stays recorded, so remove can take it
-                    medialib.record(client_id, ids, names[:len(ids)])
-                raise Refused("internal", f"the phone made {len(ids)} pictures for {len(names)} sent. Check Photos > "
-                                          "Recently Added.")
-            medialib.record(client_id, ids, names)
+            # iOS asks the person on the first add (add access not decided yet), and the runner's add waits for the
+            # answer with the runner's whole queue: nothing else it is asked, an alert read included, is answered
+            # meanwhile. So the prompt is known from the access, before anything is sent (Codex, PR #8).
+            await self._media_adding(client_id, pictures, names, asks=access.get("add") == "notDetermined")
             return _answer([medialib.added_text(names)], notes)
         held, earlier = medialib.held_by(client_id, self._media_earlier, everything)
         if not held:
@@ -3291,9 +3451,94 @@ class Daemon(journey_tool.JourneyTools):
         medialib.drop([e["id"] for e in held])
         return _answer([lead + medialib.removed_text(names[:deleted], len(held))], notes)
 
-    async def _media_write(self, call, doing: str):
-        """A write to the phone's photo library, once: sent again after a drop it could be done twice."""
+    async def _media_adding(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str],
+                            asks: bool = False) -> None:
+        """The add, once. iOS asks the person whether the runner may use Photos and the runner's request waits for the
+        answer, so the request runs as a task of its own and this call watches for a system alert in front: when one
+        is up it stops waiting at once (needs_a_person), and nobody is held up behind it (`alert` can read the text).
+        The request itself is never cancelled or sent twice: it goes on and records its pictures when it finishes, and
+        the next media call with the same pictures picks it up instead of adding them again."""
+        # the same pictures, in the same order: by their bytes, not their file names (Codex, PR #8)
+        same = tuple((name, hashlib.sha256(data).hexdigest()) for name, data in pictures)
+        # Look up, gate, create, register and claim the photo wait as one step, for every client at once: two calls
+        # can't both find nothing and send pictures twice (CodeRabbit, PR #8), and two agents' first adds can't both
+        # find no wait and both take it (Codex, PR #8 cycle 4). The lock is let go before the wait on the task.
+        async with self._media_lock:
+            kept = self._media_adds.get(client_id)
+            now = self.control.clock()
+            holder = self._photo_wait[0] if self._photo_wait_left() is not None else None
+            if holder is not None and (kept is None or kept[1] is not holder):
+                # another agent's add holds the runner on iOS's prompt: a second add would queue behind it on the
+                # runner, past the wait's deadline, and must not take the wait over (Codex, PR #8 cycle 3)
+                raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(self._photo_wait_left() or 1))))
+            if kept is not None and not kept[1].done() and kept[0] != same:
+                # another add of this client is still waiting on the person: other pictures would queue behind it
+                # and, once it went on, be added next to it; one at a time (CodeRabbit, PR #8)
+                raise Refused("busy", "an add of other pictures is still waiting for the person's answer on the "
+                                      "phone; call media again with those pictures once the person has answered")
+            if kept is not None and kept[0] == same and (not kept[1].done() or now - kept[2] < MEDIA_KEEP):
+                task = kept[1]
+            else:
+                async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
+                    return None
+                await self.control.agent(gate)
+                task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
+                self._media_adds[client_id] = (same, task, now)
+            if asks and not task.done() and (self._photo_wait is None or self._photo_wait[0] is not task):
+                # the wait starts with the add, once, inside the step: a call that picks the add up doesn't move its
+                # deadline (cycle 3), and no other add can start before it is claimed (cycle 4)
+                self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX)
+
+                def ended(done: asyncio.Future) -> None:
+                    if self._photo_wait is not None and self._photo_wait[0] is done:
+                        self._photo_wait = None
+                        e = None if done.cancelled() else done.exception()
+                        if isinstance(e, Refused) and e.code == "reconnecting":
+                            self.lost(f"the line dropped while the runner waited on iOS's photo prompt: {e}")
+                task.add_done_callback(ended)
+        if asks and not task.done():
+            # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
+            await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)
+            if not task.done():
+                raise Refused("not_allowed", NEEDS_PHOTO_ANSWER)
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=MEDIA_WATCH)
+            if done:
+                break
+            alert = await self._media_alert()
+            if alert is not None:
+                named = RUNNER_NAME in alert.title or "photo" in alert.title.lower()
+                raise Refused("not_allowed", NEEDS_PHOTO_ANSWER if named else NEEDS_ALERT_ANSWER)
+        if (self._media_adds.get(client_id) or (None, None))[1] is task:  # only its own entry
+            del self._media_adds[client_id]
+        task.result()
+
+    async def _media_alert(self) -> ui.Alert | None:
+        """The system alert in front, read while the add waits; None when there is none or the runner can't say in time."""
         try:
+            return await asyncio.wait_for(self.session.peek_alert(), MEDIA_PEEK)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    async def _media_added(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str]) -> None:
+        ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures", queued=False)
+        if len(ids) != len(names):
+            if ids:  # what it did make stays recorded, so remove can take it
+                medialib.record(client_id, ids, names[:len(ids)])
+            raise Refused("internal", f"the phone made {len(ids)} pictures for {len(names)} sent. Check Photos > "
+                                      "Recently Added.")
+        medialib.record(client_id, ids, names)
+
+    async def _media_write(self, call, doing: str, queued: bool = True):
+        """A write to the phone's photo library, once: sent again after a drop it could be done twice. `queued`: in the
+        phone's queue like a touch (a person first); the add waits for iOS's prompt, so it isn't, or it would hold
+        every other call back for as long as the person takes."""
+        try:
+            if not queued:
+                return await self._connected_only(call)
             return await self.control.agent(lambda: self._connected_only(call))  # person-first, like a touch
         except ConnectionLost as e:
             self.lost(e)
@@ -4387,6 +4632,20 @@ class Daemon(journey_tool.JourneyTools):
             reason = str(e).split(":", 1)[0]
         return NOTE_FORCED.format(reason=reason) if reason else ""
 
+    def _delivered_hint(self, a: dict) -> str:
+        """The advice that goes with a touch that changed nothing, by what the touch was aimed at in the agent's list:
+        a text input, a point with no element under it, or anything else. A target that can't be found gets the
+        general advice (the touch itself will say not_found)."""
+        try:
+            found = ui.resolve(self.session.items, _target(a))
+        except Refused:
+            return HINT_LOADING
+        if isinstance(found, tuple):
+            found = self._element_at(found)
+            if found is None:
+                return HINT_BARE_POINT
+        return HINT_FIELD if found.role == "input" else HINT_LOADING
+
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)
 
@@ -4740,6 +4999,7 @@ class Daemon(journey_tool.JourneyTools):
             view.alert_now = view.alert
             view.read_at, view.moved, view.dropped = self.control.clock(), False, False
             view.unlooked = 0
+            view.opened = False  # the agent's own look is later than the launch's
             return text, image
         try:
             text, image = await self._read(read)
@@ -4751,10 +5011,13 @@ class Daemon(journey_tool.JourneyTools):
         return await self._add_shot(_answer([*lines, text], notes, image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,
-                     seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False) -> dict:
+                     seconds: float | None = None, snap: Snapshot | None = None, drifted: bool = False,
+                     hint: str = "", watched: float | None = None) -> dict:
         """An action's answer: its result line, then what changed on screen since the agent's last answer
         (`view.shown`), or the full list when the app changed or `full`, then `Settled in` (left out when
-        `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements."""
+        `seconds` is None: `wait` did nothing to settle), then the notes. Refs follow their elements. `hint`: a tap
+        or long press's advice for when nothing changed (NOTE_DELIVERED), given with `seconds`; the note's own time
+        is `watched`, from the touch to now (the settle's `seconds` start only when the call returns)."""
         s = self.session
         tail = [] if seconds is None else [settled_line(seconds)]
         app_before, listed_before = view.app, view.shown
@@ -4807,6 +5070,8 @@ class Daemon(journey_tool.JourneyTools):
             return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             notes = [*notes, NOTE_HEALTH]  # iOS's own Health access sheet takes touches and changes nothing
+        elif changes.NO_CHANGE in up.lines and hint and seconds is not None:
+            notes = [*notes, NOTE_DELIVERED.format(seconds=seconds if watched is None else watched, hint=hint)]
         return _answer([result, *up.lines, *tail], notes)
 
     def _off_screen_now(self) -> list[ui.Element]:
@@ -5005,6 +5270,8 @@ class Daemon(journey_tool.JourneyTools):
             await asyncio.wait_for(self._clear_network(), 10)  # first: the phone is never left in a condition
         except Exception as e:
             self.log(f"closing: network: {e}")
+        for closing in list(self._closing):
+            closing.cancel()
         if self._feeder_task is not None:
             self._feeder_task.cancel()
             await asyncio.gather(self._feeder_task, return_exceptions=True)

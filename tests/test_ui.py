@@ -393,3 +393,125 @@ def test_a_blank_touch_prefers_a_point_inside_a_scroll_view():
              el("e2", "scroll", "", rect=(0, 200, 430, 600)),
              el("e3", "text", "Kyoto", rect=(35, 370, 66, 28))]
     assert ui.blank_point(items, (430.0, 932.0), 50.0, 849.0) == (68.0, 384.0)
+
+
+# React Native gives accessibilityRole radio and checkbox no accessibility trait, so XCUITest types such a view
+# `Other`, and VoiceOver speaks the role's words after the label. These are the lines an agent should get for it.
+def _option(label: str, word: str, y: int, same_rect: bool = False) -> ET.Element:
+    text_rect = (16, y, 398, 44) if same_rect else (56, y + 10, 80, 24)
+    return node("Other", label, rect=(16, y, 398, 44), children=[node("StaticText", word, rect=text_rect)])
+
+
+def _radio_group(same_rect: bool = False) -> list[ui.Element]:
+    group = node("Application", rect=(0, 0, 430, 932), children=[
+        _option("Daily, radio button, checked", "Daily", 200, same_rect),
+        _option("Weekly, radio button", "Weekly", 250, same_rect),
+        _option("Monthly, radio button", "Monthly", 300, same_rect)])
+    return ui.elements(xml(group), SCREEN)
+
+
+def test_a_react_native_radio_option_is_listed_as_a_radio_with_its_state():
+    lines = [e.line() for e in _radio_group()]
+    assert lines == ['e1 radio "Daily" checked=true @16,200 398x44 [tap]', 'e2 text "Daily" @56,210 80x24',
+                     'e3 radio "Weekly" @16,250 398x44 [tap]', 'e4 text "Weekly" @56,260 80x24',
+                     'e5 radio "Monthly" @16,300 398x44 [tap]', 'e6 text "Monthly" @56,310 80x24']
+    daily = _radio_group()[0]
+    assert (daily.type, daily.actions, daily.checked, daily.no_trait) == ("Other", ("tap",), True, True)
+
+
+def test_a_react_native_checkbox_and_the_state_words():
+    def checkbox(label: str, value: str = "") -> ui.Element:
+        n = node("Other", label, value=value, rect=(16, 400, 398, 44),
+                 children=[node("StaticText", "Remember me", rect=(56, 410, 120, 24))])
+        return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[n])), SCREEN)[0]
+    assert checkbox("Remember me, checkbox, unchecked").line() == 'e1 checkbox "Remember me" checked=false @16,400 398x44 [tap]'
+    assert checkbox("Remember me, Checkbox, not checked").checked is False  # case doesn't matter
+    assert checkbox("Remember me, checkbox, checked").checked is True
+    assert checkbox("Remember me, checkbox, selected").checked is True
+    assert checkbox("Remember me, checkbox").checked is None  # no state said, none shown
+    assert checkbox("Remember me, checkbox").line() == 'e1 checkbox "Remember me" @16,400 398x44 [tap]'
+    e = checkbox("Remember me", value="CheckBox, checked")  # the words may come in the value
+    assert (e.role, e.label, e.value, e.checked) == ("checkbox", "Remember me", "", True)
+
+
+def test_a_state_word_before_the_role_is_part_of_the_label_not_the_state():
+    """CodeRabbit, PR #8: an option named "Selected" (an RN checkbox, unchecked) was checked=true with no label."""
+    def option(label: str, value: str = "") -> ui.Element:
+        n = node("Other", label, value=value, rect=(16, 400, 398, 44),
+                 children=[node("StaticText", "Selected", rect=(56, 410, 120, 24))])
+        return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[n])), SCREEN)[0]
+    e = option("Selected, checkbox, unchecked")
+    assert (e.role, e.label, e.checked) == ("checkbox", "Selected", False)
+    assert e.line() == 'e1 checkbox "Selected" checked=false @16,400 398x44 [tap]'
+    e = option("Checked, radio button")
+    assert (e.role, e.label, e.checked) == ("radio", "Checked", None)
+    e = option("Selected, radio button, selected")
+    assert (e.label, e.checked) == ("Selected", True)
+    e = option("Selected", value="checkbox, checked")  # the label has no role token: it stays whole
+    assert (e.role, e.label, e.checked) == ("checkbox", "Selected", True)
+    e = option("Selected, checkbox", value="unchecked")
+    assert (e.label, e.checked) == ("Selected", False)
+    assert ui.rn_label("Selected, checkbox, unchecked") == "Selected" and ui.rn_label("Total, 3 items") == "Total, 3 items"
+
+
+def _screen_of(*children: ET.Element) -> list[ui.Element]:
+    return ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=children)), SCREEN)
+
+
+def test_an_other_without_role_words_is_listed_as_before():
+    """Only React Native's role words make an `Other` a control. Any other `Other` is as it was before 1.5.1: a plain
+    labelled view is not listed (reading `accessible` would say which are controls, and that is not read yet)."""
+    # the scroll indicators UIKit adds to an alert's scroll area, seen on the phone 2026-11-12
+    bars = [node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 100, 4, 200)),
+            node("Other", "Horizontal scroll bar, 1 page", value="0%", rect=(16, 300, 200, 4))]
+    assert _screen_of(*bars) == []
+    # a card with a custom label, with or without children, is not a control either
+    card = node("Other", "Order summary", rect=(16, 100, 300, 80),
+                children=[node("StaticText", "Total", rect=(20, 110, 60, 24)), node("StaticText", "$5", rect=(100, 110, 30, 24))])
+    assert [e.line() for e in _screen_of(card)] == ['e1 text "Total" @20,110 60x24', 'e2 text "$5" @100,110 30x24']
+    assert _screen_of(node("Other", "Help", rect=(16, 100, 100, 44))) == []
+    # the label "..." over a text "…" (symbols only) is no longer a guess about children's text
+    assert [e.role for e in _screen_of(node("Other", "...", rect=(16, 100, 300, 44),
+                                            children=[node("StaticText", "…", rect=(20, 110, 20, 24))]))] == ["text"]
+    assert not any(e.no_trait for e in _screen_of(*bars, card))
+
+
+def test_a_label_target_stays_unique_beside_an_other_with_the_same_label():
+    items = _screen_of(node("Other", "Help", rect=(16, 100, 40, 40)), node("StaticText", "Help", rect=(100, 100, 60, 24)))
+    assert [e.role for e in items] == ["text"]
+    assert ui.resolve(items, ui.parse_target({"label": "Help"})).role == "text"
+    assert ui.resolve(items, ui.parse_target({"text": "Help"})).role == "text"
+
+
+def test_the_off_screen_list_has_no_plain_other_either():
+    group = node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 1000, 4, 200)),
+        node("Other", "Help", rect=(16, 1100, 100, 44))])
+    tree = ui.read(xml(group), SCREEN)
+    assert tree.items == [] and tree.offscreen == []
+
+
+def test_an_other_with_an_identifier_keeps_its_line():
+    [e, _] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Daily, radio button", name="plan-daily", rect=(16, 200, 398, 44),
+             children=[node("StaticText", "Daily", rect=(56, 210, 80, 24))])])), SCREEN)
+    assert e.line() == 'e1 other "Daily, radio button" id=plan-daily @16,200 398x44' and not e.no_trait
+    [e] = ui.elements(xml(node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", name="screen-root", rect=(16, 200, 398, 44))])), SCREEN)
+    assert e.line() == 'e1 other id=screen-root @16,200 398x44'
+
+
+@pytest.mark.parametrize("same_rect", [False, True])
+def test_a_label_target_picks_the_option_not_its_text(same_rect):
+    items = _radio_group(same_rect)
+    weekly = ui.resolve(items, ui.parse_target({"label": "Weekly"}))
+    assert isinstance(weekly, ui.Element) and (weekly.role, weekly.actions) == ("radio", ("tap",))
+    assert ui.resolve(items, ui.parse_target({"text": "Daily"})).role == "radio"
+    assert [e.role for e in items if e.label == "Weekly"] == (["radio"] if same_rect else ["radio", "text"])
+
+
+def test_an_option_scrolled_off_screen_is_still_a_target_that_is_off_screen():
+    group = node("Application", rect=(0, 0, 430, 932), children=[_option("Yearly, radio button", "Yearly", 1000)])
+    tree = ui.read(xml(group), SCREEN)
+    assert tree.items == [] and [(e.role, e.label, e.no_trait) for e in tree.offscreen] == [
+        ("radio", "Yearly", True), ("text", "Yearly", False)]

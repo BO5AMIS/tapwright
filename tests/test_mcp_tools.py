@@ -173,6 +173,13 @@ def test_the_old_tool_names_are_gone(monkeypatch):
         assert out.is_error and out.content[0].text.startswith("Error unsupported: ")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_daemon_health(monkeypatch):
+    """`viewer` asks the running daemon how many live-view pages are open; these tests never reach a real daemon on
+    this computer, unless a test fakes client.healthy itself."""
+    monkeypatch.setattr(client, "healthy", lambda info, timeout=2.0: None)
+
+
 def test_viewer_opens_the_live_view_for_the_user_and_never_gives_the_agent_its_key(monkeypatch):
     """The link's key can drive the phone and approve a held-back touch (safety review M2, 2026-11-12)."""
     import webbrowser
@@ -190,11 +197,24 @@ def test_viewer_opens_the_live_view_for_the_user_and_never_gives_the_agent_its_k
 
 def test_viewer_never_logs_the_token(monkeypatch, caplog):
     import webbrowser
-    monkeypatch.setattr(webbrowser, "open", lambda url: True)  # never a real tab
+    monkeypatch.setattr(webbrowser, "open", lambda url: True)  # never a real tab (it opened ?token=SECRET each run)
     monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "SECRET"})
     with caplog.at_level("DEBUG"):
         asyncio.run(mcp_server.viewer())
     assert "SECRET" not in caplog.text
+
+
+def test_viewer_leaves_an_open_live_view_be_instead_of_opening_another_tab(monkeypatch):
+    import webbrowser
+    opened: list[str] = []
+    monkeypatch.setattr(client, "find_or_start", lambda wait=60.0: {"port": 8417, "token": "T0KEN"})
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(client, "healthy", lambda info, timeout=2.0: {"protocol": 1, "pages": 1})
+    text = asyncio.run(mcp_server.viewer()).content[0].text
+    assert opened == [] and text.startswith("The live view is already open") and "T0KEN" not in text
+    monkeypatch.setattr(client, "healthy", lambda info, timeout=2.0: {"protocol": 1, "pages": 0})
+    asyncio.run(mcp_server.viewer())
+    assert opened == ["http://127.0.0.1:8417/?token=T0KEN"]
 
 
 def test_viewer_when_the_daemon_cannot_start(monkeypatch):

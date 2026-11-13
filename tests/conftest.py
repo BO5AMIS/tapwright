@@ -27,8 +27,9 @@ def _runner_build_current(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_browser(monkeypatch):
-    """No test opens a real browser tab. One viewer test called the real webbrowser.open, and every run of the suite
-    opened http://127.0.0.1:8417/?token=SECRET on the owner's screen (two dozen tabs, 2026-11-12)."""
+    """No test opens a real browser tab. One test once called `viewer` without faking the browser, and every run of
+    the suite opened http://127.0.0.1:8417/?token=SECRET on the owner's screen (two dozen tabs, 2026-11-12). A test
+    that wants the browser fakes webbrowser.open itself, after this."""
     import webbrowser
 
     def refuse(*args, **kwargs):
@@ -44,3 +45,14 @@ def _network_marker_in_tmp(monkeypatch, tmp_path):
     owner's real ~/.tapwright in a test."""
     from tapwright import store
     monkeypatch.setattr(store, "NETWORK_FILE", tmp_path / "network-marker" / "network.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_journey_left_running():
+    """`journey.running` is the module's registry of running journeys, held weakly: a daemon from an earlier test that
+    isn't collected yet can still have one for agent "a", and a test that starts with "no journey running" fails now
+    and then, depending on what ran before it."""
+    from tapwright import journey
+    journey.running.clear()
+    yield
+    journey.running.clear()

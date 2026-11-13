@@ -384,18 +384,27 @@ def test_the_mcp_process_sends_heartbeats_and_a_goodbye_when_its_stdio_closes(mo
 
     from tapwright import client, mcp_server
 
+    import threading
+
     seen: list[tuple[str, str]] = []
-    monkeypatch.setattr(client, "ping", lambda cid: seen.append(("ping", cid)) or True)
+    beats = threading.Event()
+
+    def ping(cid):
+        seen.append(("ping", cid))
+        if len([s for s in seen if s[0] == "ping"]) >= 2:
+            beats.set()
+        return True
+    monkeypatch.setattr(client, "ping", ping)
     monkeypatch.setattr(client, "end_session", lambda cid: seen.append(("end", cid)) or True)
     monkeypatch.setattr(mcp_server, "HEARTBEAT", 0.02)
 
-    def serving(fn):  # the stdio server: it lives a moment, then stdin reaches its end
-        time.sleep(0.1)
+    def serving(fn):  # the stdio server: it lives until two heartbeats came, then stdin reaches its end
+        assert beats.wait(10)  # an event, not a sleep: Windows' coarse clock on Python 3.10 made a fixed wait flaky
     monkeypatch.setattr(mcp_server.device, "run", serving)
     mcp_server.run(apps=["com.example.app"])
     assert ("ping", mcp_server.CLIENT_ID) in seen and seen[-1] == ("end", mcp_server.CLIENT_ID)
     count = len(seen)
-    time.sleep(0.1)
+    time.sleep(0.1)  # real time on purpose: the heartbeat must stay stopped for several of its periods
     assert len(seen) == count  # the heartbeat stopped with the process
 
     seen.clear()  # the host interrupts it: the goodbye is still sent

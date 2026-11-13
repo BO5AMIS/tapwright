@@ -510,6 +510,11 @@ class Session:
         await self._fast_routes(strict=True)  # a probe that failed is raised: media answers a retryable error
         return self.tw_version
 
+    async def peek_alert(self, timeout: float = 5.0) -> ui.Alert | None:
+        """The system alert on screen now, read apart from `items` (media's watch asks it while the runner waits for
+        the person: the list the agent works with isn't touched)."""
+        return ui.read(await self._source(timeout), self.screen).alert
+
     async def photos_access(self) -> dict:
         """The runner's access to the photo library: {"add": "authorized|denied|notDetermined|…", "full": …}."""
         value = (await self._call("GET", PHOTOS_ACCESS_PATH, timeout=LOCK_WAIT)).get("value")

@@ -119,11 +119,12 @@ def test_a_question_on_a_kept_connection_the_phone_dropped_is_asked_on_a_new_one
 def test_an_action_never_rides_a_kept_connection_that_sat_idle(monkeypatch):
     """A connection the phone dropped while it sat idle would lose the action, and an action can't be sent twice."""
     d = keeping(Line([answer(1)]), Conn(answer(2)))
-    monkeypatch.setattr(device_module, "KEEP_IDLE", 0.0)
+    # negative, so any idle time at all counts as "sat idle": elapsed time is >= 0 even when the clock (Windows, Python
+    # 3.10: ~15.6 ms steps) doesn't tick between the two requests, and no sleep is needed
+    monkeypatch.setattr(device_module, "KEEP_IDLE", -1.0)
 
     async def go():
         await d.http("GET", "/status")
-        await asyncio.sleep(0.01)
         return (await d.http("POST", "/tap", {}))["value"]
     assert asyncio.run(go()) == 2
     kept, own = d.rsd.opened

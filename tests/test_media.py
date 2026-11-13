@@ -1,10 +1,11 @@
 """`media`: test pictures for photo pickers (AGENT-TOOLS §17.6), the computer's side, with a fake runner."""
 import asyncio
 import base64
+import pathlib
 
 import pytest
 
-from tapwright import client, media, mcp_server, session as session_module, store
+from tapwright import client, daemon as daemon_module, media, mcp_server, session as session_module, store, ui
 from tapwright.control import Refused
 from tapwright.daemon import Scope
 from tapwright.device import ConnectionLost, DeviceError
@@ -220,6 +221,175 @@ def test_media_works_in_personal_mode_and_shows_nothing_of_another_app(pictures)
     run(go)
 
 
+# ---- the runner's photo prompt (phone checks, 2026-11-12: media waited 120 s on an alert nobody could read) ----
+RUNNER_PROMPT = ui.Alert("“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library",
+                         ("Limit Access…", "Allow Full Access", "Don’t Allow"), (60.0, 300.0, 300.0, 200.0))
+NEEDS_A_PERSON = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person answers "
+                  "it on the phone (to add pictures: \"Allow\" or \"Limit Access…\"; never needed: full access), then "
+                  "call media again. Until they answer (2 minutes at most) the runner answers no other call: ask "
+                  "your user now, and wait for them.")
+
+
+@pytest.fixture
+def quick(monkeypatch):
+    monkeypatch.setattr(daemon_module, "MEDIA_WATCH", 0.02)
+    monkeypatch.setattr(daemon_module, "FRONT_RETRY", 0.001)  # (a look waits out a banner before it refuses)
+
+
+def prompted(d):
+    """The phone with iOS's photo prompt up and the runner's add waiting for the person to answer it."""
+    d.session.photos_gate = asyncio.Event()
+    d.session.last_alert = RUNNER_PROMPT
+    d.session.foreground, d.session.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
+
+
+def test_media_stops_waiting_at_once_when_a_system_alert_is_in_front(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        began = asyncio.get_running_loop().time()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "not_allowed" and str(e) == NEEDS_A_PERSON
+        assert asyncio.get_running_loop().time() - began < 2.0  # not the runner's 150 s
+        assert media.load() == {}  # nothing is recorded until the runner says it added them
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_alert_tool_is_not_queued_behind_a_waiting_media(pictures, quick, monkeypatch):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        monkeypatch.setattr(daemon_module, "MEDIA_WATCH", 30.0)  # media looks for no alert meanwhile: it stays pending
+        d.session.photos_gate = asyncio.Event()
+        waiting = asyncio.ensure_future(d.run_tool("a", "media", {"add": pictures, "confirm": True}))
+        await asyncio.sleep(0.1)
+        assert not waiting.done()  # no alert yet: media waits for the runner
+        d.session.last_alert = ui.Alert("Allow?", ("Allow",), (0.0, 0.0, 10.0, 10.0))
+        r = await asyncio.wait_for(d.run_tool("b", "alert", {"action": "text"}), 2.0)  # (before the 150 s wait ends)
+        assert r["text"]
+        assert not waiting.done()  # the alert was answered while media is still pending, not after it gave up
+        d.session.last_alert = None
+        d.session.photos_gate.set()  # the add finishes
+        answer = await asyncio.wait_for(waiting, 5.0)
+        assert answer["text"].startswith("Added 3 pictures")
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_pictures_are_added_once_when_media_is_called_again_after_the_person_answers(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        d.session.last_alert = None  # the person allowed it: the runner's add goes on and finishes
+        d.session.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures to the photo library: food.jpg, label.PNG, scan.heic.")
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # sent once, never again
+        assert [e["name"] for e in media.load()["a"]] == ["food.jpg", "label.PNG", "scan.heic"]  # and kept for remove
+        r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
+        assert r["text"].startswith("Removed 3 pictures")
+        await finish(stop, task)
+    run(go)
+
+
+def test_two_calls_of_one_client_with_the_same_pictures_send_them_once(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.photos_gate = asyncio.Event()  # the add is still going when the second call looks for it
+        agent = d.control.agent
+
+        async def slow_agent(fn):  # the gate takes a moment (a person-first queue, a busy loop): the calls overlap there
+            await asyncio.sleep(0.05)
+            return await agent(fn)
+        d.control.agent = slow_agent
+        args = {"add": pictures, "confirm": True}
+        first = asyncio.ensure_future(d.run_tool("a", "media", args))
+        second = asyncio.ensure_future(d.run_tool("a", "media", args))
+        await asyncio.sleep(0.15)
+        d.session.photos_gate.set()
+        answers = await asyncio.wait_for(asyncio.gather(first, second), 5.0)
+        assert all(r["text"].startswith("Added 3 pictures") for r in answers)
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # one add, not two
+        assert len(media.load()["a"]) == 3
+        await finish(stop, task)
+    run(go)
+
+
+def test_other_pictures_wait_while_an_add_is_still_pending_on_the_person(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        prompted(d)
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        e = await refused(d, {"add": pictures[:1], "confirm": True})  # other pictures: not queued behind it
+        assert e.code == "busy" and "still waiting" in str(e) and "once the person has answered" in str(e)
+        d.session.last_alert = None
+        d.session.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})  # the first set picks up its own add
+        assert r["text"].startswith("Added 3 pictures")
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # the first add once, the other never sent
+        assert d._media_adds == {}
+        r = await d.run_tool("a", "media", {"add": pictures[:1], "confirm": True})  # now it is free to go
+        assert r["text"].startswith("Added 1 picture")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_person_driving_still_holds_media_back(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.control.person_active = lambda: True
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "busy"
+        await finish(stop, task)
+    run(go)
+
+
+def test_in_personal_mode_the_runners_prompt_can_be_read_but_never_answered_by_the_tool(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s, mine = d.session, Scope(("com.example.app",))
+        s.alert_text = "“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library"
+        prompted(d)
+
+        async def text(action):
+            s.calls.append(("alert", action))
+            return s.alert_text
+        s.alert = text
+
+        async def running():
+            return ["com.example.app"]
+        s.device.foreground_apps = running
+        r = await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
+        assert r["text"] == s.alert_text and "outside_apps" not in r["text"]
+        for action in ("accept", "dismiss"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "alert", {"action": action}, scope=mine)
+            assert e.value.code == "not_allowed" and str(e.value) == NEEDS_A_PERSON
+        assert [c for c in s.calls if isinstance(c, tuple) and c[0] == "alert"] == [("alert", "text")]  # only the text
+        with pytest.raises(Refused) as e:  # `look` still shows nothing of it: only the alert's text is read
+            await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
+        assert str(e.value).startswith("outside_apps")
+        s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Allow",), (0.0, 0.0, 10.0, 10.0))
+        with pytest.raises(Refused) as e:  # another app's prompt is no one of the given apps'
+            await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
+        assert str(e.value).startswith("outside_apps")
+        await finish(stop, task)
+    run(go)
+
+
 # ---- the MCP tool ----
 def test_the_mcp_tool_sends_absolute_paths_and_only_what_was_given(monkeypatch, tmp_path):
     seen = []
@@ -278,6 +448,22 @@ def test_an_older_or_appiums_runner_has_version_zero():
     assert asyncio.run(s.runner_version()) == 0
     s, _ = runner({"version": {"tapwright": 2}})
     assert asyncio.run(s.runner_version()) == 2 and s.fast_drag and s.fast_tap
+
+
+def test_the_session_reads_the_system_alert_apart_from_the_agents_list():
+    s, _ = runner({})
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="SpringBoard" label="SpringBoard" '
+              'x="0" y="0" width="430" height="932"><XCUIElementTypeAlert type="XCUIElementTypeAlert" '
+              'label="“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library" x="60" y="300" '
+              'width="310" height="200"><XCUIElementTypeButton type="XCUIElementTypeButton" label="Allow Full Access" '
+              'x="60" y="440" width="310" height="50"/></XCUIElementTypeAlert></XCUIElementTypeApplication></AppiumAUT>')
+
+    async def read(timeout=60):
+        return source
+    s._source, s.screen, s.items = read, (430.0, 932.0), ["the agent's list"]
+    alert = asyncio.run(s.peek_alert())
+    assert alert is not None and "WebDriverAgentRunner" in alert.title and alert.buttons == ("Allow Full Access",)
+    assert s.items == ["the agent's list"]  # (what the agent works with is untouched)
 
 
 # ---- review fixes (W14) ----
@@ -368,5 +554,177 @@ def test_pictures_a_short_answer_did_make_stay_recorded(pictures):
         e = await refused(d, {"add": pictures, "confirm": True})
         assert e.code == "internal"
         assert [x["id"] for x in media.load()["a"]] == ["ONLY/L0/001"]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- Codex, PR #8 ----
+def test_the_first_add_says_a_person_is_needed_from_the_access_alone_while_the_runner_is_held(pictures, quick):
+    """The runner's add waits for iOS's prompt with its whole queue, so no alert can be read meanwhile: the access says
+    the prompt comes (add not decided yet), and media answers needs_a_person at once. The add goes on, and is picked up
+    by the next call once the person answers."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+
+        async def held(timeout=5.0):  # the runner's queue is busy with the add: an alert read gets no answer
+            await asyncio.sleep(3600)
+        s.peek_alert = held
+        began = asyncio.get_running_loop().time()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert e.code == "not_allowed" and str(e) == NEEDS_A_PERSON
+        assert asyncio.get_running_loop().time() - began < 2.0
+        s.photo_access = {"add": "authorized", "full": "notDetermined"}  # the person allowed it
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1  # sent once
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_cut_short_add_is_picked_up_only_by_the_same_pictures_not_by_a_file_of_the_same_name(tmp_path, pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        first = pictures[0]
+        other = tmp_path / "second" / pathlib.Path(first).name
+        other.parent.mkdir()
+        data = pathlib.Path(first).read_bytes()
+        other.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))  # same name, other bytes
+        e = await refused(d, {"add": [first], "confirm": True})
+        assert e.code == "not_allowed"
+        s.photo_access = {"add": "authorized", "full": "notDetermined"}
+        s.photos_gate.set()
+        await d.run_tool("a", "media", {"add": [str(other)], "confirm": True})
+        adds = [c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]
+        assert len(adds) == 2  # the second picture was sent, not taken for the first
+        await finish(stop, task)
+    run(go)
+
+
+def test_while_ios_photo_prompt_holds_the_runner_nothing_takes_the_silence_for_a_drop(pictures, quick):
+    """Codex, PR #8 cycle 2: the runner answers nothing while its add waits on iOS's prompt. The heartbeat's lock
+    check used to time out, call it a drop, reconnect and stop the runner (and the add) long before the person
+    answered. Now the heartbeat skips its check, a request that gets no answer isn't a drop, other calls are refused
+    at once, and the add is picked up when the person has answered."""
+    from tapwright.device import ConnectionLost
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+
+        async def held():  # every other request waits behind the add, as the runner's queue does, and times out
+            await asyncio.sleep(0.05)
+            raise ConnectionLost("no answer from WebDriverAgent")
+        s.locked = held
+        await asyncio.sleep(0.3)  # many heartbeats
+        assert d.state == "live" and "reset" not in s.calls  # no reconnect, the runner and its add stay
+        d.lost(ConnectionLost("a request timed out behind the add"))
+        assert d.state == "live" and not d._lost.is_set()
+        with pytest.raises(Refused) as other:
+            await asyncio.wait_for(d.run_tool("b", "look", {"screenshot": False}), 1.0)
+        assert other.value.code == "busy" and "photo prompt" in str(other.value)
+        # the person answers: the add finishes, and the same call picks it up without asking the runner anything
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        assert d._photo_wait_left() is None
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_second_agents_add_during_the_photo_wait_is_refused_and_doesnt_take_the_wait_over(pictures, quick):
+    """Codex, PR #8 cycle 3: B's add would queue behind A's on the runner, past the wait's deadline, and replaced the
+    wait's owner. It is refused busy; the wait stays A's, and A picking its add up doesn't move the deadline."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        owner, until = d._photo_wait
+        with pytest.raises(Refused) as other:
+            await d.run_tool("b", "media", {"add": pictures[:1], "confirm": True})
+        assert other.value.code == "busy" and "photo prompt" in str(other.value)
+        assert d._photo_wait == (owner, until)
+        e = await refused(d, {"add": pictures, "confirm": True})  # A asks again: still waiting
+        assert str(e) == NEEDS_A_PERSON and d._photo_wait == (owner, until)  # same owner, same deadline
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_tools_own_call_during_the_photo_wait_waits_for_the_answer_and_then_runs(pictures, quick):
+    """Codex, PR #8 cycle 3: a journey's stress putting the phone back upright runs its own calls through run_tool;
+    refused busy, the cleanup was lost. A tool's own call waits for the person's answer instead, then runs."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        await refused(d, {"add": pictures, "confirm": True})
+        token = daemon_module._JOURNEY_OWN.set(True)
+        try:
+            own = asyncio.ensure_future(d.run_tool("j", "look", {"screenshot": False}))
+        finally:
+            daemon_module._JOURNEY_OWN.reset(token)
+        await asyncio.sleep(0.1)
+        assert not own.done()  # it waits; it isn't refused
+        s.photos_gate.set()  # the person answers
+        r = await asyncio.wait_for(own, 5.0)
+        assert r["text"]
+        assert d._photo_wait_left() is None  # the wait is over: an agent's own calls aren't refused any more
+        await finish(stop, task)
+    run(go)
+
+
+def test_two_agents_first_adds_at_once_send_one_and_the_other_is_told_busy(pictures, quick):
+    """Codex, PR #8 cycle 4: both checked for a waiting add before either had claimed the wait (their reads and the
+    touch gate let each other in), so both were sent and the second took the wait over."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        real_access = s.photos_access
+
+        async def slow_access():  # the reads of the two calls interleave
+            await asyncio.sleep(0.01)
+            return await real_access()
+        s.photos_access = slow_access
+        real_agent = d.control.agent
+
+        async def agent(fn):  # the touch gate waits its turn behind other calls, as on a busy phone
+            await asyncio.sleep(0.02)
+            return await real_agent(fn)
+        d.control.agent = agent
+        results = await asyncio.gather(
+            d.run_tool("a", "media", {"add": pictures, "confirm": True}),
+            d.run_tool("b", "media", {"add": pictures[:1], "confirm": True}), return_exceptions=True)
+        codes = sorted(r.code for r in results if isinstance(r, Refused))
+        assert codes == ["busy", "not_allowed"], results  # one waits on the person, the other is told busy
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        s.photos_gate.set()
+        await asyncio.sleep(0.05)
         await finish(stop, task)
     run(go)

@@ -146,6 +146,10 @@ class FakeDevice:
         self.rsd = "tunnel"
         self.via = "USB"
         self.killed: list[str] = []  # bundle ids whose processes kill_app ended
+        self.kill_asks: list[str] = []  # bundle ids kill_app was asked for, ended or not
+        self.kill_error: Exception | None = None  # kill_app raises this
+        self.kill_hangs = False  # kill_app never answers
+        self.kill_found = 1  # how many processes kill_app says it ended (0: the app had none to end)
         self.opened = 0  # how often the MJPEG stream was asked for
         # bundle id -> the pids of its running processes; an app not listed here is running (as pid 1)
         self.pids: dict[str, list[int]] = {}
@@ -239,8 +243,14 @@ class FakeDevice:
         raise ConnectionLost("no stream in tests")
 
     async def kill_app(self, bundle_id: str) -> int:
-        self.killed.append(bundle_id)
-        return 1
+        self.kill_asks.append(bundle_id)
+        if self.kill_error is not None:
+            raise self.kill_error
+        if self.kill_hangs:
+            await asyncio.sleep(3600)  # never answers; the caller's timeout ends it
+        if self.kill_found:
+            self.killed.append(bundle_id)
+        return self.kill_found
 
     def meter(self, bundle_id: str) -> FakeMeter:
         return FakeMeter(self, bundle_id)
@@ -303,6 +313,10 @@ class FakeSession:
         self.launched: list = []
         self.launch_args: list = []  # the launch arguments of each launch ([] for none)
         self.closed: list = []
+        self.terminate_hangs = False  # terminate never answers, as WebDriverAgent waiting on a slow app
+        self.terminate_delay = 0.0  # seconds terminate takes before it answers
+        self.terminate_error: Exception | None = None  # terminate raises this (after the delay)
+        self.terminated: list = []  # bundle ids whose terminate ran to its end (a cancelled one is not here)
         self.read_timeouts: list = []  # the per-read timeout each refresh() was given
         self.last_insets: tuple[float | None, float | None] = (None, None)  # where the top and bottom bars end
         self.typed: list = []  # (text, replace, submit, target) of each type_text
@@ -385,8 +399,17 @@ class FakeSession:
         self._record("photos_access")
         return dict(self.photo_access)
 
+    photos_gate: "asyncio.Event | None" = None  # while set and not set(): photos_add waits, as the runner for iOS's prompt
+
+    async def peek_alert(self, timeout=5.0):
+        """The system alert on screen now, read apart from `items` (what media's watch asks while it waits)."""
+        self._record("peek_alert")
+        return self.last_alert
+
     async def photos_add(self, pictures):
         self._record(("photos_add", tuple(name for name, _ in pictures)))
+        if self.photos_gate is not None:
+            await self.photos_gate.wait()
         self.photos = getattr(self, "photos", [])
         ids = [f"ID-{len(self.photos) + n}/L0/001" for n, _ in enumerate(pictures)]
         self.photos += ids
@@ -512,6 +535,13 @@ class FakeSession:
     async def terminate(self, bundle_id):
         self._record("terminate")
         self.closed.append(bundle_id)
+        if self.terminate_hangs:
+            await asyncio.sleep(3600)  # WebDriverAgent waiting on the app; the caller's timeout ends it
+        if self.terminate_delay:
+            await asyncio.sleep(self.terminate_delay)
+        if self.terminate_error is not None:
+            raise self.terminate_error
+        self.terminated.append(bundle_id)
         return f"closed {bundle_id}"
 
     async def alert(self, action):

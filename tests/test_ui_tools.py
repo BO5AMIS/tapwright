@@ -832,3 +832,35 @@ def test_a_card_cut_off_by_a_carousel_inside_the_screen_is_held_by_the_carousel(
     assert ui.scroll_holding([page, carousel], peeking, (400, 800)) is carousel
     listed = ui.Element("e3", "button", label="Card 2", rect=(100, 220, 100, 80))
     assert ui.scroll_holding([page, carousel, listed], listed, (400, 800)) is carousel
+
+
+# ---- iOS Settings' first screen: the General row's centre lies under the Search field (phone checks, 2026-11-12) ----
+PHONE = (430.0, 932.0)
+
+
+def settings_rows():
+    row = lambda label, y, ident: node("Cell", 20, y, 390, 57, label, name=ident, children=(  # noqa: E731
+        node("Button", 20, y, 390, 57, label, name=ident),))
+    return node("Table", 0, 0, 430, 932, children=(row("Wi-Fi", 700, "wifi"), row("General", 832, "com.apple.settings.general")))
+
+
+def settings_search():
+    return node("SearchField", 33, 861, 364, 50, "Search")
+
+
+def general_of(source):
+    tree = ui.read(source, PHONE)
+    return next(e for e in tree.items if e.identifier == "com.apple.settings.general")
+
+
+def test_a_search_field_listed_after_the_rows_covers_the_row_it_lies_over():
+    general = general_of(screen(settings_rows(), settings_search()))
+    assert [b.kind for b in general.covered_by] == ["SearchField"]
+    assert general.covered_by[0].rect == (33.0, 861.0, 364.0, 50.0)
+
+
+def test_a_search_field_above_the_list_covers_nothing_and_the_field_itself_is_not_covered():
+    top = node("SearchField", 20, 120, 390, 36, "Search")
+    tree = ui.read(screen(top, node("Table", 0, 160, 430, 700, children=(
+        node("Cell", 20, 170, 390, 57, "Row", children=(node("Button", 20, 170, 390, 57, "Row"),)),))), PHONE)
+    assert all(e.covered_by == () for e in tree.items)

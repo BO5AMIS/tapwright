@@ -27,6 +27,8 @@ themselves; what follows is what they can't tell you.
   the touches. Ask the user to choose and tap Allow, then go on.
 - **A person may be watching** in the live view (`viewer` opens it for the user) and can take over.
   Their input goes first.
+- **Connect once.** Load Tapwright as an MCP server when the session starts. A wrapper that starts a new process
+  for every call adds about 2 s to each call.
 - **Each tool's description lists its arguments.** The calls below show the ones that matter.
 
 ## 2. The loop: look, act, read the answer
@@ -62,7 +64,10 @@ with no element.
   40 characters or fewer is shown whole.
 - **`Same screen. Changes:`** then `+` new, `-` gone, `~` changed (with what it was),
   `↕` moved. When most of the screen changed, the full list comes instead.
-- **`No visible change.`** means nothing changed, on screen or off it.
+- **Read every answer whole.** Never pipe a call through `head`, `grep` or `sed`: the list of what changed is the
+  part you need, and cutting it costs a second `look`.
+- **`No visible change.`** means nothing changed, on screen or off it. After a `tap` or `long_press` a `Note:` says the
+  tap was delivered and for how long the screen was watched, and what to try: a tap again is rarely it.
 - **A sheet, an alert or a new screen answers with the full list:** the first line, then
   `Screen …` and the elements that are in front now. What a sheet hides is left out until it
   closes; acting on it answers `covered: … close that first.` When something out of view
@@ -145,8 +150,10 @@ Every call costs time. These save the most:
   `not_found` lists the closest names. Then `ref`, `label`, `text`; `x` and `y` last.
 - **Let the action scroll.** `tap`, `long_press`, `toggle` and `type_text` on an element that is below the fold scroll it
   into view and act, in one call. Don't `scroll` by guess first.
-- **Put known steps in `run`.** Anything you could write down before starting (open a sheet, choose, save, check) is
-  one call, with an `expect` on the step that should change something.
+- **Put known steps in `run`.** When you know the next two or more steps (open a sheet, choose, save, check), send
+  them as one call, with an `expect` on the steps that matter.
+- **Ask for the app's deep links and use them.** `open_url` with the app's own link reaches a screen in one call,
+  where taps take several. Ask the user, or the app's docs, which links it has.
 - **`look: false`** on steps whose answer you don't need, then read the next full answer.
 - **A language, a text size, a bad network** are one call each (`open_app` with `language`, `text_size`; `network`), not a trip through
   Settings.

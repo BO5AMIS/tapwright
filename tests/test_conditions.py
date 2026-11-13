@@ -157,6 +157,66 @@ def test_open_app_takes_them_in_run_and_in_the_table():
     run(go)
 
 
+def test_undone_names_only_what_was_set():
+    assert launch.undone({"language": "ar", "region": "QA", "text_size": "ax5"}) == (
+        " back to the phone's own language, region and text size")
+    assert launch.undone({"text_size": "ax5"}) == " back to the phone's own text size"
+    assert launch.undone({"language": "ar", "text_size": "xl"}) == " back to the phone's own language and text size"
+    assert launch.undone({}) == ""
+
+
+def test_a_plain_open_after_one_with_conditions_launches_again_with_the_defaults_and_says_so():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "language": "ar", "text_size": "ax5",
+                                          "look": False})
+        d.session.calls.clear()
+        d.session.closed.clear()
+        d.session.launch_args.clear()
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        # the running app is closed first (as a launch with conditions does), then launched with no arguments
+        assert d.session.closed == ["com.example.app"] and d.session.launch_args == [[]]
+        assert [c for c in d.session.calls if c in ("terminate", "launch")] == ["terminate", "launch"]
+        assert r["text"] == "Opened Example (com.example.app), back to the phone's own language and text size."
+        # once undone, the next plain open is left alone again: no close, as before
+        d.session.calls.clear()
+        d.session.closed.clear()
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        assert d.session.closed == [] and r["text"] == "Opened Example (com.example.app)."
+        await finish(stop, task)
+    run(go)
+
+
+def test_text_size_system_undoes_the_last_conditions_too():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "text_size": "xl", "look": False})
+        d.session.closed.clear()
+        d.session.launch_args.clear()
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "text_size": "system", "look": False})
+        assert d.session.closed == ["com.example.app"] and d.session.launch_args == [[]]
+        assert r["text"] == "Opened Example (com.example.app), back to the phone's own text size."
+        await finish(stop, task)
+    run(go)
+
+
+def test_new_conditions_replace_the_old_ones_and_a_close_forgets_them():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "text_size": "ax5", "look": False})
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "language": "ar", "look": False})
+        assert r["text"] == "Opened Example (com.example.app) in ar."  # a launch with conditions, said as before
+        await d.run_tool("a", "close_app", {"app": "com.example.app"})
+        d.session.closed.clear()
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        assert d.session.closed == [] and r["text"] == "Opened Example (com.example.app)."  # closed: nothing to undo
+        await finish(stop, task)
+    run(go)
+
+
 # ---- network ----
 GROUPS = [{"identifier": "SlowNetworkCondition", "profiles": [
     {"identifier": "SlowNetwork100PctLoss", "description": "100% Loss"},
@@ -336,3 +396,29 @@ def test_a_condition_whose_agent_goes_quiet_is_cleared(monkeypatch):
 def test_text_size_system_is_the_phones_own():
     assert launch.check({"text_size": "system"}) == {}
     assert launch.check({"text_size": "SYSTEM", "language": "ar"}) == {"language": "ar"}
+
+
+def test_a_close_that_fails_keeps_the_launch_conditions_of_the_app_still_running(monkeypatch):
+    """Codex, PR #8: close_app forgot the conditions before it knew the app was gone; a failed close left the app
+    running with text size xl, and the next plain open_app only brought it forward as it was."""
+    from tapwright.device import DeviceError
+    monkeypatch.setenv("TAPWRIGHT_CLOSE", "wda")
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "text_size": "xl", "look": False})
+        real = d.session.terminate
+
+        async def failing(bundle_id):
+            raise DeviceError("the runner couldn't end it")
+        d.session.terminate = failing
+        with pytest.raises(Exception):
+            await d.run_tool("a", "close_app", {"app": "com.example.app"})
+        d.session.terminate = real
+        d.session.launch_args.clear()
+        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        assert d.session.launch_args == [[]]  # closed and launched again with the defaults
+        assert r["text"] == "Opened Example (com.example.app), back to the phone's own text size."
+        await finish(stop, task)
+    run(go)

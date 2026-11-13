@@ -21,8 +21,10 @@ SETTLED = re.compile(r"Settled in \d+\.\d\d s\.")
 
 
 def unsettled(answer: dict) -> list[str]:
-    """The answer's lines without its `Settled in` line, which varies with timing."""
-    return [line for line in answer["text"].splitlines() if not SETTLED.fullmatch(line)]
+    """The answer's lines without its `Settled in` line and the `the tap was delivered` note of a touch that changed
+    nothing (1.5.1), which vary with timing; the tests of that note read it themselves (`delivered`)."""
+    return [line for line in answer["text"].splitlines()
+            if not SETTLED.fullmatch(line) and not line.startswith("Note: the tap was delivered")]
 
 
 def make(session=None, **options) -> Daemon:
@@ -83,7 +85,7 @@ def test_look_then_act_by_ref():
         assert unsettled(r)[1:] == ["Same screen. Changes:", "No visible change.",
                                     "Note: changes are since your last list, 3 actions ago."] and r["image"] is None
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert "Note:" not in r["text"]  # that block was since the last one
+        assert "changes are since" not in r["text"]  # that block was since the last one
         await finish(stop, task)
     run(go)
 
@@ -1631,7 +1633,8 @@ def test_an_unchanged_screen_is_answered_without_reading_the_tree():
         reads = d.session.calls.count("snapshot")
         r = await d.run_tool("a", "tap", TAP)
         text = r["text"].splitlines()
-        assert text[1:3] == ["Same screen. Changes:", "No visible change."] and SETTLED.fullmatch(text[-1])
+        assert text[1:3] == ["Same screen. Changes:", "No visible change."] and SETTLED.fullmatch(text[-2])
+        assert text[-1].startswith("Note: the tap was delivered")
         assert d.session.calls.count("snapshot") == reads and d.session.calls.count("refresh") == 0
         assert [e.ref for e in d.control.client("a").items] == ["e1"]  # the agent's list stays current
         await feeder.stop()
@@ -2279,6 +2282,355 @@ def test_close_app_by_name():
         r = await d.run_tool("a", "close_app", {"app": "Example"})
         assert d.session.closed == ["com.example.app"] and r["text"] == "Closed Example (com.example.app)."
         await finish(stop, task)
+    run(go)
+
+
+def test_close_app_ends_the_app_through_ios_first_then_tells_webdriveragent():
+    """1.5.1: WebDriverAgent's terminate waits for the app to finish quitting (median 46 s on a real app); iOS's own
+    process control doesn't. The answer is the same, and one log line says which way it went."""
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == ["com.example.app"]
+        assert d.session.closed == ["com.example.app"]  # WebDriverAgent's bookkeeping matches
+        said = [line for line in logs if "com.example.app" in line and "process control" in line]
+        assert len(said) == 1 and re.search(r"in \d+\.\d s", said[0])
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_without_a_tunnel_uses_webdriveragent_alone():
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.device.rsd = None
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == [] and d.session.closed == ["com.example.app"]
+        assert len([line for line in logs if "WebDriverAgent" in line and "com.example.app" in line]) == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_falls_back_to_webdriveragent_when_the_kill_raises():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_error = DeviceError("process control refused")
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == ["com.example.app"] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_falls_back_to_webdriveragent_when_the_kill_times_out(monkeypatch):
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_KILL_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_hangs = True
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == [] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_with_tapwright_close_wda_never_asks_ios(monkeypatch):
+    async def go():
+        monkeypatch.setenv("TAPWRIGHT_CLOSE", "wda")
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.kill_asks == [] and d.session.closed == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_slow_webdriveragent_terminate_after_the_kill_does_not_hold_the_answer(monkeypatch):
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.terminate_hangs = True
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert asyncio.get_running_loop().time() - began < 1.0
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.device.killed == ["com.example.app"]
+        assert any("process control" in line for line in logs)
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_waits_for_webdriveragent_when_the_kill_found_nothing(monkeypatch):
+    """Review of 1.5.1 (M2): a kill that ended no process proves nothing (the app may be running under another name,
+    or have restarted), so WebDriverAgent's terminate is the one that decides, as before 1.5.1: with no cap."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.device.kill_found = 0
+        d.session.terminate_delay = 0.3
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        assert d.session.terminated == ["com.example.app"]  # it was waited for, to its end
+        assert [line for line in logs if "found no process" in line]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_slow_terminate_after_a_kill_is_left_to_finish_not_cancelled(monkeypatch):
+    """Review of 1.5.1 (M2): a cancelled request stays in flight on the phone and its connection is torn down; the
+    request is left alone to end by its own timeout, and the answer doesn't wait for it."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.terminate_delay = 0.3
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert asyncio.get_running_loop().time() - began < 0.25 and r["text"] == "Closed Example (com.example.app)."
+        assert d.session.terminated == []  # still going
+        await asyncio.sleep(0.4)
+        assert d.session.terminated == ["com.example.app"]  # and it was not cancelled
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("error", [DeviceError("invalid session"), ConnectionLost("the phone didn't answer")])
+def test_a_failing_terminate_after_a_good_kill_is_logged_and_the_app_is_closed(error):
+    """Review of 1.5.1 (L2): the app is gone; a WebDriverAgent error then is no reason to say it isn't."""
+    async def go():
+        logs: list = []
+        d = make(log=lambda *a: logs.append(" ".join(str(x) for x in a)))
+        stop, task = await started(d)
+        d.session.terminate_error = error
+        r = await d.run_tool("a", "close_app", {"app": "Example"})
+        assert r["text"] == "Closed Example (com.example.app)."
+        await asyncio.sleep(0.05)
+        assert [line for line in logs if "terminate" in line and str(error) in line]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_of_an_unknown_bundle_id_is_not_found():
+    """Review of 1.5.1 (L4): any bundle id is allowed through (a dedicated phone's agent may close any app), so one
+    nothing has says so instead of a bare WebDriverAgent error."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.kill_found = 0
+        d.session.terminate_error = DeviceError("no such application")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "close_app", {"app": "com.nobody.nothing"})
+        assert e.value.code == "not_found" and "com.nobody.nothing" in str(e.value) and "apps" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_open_app_with_launch_arguments_ends_a_running_app_the_fast_way_too(monkeypatch):
+    """Review of 1.5.1 (L3): a language, region or text size is taken only by a fresh launch, so the running app is
+    closed first; that waited the median 46 s on WebDriverAgent's terminate alone."""
+    async def go():
+        monkeypatch.setattr(daemon_module, "CLOSE_TERMINATE_CAP", 0.05)
+        d = make()
+        stop, task = await started(d)
+        d.session.terminate_delay = 0.3
+        began = asyncio.get_running_loop().time()
+        await d.run_tool("a", "open_app", {"app": "Example", "language": "ar"})
+        assert asyncio.get_running_loop().time() - began < 0.25
+        assert d.session.device.killed == ["com.example.app"] and d.session.launched == ["com.example.app"]
+        await asyncio.sleep(0.4)  # the first terminate ends on its own
+        d.session.device.kill_found = 0  # nothing to end there: WebDriverAgent's terminate is waited for, as before
+        d.session.terminated.clear()
+        await d.run_tool("a", "open_app", {"app": "Example", "language": "ar"})
+        assert d.session.terminated == ["com.example.app"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_close_app_outside_the_given_apps_ends_nothing():
+    async def go():
+        s = FakeSession()
+        s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
+        d = make(s)
+        stop, task = await started(d)
+        for app in ("com.example.mail", "Mail box"):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "close_app", {"app": app}, scope=Scope(("com.example.app",)))
+            assert e.value.code == "not_allowed"
+        assert s.device.kill_asks == [] and s.closed == []
+        await finish(stop, task)
+    run(go)
+
+
+NOTE_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
+                "report it as a finding.")
+NOTE_FIELD = "It is a text field: type_text types into it."
+NOTE_POINT = "No element is at that point."
+
+
+def delivered(text: str) -> list[str]:
+    """The `the tap was delivered` notes of an answer, with the seconds replaced by N."""
+    return [re.sub(r"within \d+\.\d s", "within N s", line) for line in text.splitlines()
+            if line.startswith("Note: the tap was delivered")]
+
+
+def delivered_note(hint: str) -> str:
+    return f"Note: the tap was delivered, and nothing on screen changed within N s. {hint}"
+
+
+def test_a_tap_that_changes_nothing_says_the_touch_was_delivered_and_what_to_do():
+    """1.5.1: agents couldn't tell whether the tap landed, so they looked again and retried."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "No visible change." in r["text"].splitlines()  # the line itself, byte for byte
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        assert re.search(r"within \d\.\d s\. ", r["text"])  # seconds to one decimal
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_no_change_note_for_a_text_field_says_type_text_types_into_it():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [el("e1", "input", "Email", "email", rect=(10, 100, 200, 40))])
+        r = await d.run_tool("a", "tap", {"target": {"id": "email"}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_FIELD)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_no_change_note_for_a_bare_point_says_no_element_is_there():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"x": 300, "y": 600}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]
+        r = await d.run_tool("a", "tap", {"target": {"x": 20, "y": 110}})  # a point over the button is no bare point
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_long_press_that_changes_nothing_gets_the_same_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "long_press", {"target": {"ref": "e1"}})
+        assert delivered(r["text"]) == [delivered_note(NOTE_LOADING)]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_health_sheet_note_stands_alone_without_the_delivered_note():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await looked(d, [button("e1", "Turn On All", rect=(20, 200, 200, 40)),
+                         button("e2", "Don’t Allow", rect=(20, 60, 100, 40)),
+                         button("e3", "Allow", rect=(300, 60, 80, 40), enabled=False)])
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "Note: this is iOS's Health access sheet" in r["text"] and delivered(r["text"]) == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_delivered_note_is_left_out_for_look_false_other_tools_and_a_changed_screen():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
+        assert "delivered" not in r["text"]
+        r = await d.run_tool("a", "wait", {"seconds": 0.1})  # no change either, but no touch
+        assert "No visible change." in r["text"] and "delivered" not in r["text"]
+        d.session.tree = [button("e1", "OK", "ok-button"), button("e2", "Done", "done", rect=(10, 160, 100, 40))]
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert "No visible change." not in r["text"] and "delivered" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_delivered_note_is_also_given_when_the_tree_read_is_skipped():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", TAP)
+        assert d.session.calls.count("snapshot") == reads  # the path that reads no tree
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]  # (5, 5) has no element under it
+        r = await d.run_tool("a", "long_press", TAP)
+        assert delivered(r["text"]) == [delivered_note(NOTE_POINT)]
+        await feeder.stop()
+    run(go)
+
+
+def test_the_delivered_note_counts_its_seconds_from_the_touch_not_from_the_calls_return():
+    """Review of 1.5.1 (L1): a tap's call takes a while, and "within 0.0 s" read as "after the tap" was wrong."""
+    async def go():
+        # settle_first_frame is how long the settle waits for the first frame after the call returns. The default 10 ms
+        # is shorter than the feeder's period on Windows/Python 3.10 (asyncio.sleep(0.004) takes ~15.6 ms there), so
+        # the wait timed out, the stream counted as stalled and the tree was read. 0.2 s is the margin, not the subject.
+        d = make(settle_first_frame=0.2)
+        stop, task = await started(d)
+        slow_tap = d.session.tap
+
+        async def tap(*args, **kwargs):
+            await asyncio.sleep(0.4)
+            return await slow_tap(*args, **kwargs)
+        d.session.tap = tap
+
+        def seconds(text: str) -> float:
+            return float(re.search(r"changed within (\d+\.\d) s", text).group(1))
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert seconds((await d.run_tool("a", "tap", {"target": {"ref": "e1"}}))["text"]) >= 0.4  # the tree-read path
+        d.hub.publish(b"A")
+        await d.run_tool("a", "look", {"screenshot": False})
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.session.calls.count("snapshot") == reads and seconds(r["text"]) >= 0.4  # and the one that reads none
+        await feeder.stop()
+    run(go)
+
+
+def test_the_health_sheet_note_is_also_given_when_the_tree_read_is_skipped():
+    """Review of 1.5.1 (M1): with a live picture feed the tree isn't read after a touch that changes nothing, and the
+    agent was told to retry and report a finding on the one sheet iOS doesn't let automation change."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.hub.publish(b"A")
+        await looked(d, [button("e1", "Turn On All", rect=(20, 200, 200, 40)),
+                         button("e2", "Don’t Allow", rect=(20, 60, 100, 40)),
+                         button("e3", "Allow", rect=(300, 60, 80, 40), enabled=False)])
+        feeder = FrameFeeder(d.hub).start(then=b"A")
+        reads = d.session.calls.count("snapshot")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert d.session.calls.count("snapshot") == reads  # the path that reads no tree
+        assert "No visible change." in r["text"]
+        assert "Note: this is iOS's Health access sheet; iOS doesn't let automation change it." in r["text"]
+        assert delivered(r["text"]) == []  # that note stands alone, as on the other path
+        await feeder.stop()
     run(go)
 
 
@@ -3867,6 +4219,50 @@ def test_a_card_under_the_tab_bar_is_tapped_where_it_shows():
     run(go)
 
 
+# (its glass reaches a little above the field itself, which sits at y 861: the visible part ends at y 846)
+SETTINGS_SEARCH = ui.Bar("SearchField", (33.0, 846.0, 364.0, 66.0), "input Search @33,846 364x66")
+
+
+def settings_rows(search: bool) -> list:
+    """iOS Settings' first screen as the phone checks found it (2026-11-12): the General row's centre lies under the
+    Search field, which the first list after the launch may not show yet."""
+    return [el("e1", "cell", "Wi-Fi", "wifi", rect=(20, 700, 390, 57)),
+            el("e2", "cell", "General", "com.apple.settings.general", rect=(20, 832, 390, 57),
+               covered_by=(SETTINGS_SEARCH,) if search else ())]
+
+
+def test_the_first_tap_after_open_app_reads_the_screen_again_and_aims_at_the_part_the_search_field_leaves():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.session.tree = settings_rows(search=False)  # what open_app's own list had: the field wasn't there yet
+        await d.run_tool("a", "open_app", {"app": "com.example.app"})
+        d.session.tree = settings_rows(search=True)
+        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
+        assert d.session.last_point == (215.0, 839.0)  # the strip above the field, not the row's centre (215, 860.5)
+        assert re.fullmatch(r'Tapped e\d cell "General" id=com.apple.settings.general at its visible part \(215, 839\)\.',
+                            r["text"])
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_look_after_open_app_is_the_list_a_touch_uses_with_no_second_read():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.session.tree = settings_rows(search=False)
+        await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
+        d.session.tree = settings_rows(search=True)
+        await d.run_tool("a", "look", {"screenshot": False})  # the agent's own look, after the launch
+        reads = d.session.calls.count("refresh")
+        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
+        assert d.session.calls.count("refresh") == reads and "at its visible part (215, 839)" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
 def test_an_element_with_too_little_showing_is_refused():
     async def go():
         d = make()
@@ -4396,10 +4792,11 @@ def test_the_next_call_check_is_skipped_after_a_person_acted_or_after_a_while(mo
         assert s.launched == [] and "came to the front" not in r["text"]
         s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
         await d.run_tool("a", "look", {"screenshot": False})
-        monkeypatch.setattr(daemon_module, "RECHECK_WITHIN", 0.0)
+        # negative, so any time at all counts as "after a while": elapsed time is >= 0 even when the clock (Windows,
+        # Python 3.10: ~15.6 ms steps) doesn't tick between the calls, and no sleep is needed
+        monkeypatch.setattr(daemon_module, "RECHECK_WITHIN", -1.0)
         await d.run_tool("a", "tap", {"target": {"id": "top"}, "look": False})
         s.foreground, s.app = "com.apple.mobilemail", ("Mail", "com.apple.mobilemail")
-        await asyncio.sleep(0.01)
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert s.launched == [] and "came to the front" not in r["text"]
         await finish(stop, task)

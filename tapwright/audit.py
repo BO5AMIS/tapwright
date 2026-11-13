@@ -2,6 +2,7 @@
 lines, in the format both tools share, plus `duplicate_id` from the tree."""
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 
@@ -57,8 +58,11 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     for e in items:
         if ident and (e.identifier == ident or e.name == ident):
             return e.line()
+    # an RN radio or checkbox has its role and state words in XCTest's raw label ("Weekly, radio button"); the tree's
+    # element has the label without them (CodeRabbit, PR #8)
+    labels = {label, ui.rn_label(label)}
     for e in items:
-        if any(box[2:]) and tuple(round(v) for v in e.rect) == box and (not label or label in (e.label, e.value, e.text)):
+        if any(box[2:]) and tuple(round(v) for v in e.rect) == box and (not label or labels & {e.label, e.value, e.text}):
             return e.line()
     # the tree has no such element: say what XCTest itself says of it (its label or id, and its frame in points)
     kind = str(attrs.get("type") or "").removeprefix("XCUIElementType")
@@ -108,6 +112,16 @@ def duplicates(items: list[ui.Element]) -> list[tuple[str, str]]:
     return found
 
 
+NO_TRAIT_FIX = 'give it accessibilityRole="button" (or a native control) with accessibilityState.'
+
+
+def no_trait(items: list[ui.Element]) -> list[tuple[str, str, str]]:
+    """(`trait`, element line, what) for every radio or checkbox that React Native types `Other` (no trait: VoiceOver
+    can focus it but doesn't announce it as a control)."""
+    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {json.dumps(e.text or e.role, ensure_ascii=False)}'
+             " as a control") for e in items if e.no_trait]
+
+
 def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> list[tuple[str, str, str]]:
     """(type, element line, what) for each issue of the asked types, XCTest's first, then `duplicate_id`. Shared by
     `audit`'s report and `ux_check`."""
@@ -118,6 +132,9 @@ def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> li
             continue
         what = str(issue.get("compactDescription") or "").strip().rstrip(".") or WHAT[kind]
         rows.append((kind, element_of(issue.get("elementAttributes") or {}, items), what))
+    if "trait" in types:
+        told = {line for kind, line, _ in rows if kind == "trait"}  # XCTest's own row for an element stands for ours
+        rows += [row for row in no_trait(items) if row[1] not in told]
     if "duplicate_id" in types:
         rows += [(kind, line, WHAT[kind]) for kind, line in duplicates(items)]
     return rows
@@ -134,8 +151,10 @@ def report(screen: str, issues: list[dict], items: list[ui.Element], types: list
     by_kind = Counter(r[0] for r in rows)
     counts = ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items(), key=lambda kv: TYPES.index(kv[0])))
     lines = [f"Audit of {screen}: {len(rows)} issue{'s' if len(rows) != 1 else ''} ({counts})."]
+    ours = {line for _, line, _ in no_trait(items)}  # XCTest's trait row for one of these gets our fix too
     for n, (kind, line, what) in enumerate(rows[:MAX_ISSUES], 1):
-        lines.append(f"{n}. {kind}: {line or 'the screen'}: {what}. Fix: {FIX[kind]}")
+        fix = NO_TRAIT_FIX if kind == "trait" and line in ours else FIX[kind]
+        lines.append(f"{n}. {kind}: {line or 'the screen'}: {what}. Fix: {fix}")
     if len(rows) > MAX_ISSUES:
         lines.append(f"(+{len(rows) - MAX_ISSUES} more issues; pass types to narrow it.)")
     lines.append(tail)

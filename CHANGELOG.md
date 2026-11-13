@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.5.1 (2026-11-13)
+
+Small fixes from the first real-app runs. No new tools.
+
+- `close_app` is faster. It ends the app through iOS's own process control, then tells WebDriverAgent, which waited a
+  median of 46 s for a real app to finish quitting. The answer is the same, and a slow or failing second step is
+  logged, not waited for. Without the tunnel, if iOS refuses, takes over 5 s or finds no process to end, it falls back
+  to WebDriverAgent alone as before; `TAPWRIGHT_CLOSE=wda` forces that. `open_app` with a language, region or text size
+  closes a running app the same way. A bundle id nothing has gives `not_found`.
+- A `tap` or `long_press` that changes nothing keeps `No visible change.` and adds a note: the tap was delivered, and
+  nothing on screen changed within N s, with what to try (a text field: `type_text`; a point with no element; else
+  `wait_for` what you expect, then report it as a finding). Agents couldn't tell whether the touch landed, so they
+  looked again and retried. iOS's Health access sheet keeps its own note.
+- The skill and the agent guide say four things more: read every answer whole (never pipe a call through `head`,
+  `grep` or `sed`), send known steps as one `run`, ask for the app's deep links and use them with `open_url`, and
+  connect once as an MCP server (a wrapper that starts a new process for every call adds about 2 s to each call).
+- React Native radio and checkbox options are listed, with their checked state (`radio "Daily" checked=true`). iOS
+  gives them no accessibility trait, so they were typed `Other` and left out of `look` unless they had an id. They are
+  found by React Native's role words in the label or value (`radio button`, `checkbox`, English only), so no other
+  `Other` changes: a card, a scroll indicator or a plain labelled view is listed as before. `audit` flags each such
+  element once: no trait, so VoiceOver doesn't announce it as a control.
+- The first touch by id, label or text after `open_app` reads the screen again before it aims. The list `open_app`
+  answered with can miss a search field drawn a moment later, and a row under it was touched at its centre, beneath
+  the field. The row is now touched at its visible part.
+- A plain `open_app` after one with a language, region or text size says what it undid:
+  `Opened Example (com.example.app), back to the phone's own text size.`
+- `media`: the first add, which makes iOS ask the person whether the runner may add photos, answers `needs_a_person`
+  at once. Tapwright never answers that prompt itself. The runner can do nothing else until the person answers (two
+  minutes at most), so meanwhile other calls answer `busy` right away instead of waiting, and Tapwright doesn't take
+  the silence for a lost connection. The add finishes once the person answers, and calling `media` again with the
+  same pictures picks it up rather than adding them twice.
+- The journey's stop line names the errors its report counts: `Findings: none. Errors: 2 (1 not_found, 1 covered).`
+- The live view's link with its key is never printed (the start line of `serve`, "already running", and `view`). An app
+  around the terminal had copied such links with the key hidden as `?token=SECRET` and opened them as tabs, which
+  could only fail. `viewer` leaves an open live view alone instead of opening another tab (`health` reports the
+  connected pages), and no test opens a real browser.
+
 ## 1.5.0, "the Real User Update" (2026-11-13)
 
 Apps are made or broken by whether a user can find a feature, understand it and finish it easily. An agent can now

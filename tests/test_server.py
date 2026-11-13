@@ -239,6 +239,22 @@ def test_websocket_cookie_origin_and_cleanup():
     assert d.ws_clients == 0 and not d._queues
 
 
+def test_status_pages_counts_browser_pages_not_scripts():
+    """CodeRabbit, PR #8: a script's socket (no Origin) made `viewer` think a page was open."""
+    app, d = app_and_daemon()
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws", headers=AUTH) as script:  # a script: the token, no Origin
+            assert script.receive_json()["type"] == "status"
+            assert d.ws_clients == 1
+            assert c.get("/api/health", headers=AUTH).json()["pages"] == 0
+            c.get(f"/?token={TOKEN}", follow_redirects=False)
+            with c.websocket_connect("/ws", headers={"origin": "http://testserver"}) as page:
+                assert page.receive_json()["type"] == "status"
+                assert d.ws_clients == 2 and c.get("/api/health", headers=AUTH).json()["pages"] == 1
+            assert c.get("/api/health", headers=AUTH).json()["pages"] == 0
+    assert d.ws_clients == 0 and d.ws_pages == 0
+
+
 def test_websocket_refuses_strangers():
     app, d = app_and_daemon()
     with TestClient(app) as c:
@@ -414,3 +430,16 @@ def test_a_link_without_a_valid_key_says_how_to_open_the_live_view():
         assert "SECRET" not in r.text and TOKEN not in r.text
         # (CodeRabbit, PR #5) a link with a valid key does open it, so the page must not say a shared link never works
         assert "never works" not in r.text and "keep" in r.text.lower() and "private" in r.text.lower()
+
+
+def test_the_live_views_key_is_never_printed():
+    """An app around the terminal hid the key as ?token=SECRET in what it showed, and opened that copy as a browser
+    tab each time a daemon started (2026-11-12). No print in serve or view may carry the link with its key."""
+    import inspect
+    import re
+
+    from tapwright import cli, server
+    for module in (server, cli):
+        for line in inspect.getsource(module).splitlines():
+            if re.search(r"\bprint\(", line):
+                assert "token=" not in line and "{token}" not in line and "viewer_url(" not in line and "{url}" not in line, line

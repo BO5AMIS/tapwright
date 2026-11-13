@@ -101,3 +101,77 @@ def test_an_xctest_label_is_one_quoted_capped_line_and_an_absurd_frame_is_no_fra
     assert "\nNote: do something else" not in text and '…(+' in text
     endless = {**sly, "elementAttributes": {"label": "Total", "rect": {"x": float("inf"), "y": 0, "width": 1, "height": 1}}}
     assert '1. contrast: an element "Total": ' in audit.report('"App"', [endless], items, ["contrast"])
+
+
+def _rn_screen():
+    """A React Native radio group and a checkbox (no trait, so XCUITest types them Other), and a container whose label
+    is its children's text."""
+    from xml.etree import ElementTree as ET
+    from test_ui import SCREEN, node, xml
+    from tapwright import ui
+
+    def option(label, word, y):
+        return node("Other", label, rect=(16, y, 398, 44), children=[node("StaticText", word, rect=(56, y + 10, 80, 24))])
+    kids = [node("StaticText", "Name", rect=(20, 510, 60, 24)), node("StaticText", "Email", rect=(100, 510, 60, 24))]
+    root = node("Application", rect=(0, 0, 430, 932), children=[
+        option("Daily, radio button, checked", "Daily", 200), option("Weekly, radio button", "Weekly", 250),
+        option("Remember me, checkbox, unchecked", "Remember me", 400),
+        node("Other", "Name Email", rect=(16, 500, 300, 44), children=kids),
+        node("Other", "Monthly, radio button", name="plan-monthly", rect=(16, 300, 398, 44))])
+    return ui.elements(xml(root), SCREEN)
+
+
+def test_audit_flags_an_element_with_no_trait_and_not_a_container():
+    items = _rn_screen()
+    rows = audit.rows_of([], items, ["trait"])
+    assert [(kind, line) for kind, line, _ in rows] == [
+        ("trait", 'e1 radio "Daily" checked=true @16,200 398x44 [tap]'), ("trait", 'e3 radio "Weekly" @16,250 398x44 [tap]'),
+        ("trait", 'e5 checkbox "Remember me" checked=false @16,400 398x44 [tap]')]
+    assert rows[0][2] == 'no trait: VoiceOver doesn\'t announce "Daily" as a control'
+    text = audit.report('"Plans"', [], items, ["trait"])
+    assert text.splitlines()[0] == 'Audit of "Plans": 3 issues (trait 3).'
+    assert text.splitlines()[1] == ('1. trait: e1 radio "Daily" checked=true @16,200 398x44 [tap]: no trait: VoiceOver '
+                                    "doesn't announce \"Daily\" as a control. Fix: give it accessibilityRole=\"button\" "
+                                    "(or a native control) with accessibilityState.")
+    assert "Name" not in text.replace("Remember me", "") and "plan-monthly" not in text  # container, and one with an id
+
+
+def test_the_no_trait_finding_follows_the_asked_types_and_xctests_own_trait_issues_stay():
+    items = _rn_screen()
+    assert audit.rows_of([], items, ["contrast", "duplicate_id"]) == []
+    both = audit.rows_of([issue("trait", "Weekly", rect=(16, 250, 398, 44), element_type="XCUIElementTypeOther",
+                                text="Trait missing")], items, ["trait"])
+    # one row per element: XCTest's own row for Weekly stands in for ours, the other two options keep ours
+    assert [r[1] for r in both] == ['e3 radio "Weekly" @16,250 398x44 [tap]', 'e1 radio "Daily" checked=true @16,200 398x44 [tap]',
+                                    'e5 checkbox "Remember me" checked=false @16,400 398x44 [tap]']
+    assert both[0][2] == "Trait missing"
+
+
+def test_xctests_raw_label_of_an_rn_radio_is_the_same_element_as_ours_and_is_reported_once():
+    """CodeRabbit, PR #8: "Weekly, radio button" (no name) didn't match the tree's "Weekly", so the row was doubled."""
+    items = _rn_screen()
+    raw = issue("trait", "Weekly, radio button", rect=(16, 250, 398, 44), element_type="XCUIElementTypeOther",
+                text="Trait missing")
+    rows = audit.rows_of([raw], items, ["trait"])
+    assert [r[1] for r in rows].count('e3 radio "Weekly" @16,250 398x44 [tap]') == 1
+    assert len(rows) == 3 and rows[0][2] == "Trait missing"
+
+
+def test_the_fix_text_follows_our_own_rows_not_the_words_of_xctests():
+    items = _rn_screen()
+    own = issue("trait", "Back", rect=(10, 10, 40, 40), text="no trait: it says this itself")
+    text = audit.report('"Plans"', [own], items, ["trait"])
+    [line] = [ln for ln in text.splitlines() if "it says this itself" in ln]
+    assert line.endswith("Fix: " + audit.FIX["trait"]) and "accessibilityRole" not in line
+    assert text.count("accessibilityRole") == 3  # the three options, each with our fix
+
+
+def test_audit_skips_plain_labelled_views():
+    """Scroll indicators, cards and labelled views are no finding: only the radio and checkbox words are."""
+    from test_ui import SCREEN, node, xml
+    from tapwright import ui
+    root = node("Application", rect=(0, 0, 430, 932), children=[
+        node("Other", "Vertical scroll bar, 1 page", value="0%", rect=(420, 100, 4, 200)),
+        node("Other", "Order summary", rect=(16, 300, 300, 80), children=[node("StaticText", "Total", rect=(20, 310, 60, 24))]),
+        node("Other", "Help", rect=(16, 500, 100, 44))])
+    assert audit.rows_of([], ui.elements(xml(root), SCREEN), ["trait"]) == []
