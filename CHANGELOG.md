@@ -5,6 +5,9 @@
 - A place is `place_<n>` until a person names it. Tapwright no longer names a place after a repeated navigation title
   (a private title such as "Chat with Sara" would have become a stored place name). Maps that already hold
   title-derived names keep them. Same rule as AGENT-TOOLS 1.13.2, §18.1.
+- A native Back button is labelled with the title of the screen under it. A road learned from it is now `back` with no
+  name, and a road that would aim by a title (or keep one among its other names) keeps none of it, so no title is in a
+  map in plain text.
 - A test account's password or username that a screen shows (a revealed password) is no longer in a text answer when it
   holds a quote, a backslash or extra spaces, or is long: it is replaced before the text is escaped or cut.
 - QUALITY-BAR 2.5 (`docs/QUALITY-BAR.md`).

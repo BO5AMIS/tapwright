@@ -3238,6 +3238,7 @@ class Daemon(journey_tool.JourneyTools):
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
+            box["top"] = (getattr(s, "last_insets", None) or (None, None))[0]  # where the top bar ends, before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
@@ -3736,12 +3737,12 @@ class Daemon(journey_tool.JourneyTools):
             if (said := self.maps.link(root, bundle, seen.name, str(args.get("url")))) is not None:
                 notes.append(said)
         if box.get("mapping") and previous is not None and previous != seen.name and not typed_here:
-            move = self._move_of(name, args, box, root, bundle)
+            move = self._move_of(name, args, box, root, bundle, (previous, seen.name))
             if move is not None and _GRANTED.get():
                 notes.append(NOTE_NOT_ROAD)
             elif move is not None:
                 aim = box.get("aim")
-                names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None else {})
+                names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None and move["tool"] != "back" else {})
                 made = self.maps.record(root, bundle, previous, seen.name, move, names,
                                         round((time.monotonic() - began) * 1000), await self._build_of(bundle))
                 notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in (made.dropped if made else []))
@@ -3754,16 +3755,35 @@ class Daemon(journey_tool.JourneyTools):
             text = "\n".join(lines)
         return {**answer, "text": text + "".join(f"\nNote: {n}" for n in notes)} if (notes or text != answer["text"]) else answer
 
-    def _move_of(self, name: str, args: dict, box: dict, root: str | None, bundle: str) -> dict | None:
+    def _is_native_back(self, element: ui.Element, box: dict) -> bool:
+        """Is the element a navigation bar's leading button (where `back` taps; ui.back_button), by where it was before
+        the touch: a button inside the top bar, in its left quarter."""
+        top = box.get("top")
+        if element.type != "Button" or top is None:
+            return False
+        width = self.session.screen[0]
+        return element.y + element.height <= top and element.x + element.width / 2 < width / 4
+
+    def _move_of(self, name: str, args: dict, box: dict, root: str | None, bundle: str,
+                 between: tuple[str, str]) -> dict | None:
         """The move an action made, as a road keeps it (roads.move_of); None when it isn't one that can be kept (an
-        `open_url` whose link matches no pattern, §18.3)."""
+        `open_url` whose link matches no pattern, §18.3). A native Back button is labelled with a screen's title, and a
+        title is never saved in plain text: its road is `back`, with no name, and any other move aimed by a title is no
+        road (Codex, PR #10 cycle 1)."""
         target, element, items = box.get("aim") or (None, None, [])
         if element is not None and self._loaded().holds(element.text or ""):
             return None  # a field that shows an account's value is no name for a road
+        data = self.maps.data(root, bundle)
+        if (name in roads.TARGETED and element is not None and element.role != "cell"
+                and places.is_title(data, between, element.label, element.text, element.value) and self._is_native_back(element, box)):
+            return {"tool": "back"}
         extra = dict(args)
         if name == "open_url":
-            extra = {"link": links.canonical(self.maps.data(root, bundle), str(args.get("url")))}
-        return roads.move_of(name, target, element, items, extra)
+            extra = {"link": links.canonical(data, str(args.get("url")))}
+        move = roads.move_of(name, target, element, items, extra)
+        if move is not None and self.maps.titled(data, *between, move):
+            return None  # Maps.record would refuse it too; no road, and no note
+        return move
 
     def _mapped_look(self, view, text: str) -> tuple[str, list[str]]:
         """A look's text with the `Place:` line in its header (§18.1, once the app has a map), and the notes the map has

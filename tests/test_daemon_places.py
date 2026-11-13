@@ -149,6 +149,70 @@ def test_a_list_row_without_an_id_is_a_row_and_no_row_text_is_saved(tmp_path):
     run(go)
 
 
+TITLED = {"chat": screen("Chat with Sara", ids=("open-detail", "info-btn")),
+          "detail": screen("Detail", back="Chat with Sara", ids=("title-btn",)),
+          "info": screen("Info", ids=("x",))}
+
+
+def titled(tmp_path, goes):
+    session = MapSession(dict(TITLED), "chat", goes)
+    session.has_nav_bar, session.back_at = True, (20.0, 70.0)
+    d = make(session)
+    d.maps = mapkeeper.Maps(str(tmp_path))
+    return d
+
+
+def test_a_native_back_labelled_with_a_title_is_a_back_road_and_no_title_is_saved(tmp_path):
+    async def go():
+        d = titled(tmp_path, {("chat", "open-detail"): "detail", ("detail", "Chat with Sara"): "chat"})
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await tap(d, {"id": "open-detail"})
+        r = await tap(d, {"label": "Chat with Sara"})  # the Back button, named by the title of the screen under it
+        assert "Chat with Sara" in r["text"]  # the agent sees it
+        await d.maps.flush()
+        text = (tmp_path / BUNDLE / "map.json").read_text("utf-8")
+        assert "Sara" not in text
+        by = {(r["from"], r["to"]): r for r in json.loads(text)["roads"]}
+        assert list(by) == [("place_1", "place_2"), ("place_2", "place_1")]
+        assert by[("place_2", "place_1")]["move"] == {"tool": "back"} and by[("place_2", "place_1")]["names"] == {}
+        assert by[("place_1", "place_2")]["names"]["id"] == "open-detail"
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_button_that_is_no_back_but_carries_a_title_makes_no_road_and_saves_no_title(tmp_path):
+    async def go():
+        d = titled(tmp_path, {("chat", "open-detail"): "detail", ("detail", "Chat with Sara"): "chat"})
+        d.session.screens["detail"] = screen("Detail", ids=("title-btn",))  # no Back button
+        button = next(e for e in d.session.screens["detail"].items if e.identifier == "title-btn")
+        button.label, button.identifier, button.name = "Chat with Sara", "", ""  # no id: only the title names it
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await tap(d, {"id": "open-detail"})
+        await tap(d, {"label": "Chat with Sara"})  # a body button, not the bar's leading one, named only by the title
+        await d.maps.flush()
+        text = (tmp_path / BUNDLE / "map.json").read_text("utf-8")
+        assert "Sara" not in text
+        assert [(r["from"], r["to"]) for r in json.loads(text)["roads"]] == [("place_1", "place_2")]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_title_in_a_roads_other_names_is_left_out_and_a_title_target_is_no_road(tmp_path):
+    from tapwright import places
+    data = {"titleKey": "ab" * 16, "places": {"place_1": {"titles": {"latin": places.title_hash("ab" * 16, "latin", "Chat with Sara")}},
+                                              "place_2": {"titles": {}}}}
+    keeper = mapkeeper.Maps(str(tmp_path))
+    keeper._memory[(str(mapkeeper.mapfile.root(str(tmp_path))), BUNDLE)] = {**places.empty_map(BUNDLE), **data}
+    assert keeper.record(str(tmp_path), BUNDLE, "place_2", "place_1", {"tool": "tap", "target": {"label": "Chat with Sara"}}, {}, 1, None) is None
+    made = keeper.record(str(tmp_path), BUNDLE, "place_2", "place_1", {"tool": "tap", "target": {"id": "go"}},
+                         {"id": "go", "label": "Chat with Sara", "text": "Go back"}, 1, None)
+    assert made is not None
+    [road] = keeper.data(str(tmp_path), BUNDLE)["roads"]
+    assert road["names"] == {"id": "go", "text": "Go back"}
+
+
 def test_typed_text_is_never_saved_and_makes_no_road_until_the_place_changes(tmp_path):
     async def go():
         d = mapped(tmp_path)

@@ -153,6 +153,20 @@ def title_hash(title_key: str, lang: str, title: str) -> str:
     return mac.hexdigest()[:HASH_CHARS]
 
 
+def is_title(data: dict, between: tuple[str, ...], *texts: str | None) -> bool:
+    """Is any of these texts the navigation title of one of the places `between` (a road's two ends)? A native Back
+    button is labelled with the title of the screen under it, and a button often carries the title of the screen it
+    opens, so those two places are the ones whose titles a road's names can hold. A title is kept only as a hash
+    (never in plain text), so a road that would hold one keeps nothing of it. Only the two ends are checked, not every
+    title of the app: a label that merely equals some other screen's title is no title of this road."""
+    for name in between:
+        place = data["places"].get(name)
+        for lang, wanted in (place.get("titles", {}) if place else {}).items():
+            if any(text and title_hash(data["titleKey"], lang, text) == wanted for text in texts):
+                return True
+    return False
+
+
 def clean_name(text: str) -> str:
     """A name a person gave, as `[a-z0-9_]`: lower case, spaces and dashes as `_`. ValueError when it can't be one."""
     name = re.sub(r"[\s-]+", "_", text.strip().lower())

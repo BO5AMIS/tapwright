@@ -11,7 +11,7 @@ SCREEN = (400.0, 800.0)
 
 
 def screen(title: str, ids: tuple[str, ...] = (), rows: tuple[str, ...] = (), tab: str | None = None, alert: str | None = None,
-           texts: tuple[str, ...] = (), inputs: tuple[str, ...] = (), bundle: str = APP[1], secure: tuple[str, ...] = ()) -> ui.Tree:
+           texts: tuple[str, ...] = (), inputs: tuple[str, ...] = (), bundle: str = APP[1], secure: tuple[str, ...] = (), back: str | None = None) -> ui.Tree:
     """A screen: a navigation bar with `title`, a table of `rows` (cells without identifiers), buttons with these `ids`
     (their label is "Label of <id>"), static `texts`, a tab bar with `tab` selected, perhaps an alert."""
     def node(kind, **attrs):
@@ -19,6 +19,8 @@ def screen(title: str, ids: tuple[str, ...] = (), rows: tuple[str, ...] = (), ta
     app = node("Application", bundleId=bundle, label=APP[0], x=0, y=0, width=400, height=800)
     bar = node("NavigationBar", name=title, x=0, y=40, width=400, height=60)
     bar.append(node("StaticText", label=title, name=title, value=title, x=10, y=50, width=200, height=30, traits="StaticText,Header"))
+    if back:  # a native Back button: the leading button of the bar, labelled with the screen under it
+        bar.append(node("Button", label=back, name=back, x=10, y=50, width=60, height=30))
     table = node("Table", name="body", x=0, y=110, width=400, height=500)
     for i, row in enumerate(rows):
         table.append(node("Cell", label=row, name=row, x=0, y=110 + 50 * i, width=400, height=48))
@@ -57,6 +59,7 @@ class MapSession(FakeSession):
     def _show(self) -> ui.Tree:
         tree = self.screens[self.at]
         self.items, self.last_tree = list(tree.items), tree
+        self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         return tree
 
