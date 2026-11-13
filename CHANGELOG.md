@@ -19,6 +19,9 @@
   maps, journey reports (`report.md`, `report.html`, `journey.json`) and the action log. A recording never saves a
   selector that holds a value or its placeholder: it takes the element's id, else its label, else the point. Scripts,
   routes and journey reports are also checked as they are written.
+- `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
+  console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
+  sent.
 - QUALITY-BAR 2.5 (`docs/QUALITY-BAR.md`).
 - The spec is AGENT-TOOLS 1.13.2 (`docs/AGENT-TOOLS.md`, the same bytes as Tapline's). Besides §18.1, it says that
   pictures are free of a password only while its field stays secure (§18.6), adds `"by": "chat"` to `confirm_closed`
