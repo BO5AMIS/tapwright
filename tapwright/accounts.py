@@ -13,6 +13,7 @@ Pure but for reading the file and asking git: no phone.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -73,28 +74,51 @@ class Loaded:
             raise Refused("not_allowed", f"account {name} may be used only in {', '.join(found.apps)}; this is {bundle or 'no app'}")
         return found
 
+    @functools.cached_property
     def _values(self) -> list[tuple[str, str]]:
+        """(form of a value, its placeholder), the longest form first: a value that holds another is replaced whole.
+        Worked out once per load (every string the tree takes in goes through `scrub`)."""
         out = []
         for account in self.accounts.values():
             if account.username and len(account.username) >= MIN_SCRUBBED:
                 out.extend((form, f"<{account.name}'s username>") for form in _forms(account.username))
             if account.password and len(account.password) >= MIN_SCRUBBED:
                 out.extend((form, f"<{account.name}'s password>") for form in _forms(account.password))
-        out.sort(key=lambda pair: -len(pair[0]))  # the longest first: a value that holds another is replaced whole
+        out.sort(key=lambda pair: -len(pair[0]))
         return out
 
+    @functools.cached_property
+    def _placeholders(self) -> "re.Pattern[str] | None":
+        """The placeholders this file's values become, as one pattern (a capturing group, for re.split)."""
+        shown = sorted({label for _, label in self._values}, key=len, reverse=True)
+        return re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
+
+    @property
+    def redacts(self) -> bool:
+        """Is there any value to redact?"""
+        return bool(self._values)
+
     def scrub(self, text: str) -> str:
-        """The text with every account's username and password replaced by `<name's username>` / `<name's password>`."""
-        if self.problem is not None and not self.accounts:
+        """The text with every account's username and password replaced by `<name's username>` / `<name's password>`.
+        Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
+        where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's …`)."""
+        values = self._values
+        if not text or not values or not any(value in text for value, _ in values):
             return text
-        for value, label in self._values():
-            if value in text:
-                text = text.replace(value, label)
-        return text
+        parts = self._placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
+        for n in range(0, len(parts), 2):
+            for value, label in values:
+                if value in parts[n]:
+                    parts[n] = parts[n].replace(value, label)
+        return "".join(parts)
 
     def holds(self, text: str) -> bool:
-        """Does the text hold an account's value? What does is never saved to a map."""
-        return any(value in text for value, _ in self._values())
+        """Does the text hold an account's value, or the placeholder it is shown as? What does is never saved to a map,
+        a recording or a route: the value is private, and the placeholder finds nothing on a phone."""
+        if not text:
+            return False
+        return any(value in text for value, _ in self._values) or bool(
+            self._placeholders is not None and self._placeholders.search(text))
 
     def clean(self, names: dict) -> dict:
         """A road's names without the ones that hold an account's value (a field showing the username is no name)."""

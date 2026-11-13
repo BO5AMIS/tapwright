@@ -246,13 +246,19 @@ def load_script(path: str) -> dict:
 
 def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
     """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
-    `index` when that target matches several elements. A ref is turned into the element it names first."""
+    `index` when that target matches several elements. A ref is turned into the element it names first.
+
+    A test account's value, or the placeholder it is shown as, is never saved (AGENT-TOOLS §18.6; Codex, PR #10 cycle
+    2): an id, label or text that holds one is passed over for the next, and the point is the last resort, as for an
+    element with none of the three. A selector the agent wrote with a placeholder in it is saved the same way, from
+    the element it finds."""
     if not isinstance(target, dict):
         return None
     if target.get("x") is not None:
         return {"x": target["x"], "y": target["y"]}
-    if not target.get("ref"):
-        return {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
+    named = {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
+    if not target.get("ref") and not any(isinstance(v, str) and ui.private(v) for v in named.values()):
+        return named
     try:
         found = ui.resolve(items, ui.parse_target(target))
     except Refused:
@@ -260,7 +266,7 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
     if not isinstance(found, ui.Element):
         return None
     for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
-        if not value:
+        if not value or ui.private(value):
             continue
         aim = {kind: value}
         # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
@@ -291,9 +297,11 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
         aim = recorded_target(entry, items) if isinstance(found, ui.Element) else None
         if aim is None or "x" in aim:
             what = found.line(ref=False, actions=False, place=False) if isinstance(found, ui.Element) else entry["ref"]
-            raise Refused("bad_params", f"can't record ignore {entry['ref']} ({what}): it has no id, label or text to "
-                                        "find it by when the script replays; ignore it by a rect {x, y, width, "
-                                        "height} instead")
+            account = isinstance(found, ui.Element) and any(ui.private(v) for v in (found.identifier, found.label, found.text))
+            why = ("its only name is a test account's value, which is never saved" if account
+                   else "it has no id, label or text to find it by when the script replays")
+            raise Refused("bad_params", f"can't record ignore {entry['ref']} ({what}): {why}; ignore it by a rect "
+                                        "{x, y, width, height} instead")
         saved.append(aim)
     return saved
 

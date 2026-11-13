@@ -78,6 +78,38 @@ def shown(text: str) -> str:
     return redact(text) if redact is not None else text
 
 
+# the placeholder an account's value is shown as (accounts.Loaded.scrub): `<tester2's password>`
+PRIVATE = re.compile(r"<[A-Za-z0-9_-]{1,40}'s (?:username|password)>")
+TEXT_ATTRIBUTES = ("label", "name", "value", "placeholderValue", "title")  # what the tree's text is read from
+
+
+def private(text: str) -> bool:
+    """Does the text hold a test account's value, or the placeholder it is shown as? Such text is never saved as a
+    selector, a name or a step (a recording, a route, a map): the value is private, and the placeholder is no text an
+    app shows."""
+    return bool(text) and (shown(text) != text or PRIVATE.search(text) is not None)
+
+
+def redacted(data: object, redact: Callable[[str], str] | None = None) -> object:
+    """`data` (strings, lists, tuples, dicts) with every string redacted (`redact`, else this call's REDACT); keys too.
+    What comes in from the phone goes through this where it enters, and what is written to a file before it is."""
+    redact = redact or REDACT.get()
+    if redact is None:
+        return data
+
+    def walk(v: object) -> object:
+        if isinstance(v, str):
+            return redact(v)
+        if isinstance(v, dict):
+            return {walk(k): walk(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            if isinstance(v, list):
+                return [walk(x) for x in v]
+            return type(v)(*(walk(x) for x in v)) if hasattr(v, "_fields") else tuple(walk(x) for x in v)
+        return v
+    return walk(data)
+
+
 def quoted(text: str) -> str:
     """Screen text as a JSON string, redacted first (no collapsing or cutting)."""
     return json.dumps(shown(text), ensure_ascii=False)
@@ -501,12 +533,23 @@ def rn_label(label: str) -> str:
     return found.label if found else label
 
 
-def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
-    """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError."""
+def _parse(source: str, screen: tuple[float, float] | None,
+           redact: Callable[[str], str] | None = None) -> ET.Element:
+    """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError.
+
+    Every text attribute is redacted here, where the screen comes in (`redact`, else this call's REDACT): a test
+    account's username or password a field shows becomes its placeholder, so no element, alert, title, change list,
+    selector, name or report made from the tree ever holds the value (AGENT-TOOLS §18.6; Codex, PR #10 cycle 2)."""
     try:
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
         raise DeviceError("WebDriverAgent sent an unreadable element tree") from e
+    redact = redact or REDACT.get()
+    if redact is not None:
+        for node in root.iter():
+            for key in TEXT_ATTRIBUTES:
+                if (value := node.get(key)) and (now := redact(value)) != value:
+                    node.set(key, now)
     trace.parsed()
     if screen is not None and screen[0] > screen[1]:
         _upright_keyboard(root, screen)
@@ -545,7 +588,8 @@ def _alert(node: ET.Element) -> Alert:
     return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
 
 
-def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
+def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False,
+         redact: Callable[[str], str] | None = None) -> Tree:
     """Flatten WDA's XML tree into the elements worth showing, in reading order, numbered e1...
     Skips what has no size or whose centre (where a tap would land) is clipped by the screen or a
     scroll container, and the keyboard's keys unless `keyboard`. Raises DeviceError on a broken tree."""
@@ -713,7 +757,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                     hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
-    root = _parse(source, screen)
+    root = _parse(source, screen, redact)
     parents = {child: up for up in root.iter() for child in up}
     # On the phone the keyboard has a window of its own: Window > a full-screen view > [an empty view, the strip
     # with the globe key, the views holding the Keyboard node].
@@ -1218,12 +1262,12 @@ DISMISS_MARGIN = 60.0  # points a closing touch keeps from the screen's top (the
 NOT_BACK = {"cancel", "close", "done", "save", "edit", "delete", "clear", "discard", "menu", "sign out"}
 
 
-def back_button(source: str, screen: tuple[float, float]) -> Back:
+def back_button(source: str, screen: tuple[float, float], redact: Callable[[str], str] | None = None) -> Back:
     """Where to tap to go back, from WebDriverAgent's XML. NavigationBar is a container, so it isn't in
     the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
     leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
     does something else; else no point (a bar without a back button is usually a root screen)."""
-    root = _parse(source, screen)
+    root = _parse(source, screen, redact)
 
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect

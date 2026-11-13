@@ -677,6 +677,7 @@ class Toggled(Noted):
 class Typed(Noted):
     """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
     field: ui.Element = ui.Element("", "input")  # the input as it was when typed into
+    typed: str | None = None  # the text really typed (an account's value for its placeholder); never in an answer
 
     def same_field(self, now: ui.Element) -> bool:
         """Is `now` the field typed into (the ref may have gone to another input since)? The same ref and
@@ -824,6 +825,9 @@ class Daemon(journey_tool.JourneyTools):
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
                  actions: ActionLog | None = None) -> None:
         self.session = session
+        # every read of the screen redacts the test accounts' values where it comes in (ui._parse), in a call or not
+        if hasattr(session, "redactor"):
+            session.redactor = self._redactor
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
@@ -1530,9 +1534,9 @@ class Daemon(journey_tool.JourneyTools):
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
         atoken = _ACCOUNTS.set(accounts) if accounts is not None else None
-        rtoken = ui.REDACT.set(lambda text: self._loaded().scrub(text))  # every screen string is redacted as it is rendered
+        rtoken = ui.REDACT.set(self._redactor())  # every screen string is redacted as it is rendered
         try:
-            jr =self._journeys.get(client_id)
+            jr = self._journeys.get(client_id)
             if jr is None or name == "journey":
                 return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
             return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy, ux_rules)
@@ -1625,6 +1629,18 @@ class Daemon(journey_tool.JourneyTools):
                 _BRIEF.reset(btoken)
             if ftoken is not None:
                 _FIRED.reset(ftoken)
+
+    def _redact(self, text: str) -> str:
+        """A screen string without the test accounts' values (the call's accounts file, else the daemon's)."""
+        return self._loaded().scrub(text)
+
+    def _redactor(self) -> "Callable[[str], str] | None":
+        """The redactor in force now: this call's (ui.REDACT), else the accounts' scrub; None when no account has a value
+        (nothing to redact, so a read skips the work)."""
+        if (inside := ui.REDACT.get()) is not None:
+            return inside
+        loaded = self._loaded()
+        return loaded.scrub if loaded.redacts else None
 
     def _loaded(self) -> "accountlib.Loaded":
         """The test accounts file this call uses (the call's own, else the daemon's), loaded; `accountlib.NONE` with none."""
@@ -2438,7 +2454,9 @@ class Daemon(journey_tool.JourneyTools):
             path = str(batch.writable(path or str(batch.named(rec["name"]))))
             try:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-                pathlib.Path(path).write_text(json.dumps(batch.script(rec["name"], rec["app"], rec["steps"]),
+                # (a backstop: the steps' selectors were chosen without an account's value, §18.6)
+                saved = ui.redacted(batch.script(rec["name"], rec["app"], rec["steps"]), self._redact)
+                pathlib.Path(path).write_text(json.dumps(saved,
                                                          ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
@@ -2478,6 +2496,7 @@ class Daemon(journey_tool.JourneyTools):
         app's map folder (§18.5)."""
         bundle, end = await self._route_place(scope)
         route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], rec["steps"])
+        route = ui.redacted(route, self._redact)  # (a backstop: no step holds an account's value, §18.6)
         routes.check(route)
         root = self._maps_root()
         try:
@@ -3354,14 +3373,16 @@ class Daemon(journey_tool.JourneyTools):
         if isinstance(result, Toggled):
             landed = await self._toggle_landed(view, result)
         elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
-            landed = await self._typed_landed(view, result, args["text"])
-            if landed is None and not result.field.secure and await self._typed_wrong(result, args["text"]) and \
-                    await self.control.agent(lambda: self.session.retype(args["text"])):
+            # the text the keys made, as the tree shows it: an account's value as its placeholder, as every read has it
+            typed = result.typed if result.typed is not None else args["text"]
+            landed = await self._typed_landed(view, result, self._redact(typed))
+            if landed is None and not result.field.secure and await self._typed_wrong(result, self._redact(typed)) and \
+                    await self.control.agent(lambda: self.session.retype(typed)):
                 # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
                 # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
                 # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
                 notes = [*notes, NOTE_RETYPED]
-                landed = await self._typed_landed(view, result, args["text"])
+                landed = await self._typed_landed(view, result, self._redact(typed))
         else:
             landed = None
         if landed is not None:
@@ -3771,8 +3792,8 @@ class Daemon(journey_tool.JourneyTools):
         title is never saved in plain text: its road is `back`, with no name, and any other move aimed by a title is no
         road (Codex, PR #10 cycle 1)."""
         target, element, items = box.get("aim") or (None, None, [])
-        if element is not None and self._loaded().holds(element.text or ""):
-            return None  # a field that shows an account's value is no name for a road
+        if element is not None and any(self._loaded().holds(v) for v in (element.identifier, element.label, element.value)):
+            return None  # a field that shows an account's value (its placeholder, as the tree reads it) is no name for a road
         data = self.maps.data(root, bundle)
         if (name in roads.TARGETED and element is not None and element.role != "cell"
                 and places.is_title(data, between, element.label, element.text, element.value) and self._is_native_back(element, box)):
@@ -4019,6 +4040,8 @@ class Daemon(journey_tool.JourneyTools):
         else:
             picture = await self._read(self.session.screenshot_png)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
+        # the picture's text comes in redacted, as the tree's does: a password the picture shows is its placeholder
+        seen = [dataclasses.replace(s, text=ui.shown(s.text)) for s in seen]
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
@@ -4718,6 +4741,7 @@ class Daemon(journey_tool.JourneyTools):
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
+        done.typed = real
         return done
 
     async def _scroll(self, view, a: dict) -> Scrolled:

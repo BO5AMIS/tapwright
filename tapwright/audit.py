@@ -52,6 +52,7 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     place and label), else a line made from XCTest's attributes, without a ref. Empty when there is none."""
     if not attrs:
         return ""
+    attrs = ui.redacted(attrs)  # (Session.audit redacted it where it came in; any other caller's is here)
     ident = str(attrs.get("name") or attrs.get("identifier") or "")
     label = str(attrs.get("label") or "")
     box = _box(attrs.get("rect") or attrs.get("frame"))
@@ -126,6 +127,7 @@ def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> li
     """(type, element line, what) for each issue of the asked types, XCTest's first, then `duplicate_id`. Shared by
     `audit`'s report and `ux_check`."""
     rows: list[tuple[str, str, str]] = []
+    issues = [ui.redacted(i) for i in issues]  # XCTest's words quote the element's text: a revealed password too
     for issue in issues:
         kind = FROM_XCTEST.get(str(issue.get("auditType") or ""), "")
         if not kind or kind not in types:

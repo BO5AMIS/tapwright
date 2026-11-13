@@ -8,8 +8,13 @@
 - A native Back button is labelled with the title of the screen under it. A road learned from it is now `back` with no
   name, and a road that would aim by a title (or keep one among its other names) keeps none of it, so no title is in a
   map in plain text.
-- A test account's password or username that a screen shows (a revealed password) is no longer in a text answer when it
-  holds a quote, a backslash or extra spaces, or is long: it is replaced before the text is escaped or cut.
+- A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
+  (`<tester2's password>`) where the screen comes in: every tree read, alert, XCTest audit issue and OCR reading, so
+  nothing made from them holds it, in any form (escaped, collapsed, cut). That covers the text answers and change lists
+  (a `(was …)` cut no longer keeps a password's end), the audit's element lines (`id=`), recorded scripts and routes,
+  maps, journey reports (`report.md`, `report.html`, `journey.json`) and the action log. A recording never saves a
+  selector that holds a value or its placeholder: it takes the element's id, else its label, else the point. Scripts,
+  routes and journey reports are also checked as they are written.
 - QUALITY-BAR 2.5 (`docs/QUALITY-BAR.md`).
 - The spec is AGENT-TOOLS 1.13.2 (`docs/AGENT-TOOLS.md`, the same bytes as Tapline's). Besides §18.1, it says that
   pictures are free of a password only while its field stays secure (§18.6), adds `"by": "chat"` to `confirm_closed`
