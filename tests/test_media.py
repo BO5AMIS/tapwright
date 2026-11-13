@@ -257,10 +257,11 @@ def test_media_stops_waiting_at_once_when_a_system_alert_is_in_front(pictures, q
     run(go)
 
 
-def test_the_alert_tool_is_not_queued_behind_a_waiting_media(pictures, quick):
+def test_the_alert_tool_is_not_queued_behind_a_waiting_media(pictures, quick, monkeypatch):
     async def go():
         d = make()
         stop, task = await started(d)
+        monkeypatch.setattr(daemon_module, "MEDIA_WATCH", 30.0)  # media looks for no alert meanwhile: it stays pending
         d.session.photos_gate = asyncio.Event()
         waiting = asyncio.ensure_future(d.run_tool("a", "media", {"add": pictures, "confirm": True}))
         await asyncio.sleep(0.1)
@@ -268,8 +269,11 @@ def test_the_alert_tool_is_not_queued_behind_a_waiting_media(pictures, quick):
         d.session.last_alert = ui.Alert("Allow?", ("Allow",), (0.0, 0.0, 10.0, 10.0))
         r = await asyncio.wait_for(d.run_tool("b", "alert", {"action": "text"}), 2.0)  # (before the 150 s wait ends)
         assert r["text"]
-        with pytest.raises(Refused):
-            await asyncio.wait_for(waiting, 2.0)  # and media has given up waiting on it
+        assert not waiting.done()  # the alert was answered while media is still pending, not after it gave up
+        d.session.last_alert = None
+        d.session.photos_gate.set()  # the add finishes
+        answer = await asyncio.wait_for(waiting, 5.0)
+        assert answer["text"].startswith("Added 3 pictures")
         await finish(stop, task)
     run(go)
 
