@@ -3893,8 +3893,22 @@ class Daemon:
             after = sorted([*view.items, *getattr(s, "offscreen", [])], key=lambda e: (e.y, e.x))
 
             def inside(e: ui.Element, later: bool) -> bool:
-                holder = ui.scroll_holding(view.items if later else shown_before, e, s.screen)
-                return holder is not None and holder.rect == area.rect
+                # proof, not a guess: inside the scroll view, or past the screen in a column (row) that holds no other
+                # scroll view. scroll_holding's pick of a view to scroll (the largest in the column) is no proof: a
+                # pane stacked above in the same column can hold it (Codex, PR #6 cycle 6).
+                shown = view.items if later else shown_before
+                holder = ui.scroll_of(shown, e)
+                if holder is None:
+                    cx, cy = e.center
+                    scrolls = [v for v in shown if v.role == "scroll"]
+                    if 0 <= cx < s.screen[0]:
+                        lined = [v for v in scrolls if v.x <= cx <= v.x + v.width]
+                    else:
+                        lined = [v for v in scrolls if v.y <= cy <= v.y + v.height]
+                    if len(lined) != 1:
+                        return False
+                    holder = lined[0]
+                return holder.rect == area.rect
             final = _followed(hit, before, after, ui.candidates(after, target), view.items, inside)
             if final is None:
                 raise Refused("stale", f"index {target.index} can't be sure to name "

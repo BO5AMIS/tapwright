@@ -155,6 +155,34 @@ def test_an_indexed_tap_measures_the_shift_only_inside_its_own_scroll_view(headi
     run(go)
 
 
+# ---- cycle 6: an element past the screen in a column two panes share proves nothing ----
+def test_an_off_screen_element_of_a_stacked_pane_does_not_measure_the_shift():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        top = el("e1", "scroll", "", "pane", rect=(0, 0, 400, 150))
+        lst = el("e2", "scroll", "", "list", rect=(0, 150, 400, 650))
+        acct = lambda y: el("", "button", "Account", "", rect=(10, y, 100, 40))
+        side = lambda y: el("", "text", "Sidebar", "", rect=(10, y, 100, 30))
+        s.tree, s.offscreen = [top, lst], [acct(950), acct(1000), side(1500)]
+        real = s.scroll
+
+        async def scroll(x0, y0, x1, y1):  # the list moves by -248, the pane above by -298: Sidebar stays below
+            s.tree = [top, lst, acct(702), acct(752)]
+            s.tree[2].ref, s.tree[3].ref = "e3", "e4"
+            s.offscreen = [side(1202)]
+            return await real(x0, y0, x1, y1)
+        s.scroll = scroll
+        await d.run_tool("a", "look", {"screenshot": False})
+        taps = len(s.tap_points)
+        with pytest.raises(Refused) as e:  # it tapped B at 722 when Sidebar counted
+            await d.run_tool("a", "tap", {"target": {"label": "Account", "index": 1}, "look": False})
+        assert e.value.code == "stale" and len(s.tap_points) == taps
+        await finish(stop, task)
+    run(go)
+
+
 # ---- cycle 3: an ended agent is not forgotten after others end ----
 def test_an_ended_agent_stays_ended_after_hundreds_of_others_end():
     async def go():
