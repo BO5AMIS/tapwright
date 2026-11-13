@@ -80,6 +80,9 @@ _GRANTED: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("tapwright
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
+# True while a replay's fresh start runs: its calls are real steps of a recording in progress (the app restart), but the
+# first-answer note goes on the replay's own answer, not on theirs
+_GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_greeting_held", default=False)
 # Set to a list by the recording branch of run_tool; a compare_screen call puts what it found there (the folder, the
 # bundle id, and the reference file it used), for `_record_compare`. Per call, so another client's comparison can't
 # change it.
@@ -1050,6 +1053,7 @@ class Daemon:
         `policy` is its safety policy (docs/AGENT-TOOLS.md 11.1); None is the built-in one."""
         self.last_request = time.monotonic()
         top_level = BATCH.get() is None and not _NESTED.get()  # a batch's own steps were checked with it (batch.check_steps)
+        greets = top_level and not _GREETING_HELD.get()
         if top_level and name in params.ALLOWED:
             params.check(name, args)
         # the policy holds for the whole call, a batch's steps included (they call run_tool without one)
@@ -1063,7 +1067,7 @@ class Daemon:
         try:
             if not locks:
                 answer = await self._run_tool_policed(client_id, name, args, scope)
-                return self._first_answer(client_id, answer) if top_level else answer
+                return self._first_answer(client_id, answer) if greets else answer
             async with self._record_locks.setdefault(client_id, asyncio.Lock()):
                 rec = self._recording.get(client_id)
                 btoken = _BASELINES.set(rec.setdefault("references", []) if rec is not None else [])
@@ -1071,7 +1075,7 @@ class Daemon:
                     answer = await self._run_tool_policed(client_id, name, args, scope)
                 finally:
                     _BASELINES.reset(btoken)
-            return self._first_answer(client_id, answer) if top_level else answer
+            return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
                 _POLICY.reset(ptoken)
@@ -1638,12 +1642,13 @@ class Daemon:
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
         if data.get("fresh", True) and data.get("app"):
-            # (these calls are the replay's own: marked nested, so the first-answer note goes on the replay's answer)
-            nested = _NESTED.set(True)
+            # (these calls are the replay's own: the first-answer note goes on the replay's answer. They are not marked
+            # nested: a recording in progress saves the app restart, or a replay of it starts in the wrong app)
+            held = _GREETING_HELD.set(True)
             try:
                 await self._fresh_start(client_id, data, scope)
             finally:
-                _NESTED.reset(nested)
+                _GREETING_HELD.reset(held)
         points = [n for n, step in enumerate(data["steps"], 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
