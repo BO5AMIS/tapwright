@@ -695,3 +695,36 @@ def test_a_tools_own_call_during_the_photo_wait_waits_for_the_answer_and_then_ru
         assert d._photo_wait_left() is None  # the wait is over: an agent's own calls aren't refused any more
         await finish(stop, task)
     run(go)
+
+
+def test_two_agents_first_adds_at_once_send_one_and_the_other_is_told_busy(pictures, quick):
+    """Codex, PR #8 cycle 4: both checked for a waiting add before either had claimed the wait (their reads and the
+    touch gate let each other in), so both were sent and the second took the wait over."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        real_access = s.photos_access
+
+        async def slow_access():  # the reads of the two calls interleave
+            await asyncio.sleep(0.01)
+            return await real_access()
+        s.photos_access = slow_access
+        real_agent = d.control.agent
+
+        async def agent(fn):  # the touch gate waits its turn behind other calls, as on a busy phone
+            await asyncio.sleep(0.02)
+            return await real_agent(fn)
+        d.control.agent = agent
+        results = await asyncio.gather(
+            d.run_tool("a", "media", {"add": pictures, "confirm": True}),
+            d.run_tool("b", "media", {"add": pictures[:1], "confirm": True}), return_exceptions=True)
+        codes = sorted(r.code for r in results if isinstance(r, Refused))
+        assert codes == ["busy", "not_allowed"], results  # one waits on the person, the other is told busy
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        s.photos_gate.set()
+        await asyncio.sleep(0.05)
+        await finish(stop, task)
+    run(go)

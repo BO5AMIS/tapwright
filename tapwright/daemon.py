@@ -778,7 +778,7 @@ class Daemon(journey_tool.JourneyTools):
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
-        self._media_locks: dict[str, asyncio.Lock] = {}  # client -> the lock that makes a media add's lookup and start one step
+        self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that iOS's photo prompt holds, and until when: the runner answers nothing else meanwhile (Codex, PR #8)
         self._photo_wait: "tuple[asyncio.Future, float] | None" = None
         self._media_adds: dict[str, tuple[tuple[tuple[str, str], ...], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short, by its pictures (name, SHA-256), in order
@@ -3460,9 +3460,10 @@ class Daemon(journey_tool.JourneyTools):
         the next media call with the same pictures picks it up instead of adding them again."""
         # the same pictures, in the same order: by their bytes, not their file names (Codex, PR #8)
         same = tuple((name, hashlib.sha256(data).hexdigest()) for name, data in pictures)
-        # Look up, gate, create and register as one step per client: two calls of one client can't both find nothing
-        # and send the pictures twice (CodeRabbit, PR #8). The lock is let go before the wait on the task.
-        async with self._media_locks.setdefault(client_id, asyncio.Lock()):
+        # Look up, gate, create, register and claim the photo wait as one step, for every client at once: two calls
+        # can't both find nothing and send pictures twice (CodeRabbit, PR #8), and two agents' first adds can't both
+        # find no wait and both take it (Codex, PR #8 cycle 4). The lock is let go before the wait on the task.
+        async with self._media_lock:
             kept = self._media_adds.get(client_id)
             now = self.control.clock()
             holder = self._photo_wait[0] if self._photo_wait_left() is not None else None
@@ -3484,9 +3485,9 @@ class Daemon(journey_tool.JourneyTools):
                 task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
                 task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
                 self._media_adds[client_id] = (same, task, now)
-        if asks and not task.done():
-            if self._photo_wait is None or self._photo_wait[0] is not task:
-                # the wait starts with the add, once: a call that picks the add up doesn't move its deadline (cycle 3)
+            if asks and not task.done() and (self._photo_wait is None or self._photo_wait[0] is not task):
+                # the wait starts with the add, once, inside the step: a call that picks the add up doesn't move its
+                # deadline (cycle 3), and no other add can start before it is claimed (cycle 4)
                 self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX)
 
                 def ended(done: asyncio.Future) -> None:
@@ -3496,6 +3497,7 @@ class Daemon(journey_tool.JourneyTools):
                         if isinstance(e, Refused) and e.code == "reconnecting":
                             self.lost(f"the line dropped while the runner waited on iOS's photo prompt: {e}")
                 task.add_done_callback(ended)
+        if asks and not task.done():
             # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
             await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)
             if not task.done():
