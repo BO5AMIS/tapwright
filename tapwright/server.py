@@ -477,6 +477,36 @@ class _DropNoise(logging.Filter):
         return not (record.exc_info and record.exc_info[0] is asyncio.CancelledError)
 
 
+class RedactAccounts(logging.Filter):
+    """The log's last guard: every record's message, traceback and stack, whoever logged it, loses the values of the
+    test accounts the daemon has loaded (`scrub`) before the handler writes it. (AGENT-TOOLS §18.6)"""
+
+    def __init__(self, scrub) -> None:
+        super().__init__()
+        self.scrub = scrub
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg, record.args = self.scrub(record.getMessage()), None
+            if record.exc_info and not record.exc_text:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = self.scrub(record.exc_text)
+            if record.stack_info:
+                record.stack_info = self.scrub(record.stack_info)
+        except Exception:  # a log line that can't be checked is not written
+            return False
+        return True
+
+
+def redact_log(scrub) -> RedactAccounts:
+    """Put the guard on every handler of the root logger (what `configure_logging` set up); returns it."""
+    guard = RedactAccounts(scrub)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(guard)
+    return guard
+
+
 def configure_logging(path) -> logging.Logger:
     """Everything to a rotating file (never the token); pymobiledevice3 only from warnings up."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -605,6 +635,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             token = info["token"] if info.get("token") and not new_token else secrets.token_urlsafe(32)
             actual = sock.getsockname()[1]
             daemon = make_daemon(log.info, phone)
+            redact_log(daemon.scrub_everywhere)  # an account's value reaches serve.log in no message or traceback
             daemon.want_video = video  # the H.264 live view, set up once the phone is connected
             daemon.settle_on_video = video and settle_on_video
             daemon.ceiling = ceiling  # the rest of the flags (--no-dialog, --accounts) are read from it later

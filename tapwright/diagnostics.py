@@ -147,8 +147,10 @@ class LogRing:
 
 
 def cut(text: str, limit: int = LOG_TEXT_CUT) -> str:
-    """Text cut at `limit` characters, with how many are missing (as element text is cut: `…(+57)`)."""
-    flat = " ".join(text.split())
+    """Text cut at `limit` characters, with how many are missing (as element text is cut: `…(+57)`). A test account's
+    value is redacted first (this call's accounts): cut first, a value half inside the limit would no longer match."""
+    from . import ui  # (ui reads device, which reads this module)
+    flat = " ".join(ui.shown(text).split())
     missing = len(flat) - limit
     return flat[:limit] + (f"…(+{missing})" if missing > 0 else "")
 
@@ -250,16 +252,16 @@ def _safely(fn: Callable[[], object], default=None):
         return default
 
 
-def _reason_of(report) -> str:
+def _reason_of(report, redact: Callable[[str], str] = str) -> str:
     sub = _safely(lambda: report.exception_subtype)
     if sub:
-        return str(sub)
+        return redact(str(sub))
     info = _safely(lambda: report.application_specific_information)
     if isinstance(info, dict):
         info = " ".join(str(x) for v in info.values() for x in (v if isinstance(v, (list, tuple)) else [v]))
     elif isinstance(info, (list, tuple)):
         info = " ".join(str(x) for x in info)
-    return " ".join(str(info).split())[:CRASH_REASON_CUT] if info else ""
+    return " ".join(redact(str(info)).split())[:CRASH_REASON_CUT] if info else ""  # (redacted before the cut)
 
 
 def _is_app_frame(image: str | None, executable: str) -> bool:
@@ -295,22 +297,23 @@ def _when_of(report) -> datetime.datetime | None:
     return _safely(lambda: report.timestamp)
 
 
-def describe_crash(report, executable: str) -> CrashInfo:
-    """A parsed crash report (pycrashreport's) as the few facts `crash` shows."""
-    kind = str(_safely(lambda: report.exception_type) or "unknown exception")
+def describe_crash(report, executable: str, redact: Callable[[str], str] = str) -> CrashInfo:
+    """A parsed crash report (pycrashreport's) as the few facts `crash` shows. `redact` takes a test account's value out
+    of every text taken from the report, before any cut."""
+    kind = redact(str(_safely(lambda: report.exception_type) or "unknown exception"))
     frames = list(_safely(lambda: report.frames, []) or [])
     shown: list[str] = []
     top_app = top_any = None
     for n, frame in enumerate(frames):
         image = posixpath.basename(getattr(frame, "image_name", None) or "?")
         mine = _is_app_frame(getattr(frame, "image_name", None), executable)
-        text = f"{image} {_frame_text(frame)}"
+        text = redact(f"{image} {_frame_text(frame)}")
         top_any = top_any or text
         top_app = top_app or (text if mine else None)
         if n < CRASH_FRAMES:
             shown.append(f"{n:>2} {CRASH_MARK if mine else ' '} {text}")
     where = top_app or top_any
-    return CrashInfo(_when_of(report), kind, _reason_of(report), tuple(shown),
+    return CrashInfo(_when_of(report), kind, _reason_of(report, redact), tuple(shown),
                      f"{kind} in {where}" if where else kind,
                      posixpath.basename(str(_safely(lambda: report.filename) or "")),
                      str(_safely(lambda: report.filename) or ""))

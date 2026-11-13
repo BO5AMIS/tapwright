@@ -429,8 +429,9 @@ class Trip:
             return
         if seen.place == hop.dst:
             if hop.fixed is not None:
-                made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, d._loaded().clean(hop.fixed.names), ms, self.build)
-                self.dropped([(a, b) for a, b in made.dropped])
+                if not d._loaded().holds_in(hop.move):  # a target that holds an account's value is no road: it stays as it was
+                    made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, d._loaded().clean(hop.fixed.names), ms, self.build)
+                    self.dropped([(a, b) for a, b in made.dropped])
                 self.repairs.append(hop.fixed)
                 self.lines.append(driving.repaired_line(hop.fixed))
             else:

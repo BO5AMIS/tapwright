@@ -27,6 +27,12 @@
   else the point. As a script or route is written, only its content (labels, texts, ids, values, links) is redacted,
   never a key, a tool, the format or a `${account.…}`, so an account whose username is `tap` leaves the saved tool
   `tap`. A redacted file is checked as `replay` reads it before it is reported saved.
+  Every sink is guarded where it writes, so a path that was missed can't leak: a diagnostic (an app's log line, a
+  crash reason, the logs a failed step carries) is redacted before any length cut, and a value is never kept in the log
+  ring; the daemon's log (`serve.log`) redacts every message and traceback with the accounts the daemon has loaded; a map
+  holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
+  that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
+  is redacted in that form too.
 - `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
   console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
   sent.

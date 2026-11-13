@@ -70,7 +70,7 @@ def _tab(tree: ui.Tree) -> str | None:
     tabs = [e for e in tree.items if e.role == "tab"]
     for position, tab in enumerate(tabs, 1):
         if tab.selected:
-            return tab.identifier or f"#{position}"
+            return ui.shown(tab.identifier) if tab.identifier else f"#{position}"  # (as an answer shows it, §18.6)
     return None
 
 

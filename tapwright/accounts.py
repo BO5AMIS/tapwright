@@ -30,6 +30,7 @@ FIELDS = ("username", "password", "passcode", "apps")
 PLACEHOLDER = re.compile(r"\$\{account\.(username|password)\}")
 MENTION = re.compile(r"\$\{account\.")
 MIN_SCRUBBED = 3  # a value shorter than this isn't scrubbed out of text (it would eat ordinary words)
+BIDI_MARKS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))  # the invisible direction marks ui._text drops from screen text
 PHONE = "phone"  # the entry that holds the phone's passcode, not an account to sign in with
 NO_FILE = ("no test accounts: start tapwright serve or mcp with --accounts FILE (a JSON file kept outside any git repo, "
            "or ignored by it)")
@@ -120,6 +121,16 @@ class Loaded:
         return any(value in text for value, _ in self._values) or bool(
             self._placeholders is not None and self._placeholders.search(text))
 
+    def holds_in(self, value: object) -> bool:
+        """Does any string inside `value` (a move, a target: dicts and lists, to any depth) hold an account's value?"""
+        if isinstance(value, str):
+            return self.holds(value)
+        if isinstance(value, dict):
+            return any(self.holds_in(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(self.holds_in(v) for v in value)
+        return False
+
     def clean(self, names: dict) -> dict:
         """A road's names without the ones that hold an account's value (a field showing the username is no name)."""
         return {k: v for k, v in names.items() if not (isinstance(v, str) and self.holds(v))}
@@ -129,9 +140,11 @@ NONE = Loaded()  # no file was given
 
 
 def _forms(value: str) -> set[str]:
-    """The forms a value can take in an answer: as it is, with its whitespace collapsed to single spaces (what a text
-    line shows), and each of those JSON-escaped (a quote or backslash inside a quoted string)."""
-    bases = {value, " ".join(value.split())}
+    """The forms a value can take in an answer: as it is, without direction marks, with its whitespace collapsed to single
+    spaces (what a text line shows), and each of those JSON-escaped (a quote or backslash inside a quoted string)."""
+    # (ui._text drops the direction marks from every screen string before any redaction sees it: their absence is a form too)
+    plain = value.translate(BIDI_MARKS)
+    bases = {value, " ".join(value.split()), plain, " ".join(plain.split())}
     return bases | {json.dumps(b, ensure_ascii=False)[1:-1] for b in bases}
 
 
@@ -257,3 +270,9 @@ class Store:
             held = (stamp, load(path))
             self._held[path] = held
         return held[1]
+
+    def scrub(self, text: str) -> str:
+        """The text without the values of every file loaded so far (a log line has no call whose accounts to use)."""
+        for _, loaded in list(self._held.values()):
+            text = loaded.scrub(text)
+        return text

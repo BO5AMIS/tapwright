@@ -881,7 +881,7 @@ class Daemon(journey_tool.JourneyTools):
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
-        self.log = log
+        self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that iOS's photo prompt holds, and until when: the runner answers nothing else meanwhile (Codex, PR #8)
         self._photo_wait: "tuple[asyncio.Future, float] | None" = None
@@ -928,7 +928,7 @@ class Daemon(journey_tool.JourneyTools):
         self._policed: tuple | None = None  # (tool, key) of a touch the policy checked before a scroll (§16.2)
         self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         # the maps (AGENT-TOOLS §18): learned from what agents see and do, saved in the background (mapkeeper.py)
-        self.maps = mapkeeper.Maps()
+        self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
@@ -1645,6 +1645,26 @@ class Daemon(journey_tool.JourneyTools):
         loaded = self._loaded()
         return loaded.scrub if loaded.redacts else None
 
+    @property
+    def maps(self) -> "mapkeeper.Maps":
+        return self._maps
+
+    @maps.setter
+    def maps(self, kept: "mapkeeper.Maps") -> None:
+        kept.scrub = self.scrub_everywhere  # whoever builds the maps, what they write holds no account's value
+        self._maps = kept
+
+    def scrub_everywhere(self, text: str) -> str:
+        """The text without the values of every accounts file this daemon has loaded (the call's, the server's, and any
+        earlier one): for what is written outside a call, a log line or a log ring's entry."""
+        if getattr(self, "accounts", None) is None:
+            return text
+        try:
+            self._loaded()  # (the server's file is read at least once)
+        except Exception:
+            pass
+        return self.accounts.scrub(text)
+
     def _loaded(self) -> "accountlib.Loaded":
         """The test accounts file this call uses (the call's own, else the daemon's), loaded; `accountlib.NONE` with none."""
         return self.accounts.get(_ACCOUNTS.get() or getattr(getattr(self, "ceiling", None), "accounts", None))
@@ -1855,6 +1875,7 @@ class Daemon(journey_tool.JourneyTools):
         async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
             if entry_pid == proc.pid:
                 got[0] += 1
+                text = self.scrub_everywhere(text)  # a test account's value is never kept, so no retention cut can split one
                 if floor is None or at >= floor:
                     # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
                     ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
@@ -2075,7 +2096,7 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("unsupported", diagnostics.CRASH_NO_EXECUTABLE.format(app=shown))
         search = await self._phone_files("read the phone's crash reports",
                                          self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT, bundle))
-        infos = [diagnostics.describe_crash(r, exe) for r in search.reports]
+        infos = [diagnostics.describe_crash(r, exe, self.scrub_everywhere) for r in search.reports]
         skipped = diagnostics.skipped_notes(search)
         # AGENT-TOOLS §15.2: only reports since the session began; `all` is the last 5 of those, not the newest alone
         infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:diagnostics.CRASH_RECENT if args["all"] else 1]
@@ -2122,7 +2143,7 @@ class Daemon(journey_tool.JourneyTools):
             except Exception:
                 return None
             for crash in found.reports:
-                info = diagnostics.describe_crash(crash, exe)
+                info = diagnostics.describe_crash(crash, exe, self.scrub_everywhere)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
                     return info

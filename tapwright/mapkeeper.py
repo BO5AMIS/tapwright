@@ -29,8 +29,9 @@ class Seen:
 
 
 class Maps:
-    def __init__(self, root: str | None = None) -> None:
-        self.root = root  # the folder given to `tapwright serve --maps`; None: the tool's home
+    def __init__(self, root: str | None = None, scrub: Callable[[str], str] | None = None) -> None:
+        self.root = root
+        self.scrub = scrub  # takes a test account's value out of a string (the daemon sets it): the writer's backstop  # the folder given to `tapwright serve --maps`; None: the tool's home
         self._files: dict[Key, mapfile.MapFile] = {}
         self._memory: dict[Key, dict] = {}
         self._dirty: set[Key] = set()
@@ -47,7 +48,7 @@ class Maps:
     def file(self, root: str | None, app: str) -> mapfile.MapFile:
         key = self._key(root, app)
         if key not in self._files:
-            self._files[key] = mapfile.MapFile(key[0], app)
+            self._files[key] = mapfile.MapFile(key[0], app, lambda text: self.scrub(text) if self.scrub is not None else text)
         return self._files[key]
 
     def data(self, root: str | None, app: str) -> dict:

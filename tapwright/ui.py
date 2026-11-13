@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
-from . import trace
+from . import accounts, trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -60,7 +60,7 @@ ROLE_ACTIONS = {"button": ("tap",), "link": ("tap",), "cell": ("tap",), "tab": (
 # and any other set are listed.
 IMPLIED_ACTIONS = {role: acts for role, acts in ROLE_ACTIONS.items() if role != "cell"}
 
-_BIDI_MARKS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"))
+_BIDI_MARKS = accounts.BIDI_MARKS  # (what iOS puts around numbers; an account value shown without them is redacted too)
 
 
 def _text(v) -> str:
