@@ -1201,3 +1201,31 @@ def test_codex_pr7_c1_double_tap_does_not_touch_again_in_an_app_the_agent_was_no
         assert len(session.tap_points) == 1
         await finish(stop, task)
     run(go)
+
+
+def test_codex_pr7_c1_a_picture_from_a_frame_that_came_after_a_switch_to_an_unlisted_app_is_not_kept(reports):
+    """The wait for the stream's next frame ends in another app's screen: the foreground is read again and the picture dropped."""
+    async def go():
+        session = DescribingSession()
+        session.tree = list(HOME)
+        session.foreground = "com.example.app"
+        d = make(session)
+        stop, task = await started(d)
+        scope = Scope(("com.example.app",))
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        jr = d._journeys["a"]
+        kept, left = len(jr.frames), jr.left_out
+        waited = d._newest_frame
+
+        async def switching():
+            session.foreground, session.app = "com.other.app", ("Other", "com.other.app")  # the person switches meanwhile
+            return await waited()
+        d._newest_frame = switching
+        await d._journey_frame(jr, "tap", "Tapped Log meal\nApp: Example (com.example.app)", scope)
+        assert len(jr.frames) == kept and jr.left_out == left + 1
+        session.foreground, session.app = "com.example.app", ("Example", "com.example.app")
+        d._newest_frame = waited
+        await d._journey_frame(jr, "tap", "Tapped Log meal\nApp: Example (com.example.app)", scope)
+        assert len(jr.frames) == kept + 1  # the same call with the given app in front still keeps its picture
+        await finish(stop, task)
+    run(go)

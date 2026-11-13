@@ -80,6 +80,11 @@ class JourneyTools:
                 bundle = None
         if bundle is None:
             bundle = (self.session.app or (None, None))[1]
+        return await self._journey_bundle_ok(jr, scope, bundle)
+
+    async def _journey_bundle_ok(self, jr: journey.Journey, scope, bundle: str | None) -> bool:
+        """Is a screen of this app one the report may hold? (The rule of _journey_front_ok, for a bundle already known.)"""
+        d = _d()
         if scope is not None:
             return bundle in await self._given(scope)
         if jr.app is None or bundle == jr.app:
@@ -115,6 +120,19 @@ class JourneyTools:
                     source = await self.turned(frame.seq, source, turn)
             if source is None:
                 source = await self._read(self.session.screenshot_png)
+            # The check above trusted the answer's own `App:` line, and the frame can be the next one the stream sends, which
+            # may be another app's: the picture is kept only for a screen whose app is read again now (through the same
+            # queue as every read) and allowed. In personal mode a foreground that can't be read is no scope, so the picture
+            # is dropped; on a dedicated device the last read's app stands in (Codex, PR #7 cycle 1)
+            try:
+                after = await self._read(self.session.foreground_bundle_id)
+            except Refused:
+                after = None
+            if after is None and scope is None:
+                after = (self.session.app or (None, None))[1]
+            if after is None or not await self._journey_bundle_ok(jr, scope, after):
+                jr.left_out += 1
+                return
             path = jr.folder / "screens" / f"{len(jr.frames) + 1:03d}.jpg"
             await asyncio.to_thread(journey_report.store_shot, source, path)
         except Exception as e:  # noqa: BLE001
