@@ -761,6 +761,7 @@ class Daemon:
                           "alert": self._alert, "swipe": self._swipe}
         self._performed: dict[str, performance.Reading] = {}  # {agent: its last `performance` reading}, for `under`
         self._measured: dict | None = None  # the last reading's numbers, for the action log
+        self._overridden: set[str] = set()  # apps launched with a language, region or text size (§16.3) and not closed since
         self._network: str | None = None  # the network condition on now (AGENT-TOOLS §16.4): offline, 3g or lossy
         # who set it and when they last called: a condition whose agent has gone quiet for NETWORK_IDLE is cleared, so
         # the phone isn't left slow after that agent's session ends (the daemon itself may live on for others)
@@ -901,11 +902,27 @@ class Daemon:
             return _answer([network.line(mode)], notes)
         # The owner's decision (2026-11-12): `network` is open to every agent, personal mode included, within the
         # limits above (idle clear, NETWORK_MAX); a policy can shut it off by holding the word `network` in `block`.
-        blocked = _POLICY.get().blocks_tool("network", self._app_bundle())
+        rules = _POLICY.get()
+        blocked = rules.blocks_tool("network", self._app_bundle())  # the app of the last read
+        front = self._app_bundle()
+        if blocked is None:
+            # a person may have brought another app to the front since the last read: ask the phone now. A per-app
+            # block word anywhere in the policy makes the answer matter; when the phone can't say, the safe side wins
+            per_app = any(rules.blocks_tool("network", bundle) == "app" for bundle in rules.apps)
+            try:
+                now = await self._read(self.session.foreground_bundle_id)
+            except Exception:
+                now = None
+                if per_app:
+                    raise Refused("not_allowed", "blocked: the safety policy blocks network for some apps, and the app "
+                                                 "in front can't be read now; try again in a moment.") from None
+            if now:
+                blocked, front = rules.blocks_tool("network", now), now
         if blocked == "global":
             raise Refused("not_allowed", "blocked: the safety policy blocks network here.")
         if blocked == "app":
-            app = (self.session.app or (None, None))[0] or self._app_bundle()
+            last = self.session.app or (None, None)
+            app = self.session.app_names.get(front or "") or (last[0] if last[1] == front else None) or front
             raise Refused("not_allowed", f"blocked: the safety policy blocks network for {app}.")
         if device.rsd is None:
             raise self._not_connected()
@@ -2454,6 +2471,7 @@ class Daemon:
             self._require_connected()
             await self._quicken()
             s = self.session
+            aim = target  # what the touch is aimed at: after a scroll to an off-screen element, that element's ref
             # a list read mid-redraw can miss elements while the screen looks unchanged since: a target missing
             # from it is read for again before it is not_found
             live = by_lookup and (not self._current(view) or (target.kind != "point" and self._missing(view.items, target)))
@@ -2489,17 +2507,19 @@ class Daemon:
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
-                        if await self._reach(view, client_id, name, args, target, dry):
+                        if (pinned := await self._reach(view, client_id, name, args, target, dry)) is not None:
                             box["scrolled"] = True
+                            aim = pinned  # the element that came on screen, by its ref
+            use = args if aim is target else {**args, "target": aim}
             # a person would close the keyboard before the touch
-            box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, target))
+            box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, aim))
             s.last_point = None
             box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             handler = self._handlers.get(name)
             if dry and name == "swipe":
                 self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
-            return await (handler(view, args) if handler else call(s, args))
+            return await (handler(view, use) if handler else call(s, use))
 
         async def act_as_agent():
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
@@ -2823,8 +2843,11 @@ class Daemon:
     async def _open_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"])
         extra = launchlib.arguments(a)  # §16.3: language, region, text size; only a fresh launch takes them
+        # an app this daemon launched with them still runs with them: WebDriverAgent would bring that process forward as
+        # it is, so a plain open (or text_size: system) closes it and launches it again with the defaults (Codex, PR #6)
+        back = not extra and bundle_id in self._overridden
         try:
-            if extra:
+            if extra or back:
                 try:
                     await self.session.terminate(bundle_id)  # a running app is closed first
                 except ConnectionLost:
@@ -2838,14 +2861,21 @@ class Daemon:
             raise
         except DeviceError as e:
             raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        if extra:
+            self._overridden.add(bundle_id)
+        else:
+            self._overridden.discard(bundle_id)
         self._opened = bundle_id
         self._crash_since = self._wall()  # a new start: an earlier crash is old news
         self.restart_logs(bundle_id)
+        if back:
+            return f"Opened {shown}, back to the phone's own language and text size."
         return f"Opened {shown}{launchlib.said(a)}."
 
     async def _close_app(self, view, a: dict) -> str:
         bundle_id, shown = await self._app(a["app"], partial=False)
         await self.session.terminate(bundle_id)
+        self._overridden.discard(bundle_id)  # the process is gone, and its launch overrides with it
         return f"Closed {shown}."
 
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
@@ -3642,24 +3672,26 @@ class Daemon:
         off = [e for e in getattr(self.session, "offscreen", []) if id(e) not in hidden]
         return closest.find(target, view.items, off, self.session.screen)
 
-    async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> bool:
+    async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> ui.Target | None:
         """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
         `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
-        has its say on the target first. Returns whether it scrolled. Where no scroll can bring it on screen, or it
-        isn't in the tree at all (a lazy row), it is refused as before: `off_screen`, or `not_found` further on."""
+        has its say on the target first, and again on the element that came on screen when that isn't the one it
+        checked. Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
+        before: `off_screen`, or `not_found` further on. Returns the target to act on when it scrolled (the element
+        that came on screen, by ref), else None."""
         if name not in REACH_TOOLS:
             self._refuse_off_screen(target)
-            return False
+            return None
         s = self.session
         try:
             # the element _scroll_to will bring on screen: the same lookup, `index` counted through both lists
             hit = self._anywhere(view, target)
         except Refused as e:
             if e.code == "not_found":
-                return False  # not off screen either: the action says not_found
+                return None  # not off screen either: the action says not_found
             raise
         if not isinstance(hit, ui.Element) or any(hit is e for e in view.items):
-            return False  # (on screen already: the action touches it where it is)
+            return None  # (on screen already: the action touches it where it is)
         said = ""
         if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
             said = self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
@@ -3685,12 +3717,25 @@ class Daemon:
                 self._dry(args, f"Would scroll to it, then type {n} character{'s' if n != 1 else ''} into {shown}.")
             self._dry(args, f"Would scroll to it, then {verb} {shown} at {round(x)},{round(y)}.{said}")
         done = await self._scroll_to(view, target)
-        if self._missing(view.items, target):
+        # The element the target names now, counted as _scroll_to counted it (`index` runs through the screen and what
+        # lies past it): on screen after the scroll, it is the one to touch. The action gets its ref, not the target
+        # again: an `index` counted in the visible matches alone would point at another element or at none.
+        try:
+            final = self._anywhere(view, target)
+        except Refused:
+            final = None
+        if not isinstance(final, ui.Element) or not any(final is e for e in view.items):
             note = getattr(done, "note", "") or "it is as far into view as it gets."
             raise Refused("not_actionable", f"off_screen: {hit.line(ref=False, actions=False)} is off screen; "
                                             f"scrolling didn't bring it on screen: {note}")
+        if name != "type_text" and self._police_key(final) != self._police_key(hit):
+            # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
+            self._policed = None
+            self._police(name, args, final)
+            if _POLICY.get().check(self._app_bundle(), final.label if final.role == "input" else final.text) is not None:
+                self._policed = (name, self._police_key(final))
         self._scrolled_first.add(client_id)
-        return True
+        return ui.Target(ref=final.ref) if final.ref else target
 
     def _scroll_view_rect(self, area: ui.Element) -> tuple[float, float, float, float]:
         """The part of a scroll view between the bars: where its content is seen and dragged."""
