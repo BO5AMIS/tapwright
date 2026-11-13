@@ -1384,7 +1384,10 @@ class Daemon(journey_tool.JourneyTools):
         # inside its call): a check's guard, its save and its registration are one step, and the recording a call checks
         # against is the one in force once it holds the lock, read inside it (Codex, PR #3 cycles 6 and 7: a call queued
         # behind a recording's restart checked the old one). Other clients, and a person's input, never wait on it.
-        outer = _BASELINES.get() is None
+        # A journey tool's own calls (its look, its open_app, its network moment) run inside the journey call and
+        # never take this lock: the journey call holds its agent's journey lock, and a stop holding this lock while it
+        # waits for that one would wait forever (Codex, PR #7 cycle 3). Nothing that holds a journey lock waits for this one.
+        outer = _BASELINES.get() is None and not _JOURNEY_OWN.get()
         locks = outer and (client_id in self._recording or name == "record")
         try:
             if not locks:
@@ -3145,24 +3148,53 @@ class Daemon(journey_tool.JourneyTools):
         """AGENT-TOOLS §17.3: the screen in front against the usability basics (tapwright/uxcheck.py), with the audit's
         cut-off text, contrast and target size. The tree is read first, as `audit` does."""
         await self._settle_pending()
-        await self._read(lambda: self._silent_read(view))
+        given = _GIVEN.get()
+        session = self.session
+
+        async def front() -> str | None:
+            try:
+                return await session.foreground_bundle_id() or None
+            except ConnectionLost:
+                raise  # (the read's own reconnect handles it)
+            except DeviceError:
+                return None
+
+        async def turn() -> tuple[str | None, list | DeviceError, str | None]:
+            # One turn of the phone's queue: the app in front, the tree, the audit, and the app in front again. No
+            # action or person's input comes between them, so the elements checked are the given app's when both reads
+            # name it (Codex, PR #7 cycle 3: reads in separate turns let another client open an unlisted app for the
+            # tree and come back before the check; CodeRabbit, PR #7).
+            first = await front() if given is not None else None
+            await self._silent_read(view)
+            try:
+                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT])
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                found = e
+            return first, found, (await front() if given is not None else None)
+        for attempt in (1, 2):
+            first, issues, last = await self._read(turn)
+            if given is None or (first == last and first in given):
+                break
+            if first == last == SPRINGBOARD and await self._prompt_of_given(given, view, read=False):
+                break  # a given app's own permission prompt
+            if attempt == 1 and first == last == SPRINGBOARD:
+                # a notification banner over the app makes WebDriverAgent say SpringBoard: _front waits it out, and
+                # the turn is read again only when a given app is in front then
+                if (await self._front(given)) in given:
+                    continue
+            # Personal mode: nothing of another app's screen is remembered for naming drift, checked or filed
+            shown = last if first == last else (last or first)
+            raise Refused("not_allowed", _outside(shown, self.session.app_names.get(shown or ""),
+                                                  ", ".join(given.values())))
         rows: list[tuple[str, str, str]] = []
         notes = list(notes)
-        try:
-            issues = await self._read(lambda: self.session.audit([audit.XCTEST[t] for t in self.UX_AUDIT]))
-            rows = audit.rows_of(issues, view.items, list(self.UX_AUDIT))
-        except DeviceError as e:
-            notes.append(f"the phone's accessibility audit isn't available here ({e}), so cut-off text, contrast and "
+        if isinstance(issues, DeviceError):
+            notes.append(f"the phone's accessibility audit isn't available here ({issues}), so cut-off text, contrast and "
                          "target size were not checked.")
-        given = _GIVEN.get()
-        if given is not None:
-            # Personal mode asked which app was in front before the call; another may have come forward since. Its
-            # labels are not remembered for naming drift, and no finding is filed, unless a given app is in front now
-            # (CodeRabbit, PR #7).
-            front = await self._front(given, prompt=lambda: self._prompt_of_given(given, view, read=False))
-            if front not in given and front != PROMPT_FRONT:
-                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""),
-                                                      ", ".join(given.values())))
+        else:
+            rows = audit.rows_of(issues, view.items, list(self.UX_AUDIT))
         rules = uxcheck.rules_in_force()
         result = uxcheck.check(view.items, self.session.screen, client_id, rules, rows)
         app = getattr(self.session, "app", None)
