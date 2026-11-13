@@ -1137,6 +1137,11 @@ class Daemon(journey_tool.JourneyTools):
             return None
         return left
 
+    async def _after_photo_wait(self) -> None:
+        """Wait until iOS's photo prompt no longer holds the runner (the person answered, or the wait's deadline)."""
+        while (left := self._photo_wait_left()) is not None and self._photo_wait is not None:
+            await asyncio.wait({self._photo_wait[0]}, timeout=left)
+
     def lost(self, reason: "str | Exception") -> None:
         """A request found the line dead: the supervisor reconnects. When the request was cut because the app in
         front doesn't answer (AppNotAnswering), that is what agents and the live view are told meanwhile."""
@@ -1400,8 +1405,13 @@ class Daemon(journey_tool.JourneyTools):
         rules (§17.3); None is none."""
         left = self._photo_wait_left()
         if left is not None and name not in PHOTO_WAIT_FREE:
-            # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
-            raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(left))))
+            if _NESTED.get() or _JOURNEY_OWN.get():
+                # a tool's own call (a journey's stress putting the phone back upright): it waits for the person's
+                # answer and then runs, instead of being lost from a cleanup that nothing retries (Codex, PR #8 cycle 3)
+                await self._after_photo_wait()
+            else:
+                # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
+                raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(left))))
         jr = self._journeys.get(client_id)
         if jr is None or name == "journey":
             return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
@@ -3455,6 +3465,11 @@ class Daemon(journey_tool.JourneyTools):
         async with self._media_locks.setdefault(client_id, asyncio.Lock()):
             kept = self._media_adds.get(client_id)
             now = self.control.clock()
+            holder = self._photo_wait[0] if self._photo_wait_left() is not None else None
+            if holder is not None and (kept is None or kept[1] is not holder):
+                # another agent's add holds the runner on iOS's prompt: a second add would queue behind it on the
+                # runner, past the wait's deadline, and must not take the wait over (Codex, PR #8 cycle 3)
+                raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(self._photo_wait_left() or 1))))
             if kept is not None and not kept[1].done() and kept[0] != same:
                 # another add of this client is still waiting on the person: other pictures would queue behind it
                 # and, once it went on, be added next to it; one at a time (CodeRabbit, PR #8)
@@ -3470,15 +3485,17 @@ class Daemon(journey_tool.JourneyTools):
                 task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
                 self._media_adds[client_id] = (same, task, now)
         if asks and not task.done():
-            self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX)
+            if self._photo_wait is None or self._photo_wait[0] is not task:
+                # the wait starts with the add, once: a call that picks the add up doesn't move its deadline (cycle 3)
+                self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX)
 
-            def ended(done: asyncio.Future) -> None:
-                if self._photo_wait is not None and self._photo_wait[0] is done:
-                    self._photo_wait = None
-                    e = None if done.cancelled() else done.exception()
-                    if isinstance(e, Refused) and e.code == "reconnecting":
-                        self.lost(f"the line dropped while the runner waited on iOS's photo prompt: {e}")
-            task.add_done_callback(ended)
+                def ended(done: asyncio.Future) -> None:
+                    if self._photo_wait is not None and self._photo_wait[0] is done:
+                        self._photo_wait = None
+                        e = None if done.cancelled() else done.exception()
+                        if isinstance(e, Refused) and e.code == "reconnecting":
+                            self.lost(f"the line dropped while the runner waited on iOS's photo prompt: {e}")
+                task.add_done_callback(ended)
             # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
             await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)
             if not task.done():

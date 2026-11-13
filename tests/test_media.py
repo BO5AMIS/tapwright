@@ -644,3 +644,54 @@ def test_while_ios_photo_prompt_holds_the_runner_nothing_takes_the_silence_for_a
         assert d._photo_wait_left() is None
         await finish(stop, task)
     run(go)
+
+
+def test_a_second_agents_add_during_the_photo_wait_is_refused_and_doesnt_take_the_wait_over(pictures, quick):
+    """Codex, PR #8 cycle 3: B's add would queue behind A's on the runner, past the wait's deadline, and replaced the
+    wait's owner. It is refused busy; the wait stays A's, and A picking its add up doesn't move the deadline."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+        owner, until = d._photo_wait
+        with pytest.raises(Refused) as other:
+            await d.run_tool("b", "media", {"add": pictures[:1], "confirm": True})
+        assert other.value.code == "busy" and "photo prompt" in str(other.value)
+        assert d._photo_wait == (owner, until)
+        e = await refused(d, {"add": pictures, "confirm": True})  # A asks again: still waiting
+        assert str(e) == NEEDS_A_PERSON and d._photo_wait == (owner, until)  # same owner, same deadline
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_tools_own_call_during_the_photo_wait_waits_for_the_answer_and_then_runs(pictures, quick):
+    """Codex, PR #8 cycle 3: a journey's stress putting the phone back upright runs its own calls through run_tool;
+    refused busy, the cleanup was lost. A tool's own call waits for the person's answer instead, then runs."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        await refused(d, {"add": pictures, "confirm": True})
+        token = daemon_module._JOURNEY_OWN.set(True)
+        try:
+            own = asyncio.ensure_future(d.run_tool("j", "look", {"screenshot": False}))
+        finally:
+            daemon_module._JOURNEY_OWN.reset(token)
+        await asyncio.sleep(0.1)
+        assert not own.done()  # it waits; it isn't refused
+        s.photos_gate.set()  # the person answers
+        r = await asyncio.wait_for(own, 5.0)
+        assert r["text"]
+        assert d._photo_wait_left() is None  # the wait is over: an agent's own calls aren't refused any more
+        await finish(stop, task)
+    run(go)
