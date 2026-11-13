@@ -773,6 +773,7 @@ class Daemon(journey_tool.JourneyTools):
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
         self.log = log
+        self._media_locks: dict[str, asyncio.Lock] = {}  # client -> the lock that makes a media add's lookup and start one step
         self._media_adds: dict[str, tuple[tuple[tuple[str, str], ...], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short, by its pictures (name, SHA-256), in order
         self._closing: set[asyncio.Future] = set()  # WebDriverAgent terminates after a close_app's kill, left to finish
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
@@ -3409,19 +3410,22 @@ class Daemon(journey_tool.JourneyTools):
         is up it stops waiting at once (needs_a_person), and nobody is held up behind it (`alert` can read the text).
         The request itself is never cancelled or sent twice: it goes on and records its pictures when it finishes, and
         the next media call with the same pictures picks it up instead of adding them again."""
-        kept = self._media_adds.get(client_id)
-        now = self.control.clock()
         # the same pictures, in the same order: by their bytes, not their file names (Codex, PR #8)
         same = tuple((name, hashlib.sha256(data).hexdigest()) for name, data in pictures)
-        if kept is not None and kept[0] == same and now - kept[2] < MEDIA_KEEP:
-            task = kept[1]
-        else:
-            async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
-                return None
-            await self.control.agent(gate)
-            task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
-            task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
-            self._media_adds[client_id] = (same, task, now)
+        # Look up, gate, create and register as one step per client: two calls of one client can't both find nothing
+        # and send the pictures twice (CodeRabbit, PR #8). The lock is let go before the wait on the task.
+        async with self._media_locks.setdefault(client_id, asyncio.Lock()):
+            kept = self._media_adds.get(client_id)
+            now = self.control.clock()
+            if kept is not None and kept[0] == same and now - kept[2] < MEDIA_KEEP:
+                task = kept[1]
+            else:
+                async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
+                    return None
+                await self.control.agent(gate)
+                task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
+                self._media_adds[client_id] = (same, task, now)
         if asks and not task.done():
             # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
             await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)

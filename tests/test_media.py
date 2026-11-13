@@ -294,6 +294,31 @@ def test_the_pictures_are_added_once_when_media_is_called_again_after_the_person
     run(go)
 
 
+def test_two_calls_of_one_client_with_the_same_pictures_send_them_once(pictures, quick):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.photos_gate = asyncio.Event()  # the add is still going when the second call looks for it
+        agent = d.control.agent
+
+        async def slow_agent(fn):  # the gate takes a moment (a person-first queue, a busy loop): the calls overlap there
+            await asyncio.sleep(0.05)
+            return await agent(fn)
+        d.control.agent = slow_agent
+        args = {"add": pictures, "confirm": True}
+        first = asyncio.ensure_future(d.run_tool("a", "media", args))
+        second = asyncio.ensure_future(d.run_tool("a", "media", args))
+        await asyncio.sleep(0.15)
+        d.session.photos_gate.set()
+        answers = await asyncio.wait_for(asyncio.gather(first, second), 5.0)
+        assert all(r["text"].startswith("Added 3 pictures") for r in answers)
+        assert [c for c in d.session.calls if isinstance(c, tuple) and c[0] == "photos_add"] == [
+            ("photos_add", ("food.jpg", "label.PNG", "scan.heic"))]  # one add, not two
+        assert len(media.load()["a"]) == 3
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_person_driving_still_holds_media_back(pictures, quick):
     async def go():
         d = make()
