@@ -26,9 +26,11 @@ Small fixes from the first real-app runs. No new tools.
   the field. The row is now touched at its visible part.
 - A plain `open_app` after one with a language, region or text size says what it undid:
   `Opened Example (com.example.app), back to the phone's own text size.`
-- `media`: when iOS asks the person whether the runner may add photos, `media` stops waiting at once and answers
-  `needs_a_person`. Tapwright never answers that prompt itself. The add finishes on its own once the person answers,
-  without holding up `alert` or `look`, and a repeated `media` call picks it up rather than adding twice.
+- `media`: the first add, which makes iOS ask the person whether the runner may add photos, answers `needs_a_person`
+  at once. Tapwright never answers that prompt itself. The runner can do nothing else until the person answers (two
+  minutes at most), so meanwhile other calls answer `busy` right away instead of waiting, and Tapwright doesn't take
+  the silence for a lost connection. The add finishes once the person answers, and calling `media` again with the
+  same pictures picks it up rather than adding them twice.
 - The journey's stop line names the errors its report counts: `Findings: none. Errors: 2 (1 not_found, 1 covered).`
 - The live view's link with its key is never printed (the start line of `serve`, "already running", and `view`). An app
   around the terminal had copied such links with the key hidden as `?token=SECRET` and opened them as tabs, which

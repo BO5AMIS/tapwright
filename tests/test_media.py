@@ -607,3 +607,40 @@ def test_a_cut_short_add_is_picked_up_only_by_the_same_pictures_not_by_a_file_of
         assert len(adds) == 2  # the second picture was sent, not taken for the first
         await finish(stop, task)
     run(go)
+
+
+def test_while_ios_photo_prompt_holds_the_runner_nothing_takes_the_silence_for_a_drop(pictures, quick):
+    """Codex, PR #8 cycle 2: the runner answers nothing while its add waits on iOS's prompt. The heartbeat's lock
+    check used to time out, call it a drop, reconnect and stop the runner (and the add) long before the person
+    answered. Now the heartbeat skips its check, a request that gets no answer isn't a drop, other calls are refused
+    at once, and the add is picked up when the person has answered."""
+    from tapwright.device import ConnectionLost
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        s = d.session
+        s.photo_access = {"add": "notDetermined", "full": "notDetermined"}
+        s.photos_gate = asyncio.Event()
+        e = await refused(d, {"add": pictures, "confirm": True})
+        assert str(e) == NEEDS_A_PERSON
+
+        async def held():  # every other request waits behind the add, as the runner's queue does, and times out
+            await asyncio.sleep(0.05)
+            raise ConnectionLost("no answer from WebDriverAgent")
+        s.locked = held
+        await asyncio.sleep(0.3)  # many heartbeats
+        assert d.state == "live" and "reset" not in s.calls  # no reconnect, the runner and its add stay
+        d.lost(ConnectionLost("a request timed out behind the add"))
+        assert d.state == "live" and not d._lost.is_set()
+        with pytest.raises(Refused) as other:
+            await asyncio.wait_for(d.run_tool("b", "look", {"screenshot": False}), 1.0)
+        assert other.value.code == "busy" and "photo prompt" in str(other.value)
+        # the person answers: the add finishes, and the same call picks it up without asking the runner anything
+        s.photos_gate.set()
+        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True})
+        assert r["text"].startswith("Added 3 pictures")
+        assert len([c for c in s.calls if isinstance(c, tuple) and c[0] == "photos_add"]) == 1
+        assert d._photo_wait_left() is None
+        await finish(stop, task)
+    run(go)
