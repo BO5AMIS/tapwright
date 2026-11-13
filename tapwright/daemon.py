@@ -4091,16 +4091,17 @@ class Daemon(journey_tool.JourneyTools):
         return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
-    def _police(self, tool: str, a: dict, element: ui.Element | None) -> str:
+    def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
         """The safety policy's say on a touch of `element` (docs/AGENT-TOOLS.md 11): nothing when it has no word,
         `not_allowed: blocked` for a block word, and for a confirm word `not_allowed: needs_confirmation` (a
         request goes to the live view) unless a person's OK for this very call is waiting. That OK is used up
         here. For a dry run, nothing is asked or used up: the sentence for the answer's end, or "". `force` never
-        skips it, and nothing here touches the phone."""
+        skips it, and nothing here touches the phone. `bundle`: the app the element is in, when that is not the app of the
+        last read (a journey's second touch, after the first may have opened another app)."""
         if element is None:
             return ""
         # an input is matched by its label only: what someone typed into it is data, not what a touch does
-        hit = _POLICY.get().check(self._app_bundle(), element.label if element.role == "input" else element.text)
+        hit = _POLICY.get().check(bundle or self._app_bundle(), element.label if element.role == "input" else element.text)
         if hit is None:
             return ""
         kind, word = hit
@@ -4212,14 +4213,21 @@ class Daemon(journey_tool.JourneyTools):
         done = await self.session.tap(target, hold_ms=hold_ms)
         if _DOUBLE.get():
             await asyncio.sleep(DOUBLE_TAP_GAP)
-            # what is there now: the first touch may have put another screen under the finger (read again, police again)
+            # what is there now: the first touch may have put another screen under the finger (read again, police again).
+            # The first touch may also have opened another app (a link into Safari): the app in front is read again, and in
+            # personal mode a second touch is made only on a given app's screen; the per-app policy is that of the app
+            # really in front, since Session.refresh leaves `session.app` as the last look had it (Codex, PR #7 cycle 1)
+            front = await self.session.foreground_bundle_id()  # (not _read: this runs inside the touch's own turn in the queue)
+            given = _GIVEN.get()
+            if given is not None and front not in given:
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), ", ".join(given.values())))
             items = (await self.session.refresh()).items
             if target.kind == "point":
                 under = self._element_at((target.x, target.y), items)
             else:
                 found = ui.resolve(items, target)
                 under = self._element_at(found, items) if isinstance(found, tuple) else found
-            self._police("tap", {}, under)
+            self._police("tap", {}, under, front)
             await self.session.tap(target, hold_ms=hold_ms)
         return done
 

@@ -1176,3 +1176,28 @@ def test_lows_a_cancelled_start_leaves_no_journey_and_no_folder(reports):
         assert not reports.exists() or not list(reports.iterdir())
         await finish(stop, task)
     run(go)
+
+
+def test_codex_pr7_c1_double_tap_does_not_touch_again_in_an_app_the_agent_was_not_given(reports):
+    """The first touch opens a link in Safari: the second touch is not made, in personal mode scoped to another app."""
+    class Linking(DescribingSession):
+        async def tap(self, target, hold_ms=60):
+            done = await super().tap(target, hold_ms)
+            self.foreground, self.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")
+            return done
+
+    async def go():
+        session = Linking()
+        session.tree = list(HOME)
+        session.foreground = "com.example.app"
+        d = make(session)
+        stop, task = await started(d)
+        scope = Scope(("com.example.app",))
+        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
+        session.tap_points.clear()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 200, "y": 500}}, scope=scope)
+        assert e.value.code == "not_allowed" and "outside_apps" in str(e.value) and "com.apple.mobilesafari" in str(e.value)
+        assert len(session.tap_points) == 1
+        await finish(stop, task)
+    run(go)
