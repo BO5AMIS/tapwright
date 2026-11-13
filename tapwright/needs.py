@@ -14,12 +14,13 @@ DEVELOPER_MODE = ("Turn on Developer Mode: Settings > Privacy & Security > Devel
 NOT_TRUSTED = "Unlock the phone and tap Trust on \"Trust This Computer?\" (enter the passcode if it asks)."
 
 
-def from_state(state: str | None, detail: str | None) -> list[str]:
-    """From the daemon's own state and its detail line."""
+def from_state(state: str | None, detail: str | None, stuck_locked: bool = False) -> list[str]:
+    """From the daemon's own state and its detail line. `stuck_locked`: the last connect found the phone locked (the
+    state then reads connecting or reconnecting, not locked)."""
     found = []
     if PASSCODE_WORDS in (detail or ""):
         found.append(PASSCODE)
-    if state == "locked":
+    if state == "locked" or stuck_locked:
         found.append(LOCKED)
     return found
 

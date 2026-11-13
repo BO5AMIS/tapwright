@@ -271,7 +271,8 @@ def test_ux_check_is_a_read_in_personal_mode_and_refused_outside_the_given_apps(
 def test_findings_are_added_to_a_running_journey_when_there_is_one(monkeypatch):
     from tapwright import journey as journey_module
     got = []
-    monkeypatch.setattr(journey_module, "add_finding", lambda client_id, finding: got.append((client_id, finding)))
+    monkeypatch.setattr(journey_module, "add_finding",
+                        lambda client_id, finding, lines=None: got.append((client_id, finding)))
 
     async def go():
         d = make()
@@ -296,3 +297,17 @@ def test_a_phone_without_the_audit_still_gets_the_other_facts():
         assert "1. icon_only" in r["text"] and "audit isn't available here" in r["text"]
         await finish(stop, task)
     run(go)
+
+
+def test_cr_enabled_sliders_are_counted_as_choices():
+    items = [el("e1", "slider", "Volume", rect=(20, 100, 300, 40)), el("e2", "slider", "Off", rect=(20, 200, 300, 40),
+                                                                           enabled=False),
+             button("e3", "Save", rect=(20, 300, 100, 40))]
+    assert uxcheck.check(items, PHONE).choices == 2
+
+
+def test_cr_a_symbolic_close_label_is_a_way_back():
+    rules = uxcheck.parse({"rules": [{"way_back": True}]})
+    for symbol in ("×", "✕", "‹", "<", "x"):
+        only = [el("e1", "text", "Settings", rect=(20, 300, 200, 24)), button("e2", symbol, rect=(340, 60, 40, 30))]
+        assert kinds(uxcheck.check(only, PHONE, rules=rules)) == [], symbol

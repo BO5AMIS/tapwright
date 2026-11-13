@@ -4,6 +4,7 @@ import dataclasses
 import base64
 import io
 import re
+import time
 
 import pytest
 from fakes import Clock, FakeDevice, FakeSession, FrameFeeder, VirtualLoop, button, el, image_bytes
@@ -318,11 +319,16 @@ def rates(session) -> list[int]:
             if isinstance(c, tuple) and c[0] == "settings" and "mjpegServerFramerate" in c[1]]
 
 
-async def until(check, tries: int = 300) -> None:
-    for _ in range(tries):
+async def until(check, seconds: float = 3.0) -> None:
+    # a deadline, not a count of sleeps: before Python 3.13 the Windows clock ticks every 15.6 ms and asyncio.sleep(0.01)
+    # can return at once, so 300 sleeps were over in 0.4 s
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         if check():
             return
         await asyncio.sleep(0.01)
+    if check():
+        return
     raise AssertionError("never happened")
 
 
@@ -1775,7 +1781,25 @@ def test_the_list_is_not_current_without_a_stream_to_say_so():
 
 
 def run_virtual(scenario):
-    asyncio.run(scenario(), loop_factory=VirtualLoop)
+    # asyncio.run takes loop_factory only from Python 3.12, and the package allows 3.10: the loop is run by hand
+    # The cleanup is asyncio.run's own: what is still pending is cancelled and awaited, then async generators and
+    # the default executor are shut down, whether the scenario passed or failed.
+    loop = VirtualLoop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(scenario())
+    finally:
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 def test_a_silent_change_before_the_action_is_not_reported_as_no_visible_change():
@@ -3415,6 +3439,8 @@ def test_scroll_to_the_end_swipes_until_the_stream_stops_changing():
 
 def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_ends(monkeypatch):
     monkeypatch.setattr(daemon_module, "SCROLL_CAP", 0.3)  # 12 s in life
+    # the time cap is under test, not the swipe count: a fast machine made 15 swipes in 0.3 s (Windows CI, PR #6)
+    monkeypatch.setattr(daemon_module, "MAX_SCROLL_SWIPES", 10_000)
     async def go():
         d = make()
         stop, task = await started(d)
@@ -3424,6 +3450,7 @@ def test_scroll_to_start_goes_up_and_stops_at_the_cap_with_a_note_if_it_never_en
 
         async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
             ends.append((y0, y1))
+            await asyncio.sleep(0.05)  # a swipe takes time on a phone (about 6 fit in the cap)
             return await original(x0, y0, x1, y1, duration_ms, hold_ms)
         d.session.swipe = swipe
         r = await d.run_tool("a", "scroll", {"to": "start", "look": False})
@@ -3979,9 +4006,10 @@ def test_back_closes_a_sheet_by_a_touch_beside_it():
 
         async def tap(target, hold_ms=60):
             d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]  # the backdrop closes it
+            feeder.then = b"B"  # the picture changes with the touch, not before the action's mark (3.10 ran the feeder first)
             return await real(target, hold_ms)
         d.session.tap = tap
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.")
         assert d.session.tap_points == [(215.0, (60.0 + 647.0) / 2)] and "swipe" not in d.session.calls
@@ -4000,9 +4028,10 @@ def test_back_pulls_a_sheet_down_when_the_touch_beside_it_closed_nothing():
         async def swipe(x0, y0, x1, y1, duration_ms=350, hold_ms=0):
             d.session.behind, d.session.tree = [], [button("e5", "Tap me", "lab-taps")]
             d.session.pulled = (x0, y0, x1, y1)
+            feeder.then = b"B"  # the picture changes with the pull
             return await real(x0, y0, x1, y1, duration_ms, hold_ms)
         d.session.swipe = swipe
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.") and len(d.session.tap_points) == 1
         assert d.session.pulled == (215.0, 661.0, 215.0, 911.0)  # from just inside its top edge, straight down
@@ -4029,9 +4058,10 @@ def test_back_finds_the_sheet_inside_a_backdrop_that_fills_the_screen():
 
         async def tap(target, hold_ms=60):
             d.session.behind, d.session.tree = [], [button("e5", "Open sheet 2", "lab-open-sheet2")]
+            feeder.then = b"B"  # the picture changes with the touch
             return await real(target, hold_ms)
         d.session.tap = tap
-        feeder = FrameFeeder(d.hub).start(then=b"B")
+        feeder = FrameFeeder(d.hub).start(then=b"A")
         r = await d.run_tool("a", "back", {})
         assert r["text"].startswith("Closed the sheet.")
         assert d.session.tap_points == [(215.0, (60.0 + 690.0) / 2)]  # on the backdrop, above the panel
@@ -4934,7 +4964,7 @@ def test_a_touch_outside_the_focused_input_closes_the_keyboard_first(tool, args,
 
 
 def test_closing_the_keyboard_with_a_layer_open_keeps_away_from_what_it_hides():
-    """The JLD 1.1.0 RC pass (2026-11-12): with a layer in front, every touch that closed the keyboard first failed
+    """The 1.1.0 release-candidate pass on a real app (2026-11-12): with a layer in front, every touch that closed the keyboard first failed
     with "'tuple' object has no attribute 'actions'": `behind` holds (element, layer) pairs."""
     async def go():
         d, stop, task = await keyboard_up()
@@ -5625,7 +5655,7 @@ def test_an_index_given_beside_the_target_is_taken_as_the_targets():
 
 
 def test_a_touch_that_changes_nothing_on_ioss_health_sheet_says_ask_a_person():
-    """The JLD RC pass (2026-11-12): iOS's Health access sheet took every touch and changed nothing; "Allow" stayed
+    """An app tester's RC pass (2026-11-12): iOS's Health access sheet took every touch and changed nothing; "Allow" stayed
     disabled. iOS doesn't let automation change it, so the answer says so instead of leaving the agent to retry."""
     async def go():
         d = make()

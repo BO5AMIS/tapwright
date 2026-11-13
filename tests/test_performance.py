@@ -65,6 +65,30 @@ def test_limits_fail_with_every_reason_and_an_unmeasured_number_fails_too():
         "memory wasn't measured, so it can't be checked"]
 
 
+def test_a_limit_is_not_passed_on_a_partial_window_an_unsettled_launch_or_a_number_that_is_not_one():
+    """CodeRabbit, PR #4: partial sampling, a launch whose wait hit its cap, and NaN samples must not pass a check."""
+    partial = performance.summarize(Measurement(memory_mb=[100.0], cpu_pct=[10.0], fps=[60.0], failed="service stopped"),
+                                    2.0, opened_s=1.0)
+    assert partial.partial
+    assert performance.failures(partial, {"memory_mb": 300, "cpu_percent": 50, "fps_min": 30, "drops": 5}) == [
+        "memory: only part of the window was measured, so it can't be checked",
+        "CPU: only part of the window was measured, so it can't be checked",
+        "frames: only part of the window was measured, so it can't be checked",
+        "frames: only part of the window was measured, so it can't be checked"]
+    assert performance.failures(partial, {"launch_s": 2.0}) == []  # the launch time comes from the wait, not the samples
+    over = performance.summarize(Measurement(memory_mb=[400.0], failed="x"), 2.0)
+    assert performance.failures(over, {"memory_mb": 300}) == ["memory peaked at 400 MB, over 300 MB"]  # already over: said so
+    capped = performance.summarize(Measurement(), 8.0, opened_s=8.0, unsettled=True)
+    assert performance.failures(capped, {"launch_s": 10.0}) == [
+        "the screen was still changing when the launch wait ended, so the launch time can't be checked"]
+    assert performance.failures(capped, {"launch_s": 2.0}) == ["opened in 8.0 s, over 2.0 s"]
+    nan = float("nan")
+    r = performance.summarize(Measurement(memory_mb=[nan, 120.0], cpu_pct=[nan, float("inf")], fps=[nan, 60.0]), 1.0)
+    assert (r.memory_avg, r.memory_peak, r.cpu_avg, r.cpu_peak, r.fps_avg) == (120.0, 120.0, None, None, 60.0)
+    assert performance.failures(r, {"cpu_percent": 50}) == ["CPU wasn't measured, so it can't be checked"]
+    assert "CPU" in performance.answer_lines(r)[-1]  # listed under what was not measured
+
+
 def test_under_is_checked_before_anything_runs():
     from tapwright import batch
     ok = [{"tool": "performance", "launch": True, "expect": {"under": {"launch_s": 2.0, "js_heap_mb": 50}}}]
@@ -132,7 +156,10 @@ def test_the_apps_own_process_is_the_only_one_sampled():
     async def go():
         device_module.PID_RETRY = 0
         meter = device_module.AppMeter(FakeSession().device, "com.example.app")
-        await meter._processes(Tap(samples), Info())
+        worker = asyncio.create_task(meter._processes(Info()))
+        await meter._rows_in(Tap(samples))
+        await asyncio.sleep(0.05)  # the batches are taken one by one
+        worker.cancel()
         assert meter.measurement.memory_mb == [120.0, 140.0]
         assert meter.measurement.cpu_pct == [12.5]
     saved = device_module.PID_RETRY
@@ -162,6 +189,24 @@ def test_launch_closes_the_app_then_times_its_open_to_the_settled_screen():
         assert s.calls.index("terminate") < s.calls.index("launch")
         assert seen == [[("start", "com.example.app")]]
         assert s.device.metered[-1] == ("stop", "com.example.app")
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_measured_window_begins_after_the_close_and_before_the_open():
+    """Codex P2, PR #4: samples from the set-up and from the app that was running before the launch were kept."""
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        stop, task = await started(d)
+        s.device.measurement = Measurement(memory_mb=[100.0])
+        order = []
+        s.device.on_window = lambda fresh: order.append(("window", fresh, list(s.closed), list(s.launched)))
+        await d.run_tool("a", "performance", {"launch": True})
+        assert order == [("window", True, ["com.example.app"], [])]  # closed already, not yet opened
+        order.clear()
+        await d.run_tool("a", "performance", {"seconds": 1})
+        assert order == [("window", False, ["com.example.app"], ["com.example.app"])]  # (no close or open of its own)
         await finish(stop, task)
     run(go)
 
@@ -325,4 +370,38 @@ def test_the_action_log_has_the_numbers_and_nothing_personal(tmp_path):
         got = [e for e in entries if e["tool"] == "performance"]
         assert len(got) == 1 and got[0]["ok"] is True
         assert got[0]["measured"]["memory_peak"] == 190.0 and got[0]["measured"]["drops"] == 3
+    run(go)
+
+
+def test_a_still_screen_of_a_partial_window_fails_its_frame_limits_and_a_fully_sampled_one_passes():
+    """CodeRabbit and Codex, PR #4 cycle 2: fps_min and drops took the still-screen shortcut before the partial check."""
+    stopped = performance.summarize(Measurement(fps=[0.0], failed="service stopped"), 2.0)
+    assert stopped.still and stopped.partial
+    assert performance.failures(stopped, {"fps_min": 30, "drops": 0}) == [
+        "frames: only part of the window was measured, so it can't be checked"] * 2
+    whole = performance.summarize(Measurement(fps=[0.0, 0.0]), 2.0)
+    assert whole.still and not whole.partial and performance.failures(whole, {"fps_min": 30, "drops": 0}) == []
+
+
+def test_samples_lost_to_a_process_list_that_could_not_be_read_fail_memory_and_cpu_limits_only():
+    """Codex, PR #4 cycle 2: batches the phone couldn't say whose they were were skipped without a trace, and the one
+    sample left passed memory_mb."""
+    r = performance.summarize(Measurement(memory_mb=[100.0], cpu_pct=[10.0], fps=[60.0], lost=3), 2.0)
+    assert r.samples_lost and not r.partial
+    assert performance.failures(r, {"memory_mb": 300, "cpu_percent": 50, "fps_min": 30, "drops": 0}) == [
+        "memory: only part of the window was measured, so it can't be checked",
+        "CPU: only part of the window was measured, so it can't be checked"]
+    over = performance.summarize(Measurement(memory_mb=[400.0], lost=1), 2.0)
+    assert performance.failures(over, {"memory_mb": 300}) == ["memory peaked at 400 MB, over 300 MB"]
+    assert not performance.summarize(Measurement(memory_mb=[1.0]), 1.0).samples_lost
+
+
+def test_lost_samples_are_said_in_the_answer():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.device.measurement = Measurement(memory_mb=[100.0], cpu_pct=[5.0], lost=2)
+        r = await d.run_tool("a", "performance", {"seconds": 1})
+        assert "Note: " + performance.SAMPLES_LOST.format(n=2) in r["text"].splitlines()
+        await finish(stop, task)
     run(go)

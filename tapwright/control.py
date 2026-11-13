@@ -131,6 +131,13 @@ class Controller:
                         self.generation += 1
                         self._agent_at = self.clock()
 
+    def touched(self) -> None:
+        """A touch was delivered inside the running agent action, and the action may still end as refused (a journey's
+        second touch of a double tap): `agent` then skips its own +1, so the screen's generation moves here, and
+        every client's refs from before the touch are stale (CodeRabbit, PR #7)."""
+        self.generation += 1
+        self._agent_at = self.clock()
+
     @asynccontextmanager
     async def exclusive(self):
         """Work that must not overlap any action or read: reconnecting."""

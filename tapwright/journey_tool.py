@@ -11,6 +11,7 @@ import logging
 
 from . import journey, journey_export, journey_report, launch as launchlib, network, ui, uxcheck
 from .control import Refused
+from .device import ConnectionLost
 
 HIDDEN = "in a journey, ids and labels are hidden; use a ref or the visible text"
 NO_JUMP = ('in a journey, scroll to: "target" is off (a user can\'t jump to what is out of sight); scroll with a '
@@ -80,12 +81,24 @@ class JourneyTools:
                 bundle = None
         if bundle is None:
             bundle = (self.session.app or (None, None))[1]
+        return await self._journey_bundle_ok(jr, scope, bundle)
+
+    async def _journey_bundle_ok(self, jr: journey.Journey, scope, bundle: str | None) -> bool:
+        """Is a screen of this app one the report may hold? (The rule of _journey_front_ok, for a bundle already known.)"""
+        d = _d()
         if scope is not None:
             return bundle in await self._given(scope)
         if jr.app is None or bundle == jr.app:
             return True
         return bundle == d.SPRINGBOARD and await self._prompt_of_given(
             {jr.app: jr.app}, self.control.client(self._journey_owner(jr)), read=False)
+
+    async def _front_now(self) -> str | None:
+        """The app in front, read through the phone's queue now; None when the phone can't say."""
+        try:
+            return await self._read(self.session.foreground_bundle_id) or None
+        except Refused:
+            return None
 
     def _journey_owner(self, jr: journey.Journey) -> str:
         return next((c for c, j in self._journeys.items() if j is jr), "")
@@ -103,18 +116,49 @@ class JourneyTools:
             jr.left_out += 1
             return
         try:
-            frame = await self._newest_frame()
-            source = None
-            if frame is not None:
-                try:
-                    source = await d.jpeg_of(frame)
-                except d.PictureGone:
-                    source = None
-                turn = getattr(self.session, "turn", 0)
-                if source is not None and turn and getattr(frame, "picture", None) is None:
-                    source = await self.turned(frame.seq, source, turn)
-            if source is None:
-                source = await self._read(self.session.screenshot_png)
+            if scope is not None:
+                # Personal mode: the picture is the phone's own screenshot, taken in one turn of the phone's queue
+                # between two reads of the app in front, and kept only when both name the same given app. One turn: no
+                # action or person's input can come between them (separate reads let a queued action switch to another
+                # app and back, Codex, PR #7 cycle 2). A stream frame could be one from before the check, or the next
+                # one the stream sends, of another app (cycle 1).
+                session = self.session
+
+                async def front() -> str | None:
+                    try:
+                        return await session.foreground_bundle_id() or None
+                    except ConnectionLost:
+                        raise  # (the read's own reconnect handles it)
+                    except Exception:  # noqa: BLE001 - the phone can't say: no scope, no picture
+                        return None
+
+                async def capture() -> tuple[str | None, bytes, str | None]:
+                    first = await front()
+                    shot = await session.screenshot_png()
+                    return first, shot, await front()
+                before, source, after = await self._read(capture)
+                if before is None or after != before or not await self._journey_bundle_ok(jr, scope, before):
+                    jr.left_out += 1
+                    return
+            else:
+                frame = await self._newest_frame()
+                source = None
+                if frame is not None:
+                    try:
+                        source = await d.jpeg_of(frame)
+                    except d.PictureGone:
+                        source = None
+                    turn = getattr(self.session, "turn", 0)
+                    if source is not None and turn and getattr(frame, "picture", None) is None:
+                        source = await self.turned(frame.seq, source, turn)
+                if source is None:
+                    source = await self._read(self.session.screenshot_png)
+                # Dedicated: the frame can be the next one the stream sends; the app is read again after it, and the
+                # picture kept only for the journey's app (the last read's app stands in when the phone can't say)
+                after = await self._front_now() or (self.session.app or (None, None))[1]
+                if not await self._journey_bundle_ok(jr, scope, after):
+                    jr.left_out += 1
+                    return
             path = jr.folder / "screens" / f"{len(jr.frames) + 1:03d}.jpg"
             await asyncio.to_thread(journey_report.store_shot, source, path)
         except Exception as e:  # noqa: BLE001
@@ -144,19 +188,25 @@ class JourneyTools:
         if stray:
             raise Refused("bad_params", f"journey {mode} doesn't take {', '.join(stray)}; it takes "
                                         f"{', '.join(KEYS[mode]) or 'nothing more'}")
-        if mode == "start":
-            return await self._journey_start(client_id, args, scope)
+        if mode in ("start", "stop", "stress"):
+            async with self._journey_locks.setdefault(client_id, asyncio.Lock()):
+                if mode == "start":
+                    return await self._journey_start(client_id, args, scope)
+                jr = self._journeys.get(client_id)  # (read inside: a stop may have ended it while this waited)
+                if jr is None:
+                    raise Refused("bad_params", NO_JOURNEY)
+                if mode == "stop":
+                    return await self._journey_stop(client_id, jr, args, scope)
+                return await self._journey_stress(client_id, jr, args, scope)
         jr = self._journeys.get(client_id)
         if jr is None:
             raise Refused("bad_params", NO_JOURNEY)
-        if mode == "stop":
-            return await self._journey_stop(client_id, jr, args, scope)
         if mode == "finding":
             filed = jr.add_finding(args["finding"])
             n = len(jr.findings)
             where = f', screen "{filed["screen"]}"' if filed.get("screen") else ""
             return _d()._answer([f"Finding {n} filed: {filed['severity']}{where}: {filed['what']}"])
-        return await self._journey_stress(client_id, jr, args, scope)
+        raise Refused("bad_params", f"journey: unknown mode {mode}")  # (MODES are all handled above)
 
     def _journey_eyes(self, jr: journey.Journey, eyes: object) -> dict:
         if eyes not in ("user", "agent"):
@@ -164,8 +214,8 @@ class JourneyTools:
         if eyes == jr.eyes:
             return _d()._answer([f"Already in {'a user' if eyes == 'user' else 'the agent'}'s eyes."])
         jr.eyes = eyes
+        jr.eyes_switches.append((jr.calls, eyes))
         if eyes == "agent":
-            jr.eyes_off_at_call = jr.calls
             return _d()._answer(["Now in the agent's eyes: ids, labels and off-screen elements are shown, and the shortcuts "
                                  "are open. The report says so."])
         return _d()._answer(["Back in a user's eyes."])
@@ -173,13 +223,12 @@ class JourneyTools:
     async def _calls_of_its_own(self, client_id: str, jr: journey.Journey, scope, name: str, args: dict) -> dict:
         """One of the tool's own calls: through run_tool (so scope, policy and log apply), not counted as the agent's."""
         d = _d()
-        jr.muted += 1
-        token = d._NESTED.set(True)
+        token, own = d._NESTED.set(True), d._JOURNEY_OWN.set(True)  # (of this task only: another call of the agent still goes through the gate)
         try:
             return await self.run_tool(client_id, name, args, scope)
         finally:
+            d._JOURNEY_OWN.reset(own)
             d._NESTED.reset(token)
-            jr.muted -= 1
 
     async def _journey_start(self, client_id: str, args: dict, scope) -> dict:
         if client_id in self._journeys:
@@ -215,13 +264,15 @@ class JourneyTools:
                 jr.launched_with = dict(launch)
             looked = await self._calls_of_its_own(client_id, jr, scope, "look", {"screenshot": False})
         except BaseException:  # (a cancelled start too: no journey left registered, no empty folder)
-            await self._journey_undo(client_id, jr, scope, [])
-            self._journeys.pop(client_id, None)
-            journey.running.pop(client_id, None)
             try:
-                folder.rmdir()
-            except OSError:
-                pass
+                await self._journey_undo(client_id, jr, scope, [])
+            finally:  # (even when the undo raises: the next start must not find this journey registered)
+                self._journeys.pop(client_id, None)
+                journey.running.pop(client_id, None)
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
             raise
         jr.see(looked["text"])
         await self._journey_frame(jr, "look", looked["text"], scope)
@@ -357,7 +408,11 @@ class JourneyTools:
             if kind == "background":
                 await run("press_button", {"name": "home", "look": False})
                 await self.control.sleep(d.STRESS_BACKGROUND_S)
-                await run("open_app", {"app": bundle, "look": False})
+                resume = d._RESUME.set(True)  # the same process, in front again: its language and text size stay
+                try:
+                    await run("open_app", {"app": bundle, "look": False})
+                finally:
+                    d._RESUME.reset(resume)
             elif kind == "network":
                 await run("network", {"mode": mode})
                 jr.network_set = mode != "normal"
@@ -375,7 +430,9 @@ class JourneyTools:
                     await run("rotate", {"to": "portrait", "look": False})
             else:  # relaunch
                 await run("close_app", {"app": bundle})
-                await run("open_app", {"app": bundle, "look": False})
+                # a new start is a launch with the journey's conditions (the tool's own call skips the gate that adds them)
+                await run("open_app", {"app": bundle, "look": False,
+                                       **{k: v for k, v in jr.conditions.items() if k in launchlib.KEYS}})
         looked = await run("look", {"screenshot": False})
         jr.see(looked["text"])
         line = f"Stress: {label}"

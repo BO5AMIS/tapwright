@@ -913,17 +913,9 @@ def more_candidates(total: int, shown: int) -> list[str]:
     return [f'  (+{total - shown} more; use a ref or "index")'] if total > shown else []
 
 
-def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
-    """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
-    is there, so a point never becomes an element). Several matches without an `index` are
-    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
-    if target.point is not None:
-        return target.point
-    if target.ref is not None:
-        for e in items:
-            if e.ref == target.ref:
-                return e
-        raise Refused("not_found", f"{target.ref} isn't on screen any more; look again.")
+def _hits(items: list[Element], target: Target) -> tuple[list[Element], str, str]:
+    """The elements an id, label or text target matches, in reading order, with how a message names the target and
+    what it says when nothing matches. The matches before the alert rule (`resolve` applies that)."""
     if target.id is not None:
         # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
         hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
@@ -941,13 +933,38 @@ def resolve(items: list[Element], target: Target) -> Element | tuple[float, floa
             hits = [e for e in pool if want in _norm(e.label) or want in _norm(e.value)]
         hits = _without_nested(hits)
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
+    return hits, what, miss
+
+
+def _in_alert(hits: list[Element]) -> tuple[list[Element], str]:
+    """AGENT-TOOLS v1.5: an alert's own Cancel, not the Cancel behind it. When some matches are in the alert, only
+    those count, and `index` picks among them."""
+    if len(hits) > 1 and any(e.in_alert for e in hits):
+        return [e for e in hits if e.in_alert], " in the alert (matches behind it don't count)"
+    return hits, ""
+
+
+def candidates(items: list[Element], target: Target) -> list[Element]:
+    """The elements `resolve` picks among for an id, label or text target, in its order: what `index` counts in. A
+    recording uses it to save an `index` that finds the same element again."""
+    return _in_alert(_hits(items, target)[0])[0] if target.kind in ("id", "label", "text") else []
+
+
+def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
+    """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
+    is there, so a point never becomes an element). Several matches without an `index` are
+    `ambiguous`, with candidates; none, or an `index` past the matches, are `not_found`."""
+    if target.point is not None:
+        return target.point
+    if target.ref is not None:
+        for e in items:
+            if e.ref == target.ref:
+                return e
+        raise Refused("not_found", f"{target.ref} isn't on screen any more; look again.")
+    hits, what, miss = _hits(items, target)
     if not hits:
         raise Refused("not_found", miss)
-    where = ""
-    if len(hits) > 1 and any(e.in_alert for e in hits):
-        # AGENT-TOOLS v1.5: an alert's own Cancel, not the Cancel behind it. When some matches are in the
-        # alert, only those count, and `index` picks among them
-        hits, where = [e for e in hits if e.in_alert], " in the alert (matches behind it don't count)"
+    hits, where = _in_alert(hits)
     if target.index is not None:
         if target.index >= len(hits):
             raise Refused("not_found", f"index {target.index} is out of range: only {len(hits)} "

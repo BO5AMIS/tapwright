@@ -64,6 +64,7 @@ def test_a_block_word_in_the_front_apps_own_list_names_the_app():
             await d.run_tool("a", "network", {"mode": "lossy"}, policy=p)
         assert str(e.value) == "blocked: the safety policy blocks network for Example."
         other = policy.parse({"apps": {"com.other": {"block": ["network"]}}})
+        d.session.foreground = "com.example.app"  # the phone names its front app (an unnamed one is refused)
         assert (await d.run_tool("a", "network", {"mode": "3g"}, policy=other))["text"].startswith("Network: 3g")
         await finish(stop, task)
     run(go)

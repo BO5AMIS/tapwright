@@ -21,8 +21,21 @@ Small fixes from the first real-app runs. No new tools.
   found by React Native's role words in the label or value (`radio button`, `checkbox`, English only), so no other
   `Other` changes: a card, a scroll indicator or a plain labelled view is listed as before. `audit` flags each such
   element once: no trait, so VoiceOver doesn't announce it as a control.
+- The first touch by id, label or text after `open_app` reads the screen again before it aims. The list `open_app`
+  answered with can miss a search field drawn a moment later, and a row under it was touched at its centre, beneath
+  the field. The row is now touched at its visible part.
+- A plain `open_app` after one with a language, region or text size says what it undid:
+  `Opened Example (com.example.app), back to the phone's own text size.`
+- `media`: when iOS asks the person whether the runner may add photos, `media` stops waiting at once and answers
+  `needs_a_person`. Tapwright never answers that prompt itself. The add finishes on its own once the person answers,
+  without holding up `alert` or `look`, and a repeated `media` call picks it up rather than adding twice.
+- The journey's stop line names the errors its report counts: `Findings: none. Errors: 2 (1 not_found, 1 covered).`
+- The live view's link with its key is never printed (the start line of `serve`, "already running", and `view`). An app
+  around the terminal had copied such links with the key hidden as `?token=SECRET` and opened them as tabs, which
+  could only fail. `viewer` leaves an open live view alone instead of opening another tab (`health` reports the
+  connected pages), and no test opens a real browser.
 
-## 1.5.0, "the Real User Update" (unreleased)
+## 1.5.0, "the Real User Update" (2026-11-13)
 
 Apps are made or broken by whether a user can find a feature, understand it and finish it easily. An agent can now
 test that, going through a feature as a real user would, and file a visual report. The interface is AGENT-TOOLS 1.12,
@@ -55,10 +68,10 @@ shared with Tapline.
 
 **Test pictures for photo pickers**
 - `media` adds pictures to the phone's photo library for an app's photo picker, after the user's OK, and removes only
-  what it added. It needs Tapwright's runner with the photo routes (runner version 3, not yet released); older runners
-  answer `unsupported` and say so.
+  what it added. It needs the runner this release pins, tw-16.15.3.3, which has the photo routes (`tapwright setup
+  --force` installs it); an older runner answers `unsupported` and says so.
 
-## 1.4.0, "the Fewer Steps Update" (unreleased)
+## 1.4.0, "the Fewer Steps Update" (2026-11-13)
 
 The same check should cost an agent no more calls on the iPhone than on Android. A QA pass found iPhone lanes took
 about 1.5 times the calls: failed targets, scrolling to search, detours through iOS Settings, and a `look` after every
@@ -84,15 +97,36 @@ action. The interface is AGENT-TOOLS 1.11, shared with Tapline.
   quiet, the connection drops or the daemon stops. Over Wi-Fi, `offline` and `lossy` are refused, as they would cut
   Tapwright's own link.
 
+**Fixes from the review of this release**
+- A secure field's text never reaches a recording, even when the field was below the screen: the step is saved from the
+  field `type_text` really typed into, after any scroll.
+- A `network` condition lives only as long as the agent that set it. The agent's MCP process sends a heartbeat every
+  few seconds and a goodbye when its stdio closes; the condition is cleared on the goodbye, 20 s after the heartbeat
+  stops (the process was killed), after 10 minutes without a call, and at the 30-minute cap. A condition whose
+  connection to the phone closes is noticed at once. A daemon that starts and finds a condition left by one that
+  crashed clears it before any agent's first call.
+- One agent never clears another's condition by accident: a failing `run` clears only the condition it set, a
+  replaced or ended condition is told to its owner in its next answer, and a goodbye from one agent leaves the
+  other's condition alone.
+- `network` checks a per-app policy against the app in front now, not the one at the last read, and refuses when the
+  phone can't say which it is and a policy blocks `network` for some app.
+- A plain `open_app` (or `text_size: system`) after one with a language, region or text size closes the running app
+  and opens it with the defaults, and says so.
+- `tap`, `long_press`, `toggle` and `type_text` with an `index` on an off-screen match follow that element through the
+  scroll by its own identifier (when nothing else in the tree has it) and act on it, never on another match, and the
+  policy checks the element that is touched. A match without an identifier of its own is scrolled into view and not
+  touched (`stale`: look, then target it by its ref): as a list scrolls its matches move, drop and change, and an
+  `index` can then name another one.
+
 **Habits that save calls**
 - The skill has `run` examples for common patterns and a "spend fewer calls" list: read the change list instead of
   calling `look`, target by id, let the action scroll, and put known steps in `run`.
 - The shared benchmark (QUALITY-BAR 2.4) adds calls per check: five everyday checks on Wayfare, held to no more calls
   than Android.
 
-## 1.3.1 (unreleased)
+## 1.3.1 (2026-11-13)
 
-Small fixes from a QA pass.
+Small fixes from an app tester's pass.
 
 - `tapwright doctor` checks where Tapwright runs from. In a git checkout with uncommitted changes it warns; with
   unresolved merge markers (`<<<<<<<`) in the package it fails. An installed package is fine, and no git means no
@@ -108,7 +142,7 @@ Small fixes from a QA pass.
 - The live view's page for a link without a valid key now says what to do (run `tapwright view`, or ask the agent to
   use its `viewer` tool), instead of one line a person couldn't act on.
 
-## 1.3.0, "the Diagnostics Update" (unreleased)
+## 1.3.0, "the Diagnostics Update" (2026-11-13)
 
 A failure now comes with its cause: the app's log, its crash, and how it performed. The interface is AGENT-TOOLS
 1.10, shared with Tapline.
@@ -129,12 +163,16 @@ A failure now comes with its cause: the app's log, its crash, and how it perform
   from a cold start to the first settled screen (`launch: true`).
 - In `run` and scripts a `performance` step can hold limits: `"expect": {"under": {"launch_s": 2, "memory_mb": 300,
   "drops": 0}}`.
+- A limit of its own: a batch of samples already in flight when the window opens carries no timestamp, so it can't be
+  told apart from the window's own and can skew a number at the very edge of the window. Samples are counted by when
+  they arrive, not by when the phone took them. Samples still waiting when the window ends, or lost to a process list
+  that couldn't be read, are said, and fail memory and CPU limits.
 
 **Failures explain themselves**
 - A `run` or `replay` step that fails adds the app's warnings and errors since that step began. `tapwright replay
   --junit` puts them in the test case's output, and pulls a crash report next to the script.
 
-## 1.2.0, "the Regression Update" (unreleased)
+## 1.2.0, "the Regression Update" (2026-11-12)
 
 A test now checks how screens look, not only what they say. The interface is AGENT-TOOLS 1.9, shared with
 Tapline.
@@ -147,13 +185,26 @@ Tapline.
 - In `run` and scripts it is a check: `expect: {"matches": "home"}` on a step, or a `compare_screen` step. A screen
   that differs stops the batch as `expect_failed`, naming where it changed.
 - `record` folds a `compare_screen` after an action into that step, and saves the reference pictures next to the
-  script in `<script>.references/`, so a script and its pictures travel together.
+  script in `<script>.references/`, so a script and its pictures travel together. A `run` made while recording keeps
+  its visual checks too (`expect.matches` and `compare_screen` steps). A script keeps one picture for each name, so a
+  recording that compares one name in two apps is refused.
 - `tapwright replay` takes `--update-references` to save new references after an intended design change. A failed
-  check writes its picture to `<script>.diff/`, and the JUnit failure names it.
+  check writes its picture to `<script>.diff/`, and the JUnit failure names it. A picture
+  far larger than any screen, or one a script's reference would stretch to such a size, is refused before it is
+  resized. A recording refuses an update that would change a picture it already compared, before anything is written.
+- The safe write covers the reference pictures (the store's and a script's `.references/` folder) and a script's
+  `.diff/` folder, and nothing else: they are written whole or not at all, and never through a link (a symlinked
+  folder is refused, a symlinked file is replaced). On Linux and macOS every folder is held open while the file is
+  written. On Windows the folders are checked again before and after the move, which narrows the window for a folder
+  swapped for a link, but can't close it: a process running as the same user that swaps a folder at that very moment
+  can still get a write through.
 
 **Watching motion**
 - `filmstrip`: several frames in one numbered picture, for animations and loading states, taken from the live
-  stream; `tap` taps first and films what it sets off.
+  stream. With `tap`, frame 1 is taken before the tap and the other frames follow it, so the strip shows what the tap
+  sets off. A filmstrip is composed in memory. With `tapwright mcp --screenshots DIR`, filmstrips and the picture
+  `compare_screen` returns for a difference are saved to that folder by the ordinary screenshot writer, which is
+  outside the safe write above.
 
 ## 1.1.1 (2026-11-12)
 

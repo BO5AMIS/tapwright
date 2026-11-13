@@ -76,6 +76,10 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     return f"{role}{named}{shown} @{box[0]},{box[1]} {box[2]}x{box[3]}" if any(box[2:]) else f"{role}{named}{shown}"
 
 
+_NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+_FRAME = re.compile(rf"\s*\{{\s*\{{\s*{_NUMBER}\s*,\s*{_NUMBER}\s*\}}\s*,\s*\{{\s*{_NUMBER}\s*,\s*{_NUMBER}\s*\}}\s*\}}\s*")
+
+
 def _box(rect: object) -> tuple[int, int, int, int]:
     """XCTest's frame as whole points (x, y, w, h): a dict with x, y, width, height, or a "{{x, y}, {w, h}}" string.
     Zeros when it is neither."""
@@ -83,8 +87,10 @@ def _box(rect: object) -> tuple[int, int, int, int]:
         if isinstance(rect, dict):
             return tuple(round(float(rect.get(k, 0) or 0)) for k in ("x", "y", "width", "height"))  # type: ignore[return-value]
         if isinstance(rect, str):
-            x, y, w, h = (round(float(n)) for n in re.findall(r"-?\d+(?:\.\d+)?", rect)[:4])
-            return x, y, w, h
+            frame = _FRAME.fullmatch(rect)  # the whole "{{x, y}, {w, h}}", or none of it
+            if frame is not None:
+                x, y, w, h = (round(float(n)) for n in frame.groups())
+                return x, y, w, h
     except (TypeError, ValueError, OverflowError):  # (an infinite or absurd number is no frame)
         pass
     return 0, 0, 0, 0

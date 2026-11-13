@@ -37,3 +37,11 @@ def _no_real_browser(monkeypatch):
     monkeypatch.setattr(webbrowser, "open", refuse)
     monkeypatch.setattr(webbrowser, "open_new", refuse)
     monkeypatch.setattr(webbrowser, "open_new_tab", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _network_marker_in_tmp(monkeypatch, tmp_path):
+    """The daemon notes a `network` condition on disk, so a crashed daemon's is cleared at the next start: never the
+    owner's real ~/.tapwright in a test."""
+    from tapwright import store
+    monkeypatch.setattr(store, "NETWORK_FILE", tmp_path / "network-marker" / "network.json")

@@ -156,8 +156,17 @@ def test_without_full_access_remove_says_what_to_delete_by_hand(pictures):
                              "denied). Delete them by hand in Photos > Recently Added: food.jpg, label.PNG, scan.heic.")
         assert not any(isinstance(c, tuple) and c[0] == "photos_delete" for c in d.session.calls)
         assert len(media.load()["a"]) == 3  # still recorded
-        # iOS has not been asked yet: the runner asks, and the answer is no
-        d.session.photo_access = {"add": "authorized", "full": "notDetermined"}
+        # iOS has not been asked yet: the delete route would ask for full access, so it isn't called (Codex, PR #7)
+        for undecided in ({"add": "authorized", "full": "notDetermined"}, {"add": "authorized"}):
+            d.session.photo_access = undecided
+            r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
+            assert r["text"].startswith("Couldn't remove them: deleting needs full access to the photo library, and "
+                                        "Tapwright never asks for it (it adds with add-only access). Delete them by "
+                                        "hand in Photos > Recently Added: food.jpg")
+            assert not any(isinstance(c, tuple) and c[0] == "photos_delete" for c in d.session.calls)
+            assert len(media.load()["a"]) == 3
+        # a full access the runner had but lost on the way still words the by-hand answer
+        d.session.photo_access = {"add": "authorized", "full": "authorized"}
         d.session.photo_deletes = DeviceError("HTTP 500: full access to the photo library is needed to delete")
         r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
         assert r["text"].startswith("Couldn't remove them: the runner has no full access to the photo library. "

@@ -105,7 +105,8 @@ class Screen:
     index: int
     signature: frozenset
     title: str
-    acted: bool = False
+    acted: bool = False  # something was done here at some visit (the report's "nothing done here")
+    acted_here: bool = False  # ... in the current visit; with scrolls and reads, counted per visit
     scrolls: int = 0
     reads: int = 0
     frame: int | None = None  # the index in Journey.frames of the first picture of it
@@ -133,7 +134,7 @@ class Journey:
     started_wall: datetime.datetime
     folder: Path
     app: str | None = None  # the app under test (bundle id) when it began, for stress moments and undoing conditions
-    eyes_off_at_call: int | None = None
+    eyes_switches: list[tuple[int, str]] = field(default_factory=list)  # (call number, eyes switched to), in order
     calls: int = 0
     taps: int = 0
     typing: int = 0
@@ -158,7 +159,6 @@ class Journey:
     launched_with: dict = field(default_factory=dict)  # the language/region/text size the app was launched with
     left_out: int = 0  # pictures not kept because another app was in front (H1)
     over_cap: int = 0  # pictures not kept because the report holds at most MAX_FRAMES
-    muted: int = 0  # >0 while the tool makes calls of its own (stress moments, conditions): not measured
 
     @property
     def users_eyes(self) -> bool:
@@ -167,7 +167,7 @@ class Journey:
     # ---- the numbers ----
     def note_call(self, name: str, args: dict, text: str, seconds: float, error: str | None) -> bool:
         """Count one call this agent made. Returns whether the screen changed (a new screen was entered)."""
-        if self.muted or name == "journey":
+        if name == "journey":
             return False
         self.calls += 1
         if error is not None:
@@ -195,9 +195,9 @@ class Journey:
             if left is not None:
                 left.scrolls += 1
         if name in ACTING and left is not None:
-            left.acted = True
+            left.acted = left.acted_here = True
         entered = self.see(text)
-        if name == "back" and entered and left is not None and not left.acted:
+        if name == "back" and entered and left is not None and not left.acted_here:
             self.wrong_turns += 1
             if left.scrolls or left.reads >= 2:
                 self.dead_ends += 1
@@ -214,6 +214,7 @@ class Journey:
         for s in self.screens:
             if alike(s.signature, sig) >= SAME_SCREEN:
                 self.current = s
+                s.acted_here, s.scrolls, s.reads = False, 0, 0  # a new visit: wrong turns and dead ends count per visit
                 return True
         self.current = Screen(len(self.screens) + 1, sig, title_of(text))
         self.screens.append(self.current)
@@ -223,12 +224,26 @@ class Journey:
         return max(0.0, now - self.started)
 
     # ---- findings (also the API for ux_check: journey.add_finding) ----
-    def add_finding(self, finding: dict) -> dict:
+    def add_finding(self, finding: dict, at: "Screen | None | object" = None) -> dict:
         """File a finding: `{severity, what, basis, screen?, rect?}`. `screen` is a screen's number or its name (the
-        current one by default); `rect` is `(x, y, width, height)` in points to mark on its picture."""
+        current one by default); `rect` is `(x, y, width, height)` in points to mark on its picture. `at` (ux_check):
+        the screen the finding was found on, as screen_of matched it when it was read, or NOWHERE when none matched;
+        it stands for the current screen, which another call may have moved on since."""
         clean = check_finding(finding)
         if len(self.findings) >= MAX_FINDINGS:
             raise Refused("bad_params", f"a journey keeps at most {MAX_FINDINGS} findings")
+        if isinstance(at, Screen):
+            clean["screen_index"] = at.index
+            clean["screen"] = f"{at.index}. {at.title}"
+            # that screen's own picture, or none: never another screen's (Codex, PR #7 cycle 6)
+            clean["frame"] = next((i for i in range(len(self.frames) - 1, -1, -1)
+                                   if self.frames[i].screen == at.index), None)
+            self.findings.append(clean)
+            return clean
+        if at is NOWHERE:  # a screen the journey hasn't listed: filed without a screen or a picture to mark
+            clean["screen_index"], clean["frame"] = None, None
+            self.findings.append(clean)
+            return clean
         if "screen" not in clean and self.current is not None:
             clean["screen_index"] = self.current.index
             clean["screen"] = f"{self.current.index}. {self.current.title}"
@@ -237,6 +252,15 @@ class Journey:
         clean["frame"] = self.last_frame_of(clean.get("screen_index"))
         self.findings.append(clean)
         return clean
+
+    def screen_of(self, lines: str) -> "Screen | None":
+        """The journey's screen whose elements these element lines are, without moving `current`: the current one when
+        it is alike as `see` takes it, else a screen already seen that is the same, else None."""
+        sig = signature(lines)
+        if self.current is not None and alike(self.current.signature, sig) >= NEW_SCREEN:
+            return self.current
+        best = max(self.screens, key=lambda s: alike(s.signature, sig), default=None)
+        return best if best is not None and alike(best.signature, sig) >= SAME_SCREEN else None
 
     def screen_number(self, named: object) -> int | None:
         if named is None:
@@ -262,11 +286,16 @@ class Journey:
         return {sev: sum(1 for f in self.findings if f["severity"] == sev) for sev in SEVERITIES}
 
 
-def add_finding(client: str, finding: dict) -> bool:
+NOWHERE = object()  # Journey.add_finding: on no screen the journey knows
+
+
+def add_finding(client: str, finding: dict, lines: str | None = None) -> bool:
     """File a `ux_check` finding in the journey `client` has running (docs/AGENT-TOOLS.md §17.3, §17.5). `finding` is
     `{kind, element, what, basis, screen}`; its severity comes from its kind (a house rule is high) and the box round
     the element from the `@x,y WxH` of its line. It goes on the journey's current screen (ux_check reads that one).
-    The same finding twice (the agent checked the screen again) is filed once. True when it was filed."""
+    The same finding twice (the agent checked the screen again) is filed once. True when it was filed. `lines`: the
+    element lines of the screen ux_check read, which name the screen the finding goes on (another call of the agent
+    may have moved the journey's current screen on meanwhile, Codex, PR #7 cycle 5)."""
     jr = running.get(client)
     if jr is None or not isinstance(finding, dict):
         return False
@@ -274,7 +303,11 @@ def add_finding(client: str, finding: dict) -> bool:
     what, basis = str(finding.get("what") or "").strip(), str(finding.get("basis") or "").strip()
     if not what or not basis:
         return False
-    here = jr.current.index if jr.current is not None else None
+    place = (jr.screen_of(lines) or NOWHERE) if lines is not None else None
+    if lines is None:
+        here = jr.current.index if jr.current is not None else None
+    else:
+        here = place.index if isinstance(place, Screen) else None
     if any((f.get("kind"), f.get("element"), f["what"], f.get("screen_index")) == (kind or None, element or None, what, here)
            for f in jr.findings):
         return False
@@ -286,7 +319,7 @@ def add_finding(client: str, finding: dict) -> bool:
         raw["element"] = element
         if (m := _PLACE.search(element)) is not None:
             raw["rect"] = tuple(float(v) for v in m.groups())
-    jr.add_finding(raw)
+    jr.add_finding(raw, place)
     return True
 
 

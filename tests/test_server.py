@@ -412,6 +412,8 @@ def test_a_link_without_a_valid_key_says_how_to_open_the_live_view():
         assert r.status_code == 401
         assert "This link has no valid key" in r.text and "tapwright view" in r.text and "viewer" in r.text
         assert "SECRET" not in r.text and TOKEN not in r.text
+        # (CodeRabbit, PR #5) a link with a valid key does open it, so the page must not say a shared link never works
+        assert "never works" not in r.text and "keep" in r.text.lower() and "private" in r.text.lower()
 
 
 def test_the_live_views_key_is_never_printed():
