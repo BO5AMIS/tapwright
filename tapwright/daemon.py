@@ -2244,16 +2244,16 @@ class Daemon(journey_tool.JourneyTools):
                 inputs = [e for e in items if e.role == "input"]
                 field = inputs[0] if len(inputs) == 1 else None
             self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
-        return self._pre_aim(args.get("target"), items)
+        return self._pre_aim(args.get("target"), items, name)
 
     @staticmethod
-    def _pre_aim(target: object, items: list[ui.Element]) -> dict | None:
+    def _pre_aim(target: object, items: list[ui.Element], tool: str | None = None) -> dict | None:
         """The selector worked out before the call. One that holds a test account's value is never worked out from this
         list (it may be stale, or empty before a first look): it is made from the element the touch really aimed at, in
         `_record_step` (Codex, PR #10 cycle 6)."""
         if batch.holds_value(target):
             return None
-        return batch.recorded_target(target, items)
+        return batch.recorded_target(target, items, tool)
 
     def _record_expect(self, client_id: str, args: dict) -> None:
         """While recording: a `wait_for` that held right after an action becomes that step's `expect`. A wait on a test
@@ -2325,6 +2325,27 @@ class Daemon(journey_tool.JourneyTools):
             step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
+    def _typed_account_value(self, rec: dict, step: dict, text: str, secure: bool) -> str | None:
+        """The text a recorded `type_text` types, when it is or holds a test account's value (§18.6; Codex, PR #10 cycle 8).
+        Text that is exactly an account's username or password is saved as the variable the tools already type
+        (`${account.username}` / `${account.password}`, filled from drive's account); that variable is returned. Text that
+        merely holds a value, or is the placeholder an answer shows, has no variable to stand for it, and a value that
+        doesn't suit the field (a password in a text field) isn't one the variable would type: the step is left unsaved,
+        so the save is refused naming it, and its text is cleared. None for any other text (saved as typed)."""
+        if accountlib.mentions(text):
+            return None  # the placeholder itself, checked by the typing
+        loaded = self._loaded()
+        kinds = {kind for _, kind, value in loaded.entries() if value == text}
+        if kinds:
+            kind = "password" if secure else "username"
+            if kind in kinds:
+                return "${account." + kind + "}"
+        elif not loaded.holds(text):
+            return None
+        rec.setdefault("unsaved_text", []).append(len(rec["steps"]) + 1)
+        step["text"] = ""
+        return None
+
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False,
                      resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None) -> None:
         """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
@@ -2339,23 +2360,32 @@ class Daemon(journey_tool.JourneyTools):
         key = "tap" if name == "performance" else "target"  # the argument that aims at an element
         step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
         guessed = rec.pop("next_secure", False)
+        variable = None
+        if name == "type_text" and isinstance(args.get("text"), str) and not ("route" in rec and args.get("as")):
+            variable = self._typed_account_value(rec, step, args["text"], guessed or secure)
         if name == "type_text" and (guessed or secure):
             # a password is never written to a file (safety review M4): the user puts a test password in the script
             step["text"] = ""
             step["secure"] = True
-            if isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
+            if variable is not None:
+                step["text"] = variable  # the account's password, as the variable that types it
+            elif isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
                 step["text"] = args["text"]  # an account's placeholder isn't a password: it is what a script should hold
             else:
                 rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
+        elif variable is not None:
+            step["text"] = variable
         step.pop("as", None)
-        if name == "type_text" and "route" in rec and not step.get("secure") and isinstance(step.get("text"), str):
+        if variable is not None and "route" in rec and routes.ACCOUNT not in rec["variables"]:
+            rec["variables"].append(routes.ACCOUNT)  # a route that types an account's value lists it, so drive is given one
+        if name == "type_text" and variable is None and "route" in rec and not step.get("secure") and isinstance(step.get("text"), str):
             step["text"] = routes.recorded_text(step["text"], args.get("as"))  # `${name}`, or the text with a `${` escaped
             if args.get("as") and args["as"] not in rec["variables"]:
                 rec["variables"].append(args["as"])
         given = args.get(key)
         if aimed is None and batch.holds_value(given) and resolved:
             found, items = resolved[0]  # the element the touch really went to, in the list it was aimed from
-            aimed = batch.recorded_element(found, items)
+            aimed = batch.recorded_element(found, items, name)
         if aimed is not None:
             step[key] = aimed
         elif batch.holds_value(given):
@@ -2553,6 +2583,16 @@ class Daemon(journey_tool.JourneyTools):
         """A step that aimed by, or waited for, a test account's value and has nothing else to be saved by makes the save
         refused (§18.6; Codex, PR #10 cycle 6): it is never left out, and the value is never written. The recording
         ends, so it can be made again aiming by an id or a point. The step is named, never the value."""
+        typed = sorted(set(rec.get("unsaved_text") or ()))
+        if typed:
+            del self._recording[client_id]
+            many = len(typed) > 1
+            raise Refused("bad_params", f"can't save the recording: step{'s' if many else ''} {', '.join(map(str, typed))} "
+                                        "typed text that is or holds a test account's value in a way no variable can stand "
+                                        "for (only the whole text, a username in a text field or a password in a secure one, "
+                                        "is saved, as ${account.username} or ${account.password}). Nothing was saved and the "
+                                        "recording has ended: record it again, typing the account's value as the whole text "
+                                        "of a step.")
         unsaved = sorted(set(rec.get("unsaved") or ()))
         if not unsaved:
             return
@@ -5915,6 +5955,7 @@ class Daemon(journey_tool.JourneyTools):
                 point = self._switch_control(view.items, found, shown)
         want = a.get("value")
         if want is not None and found.checked == want:
+            self._touching(found)  # nothing is touched, but a recording saves this switch, not the generic lookup's element
             return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
         aimed_with = self.session.items
         said = await self._police("toggle", a, found)
@@ -5965,13 +6006,7 @@ class Daemon(journey_tool.JourneyTools):
     @staticmethod
     def _switch_first(items: list[ui.Element], target: ui.Target) -> ui.Element:
         """The element a target names, preferring a switch: a row and its switch often share a label."""
-        if target.ref is None:
-            try:
-                return ui.resolve([e for e in items if e.role == "switch"], target)
-            except Refused as e:
-                if e.code != "not_found":
-                    raise  # several switches match: the agent picks one
-        return ui.resolve(items, target)
+        return ui.switch_first(items, target)
 
     async def _back(self, view, a: dict) -> str:
         """Close an open popover by a touch outside it (AGENT-TOOLS v1.4); else tap the navigation bar's back

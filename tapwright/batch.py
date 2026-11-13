@@ -295,7 +295,7 @@ def saved_script(data: dict, redact: Callable[[str], str] | None, where: str) ->
         raise Refused("bad_params", f"can't save {where}: {e}") from None
 
 
-def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
+def recorded_target(target: dict | None, items: list[ui.Element], tool: str | None = None) -> dict | None:
     """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
     `index` when that target matches several elements. A ref is turned into the element it names first.
 
@@ -312,12 +312,12 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
     if not target.get("ref") and not holds_value(named):
         return named
     try:
-        found = ui.resolve(items, ui.parse_target(target))
+        found = ui.replayed(items, ui.parse_target(target), tool)
     except Refused:
         return None
     if not isinstance(found, ui.Element):
         return None
-    return recorded_element(found, items)
+    return recorded_element(found, items, tool)
 
 
 def holds_value(selector: object) -> bool:
@@ -327,21 +327,27 @@ def holds_value(selector: object) -> bool:
                                               for k in ("id", "label", "text"))
 
 
-def recorded_element(found: ui.Element, items: list[ui.Element]) -> dict:
+def recorded_element(found: ui.Element, items: list[ui.Element], tool: str | None = None) -> dict:
     """How a recording saves the element `found` of the list `items`: its id, else its label, else its text (one that
-    holds no account value, and that finds this very element again among `items`, with `index` when it matches several),
-    else its point."""
+    holds no account value, and that finds this very element again among `items` as the tool `tool` that replays the step
+    resolves it, with `index` when it matches several), else its point."""
     for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
         if not value or ui.private(value):
             continue
         aim = {kind: value}
-        # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
-        same = ui.candidates(items, ui.parse_target(aim))
+        # the candidates are the ones the replaying tool picks among (`tool`: a toggle counts the switches first), so the
+        # saved selector finds this element again
+        same = ui.replayed_candidates(items, ui.parse_target(aim), tool)
         place = next((n for n, e in enumerate(same) if e is found), None)
         if place is None:
             continue  # this selector never reaches the element (a nested text, a match behind an alert): try the next
         if len(same) > 1:
             aim["index"] = place
+        try:  # and it is checked as the replaying tool resolves it (Codex, PR #10 cycle 8)
+            if ui.replayed(items, ui.parse_target(aim), tool) is not found:
+                continue
+        except Refused:
+            continue
         return aim
     x, y = found.center
     return {"x": round(x, 1), "y": round(y, 1)}

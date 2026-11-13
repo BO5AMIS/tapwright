@@ -185,13 +185,33 @@ def forms(value: str) -> frozenset[str]:
 
 _forms = forms  # (the old name)
 
+_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
+
+
+def upper_escapes(text: str) -> str:
+    """The text with the hex digits of every percent escape uppercased (`%2f` is `%2F`: hex digits are case-insensitive in a
+    URL, `quote` writes them in capitals). The same length, so a span found in it is the same span of the text; the rest
+    of the text keeps its case (Codex, PR #10 cycle 8)."""
+    return _ESCAPE.sub(lambda m: m.group(0).upper(), text) if "%" in text else text
+
+
+def _swap(text: str, norm: str, value: str, label: str) -> tuple[str, str]:
+    """`text` and its `norm` (upper_escapes of it) with every `value` found in `norm` replaced by `label` in both."""
+    out, out_norm, at = [], [], 0
+    while (i := norm.find(value, at)) >= 0:
+        out += [text[at:i], label]
+        out_norm += [norm[at:i], label]
+        at = i + len(value)
+    return "".join(out) + text[at:], "".join(out_norm) + norm[at:]
+
 
 class Redaction:
     """A set of account values, as (name, kind, value), and what redacts them: every form of each (`forms`) becomes
     `<name's username>` / `<name's password>`, the longest form first, so a value that holds another is replaced whole."""
 
     def __init__(self, entries: "tuple[tuple[str, str, str], ...]" = ()) -> None:
-        pairs = [(form, f"<{name}'s {kind}>") for name, kind, value in entries for form in forms(value)]
+        # (forms and the text they are looked for in both have the hex digits of each %XX uppercased: Codex, PR #10 cycle 8)
+        pairs = [(upper_escapes(form), f"<{name}'s {kind}>") for name, kind, value in entries for form in forms(value)]
         pairs.sort(key=lambda pair: -len(pair[0]))
         self.values: list[tuple[str, str]] = pairs
         shown = sorted({label for _, label in pairs}, key=len, reverse=True)
@@ -210,19 +230,22 @@ class Redaction:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
         values = self.values
-        if not text or self._any is None or self._any.search(text) is None:
+        if not text or self._any is None or self._any.search(upper_escapes(text)) is None:
             return text
         parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
         for n in range(0, len(parts), 2):
+            part = parts[n]
+            norm = upper_escapes(part)  # (same length, so a match in it is the same span of the part)
             for value, label in values:
-                if value in parts[n]:
-                    parts[n] = parts[n].replace(value, label)
+                if value in norm:
+                    part, norm = _swap(part, norm, value, label)
+            parts[n] = part
         return "".join(parts)
 
     def holds(self, text: str) -> bool:
         if not text:
             return False
-        return bool(self._any is not None and self._any.search(text)) or bool(
+        return bool(self._any is not None and self._any.search(upper_escapes(text))) or bool(
             self.placeholders is not None and self.placeholders.search(text))
 
 

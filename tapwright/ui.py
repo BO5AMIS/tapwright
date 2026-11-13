@@ -1233,6 +1233,32 @@ def candidates(items: list[Element], target: Target) -> list[Element]:
     return _in_alert(_hits(items, target)[0])[0] if target.kind in ("id", "label", "text") else []
 
 
+def switch_first(items: list[Element], target: Target) -> Element:
+    """The element a target names, preferring a switch: a row and its switch often share a label (what `toggle` resolves)."""
+    if target.ref is None:
+        try:
+            return resolve([e for e in items if e.role == "switch"], target)  # type: ignore[return-value]
+        except Refused as e:
+            if e.code != "not_found":
+                raise  # several switches match: the agent picks one
+    return resolve(items, target)  # type: ignore[return-value]
+
+
+def replayed_candidates(items: list[Element], target: Target, tool: str | None) -> list[Element]:
+    """`candidates` as the tool that will replay the step picks among them: `toggle` counts `index` among the switches
+    first (Codex, PR #10 cycle 8), every other tool among all the matches."""
+    if tool == "toggle" and target.ref is None:
+        hits = candidates([e for e in items if e.role == "switch"], target)
+        if hits:
+            return hits
+    return candidates(items, target)
+
+
+def replayed(items: list[Element], target: Target, tool: str | None) -> Element | tuple[float, float]:
+    """`resolve` as the tool that will replay the step resolves a target."""
+    return switch_first(items, target) if tool == "toggle" else resolve(items, target)
+
+
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
     """The element a target names on the agent's list, or its point (a touch at x, y hits whatever
     is there, so a point never becomes an element). Several matches without an `index` are

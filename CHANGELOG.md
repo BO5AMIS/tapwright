@@ -49,6 +49,11 @@
   sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so
   a value its bytes hold only escaped is caught too. The map writer redacts only content fields (never the format, a hash, a key or a
   name), and a redacted map that wouldn't read never replaces the file.
+  Percent escapes match in any case of their hex digits (`%2f` is `%2F`) without making the rest of a value case-insensitive.
+  Typed account values are recorded as `${account.username}` / `${account.password}` (text that is exactly the value, a
+  username in a text field, a password in a secure one); text that only holds a value is refused naming the step. A
+  recorded selector is counted and checked the way the replaying tool resolves it (a toggle counts switches first), and a
+  toggle that changes nothing is still recorded by its switch.
 - `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
   console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
   sent.
