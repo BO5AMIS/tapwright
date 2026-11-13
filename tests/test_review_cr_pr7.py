@@ -73,3 +73,60 @@ def test_a_double_tap_refused_at_the_second_touch_still_advances_the_screen_gene
     run(go)
 
 
+# ---- 3. a failed version probe is not "an older runner" ----
+class Calls:
+    def __init__(self, answer):
+        self.answer, self.sent = answer, []
+
+    async def __call__(self, method, path, payload=None, timeout=30, again=None):
+        self.sent.append(path)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return {"value": self.answer}
+
+
+def probing(answer) -> tuple[Session, Calls]:
+    s = Session(None)
+    calls = Calls(answer)
+
+    async def ensure():
+        return None
+    s.ensure, s._call = ensure, calls
+    return s, calls
+
+
+def test_a_version_probe_that_failed_is_raised_and_asked_again_not_cached_as_version_zero():
+    s, calls = probing(DeviceError("WebDriverAgent: timeout: no answer"))
+    with pytest.raises(DeviceError):
+        asyncio.run(s.runner_version())
+    assert s.fast_tap is None  # nothing was decided
+    calls.answer = {"tapwright": 3}
+    assert asyncio.run(s.runner_version()) == 3 and s.fast_tap is True
+    s, _ = probing(DeviceError("WebDriverAgent: unknown command: Unhandled endpoint"))  # the route is not there
+    assert asyncio.run(s.runner_version()) == 0 and s.fast_tap is False
+
+
+def test_an_ordinary_touch_still_falls_back_to_w3c_when_the_probe_failed(monkeypatch):
+    monkeypatch.setattr(session_module, "FAST_TAP", "1")
+    s, _ = probing(DeviceError("WebDriverAgent: timeout: no answer"))
+    assert asyncio.run(s._fast_tap(30, 40, 60)) is False  # (no raise: the tap goes on as W3C actions)
+    assert s.fast_tap is None  # and the next one asks again
+
+
+def test_media_answers_a_retryable_error_when_the_version_probe_failed_not_an_older_runner(tmp_path):
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        pic = tmp_path / "a.png"
+        pic.write_bytes(bytes([0x89]) + b"PNG" + b"x")
+
+        async def failing():
+            raise DeviceError("timeout: no answer")
+        d.session.runner_version = failing
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "media", {"add": [str(pic)], "confirm": True})
+        assert e.value.code == "internal" and "try again" in str(e.value) and "older" not in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+

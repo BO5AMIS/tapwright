@@ -3199,7 +3199,11 @@ class Daemon(journey_tool.JourneyTools):
             except ValueError as e:
                 raise Refused("bad_params", str(e)) from None
         await self.wait_connected()
-        if await self._read(lambda: self.session.runner_version()) < medialib.MIN_TW_VERSION:
+        try:
+            version = await self._read(lambda: self.session.runner_version())
+        except DeviceError as e:  # the question got no answer: not an old runner, so ask again
+            raise Refused("internal", f"couldn't ask the runner which version it is ({e}); try again") from None
+        if version < medialib.MIN_TW_VERSION:
             raise Refused("unsupported", medialib.OLD_RUNNER)
         access = await self._read(lambda: self.session.photos_access())
         if add:

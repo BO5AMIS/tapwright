@@ -482,13 +482,21 @@ class Session:
             return False
         return True
 
-    async def _fast_routes(self) -> None:
-        """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none)."""
+    async def _fast_routes(self, strict: bool = False) -> None:
+        """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none). Only an
+        answer that says the route is not there (or one without a version) is remembered as version 0. A probe that
+        failed for another reason (a timeout, a dropped line) is not remembered (CodeRabbit, PR #7): a touch goes on
+        through W3C actions this time and asks again next time, and with `strict` the failure is raised."""
         if self.fast_tap is not None:
             return
         try:
             answer = await self._call("GET", FAST_VERSION_PATH, timeout=LOCK_WAIT)
-        except DeviceError:
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" not in said and "unknown method" not in said:
+                if strict:
+                    raise
+                return  # fast_tap stays None: no fast route for this call, and the next one asks again
             answer = {}
         value = answer.get("value")
         version = value.get("tapwright") if isinstance(value, dict) else None
@@ -499,7 +507,7 @@ class Session:
     async def runner_version(self) -> int:
         """The fork's route version of this phone's runner (0: not the fork)."""
         await self.ensure()
-        await self._fast_routes()
+        await self._fast_routes(strict=True)  # a probe that failed is raised: media answers a retryable error
         return self.tw_version
 
     async def photos_access(self) -> dict:
