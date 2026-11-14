@@ -675,3 +675,28 @@ def test_an_id_that_carries_content_is_never_in_a_places_key():
               f'<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">{rows}'
               '</XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
     assert set(ui.read(source, (430.0, 932.0)).structure.ids) == set(kept)
+
+
+def test_the_focused_field_is_never_behind_a_layer():
+    """Seen on the phone 2026-11-14 (Calendar's search): a later full-screen container that starts with an empty
+    full-screen view (like a sheet's backdrop) and holds a button reads as a presentation over the search bar, whose
+    field has the keyboard. The runner's focus says the field is in front, so that layer hides nothing there."""
+    def search_field(focused):
+        attr = ' focused="true"' if focused else ""
+        return (f'<XCUIElementTypeSearchField type="XCUIElementTypeSearchField" name="Search" label="Search" x="20" '
+                f'y="58" width="331" height="48"{attr}/>')
+
+    def source(focused):
+        return ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" label="Lab" '
+                'bundleId="com.example.lab" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="121">'
+                f'{search_field(focused)}</XCUIElementTypeOther>'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" name="results" label="Results" x="0" y="0" width="430" '
+                'height="932"><XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932"/>'
+                '<XCUIElementTypeButton type="XCUIElementTypeButton" name="Today" label="Today" x="176" y="861" '
+                'width="78" height="38"/></XCUIElementTypeOther>'
+                '</XCUIElementTypeOther></XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
+    assert any(e.role == "input" for e in ui.read(source(True), (430.0, 932.0)).items)
+    assert not any(e.role == "input" for e in ui.read(source(False), (430.0, 932.0)).items)  # (the read as before)

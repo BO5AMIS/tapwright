@@ -900,6 +900,12 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     tree.structure = _structure(root, screen_rect)
     tree.back = _back_of(root, screen) if screen else None
 
+    # The field iOS says has the keyboard focus is in front: a layer that would hide it is no layer there (seen on the
+    # phone 2026-11-14: Calendar's search results, a full-screen container that starts with an empty full-screen view
+    # like a sheet's backdrop, hid the search bar whose field had the keyboard). Only the runner's focus says so.
+    focused = [(number, e.center) for e, number, _ in found if e.focused]
+    if focused:
+        hidden[:] = [h for h in hidden if not any(h[0] <= n < h[1] and _holds(h[2], c) for n, c in focused)]
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
     def over(number: int, point: tuple[float, float], barlike: bool) -> tuple[int, int] | None:
