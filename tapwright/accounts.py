@@ -115,6 +115,7 @@ class Entry:
     values: dict[str, str] = field(default_factory=dict, repr=False)
     apps: tuple[str, ...] | None = None
     known: bool = True
+    explore: bool = False  # the user marked it `"explore": true` (§25.6): `explore` may type it, or use the account for the way back
 
 
 @dataclass(frozen=True)
@@ -1220,6 +1221,9 @@ def _read_v2(data: dict) -> "tuple[dict[str, Entry], str | None]":
         apps = entry.get("apps")
         if apps is not None and (not isinstance(apps, list) or not all(isinstance(a, str) and a for a in apps)):
             return {}, f"{name}'s apps must be a list of bundle ids"
+        marked = entry.get("explore")
+        if marked is not None and not isinstance(marked, bool):
+            return {}, f"{name}'s explore must be true or false"
         known = kind in KIND_FIELDS or kind == FIXTURE
         values: dict[str, str] = {}
         for key, value in entry.items():
@@ -1239,7 +1243,7 @@ def _read_v2(data: dict) -> "tuple[dict[str, Entry], str | None]":
                 count += 1
         if count > MAX_VALUES:
             return {}, f"it holds more than {MAX_VALUES} values; a vault file holds at most {MAX_VALUES} (split it)"
-        found[name] = Entry(name, kind, values, tuple(apps) if apps is not None else None, known)
+        found[name] = Entry(name, kind, values, tuple(apps) if apps is not None else None, known, marked is True)
     return found, None
 
 

@@ -12,7 +12,7 @@ CODES = ["not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", 
          "reconnecting", "not_connected", "timeout", "bad_params", "unsupported", "not_allowed", "internal"]
 REASONS = ["disabled", "off_screen", "covered", "under_tab_bar", "behind_alert", "no_action"]
 TOOLS = ["network", "audit", "ux_check", "media", "compare_screen", "filmstrip", "performance", "logs", "crash", "run", "record", "replay", "look", "tap", "long_press", "type_text", "scroll", "toggle", "back", "open_url", "wait", "wait_for",
-         "apps", "session_report", "map", "drive", "open_app", "viewer", "close_app", "alert", "press_button", "swipe", "rotate", "journey", "notifications"]
+         "apps", "session_report", "map", "drive", "open_app", "viewer", "close_app", "alert", "press_button", "swipe", "rotate", "journey", "notifications", "explore"]
 ONLY_HERE = {"close_app", "alert", "press_button", "rotate", "network", "notifications"}
 OLD = ["list_apps", "launch_app", "terminate_app"]
 

@@ -74,8 +74,8 @@ def test_no_field_is_typed_in_or_tapped_a_switch_is_left_alone_and_a_may_submit_
     result = run(build(tmp_path, phone)[0])
     touched = {k for _, k in phone.touched}
     assert not touched & {"name-field", "pw-field"}  # a text input is only read, a secure one never touched
-    assert "notify-switch" not in touched  # toggles are part 2b's: left untried, listed
-    assert any(sig == "id:notify-switch" and kind == "toggle" for _, sig, kind in result.deferred)
+    assert [(k, v) for _, k, v in phone.toggles if k == "notify-switch"] == [("notify-switch", True), ("notify-switch", False)]
+    assert not result.deferred  # a switch is flipped and set back (§25.7)
     form = {s.sig: s for s in result.skipped}
     assert form["id:b-save"].why == "may_submit" and form["id:b-continue"].why == "may_submit"
     assert "b-more" in touched  # a control with no submit word is an ordinary tap
@@ -205,5 +205,5 @@ def test_settings_as_the_app_is_all_system_and_nothing_is_touched(tmp_path):
 
 def test_every_move_is_a_tap_a_back_a_scroll_or_an_open_never_a_long_press_or_a_swipe(tmp_path):
     phone = red_team()
-    assert not any(hasattr(phone, name) for name in ("long_press", "swipe", "type_text", "toggle"))
+    assert not any(hasattr(phone, name) for name in ("long_press", "swipe"))
     run(build(tmp_path, phone)[0])  # the fake has no such methods: a call to one would have raised

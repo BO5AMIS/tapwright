@@ -51,6 +51,15 @@ class FakePhone:
         self.scrolls = 0
         self.fail_back: set[str] = set()
         self.reads = 0
+        self.typed: list[tuple[str, str, str]] = []  # (screen, key, text) of every type_text the phone received
+        self.toggles: list[tuple[str, str, bool]] = []  # (screen, key, value asked) of every toggle
+        self.stuck: set[str] = set()  # ids of switches that don't move when toggled
+        self.once: set[str] = set()  # ids of switches that flip once and then stick
+        self.pictures = True  # False: no picture (the app isn't in front)
+        self.audits: dict[str, tuple[str, ...]] = {}  # screen -> the audit's issues
+        self.uxes: dict[str, tuple[str, ...]] = {}
+        self.drives: list[tuple[str, str]] = []
+        self.drive_to: str | None = None
 
     def _tick(self) -> None:
         self.clock.t += self.per_move
@@ -126,11 +135,46 @@ class FakePhone:
         self.at = self.alert_to.get(self.at, self.at)
         return Moved()
 
-    async def check(self, target: ui.Target) -> Check:
+    async def check(self, target: ui.Target, tool: str = "tap") -> Check:
         el = self._element(target)
         key = el.identifier or el.label
         self.checked.append(key)
         return Check(self.needs[key], "Delete") if key in self.needs else Check()
+
+    async def type_text(self, target: ui.Target, text: str) -> Moved:
+        el = self._element(target)
+        self.typed.append((self.at, el.identifier or el.label, text))
+        self._tick()
+        return Moved()
+
+    async def toggle(self, target: ui.Target, value: bool) -> Moved:
+        el = self._element(target)
+        key = el.identifier or el.label
+        self.toggles.append((self.at, key, value))
+        self._tick()
+        if key in self.once:
+            self.once.discard(key)
+            self.stuck.add(key)
+            el.checked = value
+        elif key not in self.stuck:
+            el.checked = value
+        return Moved(settled=0.2)
+
+    async def picture(self) -> bytes | None:
+        return b"JPEGDATA" if self.pictures and not self._foreign() else None
+
+    async def audit(self) -> tuple[str, ...]:
+        return self.audits.get(self.at, ())
+
+    async def ux(self) -> tuple[str, ...]:
+        return self.uxes.get(self.at, ())
+
+    async def drive(self, place: str, account: str) -> Moved:
+        self.drives.append((place, account))
+        self._tick()
+        if self.drive_to is not None:
+            self.at = self.drive_to
+        return Moved()
 
     def mark(self) -> int:
         return len(self.events)

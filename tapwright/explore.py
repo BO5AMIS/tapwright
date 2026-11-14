@@ -15,10 +15,12 @@ looks at no grant; it never makes a long press or a swipe; it never allows a per
 "Not Now" or Cancel); it stays inside ONE app: a move after which another app is in front is a `dead_end` finding and it
 comes back with `open_app`, and nothing is touched while another app is in front.
 
-Not here (part 2b): the MCP tool and the command line, typing and `fill` (§25.6), submitting and flipping toggles (§25.7:
-until then a control that may submit is skipped as `may_submit` and a toggle is left untried), the report (§25.10) and
-coverage (§25.11). The hooks it leaves for them are named in `Explorer`: `on_new_place`, `on_toggle`.
+Part 2b adds, on the same engine: typing under `fill` (§25.6, only into a field whose id ends `-test-safe`; on a screen where it
+typed the only moves are `back` and the controls in `explore.submit`), toggles flipped and set back (§25.7), the pictures of
+findings, the `a11y` and `ux` findings of a new place, and the way back after a reset with a vault account. The report
+(§25.10) and the tool are exploretool.py's and explorereport.py's.
 """
+import dataclasses
 import heapq
 import re
 import time
@@ -38,7 +40,10 @@ RESETS_IN_A_ROW = 3  # §25.8
 PROGRESS_EVERY = 10  # §25.2
 ALERT_TRIES = 3
 BACK_SIG = "role:back@c0r0"  # the signature of the `back` move: the native Back button's own label is a title, never a name
-STOPS = ("budget_minutes", "budget_steps", "frontier_empty", "crash", "paused", "busy", "locked", "cant_get_back", "app_closed")
+STOPS = ("budget_minutes", "budget_steps", "frontier_empty", "crash", "paused", "busy", "locked", "toggle_not_restored",
+         "cant_get_back", "app_closed")
+SAFE_SUFFIX = "-test-safe"  # §25.6: a field whose id ends so is marked safe for tests
+FAKE_TEXT, FAKE_EMAIL = "Test", "test@example.com"  # §25.6: the only fake values
 TOGGLE_ROLES = ("switch", "radio", "checkbox")
 WAITING_CODES = ("paused", "busy", "locked")  # a refusal that ends the run (§25.9)
 RETRY_CODES = ("stale", "timeout")  # a refusal that says nothing about the element: not recorded
@@ -54,6 +59,12 @@ def _code(moved: "Moved") -> str:
         if _CODE.match(word):
             return word
     return "refused"
+
+
+def _build_number(build: str) -> str:
+    """`220` of `1.5.0 (220)`: a finding's `build` is CFBundleVersion, its `app_version` the short version (§27.1)."""
+    found = re.match(r"^.*\((.+)\)$", build)
+    return found.group(1) if found else build
 
 
 class PhoneStop(Exception):
@@ -79,6 +90,7 @@ class Moved:
     code: str | None = None
     detail: str = ""
     settled: float = 0.0
+    left: bool = False  # the daemon says another app came to the front after the touch (and brought the app back): §25.7
 
 
 @dataclass(frozen=True)
@@ -114,11 +126,17 @@ class Phone(Protocol):
     async def open_app(self) -> Moved: ...
     async def open_url(self, link: str) -> Moved: ...
     async def alert(self, button: str) -> Moved: ...
-    async def check(self, target: ui.Target) -> Check: ...
+    async def check(self, target: ui.Target, tool: str = "tap") -> Check: ...
     def mark(self) -> int: ...
     async def watch(self, mark: int) -> Watch: ...
     def waited(self) -> float: ...
     async def gate(self) -> None: ...
+    async def type_text(self, target: ui.Target, text: str) -> Moved: ...  # never with submit (§25.6); `text` is a fake value or a reference
+    async def toggle(self, target: ui.Target, value: bool) -> Moved: ...
+    async def picture(self) -> bytes | None: ...  # a JPEG of the screen, None when the app isn't in front (§27.2)
+    async def audit(self) -> tuple[str, ...]: ...  # the issues `audit` finds on the screen (§25.10 `a11y`)
+    async def ux(self) -> tuple[str, ...]: ...  # the findings of `ux_check` (§25.10 `ux`)
+    async def drive(self, place: str, account: str) -> Moved: ...  # a route's leg that types the vault account (§25.8)
 
 
 class MapPort(Protocol):
@@ -174,6 +192,14 @@ class Budget:
 
 
 @dataclass(frozen=True)
+class Fill:
+    """`fill` (§25.2, §25.6): `mode` is none, test-data or fixture. For a fixture, `reference` is `${vault.<name>.<field>}`: a
+    field marked only by its id gets that fixture field instead of a fake value. The value itself is never here."""
+    mode: str = "none"
+    reference: str | None = None
+
+
+@dataclass(frozen=True)
 class Identity:
     """What a finding says about the app, the tool and the phone (§27.1)."""
     app: str
@@ -209,9 +235,14 @@ class Result:
     skipped: list[Skipped]
     notes: list[str]
     resets: list[dict]
-    deferred: list[tuple[str, str, str]]  # (place, signature, kind): toggles left for §25.7 (part 2b)
+    deferred: list[tuple[str, str, str]]  # (place, signature, kind): toggles left untried (their value can't be read)
     frontier_left: int
     prompts: int  # permission prompts and alerts it answered
+    detail: str = ""  # what a stop names: `id=notify-switch` for a toggle that could not be set back
+    pictures: dict[str, bytes] = dataclasses.field(default_factory=dict)  # finding id -> JPEG (§27.2: private unless a test app)
+    typed: int = 0  # how many fields it typed into (never what)
+    flipped: int = 0  # how many toggles it flipped and set back
+    failure: Refused | None = None  # the phone refused something the run can't go on without (not_connected...): said after the report
 
 
 @dataclass(frozen=True)
@@ -249,12 +280,20 @@ class Explorer:
     def __init__(self, phone: Phone, maps: MapPort, rules: policy.Policy, identity: Identity, *, budget: Budget = Budget(),
                  start_place: str | None = None, focus: str | None = None, continue_after_crash: bool = False,
                  clock: Callable[[], float] = time.monotonic, progress: Callable[[str], None] | None = None,
-                 skip: tuple[str, ...] | None = None) -> None:
+                 skip: tuple[str, ...] | None = None, fill: Fill = Fill(), account: str | None = None,
+                 submit: tuple[str, ...] | None = None) -> None:
         self.phone, self.map, self.who = phone, maps, identity
         self.budget = budget.check()
         self.want_start, self.focus, self.keep_going = start_place, focus, continue_after_crash
         self.clock, self.progress = clock, progress
-        self.floor = explorefloor.Floor(rules, identity.app, skip)
+        self.fill, self.account = fill, account
+        self.floor = explorefloor.Floor(rules, identity.app, skip, submit)
+        self.pictures: dict[str, bytes] = {}
+        self.detail = ""
+        self.typed = 0
+        self.flipped = 0
+        self.failure: Refused | None = None
+        self._typed_here = False  # on the place being expanded it typed: only `back` and `explore.submit` controls are moved
         self.build = identity.build
         self.steps = 0
         self.t0 = 0.0
@@ -281,14 +320,85 @@ class Explorer:
         self._announced: set[str] = set()
         self._listed: dict[str, set[str]] = {}  # the signatures already put on each place's frontier in this run
 
-    # ---- hooks for part 2b (all do nothing here) ----
+    # ---- hooks ----
 
     async def on_new_place(self, place: str, tree: ui.Tree) -> None:
-        """A place seen for the first time in this run (§25.10: the audit and ux checks that make `a11y` and `ux` findings)."""
+        """A place seen for the first time in this run: the issues `audit` and `ux_check` find on it, one finding each
+        per place, at most 10 issues in it (§25.10)."""
+        for kind, found in (("a11y", self.phone.audit), ("ux", self.phone.ux)):
+            try:
+                lines = [line for line in await found() if line.strip()]
+            except PhoneStop:
+                raise
+            except Exception as e:  # noqa: BLE001 - a check that can't run is no finding and no reason to stop
+                self.notes.append(f"the {kind} check could not run on a place ({type(e).__name__})")
+                continue
+            if lines:
+                await self._find(kind, place, "No issues.", "\n".join(lines[:findings.MAX_ISSUES]), None)
 
     async def on_toggle(self, place: str, action: Action, tree: ui.Tree) -> bool:
-        """A toggle on `place` (§25.7: flip, read, flip back). True when it was handled; here none is, and it stays untried."""
-        return False
+        """A toggle on `place` (§25.7): flipped, read, flipped back and read again. A toggle the floor holds is never flipped;
+        one whose value can't be read is left untried (False). A flip that can't be shown to be restored stops the run."""
+        element = action.element
+        assert element is not None
+        items = [e for e in tree.items if not e.in_alert]
+        held = self.floor.touch(element, items)
+        if held is not None:
+            self._skip(place, action.sig, held)
+            return True
+        before = element.checked
+        if before is None:
+            return False
+        target = ui.Target(ref=element.ref)
+        check = await self.phone.check(target, "toggle")
+        if check.kind != "ok":
+            self._skip(place, action.sig, explorefloor.Skip("policy", check.word))
+            return True
+        mark = self.phone.mark()
+        self._spend()
+        self.moves.append((place, action.sig))
+        moved = await self._moved(await self.phone.toggle(target, not before))
+        if moved.code is not None:
+            await self._refused(place, action, moved)
+            return True
+        now = await self._toggle_value(place, action)
+        if now is not None and now.checked == before:  # the flip did nothing: nothing to set back
+            self._mark(place, action.sig, "same")
+            return True
+        if now is None or now.checked is None:
+            self._toggle_lost(element)
+        self._spend()  # the flip back is a touch too (and one move for a pause: no gate between the two)
+        back = await self._moved(await self.phone.toggle(ui.Target(ref=now.ref), before))
+        if back.code is not None:
+            self._toggle_lost(element)
+        again = await self._toggle_value(place, action)
+        if again is None or again.checked != before:
+            self._toggle_lost(element)
+        self.flipped += 1
+        watch = await self.phone.watch(mark)
+        if watch.crash is not None:
+            self._mark(place, action.sig, "crash")
+            await self._find("crash", place, "The app keeps running.", f"the app crashed: {watch.crash.reason}", action.step,
+                             crash=watch.crash)
+            if not self.keep_going:
+                raise Halt("crash")
+            await self._recover_from_crash(place)
+            return True
+        await self._errors(place, action.step, watch)
+        self._mark(place, action.sig, "same")
+        return True
+
+    async def _toggle_value(self, place: str, action: Action) -> ui.Element | None:
+        """The toggle as the screen shows it now (found by its signature), or None when it isn't there."""
+        look = await self._look(False)
+        if look.place != place:
+            return None
+        return next((a.element for a in self._actions(look.tree, place, False) if a.sig == action.sig and a.element is not None), None)
+
+    def _toggle_lost(self, element: ui.Element) -> None:
+        """A flip that can't be shown to be restored ends the run (§25.7): the phone is left as it is."""
+        self.detail = f"id={element.identifier}" if element.identifier else f'label={element.label or element.value or "?"}'
+        raise Halt("toggle_not_restored")
 
     # ---- the run ----
 
@@ -310,13 +420,15 @@ class Explorer:
             reason = stop.reason
         except PhoneStop as stop:
             reason = stop.reason
+        except Refused as e:  # the phone can't be used (not connected...): the run ends, its report is still written
+            self.failure, reason = e, "app_closed"
         return self._result(reason)
 
     def _result(self, reason: str) -> Result:
         left = [s for p in self.data.get("places", {}) for s in explored.frontier(self.data, p, self.build)]
         return Result(reason, self.start, self.at, list(self.seen), list(self.expanded), list(self.moves), self.steps,
                       self.elapsed(), self.found, list(self.skipped.values()), self.notes, self.resets, self.deferred,
-                      len(left), self.prompts)
+                      len(left), self.prompts, self.detail, dict(self.pictures), self.typed, self.flipped, self.failure)
 
     async def _begin(self) -> None:
         look = await self._look(False)
@@ -527,10 +639,51 @@ class Explorer:
 
     # ---- expanding a place ----
 
+    async def _type_fields(self, place: str) -> None:
+        """§25.6: under `fill`, type into the fields the app marks safe for tests (an id ending `-test-safe`), one at a time and
+        reading the screen between them; never a secure field, a password or a card, never with `submit`. What is typed is a
+        fake value (`Test`, `test@example.com` for a field with `email` in its id or label) or the fixture's reference: it is
+        kept nowhere."""
+        look = await self._look(False)
+        wanted = sorted((e for e in look.tree.items if e.role == "input" and e.identifier.endswith(SAFE_SUFFIX)),
+                        key=lambda e: (e.y, e.x, e.identifier))
+        for first in wanted:
+            look = await self._look(False)
+            if look.place != place:
+                return
+            items = [e for e in look.tree.items if not e.in_alert]
+            field = next((e for e in items if e.role == "input" and e.identifier == first.identifier), None)
+            if field is None or field.secure or not field.enabled or explorefloor.never_typed(field) \
+                    or self.floor.touch(field, items) is not None:
+                continue
+            target = ui.Target(ref=field.ref)
+            if (await self.phone.check(target, "type_text")).kind != "ok":
+                continue
+            await self.phone.gate()
+            self._spend()
+            moved = await self._moved(await self.phone.type_text(target, self._fill_text(field)))
+            if moved.code is None:
+                self.typed += 1
+                self._typed_here = True
+
+    def _fill_text(self, field: ui.Element) -> str:
+        """What a marked field gets: the fixture's field with `fixture:…` (§25.6), else a fake value."""
+        if self.fill.mode == "fixture" and self.fill.reference is not None:
+            return self.fill.reference
+        return FAKE_EMAIL if "email" in f"{field.identifier} {field.label}".casefold() else FAKE_TEXT
+
     async def _expand(self, place: str) -> None:
+        self._typed_here = False
+        try:
+            await self._expand_place(place)
+        finally:
+            self._typed_here = False
+
+    async def _expand_place(self, place: str) -> None:
         done: set[str] = set()
         scrolls = 0
         lost = 0
+        typing = self.fill.mode != "none"
         while True:
             await self.phone.gate()
             self._time()
@@ -550,7 +703,12 @@ class Explorer:
                         self._skip(place, a.sig, screen)
                 self.notes.append("a screen of the system or of an account, privacy or security setting was saved, not expanded")
                 return
-            fresh = [a.sig for a in actions if a.kind != "back" and a.sig not in self._listed.setdefault(place, set())]
+            if typing:  # once per visit: the fields the app marks safe get a fake value or the fixture's field
+                typing = False
+                await self._type_fields(place)
+                if self._typed_here:
+                    continue  # (read again: the screen has changed under the typing)
+            fresh =[a.sig for a in actions if a.kind != "back" and a.sig not in self._listed.setdefault(place, set())]
             if fresh and explored.mark_seen(self.data, place, fresh, mapfile.now()):
                 self._listed[place].update(fresh)
                 self.map.changed()
@@ -565,6 +723,12 @@ class Explorer:
                 break
             done.add(action.sig)
             if explored.is_tried(self.data, place, action.sig, self.build):
+                continue
+            if self._typed_here and action.kind != "back" and (action.element is None
+                                                                or action.element.identifier not in self.floor.submit_ids):
+                # where it typed, the only moves are `back` and the controls in `explore.submit` (§25.7): not kept as a skip,
+                # since another run without `fill` may touch it
+                self.skipped[(place, action.sig)] = Skipped(place, action.sig, "may_submit")
                 continue
             if action.kind == "toggle":
                 if not await self.on_toggle(place, action, tree):
@@ -615,21 +779,26 @@ class Explorer:
         look = await self._look(True)
         watch = await self.phone.watch(mark)
         step = action.step
+        if moved.left and not look.foreign and not look.sheet and watch.crash is None:  # (the daemon already came back)
+            self._mark(place, action.sig, "left")
+            await self._find("dead_end", place, "The move stays in the app.", "it left the app", step)
+            await self._errors(place, step, watch)
+            await self._return_to(place)
+            return True
         if watch.crash is not None:
             self._mark(place, action.sig, "crash")
-            self._find("crash", place, "The app keeps running.", f"the app crashed: {watch.crash.reason}", step,
+            await self._find("crash", place, "The app keeps running.", f"the app crashed: {watch.crash.reason}", step,
                        crash=watch.crash)
             if not self.keep_going:
                 raise Halt("crash")
             await self._recover_from_crash(place)
             return True
-        self._errors(place, step, watch)
+        await self._errors(place, step, watch)
         if moved.settled > SLOW_SECONDS:
-            self._find("slow", place, f"The screen settles within {SLOW_SECONDS:g} seconds.", f"{moved.settled:.1f} s to settle", step)
+            await self._find("slow", place, f"The screen settles within {SLOW_SECONDS:g} seconds.", f"{moved.settled:.1f} s to settle", step)
         if look.foreign or look.sheet:
-            bundle = look.tree.app[1] if look.tree.app and look.foreign else "the system's sheet"
-            self._mark(place, action.sig, "left")
-            self._find("dead_end", place, "The move stays in the app.", f"it left the app (now {bundle})", step)
+            self._mark(place, action.sig, "left")  # (another app's name is never put in a finding)
+            await self._find("dead_end", place, "The move stays in the app.", "it left the app", step)
             await (self._come_back(place) if look.foreign else self._return_to(place))
             return True
         if look.place is None:
@@ -670,27 +839,39 @@ class Explorer:
         elif moved.code not in RETRY_CODES and moved.code is not None:
             self._mark(place, action.sig, "refused", code=_code(moved))
             if moved.code == "not_actionable" and moved.detail in ("covered", "off_screen"):
-                self._find("refused", place, "The touch works.", f"not_actionable: {moved.detail}", action.step)
+                await self._find("refused", place, "The touch works.", f"not_actionable: {moved.detail}", action.step)
 
-    def _errors(self, place: str, step: dict | None, watch: Watch) -> None:
+    async def _errors(self, place: str, step: dict | None, watch: Watch) -> None:
         if watch.errors:
-            self._find("js_error", place, "No error is logged.", watch.errors[0], step, logs=watch.errors)
+            await self._find("js_error", place, "No error is logged.", watch.errors[0], step, logs=watch.errors)
 
     # ---- findings ----
 
-    def _find(self, kind: str, place: str | None, expected: str, got: str, step: dict | None, *, logs: tuple[str, ...] = (),
-              crash: CrashFacts | None = None) -> None:
+    async def _find(self, kind: str, place: str | None, expected: str, got: str, step: dict | None, *,
+                    logs: tuple[str, ...] = (), crash: CrashFacts | None = None) -> None:
         path_from, path = self._path_for(place, step)
         try:
             made = findings.make(
                 finding_id=findings.next_id(self.found), kind=kind, app=self.who.app, app_version=self.who.app_version,
-                build=self.who.build, tool=self.who.tool, tool_version=self.who.tool_version, device=self.who.device,
+                build=_build_number(self.who.build), tool=self.who.tool, tool_version=self.who.tool_version, device=self.who.device,
                 expected=expected, got=got, scrub=self.who.scrub, place=place, path_from=path_from, path=path,
                 test_app=self.who.test_app, logs=logs, crash_reason=crash.reason if crash else None,
                 crash_frames=crash.frames if crash else ())
         except findings.FindingError as e:
             self.notes.append(f"a {kind} finding could not be made ({e})")
             return
+        repeat = any(findings.repeat_key(held) == findings.repeat_key(made) for held in self.found)
+        if not repeat and kind != "crash":  # (a crash took the app: there is no screen of it to show)
+            try:
+                shot = await self.phone.picture()
+            except PhoneStop:
+                raise
+            except Exception:  # noqa: BLE001 - a picture that can't be had is a gap in the report
+                shot = None
+            if shot:  # (the phone gives one only while the given app is in front, §27.2; private unless a test app)
+                file = f"findings/{made.id}.jpg"
+                self.pictures[made.id] = shot
+                made = dataclasses.replace(made, picture=findings.Picture(file, not self.who.test_app))
         self.found = findings.add(self.found, made)
 
     def _path_for(self, place: str | None, step: dict | None) -> tuple[str | None, list[dict]]:
@@ -718,16 +899,16 @@ class Explorer:
         watch = await self.phone.watch(mark)
         if watch.crash is not None:
             self._mark(place, sig, "crash")
-            self._find("crash", place, "The app keeps running.", f"the app crashed: {watch.crash.reason}", {"tool": "back"},
+            await self._find("crash", place, "The app keeps running.", f"the app crashed: {watch.crash.reason}", {"tool": "back"},
                        crash=watch.crash)
             if not self.keep_going:
                 raise Halt("crash")
             await self._recover_from_crash(place)
             return False
-        self._errors(place, {"tool": "back"}, watch)
+        await self._errors(place, {"tool": "back"}, watch)
         if look.foreign:
             self._mark(place, sig, "left")
-            self._find("dead_end", place, "The move stays in the app.", "it left the app", {"tool": "back"})
+            await self._find("dead_end", place, "The move stays in the app.", "it left the app", {"tool": "back"})
             await self._open()
             return False
         if look.place is None or look.place == place:
@@ -799,9 +980,10 @@ class Explorer:
         return await self._recover(place)
 
     async def _recover(self, place: str) -> bool:
-        """The reset of §25.8: Tapwright's own is a relaunch with `open_app`, which keeps the app's data. At most 3 in a row
-        that don't bring the app to a known place."""
-        self._find("dead_end", place, "There is a way back.", f"no way back to {place} except a reset", None)
+        """The reset of §25.8: Tapwright's own is a relaunch with `open_app`, which keeps the app's data (the second, `app_command
+        reset`, is Tapline's: Tapwright has no such tool, so there the branch ends). At most 3 in a row that don't bring the app
+        to a known place. With `account`, the way to the start place may be a saved route that types that vault account."""
+        await self._find("dead_end", place, "There is a way back.", f"no way back to {place} except a reset", None)
         await self._open()
         self.resets.append({"how": "relaunch", "data_kept": True, "at_step": self.steps})
         look = await self._look(False)
@@ -809,6 +991,14 @@ class Explorer:
         if look.place is not None and (look.place == place or await self._reach(place)):
             self.resets_in_row = 0
             return True
+        if self.account is not None and self.start is not None and look.place != self.start:
+            self._spend()
+            moved = await self._moved(await self.phone.drive(self.start, self.account))
+            if moved.code is None:
+                look = await self._look(False)
+                if look.place is not None and (look.place == place or await self._reach(place)):
+                    self.resets_in_row = 0
+                    return True
         self.resets_in_row += 1
         if self.resets_in_row >= RESETS_IN_A_ROW:
             raise Halt("cant_get_back")

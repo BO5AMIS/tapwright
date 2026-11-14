@@ -70,6 +70,14 @@ def supports_form(ctx: object) -> bool:
         return False
 
 
+def has_progress_token(ctx: object) -> bool:
+    """Did the client of this call give a progress token (so it takes progress notifications)? False outside a request."""
+    try:
+        return ctx.request_context.meta.progress_token is not None  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class HostDialogs:
     """The poll loop and the dialogs for one MCP server (one agent). `poll(since)` and `answer(id, answer)` reach the daemon."""
 
@@ -82,19 +90,22 @@ class HostDialogs:
         self._shown: dict[str, asyncio.Task] = {}
         self._lock: asyncio.Lock | None = None
         self._since = 0
+        self._progressed = 0
 
     @asynccontextmanager
-    async def during(self, ctx: object) -> AsyncIterator[bool]:
+    async def during(self, ctx: object, progress: bool = False) -> AsyncIterator[bool]:
         """Around one call to the daemon: yields whether the host can show a dialog (then the call says so, and the
-        daemon waits for a person). The poll runs while any such call is in flight."""
-        if not self.enabled or not supports_form(ctx):
+        daemon waits for a person). The poll runs while any such call is in flight. `progress`: a long call (`explore`) whose
+        client gave a progress token is polled too, for its progress lines (AGENT-TOOLS §25.2), with no dialog."""
+        form = self.enabled and supports_form(ctx)
+        if not form and not (progress and self.enabled and has_progress_token(ctx)):
             yield False
             return
         self._calls.append(ctx)
         if self._pump is None or self._pump.done():
             self._pump = asyncio.create_task(self._run(), name="tapwright-dialog-poll")
         try:
-            yield True
+            yield form
         finally:
             self._calls.remove(ctx)
             if not self._calls:
@@ -136,6 +147,11 @@ class HostDialogs:
         if not isinstance(event, dict) or not isinstance(event.get("id"), str):
             return
         ask_id = event["id"]
+        if event.get("type") == "progress" and self._calls:  # an explore's `explored 23 places, 4 findings` (§25.2)
+            self._progressed += 1
+            asyncio.create_task(self._progress(self._progressed, str(event.get("message") or ""), self._calls[0]),
+                                name=f"tapwright-progress-{ask_id}")
+            return
         if event.get("type") == "notice" and self._calls:  # the watchdog (§24.5): said in chat, nothing to answer
             asyncio.create_task(self._notice(str(event.get("message") or ""), self._calls[0]),
                                 name=f"tapwright-notice-{ask_id}")
@@ -146,6 +162,14 @@ class HostDialogs:
             task = self._shown.pop(ask_id, None)
             if task is not None:
                 task.cancel()
+
+    @staticmethod
+    async def _progress(count: int, message: str, ctx: object) -> None:
+        """One progress notification (never part of the final answer); a client that takes none loses nothing."""
+        try:
+            await ctx.report_progress(float(count), message=message)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     async def _notice(message: str, ctx: object) -> None:

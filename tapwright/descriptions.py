@@ -250,6 +250,16 @@ SHARED = {
         "go on by hand. In a user's-eyes journey it uses roads only, with no links or reflexes, unless the "
         "journey's start allows them. `dry_run: true` says the way; `brief: true` shortens the answer."
     ),
+    'explore': (
+        'Search the app you drive for what breaks, with no model: a breadth-first walk that saves places and roads to '
+        'the map and writes a report folder (findings, each with a script that reaches it). Answers a summary, not '
+        'the screen. Optional: `minutes` (10), `steps` (500), `depth` (8), `from`, `focus` (place names), `fill` '
+        '(`"none"`, `"test-data"`, `"fixture:<name>.<field>"`: only into fields whose id ends `-test-safe`), '
+        '`continue` past a crash, `account` (a vault account marked `explore`, for the way back after a reset). It '
+        'skips anything the policy or Delete, Send, Post, Pay, Sign out hold, submits no form, allows no permission '
+        'prompt and asks no one. A person touching the phone pauses it. Not a step of `run`; a call can last its '
+        '`minutes`.'
+    ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "
         "time and the tool's time, by tool), and waste to cut, each with its call numbers: looks right after an "

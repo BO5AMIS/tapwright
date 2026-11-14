@@ -25,7 +25,7 @@ from typing import NamedTuple, TypeVar
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
-               diagnostics, dialog, driving, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
+               diagnostics, dialog, driving, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
@@ -99,6 +99,9 @@ class Sent(str):
     (in chat).` where any other OK ends `Note: allowed by a person (in chat).`"""
 # The scope (personal mode's app list) of the call being run, for a tool that makes calls of its own (`performance`)
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
+# True while `explore` makes its own moves (AGENT-TOOLS §25.5): a touch the policy holds is never asked of a person (no dialog, no
+# live-view request) and no grant is looked at: the touch is refused as `needs_confirmation`, and a dry run says so.
+_EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exploring", default=False)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
 # True while the call being run answers in brief (§13.4): set by run_tool for that call only, so a batch's own answer is
@@ -880,7 +883,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
+class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -1901,6 +1904,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name == "journey":  # AGENT-TOOLS §17: its own calls go through run_tool, so personal mode and the policy hold
             return await self._journey_tool(client_id, args, scope)
+        if name == "explore":  # AGENT-TOOLS §25: its moves go through run_tool too, one at a time, each an ordinary action
+            return await self._explore_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2036,7 +2041,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             "reason": reason, "ms": round((time.monotonic() - started) * 1000), "via": _VIA.get(),
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "answer_chars": len(said) if isinstance(said, str) else None,
-            "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
+            "batch": BATCH.get(), "nested": True if _NESTED.get() else None, "explore": True if _EXPLORING.get() else None,
             "confirmed": True if self._granted_now and not read else None,
             "confirmed_by": self._granted_by if self._granted_now and not read else None,  # "chat" or "the live view"
             # §12 (1.14, 1.14.1): the grant that let the touch through and its count, or why a matching one didn't
@@ -5772,6 +5777,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
+        if _EXPLORING.get():  # §25.5: the explorer asks no person and no grant covers it
+            if a.get("dry_run"):
+                return f" It needs a person's OK (policy word \"{word}\")."
+            raise Refused("not_allowed", f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"); explore "
+                                         "asks nobody and skips it.")
         key = self._police_key(element)
         if self._policed == (tool, key) and not a.get("dry_run"):
             self._policed = None  # the policy checked this very touch before the scroll (§16.2): once

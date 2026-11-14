@@ -72,12 +72,14 @@ class Floor:
     file's `explore.skip`). Built once; every method reads the element or screen it is given, so a policy or a screen that
     changed counts at once."""
 
-    def __init__(self, rules: policy.Policy, app: str, skip: tuple[str, ...] | None = None) -> None:
+    def __init__(self, rules: policy.Policy, app: str, skip: tuple[str, ...] | None = None,
+                 submit: tuple[str, ...] | None = None) -> None:
         own = rules.apps.get(app, policy.AppWords())
         self.app = app
         self.floor_words = (*policy.DEFAULT_CONFIRM, *REACH_OTHERS, *grants.PAYMENT_WORDS, *grants.ACCOUNT_WORDS, *CARD_WORDS)
         self.policy_words = (*rules.block, *rules.confirm, *(own.block or ()), *(own.confirm or ()))
         self.skip_words = tuple(rules.explore.skip if skip is None else skip)
+        self.submit_ids = frozenset(rules.explore.submit if submit is None else submit)  # ids the file lets it treat as a submit
 
     # ---- one element ----
 
@@ -133,14 +135,27 @@ class Floor:
     # ---- submit (§25.7) ----
 
     def may_submit(self, element: ui.Element, items: list[ui.Element]) -> Skip | None:
-        """On a screen with a text input, a control with a submit word may submit a form: skipped (`may_submit`). Part 2b
-        decides when a listed id (`explore.submit`) may be touched; until then none is, and the floor wins over it anyway."""
+        """On a screen with a text input, a control with a submit word may submit a form: skipped (`may_submit`), unless its own
+        id is in the policy file's `explore.submit` (§25.7). The floor wins over a listed id: callers check `touch` first."""
         if not any(e.role == "input" and not e.in_alert for e in items):
+            return None
+        if element.identifier and element.identifier in self.submit_ids:
             return None
         for each in self.recipients(element, items):
             if (word := _first(SUBMIT_WORDS, name_of(each))) is not None:
                 return Skip("may_submit", word)
         return None
+
+
+# §25.6: never typed into, with any `fill`: a password, a passcode, a card
+NEVER_TYPED_WORDS = ("Password", "Passcode", "PIN", "Card", "Credit", "Debit", "CVV", "CVC", "Security code", "Expiry")
+
+
+def never_typed(field: ui.Element) -> bool:
+    """A field that is secure, or whose label or id says password, passcode or card: never typed in (§25.6)."""
+    if field.secure:
+        return True
+    return any(grants.matches(w, _plain(text)) for w in NEVER_TYPED_WORDS for text in (field.label, id_words(field.identifier)) if text)
 
 
 def inside(inner: ui.Element, outer: ui.Element) -> bool:
