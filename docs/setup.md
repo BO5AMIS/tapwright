@@ -145,16 +145,24 @@ ones as the daemon's own settings.
   vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
 - **One-time codes only into a code field.** `${otp.<app>}` is typed only into a one-line field whose id, label or
   placeholder says code, OTP, verification or PIN. Any other field is refused (`not_allowed`) and no code is read. A
-  draft that holds a code says so.
+  draft that holds a code says so. Tapline's `/otp` gets a code only while the tool's own read shows the app in front
+  with such a field, and each code goes out once, also across a restart of the daemon: a handed-over code leaves a
+  mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes.
 - **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
   touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
-  with `--no-policy`. `type_text` with `submit: true` is refused there: type without it, then tap the send button.
+  with `--no-policy`. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
+  refused there: type without it, then tap the send button. Your OK is for the draft you saw: if the text, or any
+  field on the screen, changed before the send, nothing is sent and you are asked again.
+- **Deleting an account always asks you.** No grant covers a Delete or Confirm in an alert or on a screen that says it
+  deletes the account ("Delete your account?"), or in an alert about a payment, and no grant is offered for it.
 - **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
   of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
   draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
 - **`--revoke-all` always works.** If the policy file's edit lock is held, it writes `<policy file>.revoked`, which
   revokes every grant at once; the next change to the file writes the revocation in and removes the mark. It also
   stops a running batch or drive that began before it, whatever grants it began with.
+- **A vault in the macOS keychain can't be named `…#<number>`.** The keychain keeps those names for the pieces of a
+  large vault, so `vault protect` refuses such a file name; rename it first.
 - **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
   app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
 
@@ -165,7 +173,10 @@ ones as the daemon's own settings.
   If a crash leaves it behind, `tapwright doctor` names it and `tapwright schedule unlock --phone` removes it.
 - **The 90-second rule.** For a schedule, the phone is in use while a call is running, when an agent called in the
   last 90 seconds, or when you acted in the live view in the last 90 seconds. A run waits up to 10 minutes for that.
-  While a scheduled run drives, other agents' actions answer `busy`.
+  While a scheduled run drives, other agents' actions answer `busy`. The daemon also checks this itself when the run
+  starts: if an agent or you got to the phone after the run's last look, the run waits and asks again.
+- **A run opens its app.** A scheduled run opens its route's app first, so it doesn't matter which app (or the home
+  screen) is in front when it falls due.
 - **A locked phone.** `run-schedule` starts `tapwright serve` with the schedule's own `--accounts` when no daemon is
   running, so the unlock at a run's start can use that file's passcode. A daemon that is already running keeps the
   `--accounts` it was started with: if that's another file, the run is skipped as locked.
