@@ -47,9 +47,8 @@
   layer a whole-text encoder (a `%r` inside a JSON crash report, a URL inside a JSON string) or a different escape per
   character, decoded pass by pass to convergence. Only those escapes are decoded: any other backslash is a literal
   character, so a password `pass\word` doesn't hide the word `password`. Every occurrence at every level, overlapping
-  ones included, is mapped back to the characters it came from and redacted whole, even where escapes take in the
-  value's first or last characters, or both, with the text beside it (`%2` + `a%62c%2` + `F`), and a log message, a
-  traceback or a report shows none. Decoding stops at a work limit of 16 passes; a whitespace-separated token that
+  ones included, is mapped back to the characters it came from and redacted whole, and a log message, a traceback or a
+  report shows none. Decoding stops at a work limit of 16 passes; a whitespace-separated token that
   would still change is redacted whole as `<a value encoded too deep to check>` and counts as holding a value, so
   nothing is released unchecked. Searching is linear in the text and the values. A username or password is 3 to 256
   characters (at most 256 as written, at least 3 once decoded and trimmed, so three spaces are refused) and must settle
@@ -57,7 +56,9 @@
   naming the account and the field (or the number of accounts), never the
   value. Not covered: other encodings (base64, HTML entities, a hash, a change of case, a value split by other text), and a
   backslash left bare right before an escaped character (`\` + `\x73`), which JSON and Python, and the matcher, read
-  as an escaped backslash.
+  as an escaped backslash; and text around a value that ends or starts with an incomplete escape (`%2`, `\`, `\u00`)
+  and so is decoded together with the value's first or last characters (boundary fusion), which the matcher catches
+  in the common cases as a best effort, without a guarantee.
   A route's declared variables are filled in every string field and an undeclared `${name}` is literal text in every
   field, typed text included; a literal `${` is written `$${` in every field the recorder saves (in the copy it writes,
   so a save that fails and is tried again escapes it once), so a replay taps the element that was recorded; the save

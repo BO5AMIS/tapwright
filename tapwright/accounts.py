@@ -9,7 +9,7 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
   - `phone.passcode` is stored and exposed nowhere. (Typing it on the lock screen is a later task.)
 
-What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15 and 20):
+What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20 and 21):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
     without direction marks and trimmed. A value still escaped after the work limit's passes is refused too. A file
     holds at most 32 accounts (64 values; the `phone` entry isn't counted). A file that breaks a limit loads no
@@ -19,16 +19,20 @@ What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15 and
     string escapes (\\uXXXX and surrogate pairs, \\UXXXXXXXX, \\xHH, \\\\, \\", \\', \\/, \\b, \\f, \\n, \\t, \\r);
     and any composition of those, to any depth within the work limit: each layer is a whole-text encoder (quote,
     quote_plus, json.dumps, repr, ascii, ...) or a different escape for each character. Only a recognized escape
-    is decoded: any other backslash is a literal character on both sides, so `pass\\word` is not `password`. An escape
-    that takes in a value's first or last characters, or both, with the text around it is redacted with the value.
+    is decoded: any other backslash is a literal character on both sides, so `pass\\word` is not `password`.
   - Work limit: a text is decoded at most 16 times (MAX_PASSES). If a 17th pass would still change it, every
     whitespace-separated token that holds what it would change is redacted whole (as UNCHECKED) and `holds` is true:
     nothing is released that wasn't checked to the end. Each level is searched in time linear in its length and the
     values' (Knuth-Morris-Pratt for overlapping occurrences), so a text costs at most 17 such searches.
-  - Not covered: other encodings (base64, HTML entities, hashing, case changes, a value split by other text), and a
-    value's backslash left bare, or percent-encoded under a JSON or Python layer, right before an escaped character
-    (`\\` + `\\x73`): JSON and Python read `\\\\x73` as an escaped backslash and `x73`, and so does the matcher. No
-    encoder writes that: one that escapes a character escapes the backslash too.
+  - Not covered:
+    - other encodings (base64, HTML entities, hashing, case changes, a value split by other text);
+    - a value's backslash left bare, or percent-encoded under a JSON or Python layer, right before an escaped
+      character (`\\` + `\\x73`): JSON and Python read `\\\\x73` as an escaped backslash and `x73`, and so does the
+      matcher. No encoder writes that: one that escapes a character escapes the backslash too;
+    - text around a value that ends or starts with an incomplete escape (`%2`, `\\`, `\\u00`) and so is decoded
+      together with the value's first or last characters (boundary fusion); the matcher catches the common cases of
+      this as a best effort, without a guarantee. No encoder writes an escape cut short next to a value (Codex, PR #10
+      cycle 21).
 
 Pure but for reading the file and asking git: no phone.
 """
@@ -169,8 +173,9 @@ def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
 # of the original that holds such an escape is taken for a value, redacted whole (as UNCHECKED), and `holds` is true.
 # Decoding reads a text without knowing where a value starts, so an escape can take in characters of the value with
 # characters of the text around it: `%2` + `abc` reads `%2a` + `bc`, `\` + `tab` a tab + `ab`, `ab%2` + `F` reads `ab/`,
-# and both at once: `%2` + `a%62c%2` + `F` (the value `abc%2`) reads `*bc/`. So in a decoded level each character an
-# escape made is checked too: when the escape's text ends with a value's first characters and the level goes on with
+# and both at once: `%2` + `a%62c%2` + `F` (the value `abc%2`) reads `*bc/`. That is boundary fusion: outside
+# the guarantee (no encoder writes an escape cut short next to a value) and caught as a best effort. In a decoded level
+# each character an escape made is checked too: when the escape's text ends with a value's first characters and the level goes on with
 # the rest, or with the rest but its last characters, which a later escape's text starts with (or the mirror, at the
 # value's end alone), the value is there, and the escapes are redacted with it. Each such check is a few dictionary
 # lookups, by the exact characters the escape's text ends (starts) with and the value's character that must come next
@@ -585,6 +590,84 @@ def _quoted(text: str, start: int, end: int) -> tuple[int, int]:
     return start, end
 
 
+def _inside(shown: "list[tuple[int, int]]", shown_starts: list[int], a: int, b: int) -> bool:
+    """Does text[a:b] lie wholly inside one of the placeholders already in the text (`shown`, apart, in order)?"""
+    k = bisect.bisect_right(shown_starts, a) - 1
+    return k >= 0 and b <= shown[k][1]
+
+
+def _firsts(level: _Layer, chain: "list[_Layer]", lead: bool) -> list[int]:
+    """For each character of a level, where in the original text the range of an occurrence that starts with it starts
+    (what `_back` gives as the start, with `lead` as there): never decreasing."""
+    pick = 2 if lead else 0
+    starts = level.maps()[pick]
+    for step in reversed(chain):
+        where = step.maps()[pick]
+        starts = [where[a] for a in starts]
+    return starts
+
+
+def _kept(hay: str, form: str, fail: list[int], i: int, j: int, where: "Callable[[int, int], tuple[int, int]]",
+          firsts: "Callable[[], list[int]]", shown: "list[tuple[int, int]]", shown_starts: list[int]
+          ) -> "list[tuple[int, int]]":
+    """The pieces of hay[i:j], a chain of overlapping occurrences of `form` that `_occurrences` merged, that cover every
+    occurrence in it not wholly inside a placeholder already in the text, and nothing else of it: what the occurrences
+    one by one would give, without going through each (Codex, PR #10 cycle 21: a placeholder anywhere in the text made
+    every occurrence everywhere be listed, millions in a long run of one character). `where(s, t)` is the text range of
+    hay[s:t], `firsts()` the starts of those ranges for every level character.
+    Only an occurrence whose text starts inside a placeholder can lie inside one. The starts are in order, so those that
+    do are, for each placeholder the chain meets, one range of the level (a window). Only the occurrences near a window
+    are listed: each window widened by the value's length, which always holds an occurrence (two in a row overlap) that
+    starts in no window. The occurrences between such stretches all count and overlap in a row: one piece."""
+    size = len(form)
+    last = j - size  # (where the chain's last occurrence starts)
+    a, b = where(i, j)
+    k = max(bisect.bisect_right(shown_starts, a) - 1, 0)
+    windows: list[tuple[int, int]] = []
+    starts: list[int] | None = None
+    while k < len(shown) and shown[k][0] < b:
+        p, q = shown[k]
+        k += 1
+        if q <= a or q - p < size:  # (before the chain, or too short to hold an occurrence: each level character has
+            continue                # one text character or more)
+        if starts is None:
+            starts = firsts()
+        lo, hi = bisect.bisect_left(starts, p, i, last + 1), bisect.bisect_left(starts, q, i, last + 1)
+        if lo < hi:
+            windows.append((max(i, lo - size), min(last + 1, hi + size)))
+    if not windows:
+        return [(i, j)]
+    regions: list[tuple[int, int]] = []
+    for lo, hi in windows:
+        if regions and lo <= regions[-1][1]:
+            regions[-1] = (regions[-1][0], max(regions[-1][1], hi))
+        else:
+            regions.append((lo, hi))
+    pieces: list[tuple[int, int]] = []
+    run_start, run_end = i, -1  # the piece being built; run_end -1: none yet, 0: it goes on to the next occurrence
+    if regions[0][0] > i:
+        run_end = 0  # (every occurrence before the first region counts)
+    for lo, hi in regions:
+        for s, t in _occurrences(hay[lo:min(j, hi - 1 + size)], form, fail, False):
+            s, t = s + lo, t + lo
+            if _inside(shown, shown_starts, *where(s, t)):
+                if run_end > 0:
+                    pieces.append((run_start, run_end))
+                run_end = -1
+            elif run_end < 0:
+                run_start, run_end = s, t
+            elif run_end == 0 or s < run_end:
+                run_end = t
+            else:
+                pieces.append((run_start, run_end))
+                run_start, run_end = s, t
+        if hi <= last:
+            run_end = 0  # (the region's last occurrence counted; so do all of them up to the next region)
+    if run_end >= 0:
+        pieces.append((run_start, j if run_end == 0 else run_end))
+    return pieces
+
+
 class Redaction:
     """A set of account values, as (name, kind, value), and what redacts them: each value, in any of its shapes, becomes
     `<name's username>` / `<name's password>`. Overlapping occurrences are merged into one span, the earliest and then the
@@ -642,7 +725,10 @@ class Redaction:
         """Where the values are in `text`, as (start, end, placeholder), in the text's order (with `first`, as soon as one
         is found, that one alone). Overlapping occurrences are merged into one span (the first one's placeholder), so no
         piece of either value is left out of it. Only an occurrence that lies wholly inside a placeholder is passed over,
-        so a placeholder already there stays as it is. A token still decoding at the work limit is a span (UNCHECKED)."""
+        so a placeholder already there stays as it is; one that holds or crosses a placeholder is redacted whole (cycle
+        12). Overlapping occurrences of one form are merged as they are found, and only where such a run meets a
+        placeholder are the occurrences near it looked at one by one (`_kept`, cycle 21). A token still decoding at the
+        work limit is a span (UNCHECKED)."""
         shown = [(m.start(), m.end()) for m in self.placeholders.finditer(text)] if self.placeholders is not None else []
         shown_starts = [a for a, _ in shown]
         found: list[tuple[int, int, int, int, str]] = []  # (start, -length, rank, end, label)
@@ -654,12 +740,10 @@ class Redaction:
                         return [(a, b, UNCHECKED)]
                     found.append((a, a - b, -1, b, UNCHECKED))
                 continue
-            for i, j, rank, label, lead, trail in self._found(level, chain, known, merge=not shown):
+            for i, j, rank, label, lead, trail in self._pieces(level, chain, known, shown, shown_starts):
                 a, b = _back(chain, *level.span(i, j, lead, trail), lead, trail)
-                if shown:
-                    k = bisect.bisect_right(shown_starts, a) - 1
-                    if k >= 0 and b <= shown[k][1]:
-                        continue  # a piece of a placeholder (`test` in `<tester's password>`), not a value
+                if shown and _inside(shown, shown_starts, a, b):
+                    continue  # a piece of a placeholder (`test` in `<tester's password>`), not a value
                 a, b = _quoted(text, a, b)
                 if first:
                     return [(a, b, label)]
@@ -676,17 +760,53 @@ class Redaction:
                 reached = end
         return taken
 
+    def _pieces(self, level: _Layer, chain: "list[_Layer]", known: "list[list[tuple[int, str, bool]]]",
+                shown: "list[tuple[int, int]]", shown_starts: list[int]
+                ) -> "Iterator[tuple[int, int, int, str, bool, bool]]":
+        """What `_found` gives with overlapping occurrences merged, but a merged run that meets a placeholder already in
+        the text split around the occurrences wholly inside one (`_kept`)."""
+        hay = level.out
+        firsts: dict[bool, list[int]] = {}
+
+        def starts_for(lead: bool) -> "Callable[[], list[int]]":
+            def get() -> list[int]:
+                if lead not in firsts:
+                    firsts[lead] = _firsts(level, chain, lead)
+                return firsts[lead]
+            return get
+
+        for form, rank, label, lead, trail, fail in self._forms:
+            for i, j in _occurrences(hay, form, fail, True):
+                if not shown or j - i == len(form):  # (one occurrence alone: `_spans` checks it)
+                    yield i, j, rank, label, lead, trail
+                    continue
+
+                def where(s: int, t: int, lead: bool = lead, trail: bool = trail) -> tuple[int, int]:
+                    return _back(chain, *level.span(s, t, lead, trail), lead, trail)
+
+                for x, y in _kept(hay, form, fail, i, j, where, starts_for(lead), shown, shown_starts):
+                    yield x, y, rank, label, lead, trail
+        yield from self._edges(level, chain, known)
+
     def _found(self, level: _Layer, chain: "list[_Layer]", known: "list[list[tuple[int, str, bool]]]",
                merge: bool) -> "Iterator[tuple[int, int, int, str, bool, bool]]":
         """The occurrences of the values in one level, as (start, end, rank, label, lead, trail) in its canonical text:
-        each form where it is whole, then (in a decoded level) where an escape took in its first characters with
-        characters of the text before it (and maybe a later escape its last ones with the text after it), or its last
-        characters alone. Such an occurrence takes the whole escape: a couple of characters too many rather than one of
-        the value too few."""
+        each form where it is whole (with `merge`, a run of overlapping ones as one), then the occurrences at escapes
+        (`_edges`)."""
         hay = level.out
         for form, rank, label, lead, trail, fail in self._forms:
             for i, j in _occurrences(hay, form, fail, merge):
                 yield i, j, rank, label, lead, trail
+        yield from self._edges(level, chain, known)
+
+    def _edges(self, level: _Layer, chain: "list[_Layer]", known: "list[list[tuple[int, str, bool]]]"
+               ) -> "Iterator[tuple[int, int, int, str, bool, bool]]":
+        """In a decoded level, where an escape took in a value's first characters with characters of the text before it
+        (and maybe a later escape its last ones with the text after it), or its last characters alone, as `_found`
+        gives them. Such an occurrence takes the whole escape: a couple of characters too many rather than one of the
+        value too few. A best effort (the threat model's boundary fusion): no encoder writes an escape cut short next
+        to a value."""
+        hay = level.out
         if not chain:
             return
         slots, n, end, size = level.slots(), len(level.source), 2 * len(hay), len(hay)

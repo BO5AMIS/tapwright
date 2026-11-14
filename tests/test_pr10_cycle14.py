@@ -230,8 +230,8 @@ SEAMS = ["", "\\", "%", "%2", "\\u00", "+", "‎", "x", "\\\\", "%25", "'", "\""
 
 @pytest.mark.parametrize("value", VALUES)
 def test_an_escape_head_beside_the_value_never_hides_it(value):
-    # (decoding reads `%2` + `abc` as `%2a` + `bc`, `\` + `tab` as a tab + `ab`, `ab%2` + `F` as `ab/`: the escape that
-    # took in the value's first or last characters is redacted with it)
+    # (decoding reads `%2` + `abc` as `%2a` + `bc`, `\` + `tab` as a tab + `ab`, `ab%2` + `F` as `ab/`: boundary fusion,
+    # outside the guarantee since cycle 21; these common cases are caught as a best effort, and this keeps them caught)
     rng = random.Random(f"cycle14-seams-{value}")
     found = redaction(value)
     for _ in range(300):
