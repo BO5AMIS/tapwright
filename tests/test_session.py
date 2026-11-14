@@ -1256,3 +1256,37 @@ def test_a_new_session_asks_for_the_drag_route_again(phone, monkeypatch):
     runner.rsd, runner.version = "tunnel", 2  # the runner was replaced by one with the drag route
     asyncio.run(s.scroll(215, 700, 215, 300))
     assert _paths(runner) == ["/wda/tw/version", "/actions", "/wda/tw/version", "/wda/tw/drag"]
+
+
+def test_alert_takes_only_accept_dismiss_or_text_and_never_builds_a_path_from_input(phone):
+    s = Session(phone)
+    for bad in ("Connect", "../x", "accept/../../x", ""):
+        before = len(phone.requests)
+        with pytest.raises(Refused) as e:
+            asyncio.run(s.alert(bad))
+        assert e.value.code == "bad_params" and "accept, dismiss, text" in str(e.value)
+        assert len(phone.requests) == before
+
+
+def test_a_session_created_again_gets_the_settings_before_any_read(phone):
+    """Found in a trace: a session re-created mid-run had no waitForIdleTimeout 0, so every read waited for the
+    blinking caret (1 to 3 s). Every new session gets the settings right after POST /session, the preset included."""
+    s = Session(phone)
+    s.session_settings = {"mjpegServerFramerate": 30, **session_module.NO_IDLE_WAIT}
+    asyncio.run(s.ensure())
+    s.sid = None  # invalid session id: the next ensure starts another
+    phone.requests.clear()
+    asyncio.run(s.ensure())
+    posts = [(path, payload) for method, path, payload in phone.requests if method == "POST"]
+    assert posts[0][0] == "/session"
+    path, payload = posts[1]
+    assert path == "/session/S/appium/settings"
+    assert payload["settings"]["waitForIdleTimeout"] == 0 and payload["settings"]["animationCoolOffTimeout"] == 0
+    assert payload["settings"]["mjpegServerFramerate"] == 30
+
+
+def test_a_new_session_waits_for_no_animation_by_default(phone):
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    sent = [p for m, path, p in phone.requests if path.endswith("/appium/settings")]
+    assert sent == [{"settings": {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}}]

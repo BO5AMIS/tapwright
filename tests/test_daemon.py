@@ -3190,6 +3190,33 @@ def test_the_connect_settings_turn_xctests_idle_wait_off_and_a_quality_change_ke
     run(go)
 
 
+def test_a_quality_change_retried_after_a_reconnect_still_sends_the_requested_settings():
+    """1.6.2: the reconnect rewrites session_settings with the old preset; the retry must send the requested one, and
+    the remembered settings, the preset and the rate must all say so afterwards."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        assert d.preset == "balanced"
+        real = d.session.settings
+        dropped = []
+
+        async def settings(values):
+            if not dropped and values.get("mjpegServerScreenshotQuality") == PRESETS["light"]["mjpegServerScreenshotQuality"]:
+                dropped.append(True)
+                raise ConnectionLost("connection reset by peer")
+            await real(values)
+        d.session.settings = settings
+        mark = len(d.session.calls)
+        await d.set_quality("light")
+        sent = [c[1] for c in d.session.calls[mark:] if isinstance(c, tuple) and c[0] == "settings"]
+        light = {**PRESETS["light"], **NO_IDLE_WAIT}
+        assert dropped and sent[-1] == light
+        assert d.session.session_settings == light
+        assert d.preset == "light" and d._fps == int(PRESETS["light"]["mjpegServerFramerate"])
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_silent_re_read_waits_for_the_screen_to_be_still_first():
     async def go():
         d = make()
@@ -6183,5 +6210,20 @@ def test_a_dry_run_and_a_dedicated_device_never_hand_the_check_to_the_runner():
         await d.run_tool("a", "look", {"screenshot": False})
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # dedicated: no scope
         assert s.checked_taps == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_alert_with_another_action_is_bad_params_and_reaches_nothing():
+    """1.6.2: `alert {"action": "Connect"}` went into the runner's URL (/alert/Connect) and came back as an internal
+    error. Only accept, dismiss and text are taken; nothing else is ever a part of a URL."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ("Connect", "../x", "", None, 3):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "alert", {"action": bad})
+            assert e.value.code == "bad_params" and ("accept, dismiss, text" in str(e.value) or "needs action" in str(e.value))
+        assert "alert" not in d.session.calls
         await finish(stop, task)
     run(go)

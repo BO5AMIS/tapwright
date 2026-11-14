@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.2 (2026-11-14)
+
+- A WebDriverAgent session re-created in the middle of a run now gets the same settings as the first one (no waiting for
+  animations such as a blinking caret, and the stream's current quality) right after it starts. Before, a tap and then
+  typing after a re-created session took 3.7 to 5.0 s; now it takes 1.7 s. A quality change keeps the requested settings if the connection drops and is
+  retried.
+- `alert` takes only `accept`, `dismiss` or `text`. Any other action is refused as `bad_params` and names the allowed
+  values; nothing from the call is put into a URL.
+- Typing into a field that already has focus can still open iOS's caret menu; a fix that reads focus from the runner
+  comes in 1.7.
+
 ## 1.6.1 (2026-11-14)
 
 - A place is `place_<n>` until a person names it. Tapwright no longer names a place after a repeated navigation title
