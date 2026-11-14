@@ -42,8 +42,10 @@ def cell(app, when, title, body="", y=100, texts=False, name="NotificationShortL
     if texts:
         inner = "".join(f'<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label={quoteattr(p)} '
                         f'x="20" y="{y}" width="300" height="20"/>' for p in pieces)
-        return (f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{name}" label="" x="8" y="{y}" '
-                f'width="414" height="80">{inner}</XCUIElementTypeButton>')
+        # (a banner's label is `<app>, <time>`, seen 2026-11-10 as `Mail, now`: the app comes from there only)
+        head = ", ".join(p for p in (app, when) if p)
+        return (f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{name}" label={quoteattr(head)} x="8" '
+                f'y="{y}" width="414" height="80">{inner}</XCUIElementTypeButton>')
     return (f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{name}" label={quoteattr(", ".join(pieces))} '
             f'x="8" y="{y}" width="414" height="80"/>')
 

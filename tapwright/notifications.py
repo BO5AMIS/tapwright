@@ -59,6 +59,10 @@ class Notification:
     body: str = dataclasses.field(repr=False)
     center: tuple[float, float]  # where a tap opens it, in points
 
+    def same(self, other: "Notification") -> bool:
+        """The same notification in another read of Notification Center: its app, title and body (its place may move)."""
+        return (self.bundle, self.title, self.body) == (other.bundle, other.title, other.body)
+
     def key(self, secret: bytes) -> str:
         """What tells one notification from another for the trigger (§22.1), as a digest: never its text. An HMAC under
         the trigger's own random key (schedules.trigger_secret), not a plain hash: a plain hash of "Your code is 123456"
@@ -195,8 +199,12 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
                     tried, when, title, body = parts
                     app = next((a for a in tried if a and names.get(a.casefold()) is not None), tried[-1])
                 else:
+                    # the app only from the label's first piece (review 1.7 B-L1): a banner's static texts are its
+                    # title and body, so a third party's notification titled "Messages" is never Messages' own
+                    label = (child.get("label") or "").strip()
+                    app = label.split(", ")[0].strip() if label else ""
                     pieces = _pieces(child)
-                    app, rest = (pieces[0], pieces[1:]) if pieces else ("", [])
+                    rest = pieces[1:] if pieces and pieces[0].casefold() == app.casefold() else list(pieces)
                     when = next((p for p in rest if is_time(p)), "")
                     if when:
                         rest.remove(when)
@@ -215,29 +223,88 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
 
 
 OPEN_ACTION = "swipe-action-button-identifier"
+# The Open action's words in the languages we can name (review 1.7 B-M8), case folded. Any other words are Open only when
+# the row has one action, on its left; words that clear, delete or change settings are never Open.
+OPEN_WORDS = frozenset({"open", "\u00f6ffnen", "ouvrir", "abrir", "apri", "openen", "\u00f6ppna", "\u00e5bn",
+                        "\u00e5pne", "avaa", "otw\u00f3rz"})
+NOT_OPEN_WORDS = frozenset({"clear", "clear all", "delete", "remove", "options", "mute", "turn off", "dismiss",
+                            "l\u00f6schen", "effacer", "borrar", "eliminar", "cancella", "wissen", "verwijderen"})
 
 
 def open_action(source: str, y: float, width: float) -> tuple[float, float] | None:
     """Where to touch the Open action iOS 26 shows on a notification's row after a first tap on it (seen on the phone
-    2026-11-14: the tap doesn't open the app; it shows the row's actions, Open on the left). Told by its identifier and
-    its place (the left half, on the row the tap was on), never by its words, which follow the phone's language. None
-    when there is none (the tree isn't XML, or no such action is on that row)."""
+    2026-11-14: the tap doesn't open the app; it shows the row's actions, Open on the left). Told by its identifier, its
+    place (the left half, on the row the tap was on) AND its words: an Open word (OPEN_WORDS), or, in a language not
+    listed, the row's only action. Words that clear or delete are never touched. None when there is none or it can't be
+    told (the tree isn't XML, no such action on that row, or several with words that aren't Open's): nothing is touched
+    rather than something else."""
     try:
         root = ET.fromstring(source)
     except ET.ParseError:
         return None
+    row: list[tuple[str, tuple[float, float, float, float]]] = []
     for node in root.iter():
         if node.get("name") != OPEN_ACTION:
             continue
         x, top, w, h = _rect(node)
-        if w > 0 and h > 0 and x + w / 2 < width / 2 and top <= y <= top + h:
-            return x + w / 2, top + h / 2
-    return None
+        if w > 0 and h > 0 and top <= y <= top + h:
+            row.append((" ".join(_said(node).split()).casefold(), (x, top, w, h)))
+    left = [(words, r) for words, r in row if r[0] + r[2] / 2 < width / 2]
+    if len(left) != 1:
+        return None
+    words, (x, top, w, h) = left[0]
+    if words in NOT_OPEN_WORDS or not (words in OPEN_WORDS or len(row) == 1):
+        return None
+    return x + w / 2, top + h / 2
+
+
+def rows_at(source: str, point: tuple[float, float]) -> int:
+    """How many notifications (of any app: only their frames are looked at, never their words) hold the point."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return 0
+    count = 0
+    for node in root.iter():
+        if _is_notification(node):
+            x, y, w, h = _rect(node)
+            if w > 0 and h > 0 and x <= point[0] < x + w and y <= point[1] < y + h:
+                count += 1
+    return count
+
+
+CENTER_TITLE = "notification center"
+LISTS = ("ScrollView", "CollectionView", "Table")
+
+
+def _kind(node: ET.Element) -> str:
+    return (node.get("type") or node.tag).removeprefix("XCUIElementType")
 
 
 def is_center(source: str) -> bool:
-    """Is this SpringBoard's tree (what Notification Center is)?"""
-    return 'bundleId="com.apple.springboard"' in source[:800]
+    """Is Notification Center open in this tree, proven (review 1.7 B-M3)? SpringBoard's tree is not enough: the home
+    screen and a banner are SpringBoard's too, and a swipe that was swallowed (Siri, Control Center, an alert) would read
+    as "no notifications". Proof is SpringBoard at the root and either Notification Center's own title, or a
+    notification inside a list (Notification Center's scroll view; a banner over an app is in none). On a doubt the
+    callers say NOT_OPENED and read nothing."""
+    if 'bundleId="com.apple.springboard"' not in source[:800]:
+        return False
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return False
+    for node in root.iter():
+        if " ".join((node.get("label") or node.get("name") or "").split()).casefold() == CENTER_TITLE:
+            return True
+    parents = {c: up for up in root.iter() for c in up}
+    for node in root.iter():
+        if _is_notification(node):
+            up = parents.get(node)
+            while up is not None:
+                if _kind(up) in LISTS:
+                    return True
+                up = parents.get(up)
+    return False
 
 
 # ---- one-time codes (§20.4, §24.3) ----------------------------------------------------------------------------------------

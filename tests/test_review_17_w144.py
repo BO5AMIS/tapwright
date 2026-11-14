@@ -146,3 +146,188 @@ def test_b_m5_a_hit_in_another_process_is_covered_unless_its_the_target_or_the_k
             assert r["text"].startswith("Tapped")
             await finish(stop, task)
     run(go)
+
+
+# ---- Notification Center: B-M3, B-M4, B-L2, B-M8, B-L1 ----
+
+HOME = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name=" " label=" " '
+        'bundleId="com.apple.springboard" x="0" y="0" width="400" height="800">'
+        '<XCUIElementTypeIcon type="XCUIElementTypeIcon" name="Wayfare" label="Wayfare" x="20" y="100" width="64" '
+        'height="64"/><XCUIElementTypeOther type="XCUIElementTypeOther" label="Page 1 of 2" x="150" y="700" width="100" '
+        'height="20"/></XCUIElementTypeApplication></AppiumAUT>')
+
+
+def _nc():
+    import test_notifications as tn
+    return tn
+
+
+def test_b_m3_springboard_alone_is_no_proof_that_notification_center_is_open(tmp_path):
+    """B-M3: a swipe that was swallowed leaves the home screen (SpringBoard's tree, no notifications). That is not
+    "no notifications": the tool says Notification Center didn't open, and the trigger's check reads nothing (so the
+    seen record never drops its keys). A banner over an app (a notification in no list) proves nothing either."""
+    import pytest
+    from test_daemon import finish, run, started
+
+    from tapwright import notifications as nl
+    from tapwright.control import Refused
+    tn = _nc()
+    assert not nl.is_center(HOME)
+    banner = HOME.replace("</XCUIElementTypeApplication>", tn.cell("Wayfare", "now", "hi") + "</XCUIElementTypeApplication>")
+    assert not nl.is_center(banner)
+    assert nl.is_center(tn.SCREEN)  # (its title)
+    untitled = tn.SCREEN.replace('label="Notification Center"', 'label="Mitteilungen"')
+    assert nl.is_center(untitled)  # (notifications in a list)
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [], source=HOME)
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:  # (first: a call makes the phone "in use" for the check for 90 s)
+            await d.notification_keys(tn.BUNDLE)
+        assert e.value.code == "not_found"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {})
+        assert e.value.code == "not_found" and tn.center_tool.NOT_OPENED in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def _swipe_then_fail(s):
+    """The first swipe goes out (Notification Center comes down), then the call raises: a timeout after the gesture."""
+    from tapwright.device import DeviceError
+    original = s.swipe
+    state = {"failed": False}
+
+    async def swipe(*a, **k):
+        out = await original(*a, **k)
+        if not state["failed"]:
+            state["failed"] = True
+            raise DeviceError("the swipe's answer timed out")
+        return out
+    s.swipe = swipe
+
+
+def test_b_m4_a_swipe_that_raises_after_it_went_out_still_closes_notification_center(tmp_path):
+    import pytest
+    from test_daemon import finish, run, started
+
+    from tapwright.control import Refused
+    tn = _nc()
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [])
+        _swipe_then_fail(s)
+        stop, task = await started(d)
+        with pytest.raises(Refused):
+            await d.run_tool("a", "notifications", {})
+        assert not s.center_open and s.foreground == tn.BUNDLE
+        await finish(stop, task)
+    run(go)
+
+
+def test_b_m4_a_banner_over_an_app_never_sends_it_home(tmp_path):
+    """B-M4: a banner over the app makes WebDriverAgent say SpringBoard. The process list says the app is in front:
+    it is brought back after, and the home button is never pressed."""
+    from test_daemon import finish, run, started
+    tn = _nc()
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [], foreground="com.apple.springboard")
+
+        async def running():
+            return [tn.BUNDLE]
+        s.device.foreground_apps = running
+        stop, task = await started(d)
+        await d.run_tool("a", "notifications", {})
+        assert "button:home" not in s.calls and tn.BUNDLE in s.launched and not s.center_open
+        await finish(stop, task)
+    run(go)
+
+
+def test_b_l2_notifications_on_a_locked_phone_answers_locked_and_touches_nothing(tmp_path):
+    import pytest
+    from test_daemon import finish, run, started
+
+    from tapwright.control import Refused
+    tn = _nc()
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [])
+        s.is_locked = True
+        stop, task = await started(d, until=("locked",))
+        with pytest.raises(Refused) as e:
+            await d.notification_keys(tn.BUNDLE)
+        assert e.value.code == "locked"
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {})
+        assert e.value.code == "locked"
+        assert "swipe" not in s.calls and s.center_reads == 0
+        await finish(stop, task)
+    run(go)
+
+
+def test_b_m8_open_reads_again_and_refuses_when_the_row_moved(tmp_path):
+    """B-M8: a new notification arrives between the read and the tap: the rows shift, and a tap on the first read's
+    place would open another app's notification. `open` reads again right before the tap and refuses."""
+    import pytest
+    from test_daemon import finish, run, started
+
+    from tapwright.control import Refused
+    from tapwright.daemon import Scope
+    tn = _nc()
+    shifted = tn.center(
+        tn.cell("Chat", "now", "Ana", "new one", y=100),
+        tn.cell("Chat", "now", "Ana", tn.CHAT_SECRET, y=190),
+        tn.cell("Wayfare", "2m ago", "Trip booked", "Your trip to Lisbon, Portugal is confirmed", y=280),
+        tn.cell("Wayfare", "1h ago", "Price drop", y=370))
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [])
+        s.center_opens = tn.BUNDLE
+        original, reads = s.read_center, []
+
+        async def read_center(timeout=10.0):
+            reads.append(1)
+            if len(reads) > 1:
+                s.center_source = shifted
+            return await original(timeout)
+        s.read_center = read_center
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {"open": 1}, scope=Scope((tn.BUNDLE,)))
+        assert e.value.code == "not_found" and "moved or changed" in str(e.value)
+        assert s.tap_points == [] and not s.center_open and s.foreground == tn.BUNDLE
+        await finish(stop, task)
+    run(go)
+
+
+def test_b_m8_the_open_action_is_told_by_its_words_never_a_clear_on_the_left():
+    from tapwright import notifications as nl
+    tn = _nc()
+
+    def row(*actions):
+        return f"<r>{''.join(actions)}</r>"
+
+    def action(label, x):
+        return tn.OPEN_BUTTON.replace('label="Open"', f'label="{label}"').replace('x="14"', f'x="{x}"').format(y=100)
+    assert nl.open_action(row(action("Clear", 14), action("Open", 320)), 130, 430) is None
+    assert nl.open_action(row(action("Open", 14), action("Clear", 320)), 130, 430) == (59.0, 137.0)
+    assert nl.open_action(row(action("Ouvrir", 14), action("Effacer", 320)), 130, 430) == (59.0, 137.0)
+    assert nl.open_action(row(action("Xyz", 14), action("Abc", 320)), 130, 430) is None  # (unknown words, two actions)
+    assert nl.open_action(row(action("Xyz", 14)), 130, 430) == (59.0, 137.0)  # (the row's only action, on the left)
+    assert nl.open_action(row(action("Clear", 14)), 130, 430) is None
+
+
+def test_b_l1_a_banners_app_comes_from_its_labels_first_piece_only():
+    """B-L1: a third party's banner whose title is "Messages" (a code spoof) is never taken as Messages'; the app is
+    the label's first piece, and it must be the shown name of exactly one app."""
+    from tapwright import notifications as nl
+    tn = _nc()
+    spoof = ('<XCUIElementTypeButton type="XCUIElementTypeButton" name="NotificationShortLookView" label="Spoofy, now" '
+             'x="8" y="100" width="414" height="80">'
+             '<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Messages" x="20" y="100" width="300" '
+             'height="20"/><XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Your code is 123456" '
+             'x="20" y="120" width="300" height="20"/></XCUIElementTypeButton>')
+    got = nl.parse(tn.center(spoof), {**tn.INSTALLED, "com.example.spoofy": "Spoofy"}, lambda b: True)
+    assert [(n.bundle, n.title) for n in got] == [("com.example.spoofy", "Messages")]
+    assert nl.parse(tn.center(spoof), tn.INSTALLED, lambda b: True) == []  # (no app of that name: dropped)

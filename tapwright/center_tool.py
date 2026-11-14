@@ -68,20 +68,35 @@ class CenterTools:
         if not getattr(s, "app_names", None):
             await s.read_app_names()
         before = await s.foreground_bundle_id()
+        home_ok = True
+        if before == SPRINGBOARD:
+            # A notification banner over an app makes WebDriverAgent say SpringBoard (Daemon._front): the process list
+            # says which app is really in front, and that one comes back after. When it can't say, the home button is
+            # never pressed (it would throw an app away); the swipe up alone closes Notification Center (B-M4).
+            try:
+                running = list(await asyncio.wait_for(s.device.foreground_apps(), 5))
+            except Exception:
+                running, home_ok = [], False
+            if len(running) == 1:
+                before = running[0]
+            elif running:
+                home_ok = False
         w, h = s.screen
+        names = dict(getattr(s, "app_names", {}) or {})
         self.broadcast({"type": "action", "by": "agent", "kind": "notifications", "at": int(time.time() * 1000),
                         "ok": True, "caption": caption})
-        await s.swipe(w * CENTER_X, 1.0, w * CENTER_X, h * CENTER_PULL, duration_ms=CENTER_SWIPE_MS)
-        await asyncio.sleep(CENTER_OPEN_WAIT)
         opened: notes_lib.Notification | None = None
         try:
+            # (inside the try: a cancelled call, or a swipe that raised after the gesture went out, still closes it)
+            await s.swipe(w * CENTER_X, 1.0, w * CENTER_X, h * CENTER_PULL, duration_ms=CENTER_SWIPE_MS)
+            await asyncio.sleep(CENTER_OPEN_WAIT)
             source = await s.read_center()
             if not notes_lib.is_center(source):
                 raise Refused("not_found", NOT_OPENED)
-            found = notes_lib.parse(source, dict(getattr(s, "app_names", {}) or {}), keep)
+            found = notes_lib.parse(source, names, keep)
             del source  # (every other app's notification goes with it)
             if open_index is not None and 1 <= open_index <= len(found):
-                chosen = found[open_index - 1]
+                chosen = await self._same_notification(found[open_index - 1], open_index, names, keep)
                 await s.tap(ui.Target(x=chosen.center[0], y=chosen.center[1]))
                 await asyncio.sleep(OPEN_WAIT)
                 if await s.foreground_bundle_id() != chosen.bundle:
@@ -101,11 +116,31 @@ class CenterTools:
                 opened = chosen
         finally:
             if opened is None:
-                await self._close_center(before)
+                await self._close_center(before, home_ok)
         return found, opened
 
-    async def _close_center(self, before: str | None) -> None:
-        """Notification Center up again (a swipe up from the bottom edge), and the app that was in front back."""
+    async def _same_notification(self, chosen: "notes_lib.Notification", n: int, names: dict[str, str],
+                           keep: Callable[[str], bool]) -> "notes_lib.Notification":
+        """Right before `open` taps: read Notification Center again and find the same notification (its app, title and
+        body). A new one coming in moves the rows, so a tap on the first read's place could open another app's (B-M8).
+        Refused when it is gone, is there twice, moved, or its place holds more than one notification."""
+        again = await self.session.read_center()
+        try:
+            if not notes_lib.is_center(again):
+                raise Refused("not_found", NOT_OPENED)
+            now = [x for x in notes_lib.parse(again, names, keep) if x.same(chosen)]
+            moved = len(now) != 1 or abs(now[0].center[0] - chosen.center[0]) > 2 or \
+                abs(now[0].center[1] - chosen.center[1]) > 2 or notes_lib.rows_at(again, now[0].center) != 1
+        finally:
+            del again
+        if moved:
+            raise Refused("not_found", f"n{n} moved or changed while Notification Center was open (a new notification "
+                                       f"came in), so nothing was opened. Call notifications to read the list again.")
+        return now[0]
+
+    async def _close_center(self, before: str | None, home_ok: bool = True) -> None:
+        """Notification Center up again (a swipe up from the bottom edge), and the app that was in front back. The home
+        button only when the home screen was in front before (`home_ok`: never when an app may be under a banner)."""
         s = self.session
         w, h = s.screen
         try:
@@ -115,7 +150,7 @@ class CenterTools:
             front = await s.foreground_bundle_id()
             if before and before != SPRINGBOARD and front != before:
                 await s.launch(before)  # (it was running: this brings it back as it was)
-            elif (not before or before == SPRINGBOARD) and front == SPRINGBOARD:
+            elif home_ok and (not before or before == SPRINGBOARD) and front == SPRINGBOARD:
                 await s.press_button("home")  # the home screen, with nothing pulled down over it
         except Refused:
             raise
@@ -128,6 +163,8 @@ class CenterTools:
         `{open: n}` opens the n-th. `given`: personal mode's apps (None: the whole phone)."""
         if client_id in getattr(self, "_journeys", {}):
             raise Refused("bad_params", "notifications isn't part of a journey: a user's-eyes run stays in the app")
+        if self.state == "locked":  # (as actions are: a locked phone is never swiped, B-L2)
+            raise Refused("locked", "the phone is locked; ask the user to unlock it")
         n = args.get("open")
         if n is not None and (isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= notes_lib.MAX):
             raise Refused("bad_params", f"open is the number of a notification in the list, 1 to {notes_lib.MAX} (n1 is 1), "
@@ -269,6 +306,8 @@ class CenterTools:
             raise Refused("paused", "paused by the user in the live view")
         if self.phone_in_use():
             raise Refused("busy", "the phone is in use; the check waits")
+        if self.state == "locked":  # (a locked phone is never swiped: the lock screen, then its passcode screen)
+            raise Refused("locked", "the phone is locked; ask the user to unlock it")
         from . import schedules
         secret = schedules.trigger_secret()  # (the digests are HMACs under it: never a plain hash of a code, L5)
         if secret is None:
