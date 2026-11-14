@@ -380,12 +380,18 @@ class Book:
         self.path = Path(policy_path)
         self.uses = Path(f"{self.path}.uses")
         self.lock_path = Path(f"{self.path}.edit.lock")
+        # `--revoke-all`'s lock-free fallback (review 1.7 A-M5): while this file exists every grant counts as revoked;
+        # the next locked edit writes that into the policy file and removes it
+        self.revoked_mark = Path(f"{self.path}.revoked")
+        # when `--revoke-all` last ran (epoch ms): any run that began before it stops between moves, whatever grants it
+        # began with, none too (review 1.7 A-L2)
+        self.revoked_at = Path(f"{self.path}.revoked-at")
         self.audit = audit
         self.now = now or _local_now
         self.lock_deps = lock_deps
         self.lock_wait = lock_wait
         self.hooks = hooks or {}  # for tests: "before_create", "after_claim", "before_write"
-        self._cache: tuple[tuple[int, int], datetime.date, Loaded] | None = None
+        self._cache: tuple[tuple[int, int, str | None], datetime.date, Loaded] | None = None
 
     def _hook(self, name: str, *args) -> None:
         if (hook := self.hooks.get(name)) is not None:
@@ -397,7 +403,8 @@ class Book:
         today = self.now().date()
         try:
             st = self.path.stat()
-            stamp = (st.st_mtime_ns, st.st_size)
+            mark = self._mark()
+            stamp = (st.st_mtime_ns, st.st_size, mark)
         except OSError:
             return Loaded(False, [], [], lambda app: ())
         if self._cache is not None and self._cache[0] == stamp and self._cache[1] == today:
@@ -411,6 +418,8 @@ class Book:
         def block_for(app: str) -> tuple[str, ...]:
             return rules.words(app)[0]
         grants, refused = parse_grants(obj.get("grants"), today, block_for) if obj.get("version") == 2 else ([], [])
+        if mark is not None:  # (every grant not revoked in the file is, by the mark)
+            grants = [g if g.revoked is not None else dataclasses.replace(g, revoked=mark) for g in grants]
         loaded = Loaded(True, grants, refused, block_for)
         self._cache = (stamp, today, loaded)
         return loaded
@@ -599,7 +608,7 @@ class Book:
                 and grant.revoked is None and not grant.drafts_only and at.date() <= grant.until
                 and not grant.in_quiet(at))
 
-    def _use(self, grant: Grant, touch: Touch, detail: str) -> Use | str | None:
+    def _use(self, grant: Grant, touch: Touch, detail: str, line: bool = True) -> Use | str | None:
         """Claim a use, then read the file and the clock again (a revocation, an end, quiet hours or a cut quota that
         came meanwhile win), then write the audit line. No line: the use is given back and the grant doesn't cover
         the touch (§23)."""
@@ -621,21 +630,29 @@ class Book:
                     self.release(got)
                     current = fresh
                     continue
-                if not self.audit.write("grant", app=touch.app, name=grant.name,
-                                        detail=f"{detail} ({got.today} of {fresh.per_day} today)"):
+                got.per_day = fresh.per_day
+                if line and not self.write_line(touch, got, detail):
                     self.release(got)
                     return None
-                got.per_day = fresh.per_day
                 return got
             except Exception:
                 self.release(got)
                 raise
         return None
 
-    def decide(self, touch: Touch, mode: str, detail: str = "") -> Decision:
+    def write_line(self, touch: Touch, use: Use, detail: str) -> bool:
+        """The use's `grant` audit line (§23), with its count as it stands now. False when it can't be written (the
+        caller gives the use back: no line, no grant)."""
+        if self.audit is None:
+            return False
+        return bool(self.audit.write("grant", app=touch.app, name=use.name,
+                                     detail=f"{detail} ({use.today} of {use.per_day} today)"))
+
+    def decide(self, touch: Touch, mode: str, detail: str = "", line: bool = True) -> Decision:
         """Whether a grant covers this touch (§19.3), for a touch the policy says needs a person. `mode` "use" claims a
         use and writes its audit line; "peek" (a dry run) claims and writes nothing. `detail` is the audit line's
-        words, such as `tap "Post"`."""
+        words, such as `tap "Post"`. `line` False: the caller writes the line itself (write_line) once still_covers
+        held, so the log never names a use that then asked a person (review 1.7 A-L1)."""
         loaded = self.load()
         if not loaded.ok or touch_never(touch.app, touch.name):
             return Decision("ask")
@@ -661,7 +678,7 @@ class Book:
                 doesnt(f"quiet hours {grant.quiet[0]} to {grant.quiet[1]}", "quiet hours")
                 continue
             if mode == "use" and not grant.drafts_only:
-                got = self._use(grant, touch, detail)
+                got = self._use(grant, touch, detail, line)
             else:
                 counted = self.counts(grant, at)
                 got = None if counted is None else self._limit(grant, *counted)
@@ -693,6 +710,7 @@ class Book:
                     return False
             at = self.now()
             if self._current(use, at) and self._fits(grant, use):
+                use.per_day = grant.per_day
                 return self.holds(grant, touch, self.now())
             self.release(use)
             got = self._claim(grant, grant.route or (touch.routes[0] if touch.routes else None))
@@ -729,6 +747,37 @@ class Book:
         shutil.rmtree(self.uses / folder, ignore_errors=True)
         return not (self.uses / folder).exists()
 
+    def _mark(self) -> str | None:
+        """The date of the `.revoked` mark when there is one (today's when its date can't be read: it still revokes),
+        else None. OSError only when it can't be told whether there is one."""
+        try:
+            text = self.revoked_mark.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            text = ""
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            obj = None
+        date = obj.get("revoked") if isinstance(obj, dict) else None
+        return date if isinstance(date, str) and _date(date) is not None else self.now().date().isoformat()
+
+    def _fold_mark(self, obj: dict) -> bool:
+        """Under the edit lock: write the `.revoked` mark into the file's grants (their `revoked`, unless they have one).
+        True when there was a mark (the file is written, and the mark removed after)."""
+        try:
+            date = self._mark()
+        except OSError:
+            return False
+        if date is None:
+            return False
+        items = obj.get("grants")
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and _date(item.get("revoked")) is None:
+                item["revoked"] = date
+        return True
+
     # ---- changing the file (§19.5) ----
     def edit(self, change: Callable[[dict], bool]) -> str | None:
         """Change the policy file under its edit lock: the file is read again under the lock, `change` edits that
@@ -748,7 +797,8 @@ class Book:
                 return f"couldn't read the policy file: {e}"
             if not isinstance(obj, dict):
                 return "the policy file isn't a policy."
-            if not change(obj):
+            folded = self._fold_mark(obj)  # (a revocation made without the lock comes first: A-M5)
+            if not change(obj) and not folded:
                 return None
             self._hook("before_write")
             temp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
@@ -765,6 +815,8 @@ class Book:
             except OSError as e:
                 _unlink(temp)
                 return f"couldn't write the policy file: {e}"
+            if folded:
+                _unlink(self.revoked_mark)
             self._cache = None
             return None
         finally:
@@ -795,14 +847,72 @@ class Book:
                 revoked.append((name, item.get("app") if isinstance(item.get("app"), str) else None))
             return bool(revoked)
         why = self.edit(change)
+        if why is not None and why.startswith("couldn't take the policy file's edit lock"):
+            # The kill switch is never the one change a held lock blocks (review 1.7 A-M5): a `.revoked` mark, made
+            # without the lock, revokes every grant at once (every reader honours it); the next locked edit folds it in.
+            fallback = self._revoke_by_mark(today)
+            if isinstance(fallback, str):
+                return f"{why} And {fallback}"
+            revoked[:], already[:] = fallback
+            why = None
         if why is not None:
             return why
+        self._stamp_revoked()
         for name, app in revoked:  # the kill switch never waits on its record: a line that fails doesn't undo it
             if self.audit is not None:
                 self.audit.write("revoke", app=app, name=name, detail=detail)
             if safe_name(name):
                 self._remove_uses(ascii_lower(name))
         return [n for n, _ in revoked], already
+
+    def _stamp_revoked(self) -> None:
+        """`.revoked-at`: now, in epoch ms, written whole (a later run of the kill switch writes a later time)."""
+        temp = self.revoked_at.with_name(f"{self.revoked_at.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            temp.write_text(json.dumps({"at": int(time.time() * 1000)}) + "\n", encoding="utf-8")
+            os.replace(temp, self.revoked_at)
+        except OSError:
+            _unlink(temp)
+
+    def revoked_after(self, started: float) -> bool:
+        """Did `--revoke-all` run after `started` (epoch seconds)? What stops a run that began with no grant (A-L2)."""
+        try:
+            at = json.loads(self.revoked_at.read_text(encoding="utf-8")).get("at")
+        except (OSError, ValueError, AttributeError):
+            return False
+        return isinstance(at, int) and not isinstance(at, bool) and at >= int(started * 1000)
+
+    def _revoke_by_mark(self, today: str) -> "tuple[list[tuple[str, str | None]], list[str]] | str":
+        """`.revoked`, created exclusively with today's date (one already there stays: it revokes as well), and what it
+        revoked: the grants the file has that weren't revoked, and those that were. Why not, when it can't be made."""
+        try:
+            fd = os.open(self.revoked_mark, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        except OSError as e:
+            return f"couldn't write {self.revoked_mark.name} either: {e}"
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"revoked": today}) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        self._cache = None
+        try:
+            obj = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return [], []
+        items = obj.get("grants") if isinstance(obj, dict) else None
+        revoked: list[tuple[str, str | None]] = []
+        already: list[str] = []
+        for index, item in enumerate(items if isinstance(items, list) else [], 1):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") if isinstance(item.get("name"), str) and item["name"].strip() else f"#{index}"
+            if _date(item.get("revoked")) is not None:
+                already.append(name)
+            else:
+                revoked.append((name, item.get("app") if isinstance(item.get("app"), str) else None))
+        return revoked, already
 
     def create(self, spec: "Spec") -> Grant | str:
         """A grant a person made through the dialog (§19.6), written into the policy file under the edit lock: a name

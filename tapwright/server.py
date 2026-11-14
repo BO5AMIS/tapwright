@@ -23,7 +23,7 @@ from starlette.websockets import WebSocket
 from . import otp as otplib, policy, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
-from .daemon import Scope
+from .daemon import BUNDLE_ID, SYSTEM_APPS, Scope
 from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
@@ -108,23 +108,57 @@ def _hv(request, name: str, default: str | None = None) -> str | None:
     return urllib.parse.unquote(value) if request.headers.get("x-tapwright-encoding") == "percent" else value
 
 
+def resolve_app(app: str, names: dict[str, str]) -> tuple[str | None, str | None]:
+    """(the one bundle id an app named in --apps or a call stands for, why it stands for none) (review 1.7 A-M4): an
+    installed bundle id is itself; a name, ignoring case, must be the name of exactly ONE installed app (two apps that
+    show the same name prove neither), else of one of iOS's own apps; a bundle id that isn't installed (iOS's own apps
+    aren't listed) is compared as written. When the phone can't list its apps (`names` empty), a name is compared as
+    written too."""
+    q = app.strip()
+    if q in names:
+        return q, None
+    low = q.casefold()
+    hits = sorted(b for b, n in names.items() if n and n.strip().casefold() == low)
+    if len(hits) > 1:
+        return None, f'"{q}" is the name of {len(hits)} installed apps ({", ".join(hits)}); name it by its bundle id'
+    if hits:
+        return hits[0], None
+    builtin = next((b for n, b in SYSTEM_APPS.items() if n.casefold() == low), None)
+    if builtin is not None:
+        return builtin, None
+    if BUNDLE_ID.match(q) or not names:
+        return q, None
+    return None, f'no installed app is named "{q}"'
+
+
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
     async def over_ceiling(apps: tuple[str, ...], dedicated: bool, mode: str | None) -> str | None:
-        """Why a call's scope is wider than serve's --apps, or None (§18.10). An app counts as within it when the
-        ceiling names it by its bundle id or by its exact installed name, whichever the call used (seen on the phone
-        2026-11-14: `serve --apps Wayfare`, and a scheduled run naming the route's bundle id)."""
+        """Why a call's scope is wider than serve's --apps, or None (§18.10). Every name in the ceiling and in the call is
+        resolved to exactly one bundle id (resolve_app), and only bundle ids are compared (review 1.7 A-M4): `serve
+        --apps Wayfare` takes a call naming its bundle id, and the other way round (seen on the phone 2026-11-14), but
+        never a second app that shows the same name."""
         if ceiling is None:
             return None
         why = ceiling.refuse_scope(apps, dedicated, mode)
-        if why is None or dedicated:
+        if dedicated or not ceiling.apps:
             return why
         names = await daemon.installed_names() if hasattr(daemon, "installed_names") else {}
-        listed = set(ceiling.apps)
-
-        def within(app: str) -> bool:
-            return app in listed or names.get(app) in listed or any(n == app and b in listed for b, n in names.items())
-        outside = tuple(a for a in apps if not within(a))
-        return ceiling.refuse_scope(outside, False, mode) if outside else None
+        listed: set[str] = set()
+        for app in ceiling.apps:
+            bundle, problem = resolve_app(app, names)
+            if bundle is None:
+                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and {problem}, so "
+                        "no call runs. Restart tapwright serve with --apps naming each app by its bundle id.")
+            listed.add(bundle)
+        outside: list[str] = []
+        for app in apps:
+            bundle, problem = resolve_app(app, names)
+            if bundle is None:
+                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and the call names "
+                        f"an app it can't be sure of: {problem}.")
+            if bundle not in listed:
+                outside.append(app)
+        return ceiling.refuse_scope(tuple(outside), False, mode) if outside else None
 
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
     proved = otplib.Proved()  # the connections that proved this daemon a moment ago: only they may ask /otp (§18.11)

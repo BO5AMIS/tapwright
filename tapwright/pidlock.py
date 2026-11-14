@@ -245,8 +245,9 @@ def _dead(deps: Deps, holder: dict) -> bool:
 
 
 def _legacy(holder: dict) -> bool:
-    """A holder whose `started` is an older tool's text: alive while its pid runs, but `unlock` may clear it."""
-    return isinstance(holder.get("started"), str)
+    """A holder whose `started` isn't the v1.16 integer (an older tool's text, or null: a holder that couldn't read its
+    own start, review 1.7 A-M5): alive while its pid runs, since a reuse can't be proven, but `unlock` may clear it."""
+    return not is_ms(holder.get("started"))
 
 
 def _remove_if_unchanged(deps: Deps, path: str, seen: str) -> bool:

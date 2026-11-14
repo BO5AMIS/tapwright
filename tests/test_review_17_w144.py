@@ -399,3 +399,168 @@ def test_b_l4_structural_ids_are_an_allow_list():
         assert ui.structural_id(kept), kept
     for content in ("O'Brien", "Lunch, 12 pm", "Dinner & drinks", "Is it done?", "#general", "Hi!", "a\tb", "(555) 01"):
         assert not ui.structural_id(content), content
+
+
+# ---- A-M4: the --apps ceiling resolves each name to exactly one bundle id ----
+
+def test_a_m4_a_ceiling_name_two_apps_share_admits_neither_and_ids_are_compared(tmp_path):
+    """A-M4: `serve --apps Wayfare` with a second installed app also shown as "Wayfare" (another vendor's build): a
+    call naming the other one's bundle id passed on 8e30e99 (its name was in the list). Now every name resolves to one
+    bundle id, or the call is refused with the reason."""
+    from starlette.testclient import TestClient
+    from test_notifications import handover_daemon
+    from test_otp import AUTH, TOKEN, A
+
+    from tapwright.ceiling import Ceiling
+    from tapwright.server import create_app
+    _, d, s = handover_daemon(tmp_path)
+    mine, other = "com.example.wayfare", "com.other.wayfare"
+    s.installed = [{"bundle_id": b, "name": "Wayfare", "version": "1", "build": "1", "executable": "W"}
+                   for b in (mine, other)]
+    s.app_names = {}
+
+    def call(ceiling_apps, apps):
+        c = TestClient(create_app(d, TOKEN, hosts={"testserver"}, ceiling=Ceiling(apps=ceiling_apps)), client=A)
+        return c.post("/api/apps", json={}, headers={**AUTH, "X-Tapwright-Apps": apps})
+    got = call(("Wayfare",), other)
+    assert got.status_code == 403 and "over_ceiling" in got.text and "2 installed apps" in got.text
+    got = call(("Wayfare",), mine)
+    assert got.status_code == 403 and "over_ceiling" in got.text
+    got = call((mine,), "WAYFARE")
+    assert got.status_code == 403 and "can't be sure" in got.text
+    assert "over_ceiling" not in call((mine,), mine).text
+    from tapwright.server import resolve_app
+    names = {mine: "Wayfare", "com.example.chat": "Chat"}
+    assert resolve_app("wayfare", names) == (mine, None)
+    assert resolve_app("Notes", names) == ("com.apple.mobilenotes", None)
+    assert resolve_app("com.apple.mobilenotes", names) == ("com.apple.mobilenotes", None)
+    assert resolve_app("Nope", names)[0] is None
+
+
+# ---- A-M5: --revoke-all is never blocked by the edit lock; a null `started` can be cleared ----
+
+def test_a_m5_revoke_all_works_while_the_edit_lock_is_held_and_the_mark_is_folded_in_later(tmp_path):
+    """A-M5: a holder that never lets go of the policy file's edit lock (a crash with its pid reused, or on purpose)
+    made every `--revoke-all` answer "Couldn't revoke" on 8e30e99. Now `<policy>.revoked` is made without the lock; every
+    reader treats every grant as revoked; the next locked edit writes it into the file and removes the mark."""
+    import datetime
+    import json
+
+    from tapwright import grants, grantscmd, pidlock
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps({"version": 2, "grants": [{"name": "chat_send", "app": "com.example.chat",
+                                                            "words": ["Send"], "until": "2026-11-20", "perDay": 3}]}),
+                    encoding="utf-8")
+    clock = lambda: datetime.datetime(2026, 11, 14, 10, 0)  # noqa: E731
+    holder = pidlock.take(f"{path}.edit.lock")
+    try:
+        book = grants.Book(path, None, now=clock, lock_wait=0.05)
+        assert book.active() == frozenset({"chat_send"})
+        text, code = grantscmd.run_grants(str(path), revoke_all=True, audit_folder=tmp_path / "audit", now=clock)
+        assert code == 0 and "Revoked 1 grant: chat_send" in text and "chat_send: revoked 2026-11-14" in text
+        assert grants.Book(path, None, now=clock).active() == frozenset()
+        assert '"revoked"' not in path.read_text(encoding="utf-8")
+    finally:
+        pidlock.release(f"{path}.edit.lock", holder)
+    book = grants.Book(path, None, now=clock)
+    assert book.edit(lambda obj: False) is None  # (any locked edit folds the mark in)
+    assert not book.revoked_mark.exists() and json.loads(path.read_text("utf-8"))["grants"][0]["revoked"] == "2026-11-14"
+    assert book.active() == frozenset()
+
+
+def test_a_m5_a_lock_whose_holder_wrote_no_start_time_can_be_cleared_by_a_person(tmp_path):
+    import json
+
+    from tapwright import pidlock
+    path = tmp_path / "x.lock"
+    path.write_text(json.dumps({"owner": "o", "pid": 7, "started": None}), encoding="utf-8")
+    live = pidlock.Deps(pid=8, alive=lambda p: True, start_of=lambda p: 1_800_000_000_000)
+    assert pidlock.take(path, live) is None  # (never taken over: a reuse can't be proven)
+    assert pidlock.state(path, live) == ("old", 7)
+    assert pidlock.unlock(path, live).status == "removed" and not path.exists()
+
+
+# ---- A-L2: --revoke-all stops a run that began with no grant ----
+
+def test_a_l2_revoke_all_stops_a_run_that_began_with_no_active_grant(tmp_path):
+    """A-L2: a run that began with no active grant (none in the file) never stopped on 8e30e99, since it had nothing to
+    see revoked. A `--revoke-all` after it began stops it between moves, whatever it began with."""
+    import pytest
+    from test_daemon import finish, run, started
+    from test_daemon_grants import setup
+
+    from tapwright import grants
+    from tapwright.control import Refused
+
+    async def go():
+        d, rules, path, box = setup(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
+        book = grants.Book(path, None, now=lambda: box[0])  # `tapwright grants --revoke-all`, in another process
+        tapped, done = d.session.tap, []
+
+        async def tap_then_revoke(*args, **kwargs):
+            result = await tapped(*args, **kwargs)
+            if not done:
+                done.append(book.revoke_all())
+            return result
+        d.session.tap = tap_then_revoke
+        steps = [{"tool": "tap", "target": {"id": "ok-button"}}, {"tool": "tap", "target": {"id": "ok-button"}}]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": steps, "look": False}, policy=rules)
+        assert e.value.code == "not_allowed" and "stopped at step 2" in str(e.value) and "revoked" in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+# ---- A-L1: a grant's use is audited after the last check, and given back when nothing was touched ----
+
+def test_a_l1_no_grant_line_for_a_use_that_then_asked_a_person(tmp_path, monkeypatch):
+    """A-L1: the check right before the touch (still_covers) failed after the `grant` line was written on 8e30e99, so
+    the audit log said a grant let through a touch a person was asked for. The line now comes after that check."""
+    import pytest
+    from test_daemon import finish, run, started
+    from test_daemon_grants import audit_lines, grant, setup
+
+    from tapwright import grants
+    from tapwright.control import Refused
+    monkeypatch.setattr(grants.Book, "still_covers", lambda self, touch, use: (self.release(use), False)[1])
+
+    async def go():
+        d, rules, path, box = setup(tmp_path, grant())
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
+        with pytest.raises(Refused):
+            await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False, "dry_run": False}, policy=rules)
+        await finish(stop, task)
+    run(go)
+    lines = audit_lines(tmp_path) if (tmp_path / "audit" / "2026-11.jsonl").exists() else []
+    assert not [x for x in lines if x["kind"] == "grant"]
+
+
+def test_a_l1_a_use_is_given_back_when_the_call_is_refused_before_any_touch(tmp_path):
+    """A-L1: the policing of an off-screen target (before the scroll) claimed a use, and the `off_screen` refusal that
+    followed never touched but kept it on 8e30e99. Now the use is given back: the count stays 0 of 2."""
+    import pytest
+    from fakes import button
+    from test_daemon import finish, run, started
+    from test_daemon_grants import grant, setup
+
+    from tapwright import grants
+    from tapwright.control import Refused
+
+    async def go():
+        d, rules, path, box = setup(tmp_path, grant())
+        stop, task = await started(d)
+        d.session.screen = (430.0, 932.0)
+        d.session.tree = [button("e1", "OK", "ok-button", rect=(10, 200, 100, 40))]
+        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
+        d.session.offscreen = [button("", "Post", "post", rect=(16, 1500, 398, 48))]
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False}, policy=rules)
+        assert e.value.code == "not_actionable" and "off_screen" in str(e.value)
+        book = grants.Book(path, None, now=lambda: box[0])
+        g = book.load().grants[0]
+        assert book.counts(g, box[0])[0] == 0
+        await finish(stop, task)
+    run(go)

@@ -81,13 +81,15 @@ def test_revoke_all_marks_the_file_audits_each_and_lists_them_revoked(tmp_path):
     assert again.splitlines()[0] == "Every grant was already revoked (3)."
 
 
-def test_revoke_all_with_a_held_lock_changes_nothing(tmp_path):
+def test_revoke_all_with_a_held_lock_leaves_the_file_and_revokes_by_its_mark(tmp_path):
+    """Review 1.7 A-M5: a held lock never blocks the kill switch; the file is left as it is and `.revoked` revokes."""
     path, audit, book = make(tmp_path, [POST])
     held = pidlock.take(f"{path}.edit.lock")
     before = path.read_text("utf-8")
     book.lock_wait = 0.05
     done = book.revoke_all()
-    assert isinstance(done, str) and "edit lock" in done and path.read_text("utf-8") == before
+    assert not isinstance(done, str) and done[0] and path.read_text("utf-8") == before
+    assert book.active() == frozenset()
     pidlock.release(f"{path}.edit.lock", held)
 
 

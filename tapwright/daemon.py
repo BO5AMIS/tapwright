@@ -217,7 +217,8 @@ _GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar
 # The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
 _ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
 # The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
-_RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str]] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
+BEFORE_TOUCH = frozenset({"not_actionable", "stale", "not_found", "ambiguous"})  # refusals made before a touch (A-L1)
+_RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str], float] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
 
 
@@ -660,6 +661,8 @@ class GrantCall:
     line: str | None = None  # `Note: allowed by grant "…" (2 of 3 today).`
     draft: str | None = None  # §12 grant_draft: the draftsOnly grant that stopped this touch at a draft
     taken: bool = False
+    claimed: "tuple[grantlib.Book, grantlib.Use] | None" = None  # the use a grant gave this call (A-L1: given back...)
+    touched: bool = False  # (...when the call is refused before any touch went out)
 
 
 @dataclasses.dataclass
@@ -2005,6 +2008,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
+                self._give_back(said, e)
                 self._log_action(name, args, started, e, client=client_id, known_off=known, grants=said)
                 raise
             finally:
@@ -3816,11 +3820,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
             # person's input from the live view, queued separately, is never announced as the agent's
             notify = self._agent_touches.notify
+            grant_call = _GRANT_CALL.get()
+            by_read = _SCOPE_BY_READ.get() is not None
 
             async def touching(ms: float) -> None:
-                self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
+                if grant_call is not None:
+                    grant_call.touched = True  # (a grant's use is never given back once a touch went out: A-L1)
+                if by_read:
+                    self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
                 await notify(ms)
-            self.session.touch_hook = notify if _SCOPE_BY_READ.get() is None else touching
+            self.session.touch_hook = touching
             self.session.banner_guard = True
             touched_token = _SCOPE_TOUCHED.set([])
             try:
@@ -6075,15 +6084,25 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         holder = _GRANT_CALL.get()
         detail = f"{tool} {ui.clip(self.scrub_everywhere(touch.name or ''))}"
         try:
-            decided = book.decide(touch, "use", detail)
-            if decided.kind == "covered" and decided.use is not None and not book.still_covers(touch, decided.use):
-                decided = grantlib.Decision("ask")
+            decided = book.decide(touch, "use", detail, line=False)
+            if decided.kind == "covered" and decided.use is not None:
+                # the check right before the touch, THEN the audit line, with the count as it stands after it (a
+                # re-claim across midnight or the hour): never a line for a use that then asked a person (A-L1)
+                if not book.still_covers(touch, decided.use):
+                    decided = grantlib.Decision("ask")
+                elif not book.write_line(touch, decided.use, detail):
+                    book.release(decided.use)
+                    decided = grantlib.Decision("ask")
+                else:
+                    use = decided.use
+                    decided = grantlib.Decision("covered", decided.name, f"{use.today} of {use.per_day}", use)
         except Exception as e:  # any doubt asks a person
             self.log(f"grants: {type(e).__name__}: {e}")
             return False
         if decided.kind == "covered":
             if holder is not None:
                 holder.name, holder.use, holder.line = decided.name, f"{decided.counts} today", decided.line
+                holder.claimed = (book, decided.use) if decided.use is not None else None
             return True
         if holder is not None:
             holder.notes += [n for n in decided.notes if n not in holder.notes]
@@ -6092,13 +6111,30 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 holder.draft = decided.name  # (§21.3: the touch stops at a draft; _police_check shows it)
         return False
 
+    def _give_back(self, said: GrantCall, e: Refused) -> None:
+        """A call a grant covered that was refused before any touch went out (off screen, stale, covered: §19.4 "a use
+        proven not delivered gives its slot back", review 1.7 A-L1): its use is given back, and its log line names no
+        grant. A refusal that may come after a touch (a timeout, a dropped line) keeps it: the safe side."""
+        if said.claimed is None or said.touched or e.code not in BEFORE_TOUCH:
+            return
+        book, use = said.claimed
+        try:
+            book.release(use)
+        except Exception as x:  # (kept counted: the safe side)
+            self.log(f"grants: {type(x).__name__}: {x}")
+            return
+        said.claimed, said.name, said.use, said.line = None, None, None, None
+
     def _grants_revoked(self) -> list[str]:
-        """The grants in force when the running batch began that are revoked now: it stops between moves (§19.5)."""
+        """The grants in force when the running batch began that are revoked now: it stops between moves (§19.5). A
+        `--revoke-all` after it began stops it too, whatever it began with (review 1.7 A-L2: none, or ones revoked
+        already)."""
         held = _RUN_GRANTS.get()
-        if held is None or not held[1]:
+        if held is None:
             return []
         try:
-            return held[0].revoked_since(held[1])
+            gone = held[0].revoked_since(held[1]) if held[1] else []
+            return gone or (sorted(held[1]) or ["every grant"] if held[0].revoked_after(held[2]) else [])
         except Exception:
             return sorted(held[1])
 
@@ -6107,7 +6143,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if _RUN_GRANTS.get() is not None or (book := self._book()) is None:
             return None
         try:
-            return _RUN_GRANTS.set((book, book.active()))
+            return _RUN_GRANTS.set((book, book.active(), time.time()))
         except Exception:
             return None
 
