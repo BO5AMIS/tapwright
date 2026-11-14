@@ -1,0 +1,18 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "inbox",
+  "app": "com.apple.mobilemail",
+  "start": "mailboxes",
+  "end": "inbox",
+  "variables": [],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "label": "All Inboxes",
+        "index": 0
+      }
+    }
+  ]
+}

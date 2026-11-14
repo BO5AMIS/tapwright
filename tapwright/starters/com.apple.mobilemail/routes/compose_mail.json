@@ -1,0 +1,63 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "compose_mail",
+  "app": "com.apple.mobilemail",
+  "start": "inbox",
+  "end": "inbox",
+  "variables": [
+    "to",
+    "subject",
+    "body"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "label": "New Message"
+      },
+      "optional": true
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "label": "Compose"
+      },
+      "optional": true
+    },
+    {
+      "tool": "type_text",
+      "text": "${to}",
+      "target": {
+        "id": "toField"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${subject}",
+      "target": {
+        "id": "subjectField"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${body}",
+      "target": {
+        "label": "Message Body"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "id": "Mail.sendButton"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "id": "Mail.sendButton"
+      }
+    }
+  ],
+  "draftsOnly": true
+}

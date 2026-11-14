@@ -135,3 +135,25 @@ def test_reminders_and_calendar_starters_ship_their_routes_and_places(tmp_path):
         assert (variable is None) == (found.get("today") is not None and found["today"]["variables"] == [])
     assert starters.load("com.apple.reminders")[1]["add_reminder"]["variables"] == ["title"]
     assert starters.load("com.apple.mobilecal")[1]["add_event"]["variables"] == ["title"]
+
+
+def test_mail_and_messages_starters_are_compose_only_drafts_routes(tmp_path):
+    """compose_mail and compose_message end in a tap on Send, and are `draftsOnly`, so a drive of them stops at the draft
+    (§21.3); inbox only reaches the inbox."""
+    starters.install(str(tmp_path))
+    mail, mail_routes = starters.load("com.apple.mobilemail")
+    sms, sms_routes = starters.load("com.apple.MobileSMS")
+    assert set(mail_routes) == {"compose_mail", "inbox"} and set(sms_routes) == {"compose_message"}
+    assert {"inbox", "mailboxes"} <= set(mail["places"]) and {"conversations", "message_draft"} <= set(sms["places"])
+    compose = mail_routes["compose_mail"]
+    assert compose["variables"] == ["to", "subject", "body"] and compose["draftsOnly"] is True
+    assert compose["steps"][-1] == {"tool": "tap", "target": {"id": "Mail.sendButton"}}
+    assert [s["text"] for s in compose["steps"] if s["tool"] == "type_text"] == ["${to}", "${subject}", "${body}"]
+    assert all(s.get("optional") for s in compose["steps"][:2])  # the button is "New Message" or "Compose"
+    message = sms_routes["compose_message"]
+    assert message["variables"] == ["to", "text"] and message["draftsOnly"] is True
+    assert message["steps"][-1] == {"tool": "tap", "target": {"id": "sendButton"}}
+    assert mail_routes["inbox"]["variables"] == [] and "draftsOnly" not in mail_routes["inbox"]
+    installed = mapfile.MapFile(tmp_path, "com.apple.mobilemail")
+    data, _ = installed.read()
+    assert installed.read_route(data, "compose_mail")["draftsOnly"] is True
