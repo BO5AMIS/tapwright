@@ -375,9 +375,12 @@ def _decoded(text: str) -> _Layer | None:
                 continue
         changes.append((m.start(), m.end(), chr(o)))
     # a surrogate pair whose halves were decoded in different passes (`\ud83d%5Cude00`): two characters now, one again
-    taken = [(a, b) for a, b, _ in changes]
+    taken = [(a, b) for a, b, _ in changes]  # (in text order, apart: finditer's)
+    k = 0  # one sweep over both, in text order: linear, not a scan of every escape for each pair (Codex, cycle 17)
     for m in _HALVES.finditer(text):
-        if not any(a < m.end() and m.start() < b for a, b in taken):
+        while k < len(taken) and taken[k][1] <= m.start():
+            k += 1
+        if not (k < len(taken) and taken[k][0] < m.end()):
             high, low = map(ord, m.group(0))
             changes.append((m.start(), m.end(), chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))))
     changes.sort()

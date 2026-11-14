@@ -29,3 +29,13 @@ def test_ordinary_emoji_text_is_left_alone():
     loaded = _loaded("pw\U0001F600abc")
     assert loaded.scrub("smile \U0001F600 please") == "smile \U0001F600 please"
     assert not loaded.holds("\ud83d\ude00 only")
+
+
+def test_joining_surrogate_halves_stays_linear():
+    """Codex, PR #10 cycle 17: the overlap check scanned every escape for each pair (5.65 s for this line)."""
+    import time
+    loaded = _loaded("pw\U0001F600abc")
+    line = "\ud83d%5Cude00%252520" * 8000
+    began = time.perf_counter()
+    loaded.scrub(line)
+    assert time.perf_counter() - began < 1.0
