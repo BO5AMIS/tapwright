@@ -285,6 +285,7 @@ def test_other_agents_actions_and_the_trigger_check_are_busy_while_a_scheduled_r
             await gate.wait()
             return await real(*args, **kwargs)
         d.session.swipe = held_swipe
+        d._call_at.clear()  # (the run starts once agent "a" has been quiet for 90 s: Codex, PR #12 c1, M2)
         run_ = asyncio.create_task(d.run_tool("schedule-post", "swipe", {"x0": 200, "y0": 600, "x1": 200, "y1": 200,
                                                                          "look": False}))
         await asyncio.wait_for(inside.wait(), 2)

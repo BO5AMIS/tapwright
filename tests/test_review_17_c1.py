@@ -279,3 +279,261 @@ def test_m1_a_hit_the_tree_places_inside_the_target_still_taps():
             assert r["text"].startswith("Tapped") and "tap" in d.session.calls
             await finish(stop, task)
     run(go)
+
+
+# ---- M2: the daemon admits a scheduled run's first call itself -----------------------------------------------------------
+import time  # noqa: E402
+
+from tapwright import schedulerun, schedules  # noqa: E402
+from tapwright.daemon import Scope  # noqa: E402
+
+
+def test_m2_a_scheduled_runs_first_call_is_busy_while_another_clients_call_is_in_flight():
+    async def go():
+        d = make()
+        d.session.tree = [button("e1", "OK", "ok-button")]
+        stop, task = await started(d)
+        gate, inside = asyncio.Event(), asyncio.Event()
+        real = d.session.look
+
+        async def held_look(*args, **kwargs):
+            inside.set()
+            await gate.wait()
+            return await real(*args, **kwargs)
+        d.session.look = held_look
+        waiting = asyncio.create_task(d.run_tool("a", "look", {"screenshot": False}))
+        await asyncio.wait_for(inside.wait(), 2)  # agent "a" holds a call; the scheduler's status said idle before it
+        before = list(d.session.actions())
+        with pytest.raises(Refused) as e:
+            await asyncio.wait_for(d.run_tool("schedule-post", "tap", {"target": {"id": "ok-button"}}), 2)
+        assert e.value.code == "busy" and str(e.value).startswith(schedules.ADMISSION_BUSY)
+        assert d.session.actions() == before and not d.scheduled_running()
+        gate.set()
+        await asyncio.wait_for(waiting, 2)
+        d.session.look = real
+        with pytest.raises(Refused) as e:  # the agent's call ended a moment ago: still within the 90 s
+            await d.run_tool("schedule-post", "look", {"screenshot": False})
+        assert e.value.code == "busy"
+        d._person_at = -float("inf")
+        d._call_at.clear()
+        r = await d.run_tool("schedule-post", "look", {"screenshot": False})  # quiet now: admitted
+        assert r["text"]
+        d._person_at = time.monotonic()  # a person in the live view a moment ago
+        with pytest.raises(Refused) as e:
+            await d.run_tool("schedule-post", "look", {"screenshot": False})
+        assert e.value.code == "busy"
+        await finish(stop, task)
+    run(go)
+
+
+class AdmissionPhone:
+    """The scheduler's client: idle status, and a drive the daemon refuses `busy` (not admitted) `refusals` times."""
+
+    class DaemonError(RuntimeError):
+        def __init__(self, code, message, draft=False):
+            super().__init__(message)
+            self.code, self.draft = code, draft
+
+    def __init__(self, refusals, message=None):
+        self.refusals, self.calls = refusals, []
+        self.message = message or schedules.ADMISSION_BUSY
+
+    def status(self):
+        return {"state": "live", "driver": None, "paused": False, "in_use": False}
+
+    def set_scope(self, apps, dedicated=False):
+        pass
+
+    set_policy = set_accounts = set_maps = lambda self, x=None: None
+
+    def call(self, tool, args, client_id, timeout=120.0, dialog=False):
+        self.calls.append(tool)
+        if self.refusals:
+            self.refusals -= 1
+            raise self.DaemonError("busy", self.message)
+        return {"text": "Arrived."}
+
+
+@pytest.fixture
+def sched_home(tmp_path, monkeypatch):
+    from tapwright import store
+    monkeypatch.setattr(store, "HOME", tmp_path / "home")
+    routes = tmp_path / "home" / "maps" / "com.example.wayfare" / "routes"
+    routes.mkdir(parents=True)
+    (routes / "post_update.json").write_text("{}", encoding="utf-8")
+    return tmp_path / "home"
+
+
+def admission_deps(tmp_path, phone):
+    from test_review_17_safety import Clock, T1
+    from tapwright import pidlock
+    where = tmp_path / "sched"
+    schedules.write(schedules.Schedule("post", "post_update", {}, "09:00 daily", None), where)
+    clock = Clock()
+    return schedulerun.Deps(client=phone, sleep=clock.sleep, monotonic=clock.monotonic, where=where, runs=tmp_path / "runs",
+                            audit_folder=tmp_path / "audit", unlock_phone=None,
+                            lock=pidlock.Deps(pid=4242, alive=lambda p: True, start_of=lambda p: T1)), clock
+
+
+def test_m2_the_scheduler_waits_and_asks_again_when_the_daemon_doesnt_admit_it(tmp_path, sched_home):
+    from tapwright import auditlog
+    phone = AdmissionPhone(2)
+    deps, clock = admission_deps(tmp_path, phone)
+    out = schedulerun.run("post", deps=deps)
+    assert out.status == "done" and phone.calls == ["drive"] * 3 and 0 < clock.t < deps.wait
+    lines = [json.loads(x) for x in auditlog.read_lines(tmp_path / "audit")]
+    assert [x["detail"] for x in lines] == ["started", "done"]  # one start, once it was admitted
+    # never admitted within the 10 minutes: skipped as in use
+    phone = AdmissionPhone(10 ** 6)
+    (tmp_path / "b").mkdir()
+    deps, clock = admission_deps(tmp_path / "b", phone)
+    out = schedulerun.run("post", deps=deps)
+    assert (out.status, out.result) == ("skipped", schedulerun.IN_USE) and clock.t >= deps.wait
+    # any other busy (a scheduled run's own, mid-route) still ends the run
+    phone = AdmissionPhone(1, "a scheduled run is using the phone; try again when it ends")
+    (tmp_path / "c").mkdir()
+    deps, _ = admission_deps(tmp_path / "c", phone)
+    assert schedulerun.run("post", deps=deps).status == "failed" and phone.calls == ["drive"]
+
+
+# ---- M5: a scheduled run opens its route's app first ---------------------------------------------------------------------
+from mapfakes import MapSession, screen  # noqa: E402
+from test_daemon_routes import GOES, explore, record_sign_in, screens  # noqa: E402
+
+from tapwright import mapkeeper  # noqa: E402
+
+OTHER = "com.example.notes"
+SAFARI = "com.apple.mobilesafari"
+
+
+class TwoApps(MapSession):
+    """The routes' app (com.example.app), a second one and Safari; opening one shows its first screen."""
+    FIRST = {APP: "welcome", OTHER: "b_start", SAFARI: "web"}
+
+    async def launch(self, bundle_id, arguments=None):
+        text = await super().launch(bundle_id, arguments)
+        self.at = self.FIRST.get(bundle_id, self.at)
+        return text
+
+
+def two_apps(tmp_path):
+    shown = {**screens(), "b_start": screen("Start B", ids=("go-b", "b1", "b2"), bundle=OTHER),
+             "b_end": screen("End B", ids=("b3", "b4", "b5"), bundle=OTHER),
+             "web": screen("Web", ids=("w9", "w8", "w7"), bundle=SAFARI)}
+    s = TwoApps(shown, "welcome", {**GOES, ("b_start", "go-b"): "b_end"})
+    s.installed = [*s.installed, {"bundle_id": OTHER, "name": "Notes B", "version": "1", "build": "1",
+                                  "executable": "NotesB"}]
+    s.app_names = {APP: "Example", OTHER: "Notes B", SAFARI: "Safari"}
+    d = make(s)
+    d.maps = mapkeeper.Maps(str(tmp_path / "maps"))
+    return d, s
+
+
+def in_front(s, bundle):
+    s.foreground, s.app, s.at = bundle, (s.app_names.get(bundle, bundle), bundle), TwoApps.FIRST[bundle]
+
+
+def test_m5_scheduled_runs_open_their_routes_app_from_another_app_and_two_apps_in_a_row(tmp_path):
+    async def go():
+        d, s = two_apps(tmp_path)
+        stop, task = await started(d)
+        await explore(d)  # app A's places and its sign_in route
+        await record_sign_in(d)
+        in_front(s, OTHER)  # app B's places and its route
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "map", {"name": "b_start"})
+        await d.run_tool("a", "record", {"start": True, "route": "b_route"})
+        await d.run_tool("a", "tap", {"target": {"id": "go-b"}})
+        await d.run_tool("a", "map", {"name": "b_end"})
+        await d.run_tool("a", "record", {"stop": True})
+        await d.maps.flush()
+        d._call_at.clear()  # agent "a" has been quiet for a while
+        in_front(s, SAFARI)  # Safari is in front when A's schedule falls due
+        r = await d.run_tool("schedule-a", "drive", {"route": "sign_in", "with": {"email": "a@b.c"}},
+                             scope=Scope((APP,)))
+        assert r["text"].startswith("Arrived at home by route sign_in") and s.launched[-1] == APP
+        # B's schedule right after, with A's home screen in front
+        r = await d.run_tool("schedule-b", "drive", {"route": "b_route"}, scope=Scope((OTHER,)))
+        assert r["text"].startswith("Arrived at b_end by route b_route") and s.launched[-1] == OTHER
+        # an agent's own drive still drives the app in front, and opens nothing
+        launched = len(s.launched)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "drive", {"route": "sign_in", "with": {"email": "a@b.c"}}, scope=Scope((APP,)))
+        assert e.value.code == "not_allowed" and len(s.launched) == launched
+        await finish(stop, task)
+    run(go)
+
+
+# ---- M3, M4 and one turn for /otp ----------------------------------------------------------------------------------------
+from starlette.testclient import TestClient  # noqa: E402
+from test_notifications import CHAT, CODE, INSTALLED, handover_daemon  # noqa: E402
+from test_otp import AUTH, A, prove  # noqa: E402
+
+from tapwright.ui import Element  # noqa: E402
+
+
+@pytest.mark.parametrize("field", [
+    Element("e1", "input", "Message", "message", value="please send me the verification code", type="TextView"),
+    Element("e1", "input", "Search", "search", value="code", type="SearchField"),
+    Element("e1", "input", "Search", "search", value="code", type="TextField"),
+])
+def test_m3_otp_needs_a_real_code_field_not_a_composers_typed_words(tmp_path, field):
+    app, d, s = handover_daemon(tmp_path)
+    s.tree = [field]
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": CODE_APP}, headers=AUTH).status_code == 404 and s.center_reads == 0
+    assert d.code_fields.shown_at(CODE_APP) is None  # nor does a read note one
+
+
+def test_m3_a_code_field_noted_earlier_counts_only_while_the_screen_shows_one_now(tmp_path):
+    app, d, s = handover_daemon(tmp_path)
+    d.code_fields.seen(CODE_APP, True)  # a read a moment ago saw one
+    s.tree = [Element("e1", "input", "Message", "message", value="the code is?", type="TextView")]
+    s.on_tree = None  # (the read now doesn't clear it: the handover itself must look)
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": CODE_APP}, headers=AUTH).status_code == 404 and s.center_reads == 0
+
+
+def test_m4_a_code_handed_over_isnt_handed_over_again_after_a_restart(tmp_path):
+    app, d, s = handover_daemon(tmp_path)
+    c = TestClient(app, client=A)
+    prove(c)
+    got = c.post("/otp", json={"app": CODE_APP}, headers=AUTH)
+    assert got.status_code == 200 and got.json()["code"] == CODE
+    # the daemon restarts; the same notification is still in Notification Center, the same field shows
+    app, d2, s2 = handover_daemon(tmp_path)
+    assert d2 is not d
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": CODE_APP}, headers=AUTH).status_code == 404
+    from tapwright import otp
+    marks = [p for p in otp.used_folder().iterdir() if p.name != "key"]
+    assert len(marks) == 1 and CODE not in marks[0].name  # a keyed digest names it, never the code
+    assert all(CODE not in p.read_text("utf-8", "replace") for p in otp.used_folder().iterdir())
+
+
+def test_cr_otp_checks_the_app_and_reads_the_code_in_one_turn(tmp_path):
+    """CodeRabbit, PR #12 (center_tool.py:267): a person who switches apps between the check and the read of the code."""
+    app, d, s = handover_daemon(tmp_path)
+    real_agent, real_read = d.control.agent, d._read_center
+    turns, front_at_read = [], []
+
+    async def agent(fn):
+        try:
+            return await real_agent(fn)
+        finally:
+            turns.append(1)
+            if len(turns) == 1:  # a person's input, queued during the first turn, runs right after it: another app
+                s.foreground, s.tree_app = CHAT, (INSTALLED[CHAT], CHAT)
+
+    async def read_center(*args, **kwargs):
+        front_at_read.append(s.foreground)
+        return await real_read(*args, **kwargs)
+    d.control.agent, d._read_center = agent, read_center
+    c = TestClient(app, client=A)
+    prove(c)
+    got = c.post("/otp", json={"app": CODE_APP}, headers=AUTH)
+    assert front_at_read in ([], [CODE_APP]), front_at_read  # never read while another app is in front
+    assert got.status_code in (200, 404) and (got.status_code == 404) == (front_at_read == [])

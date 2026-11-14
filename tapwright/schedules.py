@@ -40,6 +40,9 @@ POLL_MINUTES = 2  # a file trigger's folder, or a notification trigger's app, is
 TASK_FOLDER = "Tapwright"
 SETTLE_SECONDS = 2.0  # a file touched this recently may still be being written: it counts at the next check
 CLIENT = "schedule-"  # a scheduled run's client id is this and the schedule's name (the daemon tells its calls apart by it)
+# the daemon's `busy` to a scheduled run's first call while someone else has the phone (Codex, PR #12 cycle 1, M2): nothing
+# was done, and the run waits and asks again within its 10 minutes
+ADMISSION_BUSY = "the phone is in use; a scheduled run waits for it"
 PHONE_LOCK = ".phone.lock"  # beside the run locks: one run or trigger check on the phone at a time (no schedule is named so)
 
 

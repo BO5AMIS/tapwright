@@ -305,7 +305,8 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
 
 def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: datetime.datetime,
                      api: ModuleType, values: dict[str, str], bundle: str, phone: Path, held: list[str]) -> Outcome:
-    # the phone: locked, or in use (§22.3)
+    # the phone: locked, or in use (§22.3). The daemon admits the drive itself, in the step that counts it as running
+    # (M2): a `busy` it answers then is the phone in use as well, and the run waits and asks again
     waited = deps.monotonic()
     unlocked = False
     while True:
@@ -336,33 +337,39 @@ def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog
             return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({str(detail)[:120]})", began, 2,
                        bundle=bundle, used=False)
         if not in_use(status):
-            break
+            # the route, as a client that asks nobody. The daemon opens the route's app (the scope's one app) before it
+            # drives (M5), and refuses `busy` when another client or a person has the phone after all (M2)
+            args: dict = {"route": s.route, "screenshot": True}
+            given = dict(values)
+            if (account := given.pop("account", None)) is not None:
+                args["account"] = account
+            if given:
+                args["with"] = given
+            from . import policy
+            try:
+                api.set_scope([bundle], False)
+                api.set_policy(policy.load(s.policy) if s.policy else None)
+                api.set_accounts(s.accounts)
+                api.set_maps(s.maps)
+            except ValueError as e:
+                return end(s, deps, audit, "failed", f"failed: {e}", began, 2, bundle=bundle, used=False)
+            try:
+                answer = api.call("drive", args, f"{schedules.CLIENT}{s.name}", timeout=TIMEOUT)
+            except api.DaemonError as e:
+                if not (e.code == "busy" and str(e).startswith(schedules.ADMISSION_BUSY)):  # (else not admitted: waits)
+                    audit.write("schedule", name=s.name, app=bundle, detail="started")
+                    state, result = classify(e.code, str(e), getattr(e, "draft", False))
+                    return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)
+            except Exception as e:  # the server went away mid-run
+                audit.write("schedule", name=s.name, app=bundle, detail="started")
+                return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {str(e)[:150]}", began, 1,
+                           bundle=bundle)
+            else:
+                audit.write("schedule", name=s.name, app=bundle, detail="started")
+                break
         if deps.monotonic() - waited >= deps.wait:
             return end(s, deps, audit, "skipped", IN_USE, began, 3, bundle=bundle, used=False)
         deps.sleep(deps.poll)
-    # the route, as a client that asks nobody
-    args: dict = {"route": s.route, "screenshot": True}
-    given = dict(values)
-    if (account := given.pop("account", None)) is not None:
-        args["account"] = account
-    if given:
-        args["with"] = given
-    from . import policy
-    try:
-        api.set_scope([bundle], False)
-        api.set_policy(policy.load(s.policy) if s.policy else None)
-        api.set_accounts(s.accounts)
-        api.set_maps(s.maps)
-    except ValueError as e:
-        return end(s, deps, audit, "failed", f"failed: {e}", began, 2, bundle=bundle, used=False)
-    audit.write("schedule", name=s.name, app=bundle, detail="started")
-    try:
-        answer = api.call("drive", args, f"{schedules.CLIENT}{s.name}", timeout=TIMEOUT)
-    except api.DaemonError as e:
-        state, result = classify(e.code, str(e), getattr(e, "draft", False))
-        return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)
-    except Exception as e:  # the server went away mid-run
-        return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {str(e)[:150]}", began, 1, bundle=bundle)
     image = answer.get("image")
     picture = None
     if isinstance(image, str) and image:

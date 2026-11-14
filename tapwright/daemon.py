@@ -1106,6 +1106,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 or any(n > 0 for n in self._calls.values())
                 or any(now - at < IN_USE_S for c, at in self._call_at.items() if not scheduled(c)))
 
+    def _someone_else_on_phone(self, client_id: str) -> bool:
+        """For a scheduled run's admission (M2): phone_in_use without the run's own activity. A person drives, acted in the
+        last IN_USE_S or paused the live view, another client has a call in flight, or an agent (not a scheduled run)
+        called in the last IN_USE_S. The queue's own `agent` driver isn't asked: the run's trigger check, just before,
+        is that."""
+        now = time.monotonic()
+        return (self.control.driver == "person" or self.control.paused or now - self._person_at < IN_USE_S
+                or any(n > 0 for c, n in self._calls.items() if c != client_id)
+                or any(now - at < IN_USE_S for c, at in self._call_at.items() if c != client_id and not scheduled(c)))
+
     def scheduled_running(self) -> bool:
         """Is a scheduled run's call in flight?"""
         return any(n > 0 and scheduled(c) for c, n in self._calls.items())
@@ -1784,6 +1794,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # a scheduled run drives with no model watching: another agent's action would land in the middle of its
             # route, and its own next step on a screen it didn't leave (review 1.7 B-H1, §22.3)
             raise Refused("busy", SCHEDULED_BUSY)
+        if scheduled(client_id) and not self._calls.get(client_id) and self._someone_else_on_phone(client_id):
+            # a scheduled run's first call is admitted here, in the same step that counts it as running (no await
+            # between): the scheduler's idle status may be stale by now, and another client's call, or a person, has the
+            # phone first. Nothing was done; the run waits and asks again (Codex, PR #12 cycle 1, M2)
+            raise Refused("busy", schedulelib.ADMISSION_BUSY)
         now = time.monotonic()
         for gone in [c for c, at in self._call_at.items() if now - at >= IN_USE_S and not self._calls.get(c)]:
             del self._call_at[gone]
@@ -2747,8 +2762,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 _RUN_GRANTS.reset(run_grants)
 
     async def _drive(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
-        """`drive` (AGENT-TOOLS §18.4): to a place over the map's proven roads, or by a link. See trip.py."""
+        """`drive` (AGENT-TOOLS §18.4): to a place over the map's proven roads, or by a link. See trip.py. A scheduled run
+        (§22.2) opens its route's app first, the one app of its scope, inside this same call (it was admitted, and
+        holds the phone, for its whole run: M2): the phone may show any other app or the home screen when it falls due
+        (Codex, PR #12 cycle 1, M5)."""
         req = driving.check(args)
+        if scheduled(client_id) and scope is not None and len(scope.apps) == 1 and not req.dry_run:
+            await self.run_tool(client_id, "open_app", {"app": scope.apps[0], "look": False}, scope)
         made = trip.Trip(self, client_id, scope, req, args)
         run_grants = self._grants_run()  # a grant revoked while it drives stops it between moves (§19.5)
         try:
