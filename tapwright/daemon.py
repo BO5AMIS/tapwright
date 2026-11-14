@@ -3751,7 +3751,7 @@ class Daemon(journey_tool.JourneyTools):
     async def _typed_landed(self, view, result: "Typed", text: str) -> tuple[Snapshot, float] | None:
         """As _toggle_landed, for typing: the field holds the typed text as soon as the keys call returns, and the
         screen's wait after it (0.2 to 0.4 s on the phone) only saw the caret blink. The first read that shows the
-        field with exactly that text is the answer, unless an alert showed in it."""
+        field with exactly that text is the answer, unless anything else appeared or went away in it."""
         loop = asyncio.get_running_loop()
         began = loop.time()
         old = result.field
@@ -3764,8 +3764,9 @@ class Daemon(journey_tool.JourneyTools):
             same = [e for e in snap.tree.items if e.role == old.role and (
                 e.identifier == old.identifier if old.identifier else e.label == old.label)]
             if len(same) == 1 and not same[0].secure and same[0].value == text:
-                # landed is the field's word alone: a list that changed size (a search field filtering its results)
-                # is the change list's to report
+                if len(snap.tree.items) != len(view.items):
+                    why = f"the list changed size ({len(view.items)} -> {len(snap.tree.items)})"
+                    break
                 return snap, loop.time() - began
             why = (f"{len(same)} matching fields" if len(same) != 1 else "the field is secure" if same[0].secure
                    else f"the field reads {self._redact(same[0].value)!r}, not the typed text")
@@ -6586,8 +6587,10 @@ class Daemon(journey_tool.JourneyTools):
         if preset not in PRESETS:
             raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
         if self.state in ("live", "locked"):
-            self.session.session_settings = {**PRESETS[preset], **NO_IDLE_WAIT}
-            await self._read(lambda: self.session.settings(self.session.session_settings))
+            wanted = {**PRESETS[preset], **NO_IDLE_WAIT}  # fixed before the call: a reconnect inside _read rewrites
+            # session_settings with the old preset, and a retry must still send the requested one
+            await self._read(lambda: self.session.settings(wanted))
+            self.session.session_settings = wanted
             self._fps = int(PRESETS[preset]["mjpegServerFramerate"])  # full rate; the pace slows it again when still
         self.preset = preset
         if self.video is not None:

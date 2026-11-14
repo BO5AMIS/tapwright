@@ -3044,31 +3044,6 @@ def test_typing_answers_as_soon_as_the_field_reads_the_text():
     run(go)
 
 
-def test_typing_lands_when_the_list_changes_size_as_a_search_field_filters_it():
-    """1.6.2: landed is the field's word alone; a filtered list is the change list's to report."""
-    async def go():
-        d = make(settle_still=5.0, settle_quiet=5.0)  # a still-screen wait would take seconds here
-        stop, task = await started(d)
-        field = el("e1", "input", "Search", "search", rect=(10, 100, 300, 40))
-        rows = [el(f"e{i}", "button", f"Row {i}", rect=(10, 150 + 50 * i, 300, 44)) for i in range(2, 8)]
-        await looked(d, [field, *rows])
-        real = d.session.type_text
-
-        async def type_text(text, **kw):
-            d.session.tree = [el("e1", "input", "Search", "search", rect=(10, 100, 300, 40), value=text), rows[0]]
-            return await real(text, **kw)
-        d.session.type_text = type_text
-        feeder = FrameFeeder(d.hub).start(then=b"B")
-        began = asyncio.get_running_loop().time()
-        r = await d.run_tool("a", "type_text", {"target": {"id": "search"}, "text": "Kyoto"})
-        assert asyncio.get_running_loop().time() - began < 1.0
-        assert "retype" not in d.session.calls
-        assert 'Value is now "Kyoto"' in r["text"].splitlines()[0]
-        await feeder.stop()
-        await finish(stop, task)
-    run(go)
-
-
 def test_toggle_followed_by_a_confirm_alert_is_not_refused():
     async def go():
         d = make()
@@ -3211,6 +3186,33 @@ def test_the_connect_settings_turn_xctests_idle_wait_off_and_a_quality_change_ke
         sent = [c[1] for c in d.session.calls if isinstance(c, tuple) and c[0] == "settings"]
         assert sent[-1]["waitForIdleTimeout"] == 0 and sent[-1]["animationCoolOffTimeout"] == 0
         assert sent[-1]["mjpegServerScreenshotQuality"] == PRESETS["light"]["mjpegServerScreenshotQuality"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_quality_change_retried_after_a_reconnect_still_sends_the_requested_settings():
+    """1.6.2: the reconnect rewrites session_settings with the old preset; the retry must send the requested one, and
+    the remembered settings, the preset and the rate must all say so afterwards."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        assert d.preset == "balanced"
+        real = d.session.settings
+        dropped = []
+
+        async def settings(values):
+            if not dropped and values.get("mjpegServerScreenshotQuality") == PRESETS["light"]["mjpegServerScreenshotQuality"]:
+                dropped.append(True)
+                raise ConnectionLost("connection reset by peer")
+            await real(values)
+        d.session.settings = settings
+        mark = len(d.session.calls)
+        await d.set_quality("light")
+        sent = [c[1] for c in d.session.calls[mark:] if isinstance(c, tuple) and c[0] == "settings"]
+        light = {**PRESETS["light"], **NO_IDLE_WAIT}
+        assert dropped and sent[-1] == light
+        assert d.session.session_settings == light
+        assert d.preset == "light" and d._fps == int(PRESETS["light"]["mjpegServerFramerate"])
         await finish(stop, task)
     run(go)
 

@@ -4,11 +4,10 @@
 
 - A WebDriverAgent session re-created in the middle of a run now gets the same settings as the first one (no waiting for
   animations such as a blinking caret, and the stream's current quality) right after it starts. Before, a tap and then
-  typing after a re-created session took 3.7 to 5.0 s; now it takes 1.7 s.
+  typing after a re-created session took 3.7 to 5.0 s; now it takes 1.7 s. A quality change keeps the requested settings if the connection drops and is
+  retried.
 - `alert` takes only `accept`, `dismiss` or `text`. Any other action is refused as `bad_params` and names the allowed
   values; nothing from the call is put into a URL.
-- Typing into a search field that filters its list while you type no longer counts as "didn't land": the field's own
-  text decides, and the change list reports the list that changed. An alert still counts as not landed.
 - Typing into a field that already has focus can still open iOS's caret menu; a fix that reads focus from the runner
   comes in 1.7.
 
