@@ -21,7 +21,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from .control import Refused
 
@@ -250,6 +250,16 @@ def _compiled(made: str) -> "re.Pattern[str]":
     return re.compile(made)
 
 
+def _every(each: "re.Pattern[str]", text: str) -> "Iterator[re.Match[str]]":
+    """Every match of `each` in `text`, overlapping ones too (`abcabc` at 0 and 3 in `abcabcabc`: `finditer` gives only the
+    first, and the merge never sees the second, Codex, PR #10 cycle 13). Each search resumes one character after the last
+    match's start, so the engine's skip to a first character still works, and the work is linear in the matches."""
+    at = 0
+    while (m := each.search(text, at)) is not None:
+        yield m
+        at = m.start() + 1
+
+
 class Redaction:
     """A set of account values, as (name, kind, value), and what redacts them: each value in any of its shapes (`pattern`)
     becomes `<name's username>` / `<name's password>`, the longest value first, so a value that holds another is replaced
@@ -279,7 +289,7 @@ class Redaction:
         starts = [a for a, _ in shown]
         found: list[tuple[int, int, int, int, str]] = []  # (start, -length, precedence, end, label)
         for rank, (each, label) in enumerate(self._each):
-            for m in each.finditer(text):
+            for m in _every(each, text):
                 if shown:
                     k = bisect.bisect_right(starts, m.start()) - 1
                     if k >= 0 and m.end() <= shown[k][1]:

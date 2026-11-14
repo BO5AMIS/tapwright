@@ -2590,6 +2590,11 @@ class Daemon(journey_tool.JourneyTools):
         kept; only the literal text around it is checked."""
         loaded = self._loaded()
         for n, step in enumerate(rec["steps"], 1):
+            # every field that isn't typed (a selector, an expectation, an ignore entry, an `if`) is literal: an account's
+            # `${account.…}` there is ordinary text, checked as a whole string, and the save is refused when it holds a
+            # value (Codex, PR #10 cycle 13)
+            if any(loaded.holds(s) or self.accounts.holds(s) for s in batch.literal_strings(step)):
+                rec.setdefault("unsaved", []).append(n)
             text = step.get("text")
             if step.get("tool") != "type_text" or not isinstance(text, str) or not text:
                 continue

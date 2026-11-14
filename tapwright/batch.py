@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from . import compare, names, params, performance, ui
@@ -299,6 +299,22 @@ def literal_runs(text: str, variables: "list[str] | None" = None) -> tuple[list[
     return runs, found
 
 
+def literal_strings(step: object, content: bool = False) -> Iterator[str]:
+    """The strings of a step's content fields (CONTENT_KEYS, at any depth) that are literal: every one but the `text` a
+    `type_text` types, which is the only place an account's variable or a route's variable stands for anything."""
+    if isinstance(step, str):
+        if content:
+            yield step
+    elif isinstance(step, dict):
+        typing = step.get("tool") == "type_text"
+        for k, v in step.items():
+            if not (typing and k == "text"):
+                yield from literal_strings(v, k in CONTENT_KEYS)
+    elif isinstance(step, list):
+        for v in step:
+            yield from literal_strings(v, content)
+
+
 def redacted_content(data: object, redact: Callable[[str], str]) -> object:
     """A script (or a route) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
     never a key, a tool's name, the format, the version or another structural field, and never a variable's
@@ -330,9 +346,11 @@ def redacted_content(data: object, redact: Callable[[str], str]) -> object:
 
     def walk(value: object, content: bool) -> object:
         if isinstance(value, str):
-            return text(value) if content else value
+            return redact(value) if content else value  # (literal: an account's `${...}` here is ordinary text)
         if isinstance(value, dict):
-            return {k: walk(v, k in CONTENT_KEYS) for k, v in value.items()}
+            typing = value.get("tool") == "type_text"  # the only field that is typed: its `text` (Codex, PR #10 cycle 13)
+            return {k: text(v) if typing and k == "text" and isinstance(v, str) else walk(v, k in CONTENT_KEYS)
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [walk(v, content) for v in value]
         return value
