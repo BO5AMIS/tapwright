@@ -28,6 +28,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
+from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, grants as grantlib, otp as otplib
 from .actionlog import ActionLog
@@ -278,6 +279,8 @@ STILL_FPS = 5
 PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
 PACE_TICK = 0.25  # how often the pace is checked
 LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
+WATCH_TICK, BATTERY_EVERY = 15.0, 300.0  # seconds: the watchdog's look at the state, and at the battery (§24.5)
+WATCH_NOTES = 5  # the watchdog's messages an agent's next answer carries at most
 BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
 TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 # A switch element this many times wider than tall is a whole row (label and control): toggle touches the control,
@@ -996,6 +999,15 @@ class Daemon(journey_tool.JourneyTools):
         self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
         self.otp_codes = otplib.Codes(self.accounts.remember_code)  # one-time codes read, not yet used (§20.4)
+        # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
+        self.unlocker = unlocklib.Unlocker()
+        self.lock_screen: "unlocklib.LockScreen | None" = None  # (made from the session when first needed; tests set one)
+        # the watchdog (§24.5, watchdog.py): one message per event when the phone has gone or its battery is low
+        self.watchdog = watchlib.Watchdog(self._watchdog_say)
+        self.watch_tick: float | None = WATCH_TICK if pace_tick is not None else None  # (None: no ticking task)
+        self.battery_every = BATTERY_EVERY
+        self._watch_notes: dict[str, list[str]] = {}  # {agent: the watchdog's messages its next answer carries}
+        self._battery_at = -math.inf
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
         self._queues: set = set()
@@ -1069,6 +1081,9 @@ class Daemon(journey_tool.JourneyTools):
     def _set_state(self, state: str, detail: str | None = None) -> None:
         changed = (state, detail) != (self.state, self.detail)
         self.state, self.detail = state, detail
+        watch = getattr(self, "watchdog", None)
+        if watch is not None:
+            watch.state(state, getattr(self.session.device, "via", None))
         if state in ("live", "locked"):
             self._connected.set()
         else:
@@ -1434,14 +1449,105 @@ class Daemon(journey_tool.JourneyTools):
         self._agent_touches.start()  # find Tapline's hosts, if any, before the first touch needs them
         pacer = asyncio.create_task(self._pace(stop), name="pace") if self.pace_tick else None
         watch = asyncio.create_task(self._watch_loop(stop), name="loop-watch") if self.pace_tick else None
+        dog = asyncio.create_task(self._watch_phone(stop), name="watchdog") if self.watch_tick else None
         try:
             await self._supervise(stop)
         finally:
-            for helper in (pacer, watch, *self._log_tasks.values()):
+            for helper in (pacer, watch, dog, *self._log_tasks.values()):
                 if helper is not None:
                     helper.cancel()
                     await asyncio.gather(helper, return_exceptions=True)
             self._log_tasks.clear()
+
+    # ---- the watchdog (§24.5) ----
+    async def _watch_phone(self, stop: asyncio.Event) -> None:
+        """Every `watch_tick` seconds: tell the watchdog the state (a phone gone for its grace is said once), and now
+        and then the battery, read over lockdown while the phone is up."""
+        while not stop.is_set():
+            await _first(self.watch_tick or WATCH_TICK, stop)
+            if stop.is_set():
+                return
+            try:
+                await self.watch_once()
+            except Exception as e:
+                self.log(f"watchdog: {e}")
+
+    async def watch_once(self) -> None:
+        self.watchdog.state(self.state, getattr(self.session.device, "via", None))
+        now = time.monotonic()
+        if self.state in watchlib.UP and now - self._battery_at >= self.battery_every:
+            self._battery_at = now
+            read = getattr(self.session.device, "battery", None)
+            if read is not None:
+                try:
+                    percent, charging = await asyncio.wait_for(read(), 10)
+                except Exception:
+                    percent, charging = None, None
+                self.watchdog.battery(percent, charging)
+
+    def _watchdog_say(self, kind: str, text: str) -> None:
+        """One watchdog message: the log, each host's dialog channel (a `notice`; the MCP server shows it in chat
+        while a call is out), and a Note in the next answer of every agent seen so far (once each)."""
+        self.log(text)
+        for client_id, channel in list(self._channels.items()):
+            channel.push({"type": "notice", "id": f"w{secrets.token_hex(4)}", "kind": kind, "message": text})
+        for client_id in list(self.control.clients):
+            notes = self._watch_notes.setdefault(client_id, [])
+            if text not in notes:
+                notes.append(text)
+                del notes[:-WATCH_NOTES]  # (an agent that never calls again keeps only the newest few)
+
+    def _with_watch_notes(self, client_id: str, text: str) -> str:
+        notes = self._watch_notes.pop(client_id, None)
+        return "\n".join([text, *(f"Note: {n}" for n in notes if n not in text)]) if notes else text
+
+    # ---- the passcode unlock (§18.6, §11.5) ----
+    def _lock_screen(self) -> "unlocklib.LockScreen":
+        if self.lock_screen is None:
+            self.lock_screen = unlocklib.PhoneLockScreen(self.session)
+        return self.lock_screen
+
+    def passcode_for(self, accounts: str | None = None) -> str | None:
+        """The vault's `phone.passcode` for this call (its accounts file, else the daemon's): only the tool uses it."""
+        try:
+            loaded = self.accounts.get(accounts) if accounts else self._loaded()
+        except Exception:
+            return None
+        if loaded.problem is not None:
+            return None
+        return loaded.passcode if isinstance(loaded.passcode, str) and loaded.passcode.strip() else None
+
+    async def unlock_phone(self, accounts: str | None = None) -> "unlocklib.Result":
+        """Unlock a locked phone with the vault's passcode (unlock.py has the rules). Never while paused or while a
+        person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode typed;
+        the log gets fixed words. On success the state is live at once."""
+        if self.control.paused:
+            return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
+        if self.control.person_active():
+            return unlocklib.Result(False, "busy", "a person is using the phone; try again in a moment")
+        if self.state != "locked":
+            return unlocklib.Result(self.state == "live", "not_locked" if self.state == "live" else "not_connected",
+                                    "" if self.state == "live" else "the phone isn't connected")
+        passcode = self.passcode_for(accounts)
+
+        def audit(detail: str) -> None:
+            if self.audit is not None:
+                self.audit.write("vault", name=unlocklib.AUDIT_NAME, detail=detail)
+
+        async def attempt() -> "unlocklib.Result":
+            return await self.unlocker.unlock(self._lock_screen(), passcode, audit)
+        try:
+            result = await (attempt() if self.control.holds_turn() else self.control.read(attempt))
+        except Exception as e:  # (a reconnect under way: no key was typed by this, or unlock.py said so itself)
+            self.log(f"passcode unlock: couldn't run ({type(e).__name__})")
+            return unlocklib.Result(False, "failed", unlocklib.FAILED)
+        if result.code == "unlocked":
+            self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
+            if self.state == "locked":
+                self._set_state("live")
+        elif result.code not in ("not_locked", "no_passcode"):
+            self.log(f"passcode unlock: {result.code}")
+        return result
 
     async def _watch_loop(self, stop: asyncio.Event) -> None:
         """Say in the log when this process's event loop was held up. The tunnel to the phone is a TCP/IP stack
@@ -1682,7 +1788,10 @@ class Daemon(journey_tool.JourneyTools):
                         finally:
                             _BASELINES.reset(basetoken)
             except Refused as e:
-                if (said := self.scrub_everywhere(str(e))) != str(e):  # an account's value is never in an error either
+                said = self.scrub_everywhere(str(e))
+                if top_level and client_id in self._watch_notes:
+                    said = self._with_watch_notes(client_id, said)
+                if said != str(e):  # an account's value is never in an error either
                     raise Refused(e.code, said) from None
                 raise
             if top_level:
@@ -1691,6 +1800,8 @@ class Daemon(journey_tool.JourneyTools):
                     answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
             if (said := self.scrub_everywhere(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
                 answer = {**answer, "text": said}
+            if top_level and client_id in self._watch_notes:  # the watchdog's messages since this agent's last call
+                answer = {**answer, "text": self._with_watch_notes(client_id, answer["text"])}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
@@ -6090,16 +6201,28 @@ class Daemon(journey_tool.JourneyTools):
         return None
 
     async def _hold_for_phone(self, name: str) -> None:
-        """Before a call, for an agent whose host has a dialog: if the phone is locked or asking for its passcode, ask a
-        person and wait for it to clear (the daemon looks at the phone again by itself). If it doesn't clear, the call
-        goes on and answers its usual `locked`."""
+        """Before a call: if the phone is locked and the vault gives `phone.passcode`, the tool unlocks it itself
+        (§18.6, Tapwright 1.7; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
+        locked or asking for its passcode, ask a person and wait for it to clear (the daemon looks at the phone again by
+        itself). If it doesn't clear, the call answers `locked`: the unlock's own words when it was tried (`the
+        passcode in the file was refused`), else its usual ones."""
         moment = self._phone_moment(name)
-        if moment is None or _DIALOG.get() is None:
+        if moment is None:
             return
-
-        async def cleared() -> bool:
-            return self._phone_moment(name) is None
-        await self._hold_for_person(moment, cleared, nudge=self._asked_for)
+        tried: unlocklib.Result | None = None
+        if moment is needs.UNLOCK and self.passcode_for() is not None:
+            tried = await self.unlock_phone()
+            if tried.ok or self._phone_moment(name) is None:
+                return
+            if tried.code in ("busy", "paused"):
+                raise Refused(tried.code, tried.message)
+        if _DIALOG.get() is not None:
+            async def cleared() -> bool:
+                return self._phone_moment(name) is None
+            if await self._hold_for_person(moment, cleared, nudge=self._asked_for):
+                return
+        if tried is not None and tried.message:
+            raise Refused("locked", tried.message)
 
     async def _hold_for_person(self, moment: needs.Moment, cleared: Callable[[], Awaitable[bool]],
                                every: float = CONFIRM_TICK, nudge: Callable[[], object] | None = None) -> bool:

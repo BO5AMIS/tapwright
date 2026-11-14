@@ -185,8 +185,9 @@ def test_a_short_plain_value_is_typed_but_cant_be_kept_out(tmp_path):
     assert v.scrub("UK 2") == "UK 2"  # (too short: it would eat ordinary words)
 
 
-def test_the_passcode_is_never_a_redaction_entry(tmp_path):
-    assert all(field != "passcode" for _, field, _ in load(tmp_path).entries())
+def test_the_passcode_is_a_redaction_entry_now_that_the_tool_types_it(tmp_path):
+    """1.7 (§18.6, §20.3): the passcode is typed on the lock screen, so it is redacted like any value."""
+    assert [field for _, field, _ in load(tmp_path).entries()].count("passcode") == 1
 
 
 def test_the_store_redacts_vault_values_and_codes_in_one_pass(tmp_path):
