@@ -106,6 +106,9 @@ ones as the daemon's own settings.
   names. A lock in the middle of a run stops it (`locked`): locking the phone is how you stop the agent. At most 2
   attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
   passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
+  **Experimental in 1.7:** on the test iPhone (Face ID, iOS 26) the unlock didn't yet find the passcode keypad. It
+  answered `locked` and typed nothing. iOS also won't open the USB connection to a phone that is locked when the daemon
+  starts. Plan unattended runs with the phone unlocked for now.
 - **`--maps DIR`**: where each app's map is kept (`<DIR>/<bundle id>/map.json`, and its `routes/`). The default is
   `~/.tapwright/maps`. Point it at a folder in your project and a team, CI and Tapline share what was learned.
 - **`--brief`**: answer every action in brief (the first line, at most 12 lines of changes, then `...N more:
