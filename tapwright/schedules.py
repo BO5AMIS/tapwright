@@ -37,6 +37,8 @@ VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 POLL_MINUTES = 2  # a file trigger's folder, or a notification trigger's app, is looked at this often while the PC is awake
 TASK_FOLDER = "Tapwright"
 SETTLE_SECONDS = 2.0  # a file touched this recently may still be being written: it counts at the next check
+CLIENT = "schedule-"  # a scheduled run's client id is this and the schedule's name (the daemon tells its calls apart by it)
+PHONE_LOCK = ".phone.lock"  # beside the run locks: one run or trigger check on the phone at a time (no schedule is named so)
 
 
 class ScheduleError(ValueError):
@@ -54,6 +56,12 @@ def file_of(name: str, where: Path | None = None) -> Path:
 
 def lock_of(name: str, where: Path | None = None) -> Path:
     return (where or folder()) / f"{name}.lock"
+
+
+def phone_lock_of(where: Path | None = None) -> Path:
+    """The machine-wide phone lock (review 1.7 B-H1): held by a scheduled run from its wait for the phone to the end of
+    its drive, and by a notification trigger's check, so two runs never overlap and a check never runs inside a run."""
+    return (where or folder()) / PHONE_LOCK
 
 
 def seen_of(name: str, where: Path | None = None) -> Path:
@@ -580,16 +588,29 @@ def unlock(name: str, where: Path | None = None, audit_folder: Path | None = Non
         check_name(name)
     except ScheduleError as e:
         return f"Error: {e}", 1
-    result = pidlock.unlock(lock_of(name, where), deps)
+    return _unlock(lock_of(name, where), f'The schedule "{name}" has no lock', f'The run lock of "{name}"',
+                   f"schedule {name} lock", audit_folder, deps)
+
+
+def unlock_phone(where: Path | None = None, audit_folder: Path | None = None,
+                 deps: pidlock.Deps | None = None) -> tuple[str, int]:
+    """`tapwright schedule unlock --phone`: remove a stuck phone lock (review 1.7 B-H1), as `unlock` does a run lock."""
+    return _unlock(phone_lock_of(where), "There is no phone lock", "The phone lock", "schedules phone lock",
+                   audit_folder, deps)
+
+
+def _unlock(path: Path, none: str, which: str, audited: str, audit_folder: Path | None,
+            deps: pidlock.Deps | None) -> tuple[str, int]:
+    result = pidlock.unlock(path, deps)
     if result.status == "none":
-        return f'The schedule "{name}" has no lock; nothing to remove.', 0
+        return f"{none}; nothing to remove.", 0
     if result.status == "live":
-        return (f'The run lock of "{name}" is held by a live process (pid {result.pid}); nothing was removed. Wait for the '
+        return (f"{which} is held by a live process (pid {result.pid}); nothing was removed. Wait for the "
                 "run to finish, or stop that process first."), 1
     done = [f"Removed {p} ({why})." for p, why in result.removed]
     if result.removed:
         auditlog.AuditLog(audit_folder).write(
-            "approval", name=f"schedule {name} lock", detail=f"unlocked ({'; '.join(why for _, why in result.removed)})")
+            "approval", name=audited, detail=f"unlocked ({'; '.join(why for _, why in result.removed)})")
     if result.status == "failed":
         return "\n".join([*done, f"Couldn't remove {result.failed or 'the lock'}: it changed or can't be deleted. "
                                  "Look at it and try again."]), 1
@@ -600,9 +621,19 @@ def stuck_locks(where: Path | None = None, deps: pidlock.Deps | None = None) -> 
     """For `doctor`: (schedule, lock path, why) for each run lock that is stuck (never a live one)."""
     found = []
     for n in names(where):
-        base = str(lock_of(n, where))
-        for path in (base, f"{base}.takeover"):
-            kind, pid = pidlock.state(path, deps)
-            if kind in ("dead", "empty", "unreadable"):
-                found.append((n, path, pidlock.stuck_words(kind, pid)))
+        found += [(n, path, why) for path, why in _stuck(lock_of(n, where), deps)]
+    return found
+
+
+def stuck_phone_lock(where: Path | None = None, deps: pidlock.Deps | None = None) -> list[tuple[str, str]]:
+    """For `doctor`: (lock path, why) when the phone lock is stuck (never a live one)."""
+    return _stuck(phone_lock_of(where), deps)
+
+
+def _stuck(lock: Path, deps: pidlock.Deps | None) -> list[tuple[str, str]]:
+    found = []
+    for path in (str(lock), f"{lock}.takeover"):
+        kind, pid = pidlock.state(path, deps)
+        if kind in ("dead", "empty", "unreadable"):
+            found.append((path, pidlock.stuck_words(kind, pid)))
     return found

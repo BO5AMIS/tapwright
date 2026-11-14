@@ -542,7 +542,10 @@ def report_schedules() -> int:
     stuck = schedules.stuck_locks()
     for n, lock, why in stuck:
         fail(f"the run lock {lock} of schedule \"{n}\" is stuck: {why}. Remove it with: tapwright schedule unlock {n}")
-    return len(stuck)
+    phone = schedules.stuck_phone_lock()
+    for lock, why in phone:
+        fail(f"the schedules' phone lock {lock} is stuck: {why}. Remove it with: tapwright schedule unlock --phone")
+    return len(stuck) + len(phone)
 
 
 async def doctor(a) -> int:
@@ -958,8 +961,10 @@ def main() -> int:
     ss.add_parser("list", help="the schedules and their tasks")
     q = ss.add_parser("remove", help="remove a schedule and its task")
     q.add_argument("name")
-    q = ss.add_parser("unlock", help="remove a stuck run lock (refused while its holder is alive)")
-    q.add_argument("name")
+    q = ss.add_parser("unlock", help="remove a stuck run lock, or with --phone the phone lock (refused while its holder is "
+                                     "alive)")
+    q.add_argument("name", nargs="?")
+    q.add_argument("--phone", action="store_true", help="the phone lock every scheduled run and trigger check takes")
     p = sub.add_parser("run-schedule", help="one run of a schedule, now (what the system's scheduler starts)")
     p.add_argument("name")
     p.add_argument("--if-triggered", action="store_true",
@@ -1149,6 +1154,10 @@ def main() -> int:
             text, code = schedules.listing_text()
         elif a.schedule_cmd == "remove":
             text, code = schedules.remove(a.name)
+        elif a.phone:
+            text, code = schedules.unlock_phone() if a.name is None else ("Error: give a name or --phone, not both", 1)
+        elif a.name is None:
+            text, code = "Error: give the schedule's name, or --phone for the phone lock", 1
         else:
             text, code = schedules.unlock(a.name)
         print(text)

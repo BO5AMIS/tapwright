@@ -35,12 +35,6 @@
       "target": {
         "id": "sendButton"
       }
-    },
-    {
-      "tool": "tap",
-      "target": {
-        "id": "sendButton"
-      }
     }
   ],
   "draftsOnly": true
