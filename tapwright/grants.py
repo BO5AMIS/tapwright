@@ -20,6 +20,7 @@ import re
 import secrets
 import shutil
 import time
+import unicodedata
 from pathlib import Path
 from typing import Callable
 
@@ -33,6 +34,14 @@ TOOL = "tapwright"
 # §19.2: never grantable, whatever the file says. "Any word the tool treats as a payment" adds a few to the four.
 PAYMENT_WORDS = ("Buy", "Purchase", "Pay", "Subscribe", "Checkout", "Check out", "Place order", "Donate")
 ACCOUNT_WORDS = ("Delete account", "Delete my account", "Close account", "Deactivate account")
+# (review 1.7 A-M3) the lists above are phrases; these recognise the same things by pattern: money moving ("Send $25",
+# "Send Money Now", "Confirm order · $49.99") and an account or profile going away ("Delete your account")
+PAYMENT_MORE = ("Send money", "Transfer", "Checkout", "Order", "Tip")
+ACCOUNT_PATTERN = re.compile(r"\b(delete|remove|close|deactivate|terminate|erase)\b.{0,30}\b(account|profile)\b",
+                             re.IGNORECASE)
+_CODES = ("USD|EUR|GBP|JPY|CNY|INR|AUD|CAD|CHF|NZD|SEK|NOK|DKK|PLN|CZK|HUF|RUB|TRY|BRL|MXN|ZAR|KRW|SGD|HKD|"
+          "QAR|AED|SAR|KWD|BHD|OMR|EGP|JOD|ILS|PKR|BDT|IDR|MYR|THB|PHP|VND|NGN|KES")
+_AMOUNT = re.compile(rf"(?<![A-Za-z])(?:{_CODES})\s?\d|\d\s?(?:{_CODES})(?![A-Za-z])", re.IGNORECASE)
 # Words that reach other people: a grant naming one is draftsOnly unless a person lifted it (§19.1, §21.3)
 REACH_WORDS = ("Send", "Post", "Publish", "Reply", "Comment")
 # §19.2's last line, Tapwright's to enforce: Settings › Passwords, Wallet, and the account, privacy and security panes.
@@ -66,11 +75,32 @@ def safe_name(name: str) -> bool:
             and ascii_lower(name).split(".")[0] not in _RESERVED)
 
 
+def payment(text: str) -> str | None:
+    """What makes `text` a payment (§19.2, "any word the tool treats as a payment"): a payment word or phrase, a
+    currency symbol, or an amount with a currency code (`QAR 25`, `25 USD`). None when it isn't one."""
+    if (word := _any(PAYMENT_WORDS + PAYMENT_MORE, text)) is not None:
+        return word
+    if (symbol := next((c for c in text if unicodedata.category(c) == "Sc"), None)) is not None:
+        return symbol
+    if (amount := _AMOUNT.search(text)) is not None:
+        return amount.group(0)
+    return None
+
+
+def account_deletion(text: str) -> str | None:
+    """What makes `text` deleting an account (§19.2): a phrase of the list, or a delete, remove, close, deactivate,
+    terminate or erase followed within 30 characters by account or profile. None when it isn't one."""
+    if (phrase := _any(ACCOUNT_WORDS, text)) is not None:
+        return phrase
+    found = ACCOUNT_PATTERN.search(text)
+    return found.group(0) if found is not None else None
+
+
 def never_reason(word: str, block: tuple[str, ...]) -> str | None:
     """Why a grant's word can never be granted (§19.2), as the refusal says it; None when it can be."""
-    if (pay := _any(PAYMENT_WORDS, word)) is not None:
+    if (pay := payment(word)) is not None:
         return f"payments and purchases are never grantable ({json.dumps(pay)})."
-    if (acct := _any(ACCOUNT_WORDS, word)) is not None:
+    if (acct := account_deletion(word)) is not None:
         return f"deleting an account is never grantable ({json.dumps(acct)})."
     if (blocked := _any(block, word)) is not None:
         return f"a blocked word is never grantable ({json.dumps(blocked)})."
@@ -78,13 +108,20 @@ def never_reason(word: str, block: tuple[str, ...]) -> str | None:
 
 
 def touch_never(app: str | None, name: str | None) -> bool:
-    """Is this touch in §19.2, whatever the grants say? A payment or an account deletion on the element, or an app
-    where the account, privacy and security settings, the passwords and the cards live."""
-    return (app in NEVER_APPS) or (bool(name) and _any(PAYMENT_WORDS + ACCOUNT_WORDS, name or "") is not None)
+    """Is this touch in §19.2, whatever the grants say? A payment or an account deletion on the element (by word, phrase
+    or pattern), or an app where the account, privacy and security settings, the passwords and the cards live."""
+    return (app in NEVER_APPS) or (bool(name) and (payment(name or "") is not None
+                                                   or account_deletion(name or "") is not None))
 
 
 def reaches_people(word: str) -> bool:
     return _any(REACH_WORDS, word) is not None
+
+
+def reach_word(text: str | None) -> str | None:
+    """The word of REACH_WORDS in `text` (an element's own label or text), or None: what makes a touch send something to
+    other people (§21.3), whatever the policy file's lists say."""
+    return _any(REACH_WORDS, text) if text else None
 
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -386,6 +423,26 @@ class Book:
             lines.append("Note: the policy file can't be read now, so no grant covers anything; every touch asks a "
                          "person.")
         return lines
+
+    def _active(self) -> list[Grant]:
+        """The grants loaded now that are neither revoked nor ended."""
+        loaded = self.load()
+        if not loaded.ok:
+            return []
+        today = self.now().date()
+        return [g for g in loaded.grants if g.revoked is None and today <= g.until]
+
+    def drafts_only_for(self, app: str | None, routes: tuple[str, ...]) -> str | None:
+        """The name of an active draftsOnly grant for `app` (in one of `routes`, when the grant names a route), or None:
+        under it a touch that sends stops at a draft (§21.3), and so does what would send without a touch."""
+        if not app:
+            return None
+        return next((g.name for g in self._active()
+                     if g.app == app and g.drafts_only and (g.route is None or g.route in routes)), None)
+
+    def naming_route(self, route: str) -> str | None:
+        """The name of an active grant that names the saved route `route` (§19.1), or None."""
+        return next((g.name for g in self._active() if g.route == route), None)
 
     # ---- counting ----
     def _list(self, folder: Path) -> list[str] | None:

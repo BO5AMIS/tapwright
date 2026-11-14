@@ -39,7 +39,7 @@ NOT_OPENED = "Notification Center didn't open, so nothing was read."
 
 class CenterTools:
     """Mixed into Daemon. Needs: self.session, self.control, self.accounts, self.otp_codes, self.code_fields, self.audit,
-    self.broadcast, self.scrub_everywhere, self._loaded, self.wait_connected."""
+    self.broadcast, self.scrub_everywhere, self._loaded, self.wait_connected, self.phone_in_use."""
 
     # ---- the code field (§20.4: a code counts only within 2 minutes after the app showed it) ----
     def _watch_code_field(self, tree: ui.Tree) -> None:
@@ -262,10 +262,12 @@ class CenterTools:
     async def notification_keys(self, app: str) -> list[str]:
         """The digests of `app`'s notifications in Notification Center now, newest first (never their text): what a
         notification trigger's check compares with what it saw before. Refused `busy` while a person or an agent uses
-        the phone, and `paused` while the live view is paused: the check never reads then."""
+        the phone, and `paused` while the live view is paused: the check never reads then. In use is the schedules' own
+        test (Daemon.phone_in_use: a call in flight or in the last 90 s, a person's input in the last 90 s, a scheduled
+        run going), not the queue's 3 s (review 1.7 B-H1)."""
         if self.control.paused:
             raise Refused("paused", "paused by the user in the live view")
-        if self.control.driver is not None:
+        if self.phone_in_use():
             raise Refused("busy", "the phone is in use; the check waits")
         from . import schedules
         secret = schedules.trigger_secret()  # (the digests are HMACs under it: never a plain hash of a code, L5)

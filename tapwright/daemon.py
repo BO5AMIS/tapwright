@@ -31,7 +31,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
-from . import auditlog, center_tool, grants as grantlib, notifications as notes_lib, otp as otplib
+from . import auditlog, center_tool, grants as grantlib, notifications as notes_lib, otp as otplib, schedules as schedulelib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -69,6 +69,11 @@ OCR_REF = re.compile(r"o[1-9][0-9]*")
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
+FULL_SWIPE_SHARE = 0.4  # a mostly-across swipe on a list row longer than this share of its width runs its first action
+IN_USE_S = 90.0  # for a schedule's busy test only: a client's call, or a person's input, this recent means the phone is in use
+SCHEDULE_FREE = frozenset({"look", "wait", "wait_for", "audit", "ux_check", "logs", "crash", "apps", "session_report",
+                           "viewer", "filmstrip", "compare_screen"})  # what other agents may still do during a scheduled run
+SCHEDULED_BUSY = "a scheduled run is using the phone; try again when it ends"
 ALERT_ACTIONS = ("accept", "dismiss", "text")  # what `alert` takes (AGENT-TOOLS §4)
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
 NO_APP_TO_MEASURE = "no app is in front to measure; open_app the app first."
@@ -358,6 +363,25 @@ def element_name(result: str) -> str:
         return ""
     text = name.group(1)
     return text if len(text) <= MARK_NAME_MAX else text[:MARK_NAME_MAX - 1] + "…"
+
+
+def scheduled(client_id: str) -> bool:
+    """Is this client a scheduled run (`tapwright run-schedule`, §22)?"""
+    return client_id.startswith(schedulelib.CLIENT)
+
+
+def full_row_swipe(items: list[ui.Element], x0: float, y0: float, x1: float, y1: float) -> ui.Element | None:
+    """The list row a swipe would run the first action of (review 1.7 B-M7), or None: a swipe that starts on a row (a
+    cell), moves more across than up or down, and further than FULL_SWIPE_SHARE of the row's width. A shorter one only
+    reveals the row's buttons, and a tap on one of those is policed as any tap."""
+    dx, dy = x1 - x0, y1 - y0
+    if abs(dx) < abs(dy):
+        return None
+    row = next((e for e in reversed(items)
+                if e.role == "cell" and e.x <= x0 < e.x + e.width and e.y <= y0 < e.y + e.height), None)
+    if row is None or row.width <= 0 or abs(dx) <= FULL_SWIPE_SHARE * row.width:
+        return None
+    return row
 
 
 def step_caption(tool: str, result: str, args: dict) -> str | None:
@@ -1055,8 +1079,28 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # agents that said goodbye (a client id is one MCP process's, never used again): a call of theirs that arrives
         # late, or is still setting a condition when the goodbye comes, must not leave one on the phone
         self._agents_ended: dict[str, None] = {}
+        # {client: its tool calls in flight} and {client: when its last call began or ended}: the schedules' busy test
+        # (phone_in_use) and the refusal of other agents' actions while a scheduled run drives (review 1.7 B-H1)
+        self._calls: dict[str, int] = {}
+        self._call_at: dict[str, float] = {}
+        self.schedules_folder: pathlib.Path | None = None  # where the schedules are (None: ~/.tapwright/schedules)
         # the device reports a condition that ended by itself or with its tunnel (L6)
         self.session.device.on_network_end = self._network_over
+
+    # ---- who uses the phone, for the schedules (§22.3) ----
+    def phone_in_use(self) -> bool:
+        """The schedules' busy test (review 1.7 B-H1): a person or an agent drives now (the queue's own 3 s), a client has
+        a tool call in flight or made one in the last IN_USE_S, a person acted in the live view in the last IN_USE_S, or
+        a scheduled run is going. An agent thinking between its calls still holds the phone; a scheduled run's own
+        finished calls don't (only one run goes at a time: the phone lock, schedulerun)."""
+        now = time.monotonic()
+        return (self.control.driver is not None or now - self._person_at < IN_USE_S
+                or any(n > 0 for n in self._calls.values())
+                or any(now - at < IN_USE_S for c, at in self._call_at.items() if not scheduled(c)))
+
+    def scheduled_running(self) -> bool:
+        """Is a scheduled run's call in flight?"""
+        return any(n > 0 and scheduled(c) for c, n in self._calls.items())
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -1066,6 +1110,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                else "tailscale" if via.startswith("network") else None)
         return {"type": "status", "protocol": PROTOCOL, "tool": "Tapwright", "state": self.state, "detail": self.detail, "via": via,
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
+                "in_use": self.phone_in_use(),  # (the schedules' busy test, §22.3; `driver` is the queue's own)
                 "size": {"w": w, "h": h}, "quality": self.preset,
                 "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
 
@@ -1727,6 +1772,29 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             else:
                 # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
                 raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(left))))
+        if not scheduled(client_id) and name not in SCHEDULE_FREE and self.scheduled_running():
+            # a scheduled run drives with no model watching: another agent's action would land in the middle of its
+            # route, and its own next step on a screen it didn't leave (review 1.7 B-H1, §22.3)
+            raise Refused("busy", SCHEDULED_BUSY)
+        now = time.monotonic()
+        for gone in [c for c, at in self._call_at.items() if now - at >= IN_USE_S and not self._calls.get(c)]:
+            del self._call_at[gone]
+        self._calls[client_id] = self._calls.get(client_id, 0) + 1
+        self._call_at[client_id] = now
+        try:
+            return await self._run_tool_counted(client_id, name, args, scope, policy, ux_rules, via, maps, dialog,
+                                                accounts)
+        finally:
+            left_calls = self._calls.get(client_id, 1) - 1
+            if left_calls > 0:
+                self._calls[client_id] = left_calls
+            else:
+                self._calls.pop(client_id, None)
+            self._call_at[client_id] = time.monotonic()
+
+    async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
+                                policy: "safety.Policy | None", ux_rules: "uxcheck.Rules | None", via: str | None,
+                                maps: str | None, dialog: bool, accounts: str | None) -> dict:
         vtoken = _VIA.set(via) if via is not None else None  # how the call came, for the log (session_report)
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
@@ -2638,10 +2706,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         path = batch.resolve(args.get("name"), args.get("path"))
         data = batch.load_script(path)
         token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
-        # a replay of a saved route runs that route: a grant naming it covers its touches (§19.1)
-        named = data.get("name") if data.get("version") == 2 and isinstance(data.get("name"), str) else None
+        # a replay of a saved route runs that route: a grant naming it covers its touches (§19.1). Only the map's own file
+        # for it, `routes/<name>.json` in the app's map folder, is that route: a script that names itself so elsewhere is
+        # not (review 1.7 A-M1)
+        named = self._saved_route_name(path, data)
         running = _ROUTES.set((*_ROUTES.get(), named)) if named else None
-        drafting = _DRAFTS_ROUTE.set(True) if named and data.get("draftsOnly") is True else None  # §21.3
+        # §21.3 (any version 2 file that says so stops at drafts: it only ever holds back more)
+        drafting = _DRAFTS_ROUTE.set(True) if data.get("version") == 2 and data.get("draftsOnly") is True else None
         run_grants = self._grants_run()
         try:
             return await self._replay(client_id, data, scope, args)
@@ -2757,6 +2828,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if not isinstance(route, str) or not routes.NAME.match(route):
                     twin = await self._route_twin(route, scope) if isinstance(route, str) else None
                     raise Refused("bad_params", twin or f"a route's name is lower-case ASCII letters, digits and _, not {route!r}")
+                self._refuse_held_route(route)
                 bundle, start = await self._route_place(scope)
                 self._recording[client_id] = {"name": route, "app": bundle, "steps": [], "route": route, "start": start,
                                               "variables": []}
@@ -2883,6 +2955,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None", steps: list[dict]) -> dict:
         """`record` with `stop` for a route: the steps (`steps`, as they are written), from the place it started to the
         place it ends at, as a file in the app's map folder (§18.5)."""
+        self._refuse_held_route(rec["route"])  # (again at the save: a grant or a schedule may have come meanwhile)
         bundle, end = await self._route_place(scope)
         route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], steps)
         # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
@@ -3712,8 +3785,6 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if not dry and s.front_by_touch():
                     s.front_apps = tuple(scoped)
             handler = self._handlers.get(name)
-            if dry and name == "swipe":
-                self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
             people = self.control.person_generation
             try:
                 return await (handler(view, use) if handler else call(s, use))
@@ -4131,6 +4202,44 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if sent:
             return sent
         return getattr(getattr(self, "ceiling", None), "maps", None)
+
+    def _saved_route_name(self, path: object, data: dict) -> str | None:
+        """The route a replayed file is (§19.1, review 1.7 A-M1): its name when the file is the map's own
+        `routes/<name>.json` for its app, in the maps folder in force; else None (a script that only names itself so)."""
+        name, app = data.get("name"), data.get("app")
+        if data.get("version") != 2 or not isinstance(name, str) or not routes.NAME.match(name) or not isinstance(app, str):
+            return None
+        try:
+            own = self.maps.file(self._maps_root(), app).routes_dir / f"{name}.json"
+            return name if os.path.samefile(str(path), own) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _refuse_held_route(self, name: str) -> None:
+        if (why := self._route_held(name)) is not None:
+            raise Refused("not_allowed", f"route {name} can't be recorded: {why}, and a recording would replace it. Record "
+                                         "under another name; only a person changes that grant or schedule.")
+
+    def _route_held(self, name: str) -> str | None:
+        """Why `record` may not save a route called `name` (review 1.7 A-M1): an active grant of the policy in force, or a
+        schedule, names it, and a recording would put the model's own steps under the person's OK. None when it may."""
+        book = self._book()
+        try:
+            granted = book.naming_route(name) if book is not None else None
+        except Exception:  # any doubt keeps the route as it is
+            return "the grants can't be read now"
+        if granted is not None:
+            return f"grant {json.dumps(granted)} names it"
+        try:
+            for schedule in schedulelib.names(self.schedules_folder):
+                try:
+                    if schedulelib.load(schedule, self.schedules_folder).route == name:
+                        return f"schedule {json.dumps(schedule)} runs it"
+                except schedulelib.ScheduleError:
+                    continue
+        except OSError:
+            return "the schedules can't be read now"
+        return None
 
     async def _build_of(self, bundle: str) -> str | None:
         """The app's version and native build number, `1.4.0 (212)`, from the installed apps: a road driven on another build
@@ -5138,6 +5247,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
         The target is tapped first by the session, which waits for the keyboard and for focus to arrive."""
+        if a.get("submit") and (why := self._submit_sends()) is not None:
+            # §21.3: Return sends a message or posts a comment in many apps, with no button for a draft to stop at
+            raise Refused("not_allowed", f"submit would send here ({why}), and a person sees a draft first. Type without "
+                                         "submit, then tap the send button.")
         target = a.get("target")
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
@@ -5224,6 +5337,21 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if using is not None:
             self._audit_typed(using, field)
         return done
+
+    def _submit_sends(self) -> str | None:
+        """Why `type_text`'s `submit` is refused now (review 1.7 B-H2): in a draftsOnly route, or under a draftsOnly grant
+        for the app in front, pressing Return could send with no draft shown. None when it may."""
+        if _DRAFTS_ROUTE.get():
+            return "the route is draftsOnly"
+        book = self._book()
+        if book is None:
+            return None
+        try:
+            name = book.drafts_only_for(self._app_bundle(), _ROUTES.get())
+        except Exception as e:  # any doubt keeps Return from sending
+            self.log(f"grants: {type(e).__name__}: {e}")
+            return "the grants can't be read"
+        return None if name is None else f"grant {json.dumps(name)} is draftsOnly"
 
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
@@ -5653,7 +5781,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         said = ""
         if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
             said = await self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
-            if _POLICY.get().check(self._app_bundle(), hit.label if hit.role == "input" else hit.text) is not None:
+            if self._held_back(hit):
                 self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
         shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
         area = ui.scroll_holding(view.items, hit, s.screen)
@@ -5716,7 +5844,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
             self._policed = None
             await self._police(name, args, final)
-            if _POLICY.get().check(self._app_bundle(), final.label if final.role == "input" else final.text) is not None:
+            if self._held_back(final):
                 self._policed = (name, self._police_key(final))
         self._scrolled_first.add(client_id)
         return ui.Target(ref=final.ref) if final.ref else target
@@ -5766,6 +5894,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
+    def _held_back(self, element: ui.Element) -> bool:
+        """Does the policy, or the words that send to other people (§21.3), have a say on a touch of `element`?"""
+        name = element.label if element.role == "input" else element.text
+        return _POLICY.get().check(self._app_bundle(), name) is not None or grantlib.reach_word(name) is not None
+
     async def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
         try:
             return await self._police_check(tool, a, element, bundle)
@@ -5783,9 +5916,28 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if element is None:
             return ""
         # an input is matched by its label only: what someone typed into it is data, not what a touch does
-        hit = _POLICY.get().check(bundle or self._app_bundle(), element.label if element.role == "input" else element.text)
+        name = element.label if element.role == "input" else element.text
+        app = bundle or self._app_bundle()
+        hit = _POLICY.get().check(app, name)
+        # §21.3: a touch that sends to other people stops at a draft in a draftsOnly route or under a draftsOnly grant.
+        # That is decided by the shared words on the element itself, never by the policy file's lists: a custom policy,
+        # `--no-policy` or an app's empty list can't turn a draft off (review 1.7 B-H2)
+        reach = grantlib.reach_word(name)
+        route_draft = bool(_DRAFTS_ROUTE.get()) and reach is not None
+        book = self._book()
+        touch = grantlib.Touch(app, name, _ROUTES.get(), tool) if book is not None else None
         if hit is None:
-            return ""
+            if reach is None:
+                return ""
+            if not route_draft:
+                try:  # (no policy word: only a draftsOnly grant for this touch stops it; nothing is counted here)
+                    grant_draft = book is not None and touch is not None and book.decide(touch, "peek").kind == "draft"
+                except Exception as e:  # any doubt stops at the draft
+                    self.log(f"grants: {type(e).__name__}: {e}")
+                    grant_draft = True
+                if not grant_draft:
+                    return ""
+            hit = (safety.CONFIRM, reach)
         kind, word = hit
         # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
         # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
@@ -5802,13 +5954,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
             return ""
         now = self.control.clock()
-        route_draft = bool(_DRAFTS_ROUTE.get()) and grantlib.reaches_people(word)  # §21.3: a route that is draftsOnly
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now
                       and (not route_draft or c.draft is not None)), None)
-        book = self._book()
-        touch = grantlib.Touch(bundle or self._app_bundle(), element.label if element.role == "input" else element.text,
-                               _ROUTES.get(), tool) if book is not None else None
         if a.get("dry_run"):
             if grant:
                 return ""
@@ -5816,9 +5964,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 decided = book.decide(touch, "peek")
                 if decided.kind == "covered":
                     return f" {decided.dry}"
-                route_draft = route_draft or (decided.kind == "draft" and grantlib.reaches_people(word))
+                route_draft = route_draft or (decided.kind == "draft" and reach is not None)
             if route_draft:
-                return f' It would stop at a draft a person sees first (policy word "{word}").'
+                return f' It would stop at a draft a person sees first (policy word "{reach}").'
             return f' It needs a person\'s OK (policy word "{word}").'
         if grant is not None and self._claim(grant):
             if grant.draft is not None:  # a draft a person sent (§21.3): logged, noted as sent, not counted as a use
@@ -5830,10 +5978,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if book is not None and touch is not None and self._by_grant(book, touch, tool):
             return ""
         held = _GRANT_CALL.get()
-        stopped = held.draft if held is not None and grantlib.reaches_people(word) else None  # a draftsOnly grant's name
+        stopped = held.draft if held is not None and reach is not None else None  # a draftsOnly grant's name
         drafted: "tuple[str, str | None, bool] | None" = None
         if route_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
             drafted = (stopped or "", *(await self._draft_text()))
+            word = reach or word  # (the draft's question names the word that sends: `Send this in Mail?`)
         message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
             raise Refused("not_allowed", message, draft=drafted is not None)
@@ -5974,7 +6123,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         said, open_ = "", None
         for c in [c for c in self._confirms.values() if c.tool == tool and c.key == key]:
             if c.state == "pending" and c.until >= now:
-                open_ = c
+                # reused only for a call that asks the same way: a person shown "Allow tap Send?" with no draft never
+                # answers for a touch that must show its draft first, nor the other way (review 1.7 B-L9)
+                if (c.draft is not None) == (drafted is not None):
+                    open_ = c
                 continue
             if c.state == "declined" and c.until >= now:
                 # a person said no a moment ago: asking again at once would only wear them down (safety review L2)
@@ -6613,12 +6765,50 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _swipe(self, view, a: dict) -> str:
         """`swipe`: a drag that barely moves is a touch where it starts, so it goes through the policy as a tap there
-        would (safety review H3)."""
+        would (safety review H3). A full swipe across a list row runs the row's first action (often Delete or Archive)
+        with no button touched, so it needs a person's OK each time (review 1.7 B-M7). The tree is read for every swipe."""
         x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
-        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP and any(_POLICY.get().words(self._app_bundle())):
-            under = self._element_at((x0, y0), (await self.session.refresh()).items)
-            await self._police("swipe", a, under)
+        items = (await self.session.refresh()).items
+        said = ""
+        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP:
+            said = await self._police("swipe", a, self._element_at((x0, y0), items))
+        elif (row := full_row_swipe(items, x0, y0, x1, y1)) is not None:
+            said = await self._full_swipe_ok(a, row)
+        self._dry(a, f"Would swipe from ({x0:g}, {y0:g}) to ({x1:g}, {y1:g}).{said}")
         return await ACTIONS["swipe"][0](self.session, a)
+
+    async def _full_swipe_ok(self, a: dict, row: ui.Element) -> str:
+        """A full swipe on a list row (review 1.7 B-M7): a touch with an unknown destructive word. A person's OK each
+        time, through the live view and the host's dialog; never covered by a grant, none offered, and never made in a
+        draftsOnly route or a scheduled run. For a dry run, the sentence for the answer's end."""
+        label = self.scrub_everywhere(row.text or row.label or row.ref)
+        what = f"a full swipe on {row.role} {ui.clip(label)}"
+        hint = "Reveal the row's actions with a short swipe, then tap the one you want."
+        if _DRAFTS_ROUTE.get() or scheduled(_CALLER.get() or ""):
+            raise Refused("not_allowed", f"needs_confirmation: {what} runs the row's first action (often Delete or "
+                                         f"Archive), which a draftsOnly route or a scheduled run never does. {hint}")
+        if a.get("dry_run"):
+            return " It needs a person's OK (a full swipe on a list row runs its first action)."
+        element_key = self._police_key(row)
+        key = (*element_key, "full swipe")
+        now = self.control.clock()
+        allowed = next((c for c in self._confirms.values()
+                        if c.tool == "swipe" and c.key == key and c.state == "allowed" and c.until >= now), None)
+        if allowed is not None and self._claim(allowed):
+            _GRANTED.get().append(allowed.origin or "the live view")
+            return ""
+        app = (self.session.app or (None, None))[0]
+        caption = (f'Allow: a full swipe on "{dialog.clean(label)}" in {dialog.clean(app) if app else "the app in front"}? '
+                   "It runs the row's first action, often Delete.")
+        message, request = self._ask("swipe", a, key, row, "full swipe", what, now, caption=caption,
+                                     why="(it runs the row's first action, often Delete or Archive; to pick the action "
+                                         "yourself, reveal the row's actions with a short swipe, then tap the one you "
+                                         "want)")
+        if request is None:
+            raise Refused("not_allowed", message)
+        taken = f"needs_confirmation: {what}: the OK given was used by another call. Nothing was touched; make it again."
+        await self._wait_for_person(request, message, "swipe", a, key, row, taken, same=element_key)
+        return ""
 
     async def _long_press(self, view, a: dict) -> str:
         return await self._touch(view, a, int(float(a.get("seconds", 1.0)) * 1000))

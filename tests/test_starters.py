@@ -157,3 +157,15 @@ def test_mail_and_messages_starters_are_compose_only_drafts_routes(tmp_path):
     installed = mapfile.MapFile(tmp_path, "com.apple.mobilemail")
     data, _ = installed.read()
     assert installed.read_route(data, "compose_mail")["draftsOnly"] is True
+
+
+def test_no_shipped_route_repeats_a_step_twice_in_a_row():
+    """Review 1.7 B-M6: compose_mail and compose_message ended in two taps on Send (the refused attempt while building and
+    its repeat): after a person sent the draft, the second tap asked again or sent again. No shipped route may hold two
+    identical steps one after the other."""
+    for app in starters.apps():
+        _, routes = starters.load(app)
+        for name, route in routes.items():
+            steps = route["steps"]
+            twice = [n for n in range(1, len(steps)) if steps[n] == steps[n - 1]]
+            assert not twice, f"{app} route {name}: step {twice[0] + 1} repeats step {twice[0]}"

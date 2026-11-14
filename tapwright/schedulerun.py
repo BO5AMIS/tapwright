@@ -9,7 +9,9 @@ skip is a `schedule` line in the audit log (§23).
 Before the route starts, the run checks what could stop it, in this order (§22.3): another run of this schedule going
 (the run lock, pidlock.py: `skipped: the previous run is still going`), the phone locked (`skipped: the phone is locked`,
 unless a passcode unlock is given), the phone in use by a person or an agent (it waits up to 10 minutes, then `skipped:
-the phone was in use`; a run is never queued behind another).
+the phone was in use`; a run is never queued behind another). A machine-wide phone lock (`.phone.lock` beside the run
+locks) is held from that wait to the end of the drive, and by a notification trigger's check, so two runs of different
+schedules never overlap and a check never runs inside a run: the one that finds it held waits as for a busy phone.
 """
 from __future__ import annotations
 
@@ -130,31 +132,60 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
         pidlock.release(schedules.lock_of(name, deps.where), token)
 
 
+def in_use(status: dict) -> bool:
+    """The phone is busy for a schedule (§22.3): a person or an agent drives, the daemon's own test says in use (a call in
+    flight or in the last 90 s, a person's input in the last 90 s, a scheduled run going), or the live view is paused."""
+    return status.get("driver") in ("person", "agent") or bool(status.get("in_use")) or bool(status.get("paused"))
+
+
+def take_phone(phone: Path, deps: Deps) -> str | None:
+    """The phone lock's token, or None while another run or check holds it (pidlock: a live holder is never displaced)."""
+    try:
+        phone.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return pidlock.take(phone, deps.lock)
+
+
 def notification_arrived(s: schedules.Schedule, deps: Deps) -> bool:
     """A notification trigger's check (§22.1): has a notification from its app appeared since the last check? Only while
     the PC is awake (the poll's task doesn't wake it) and the phone is live; never while a person or an agent uses the
-    phone, or the live view is paused: it waits for that, up to the run's own wait, and else looks again at the next
-    poll. Nothing is written for a check that finds nothing (no report, no audit line)."""
+    phone, a scheduled run holds the phone lock, or the live view is paused: it waits for that, up to the run's own
+    wait, and else looks again at the next poll. Nothing is written for a check that finds nothing (no report, no audit
+    line). The check holds the phone lock while it looks (review 1.7 B-H1)."""
     api = deps.api()
     waited = deps.monotonic()
+    phone = schedules.phone_lock_of(deps.where)
     while True:
-        try:
-            status = api.status()
-        except Exception:
-            return False
-        if not status or status.get("state") != "live":
-            return False  # (a locked or missing phone: the next poll looks again)
-        if not (status.get("driver") in ("person", "agent") or status.get("paused")):
+        token = take_phone(phone, deps)
+        if token is not None:
             try:
-                return schedules.new_notifications(s, api.notification_keys(s.trigger["notification"]), deps.where)
-            except api.DaemonError as e:
-                if e.code not in ("busy", "paused"):
-                    return False
-            except Exception:
-                return False
+                found = _check_once(s, deps, api)
+            finally:
+                pidlock.release(phone, token)
+            if found is not None:
+                return found
         if deps.monotonic() - waited >= deps.wait:
             return False
         deps.sleep(deps.poll)
+
+
+def _check_once(s: schedules.Schedule, deps: Deps, api: ModuleType) -> bool | None:
+    """One look for the trigger's notifications: True or False, or None when the phone is busy (look again later)."""
+    try:
+        status = api.status()
+    except Exception:
+        return False
+    if not status or status.get("state") != "live":
+        return False  # (a locked or missing phone: the next poll looks again)
+    if in_use(status):
+        return None
+    try:
+        return schedules.new_notifications(s, api.notification_keys(s.trigger["notification"]), deps.where)
+    except api.DaemonError as e:
+        return None if e.code in ("busy", "paused") else False
+    except Exception:
+        return False
 
 
 def end(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, status: str, result: str, began: datetime.datetime,
@@ -236,10 +267,29 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
         bundle = find_route(s)
     except schedules.ScheduleError as e:
         return end(s, deps, audit, "failed", f"failed: {e}", began, 2, used=False)
+    # the phone lock (review 1.7 B-H1): another schedule's run, or a trigger check, holds the phone as a driver would
+    phone = schedules.phone_lock_of(deps.where)
+    held: list[str] = []
+    try:
+        return _attempt_holding(s, deps, audit, began, api, values, bundle, phone, held)
+    finally:
+        if held:
+            pidlock.release(phone, held[0])
+
+
+def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: datetime.datetime,
+                     api: ModuleType, values: dict[str, str], bundle: str, phone: Path, held: list[str]) -> Outcome:
     # the phone: locked, or in use (§22.3)
     waited = deps.monotonic()
     unlocked = False
     while True:
+        if not held and (token := take_phone(phone, deps)) is not None:
+            held.append(token)
+        if not held:  # another run or a trigger check is on the phone: in use, as for a person or an agent
+            if deps.monotonic() - waited >= deps.wait:
+                return end(s, deps, audit, "skipped", IN_USE, began, 3, bundle=bundle, used=False)
+            deps.sleep(deps.poll)
+            continue
         try:
             status = api.status()
         except Exception as e:
@@ -259,7 +309,7 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
             detail = status.get("detail") or state
             return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({str(detail)[:120]})", began, 2,
                        bundle=bundle, used=False)
-        if not (status.get("driver") in ("person", "agent") or status.get("paused")):
+        if not in_use(status):
             break
         if deps.monotonic() - waited >= deps.wait:
             return end(s, deps, audit, "skipped", IN_USE, began, 3, bundle=bundle, used=False)
@@ -281,7 +331,7 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
         return end(s, deps, audit, "failed", f"failed: {e}", began, 2, bundle=bundle, used=False)
     audit.write("schedule", name=s.name, app=bundle, detail="started")
     try:
-        answer = api.call("drive", args, f"schedule-{s.name}", timeout=TIMEOUT)
+        answer = api.call("drive", args, f"{schedules.CLIENT}{s.name}", timeout=TIMEOUT)
     except api.DaemonError as e:
         state, result = classify(e.code, str(e), getattr(e, "draft", False))
         return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)

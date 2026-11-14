@@ -51,12 +51,6 @@
       "target": {
         "id": "Mail.sendButton"
       }
-    },
-    {
-      "tool": "tap",
-      "target": {
-        "id": "Mail.sendButton"
-      }
     }
   ],
   "draftsOnly": true
