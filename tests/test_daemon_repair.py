@@ -448,11 +448,14 @@ def test_a_new_screen_in_the_way_is_cleared_by_a_proven_road_put_before_the_step
         await d.run_tool("a", "tap", {"target": {"id": "dismiss-btn"}})  # promo > welcome is a proven road now
         await d.maps.flush()
         d.session.at = "promo"
+        await d.run_tool("a", "look", {"screenshot": False})
         steps = [tap({"id": "continue-btn"}, place="welcome", expect={"text": "Login"})]
         path = script(tmp_path, steps)
-        with pytest.raises(Refused):
+        with pytest.raises(Refused) as e:
             await replay(d, path)  # the plain replay stops: the promo is in the way
+        assert e.value.code == "not_found"
         d.session.at = "promo"
+        await d.run_tool("a", "look", {"screenshot": False})
         r = await replay(d, path, "apply")
         assert "with tap id=dismiss-btn before it (promo to welcome)" in r["text"]
         fixed = json.loads((tmp_path / "sign_in.repaired.json").read_text("utf-8"))
@@ -547,5 +550,35 @@ def test_a_repair_reads_nothing_of_another_app(tmp_path):
         d.session.app = ("Other", "com.other.app")
         got = await d._repair_screen("a", None, BUNDLE, tap({"id": "login-btn"}))
         assert got is None  # the app in front isn't the script's: its screen is not read into a repair
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_candidate_that_carries_a_policy_word_is_never_the_repair(tmp_path):
+    async def go():
+        tree = [title("Start"), button("e1", "Send to friends", "x-send", rect=(150, 400, 100, 40))]
+        d = phone(tmp_path, Flow(tree, {"x-send": HOME}))
+        stop, task = await started(d)
+        steps = [tap({"text": "Share"}, seen={"role": "button", "bucket": "c2r2"}, expect={"text": "Home"})]
+        with pytest.raises(Refused) as e:
+            await replay(d, script(tmp_path, steps), "apply")
+        assert "no repair was made. Nothing on the screen can take the step's tap" in str(e.value) and "tap" not in d.session.calls
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_ambiguous_target_is_repaired_by_the_facts_and_saved_with_its_index(tmp_path):
+    async def go():
+        top, bottom = button("e1", "Save", "save", rect=(10, 100, 100, 40)), button("e2", "Save", "save", rect=(10, 700, 100, 40))
+        d = phone(tmp_path, Flow([title("Edit"), top, bottom], {"save": HOME}))
+        stop, task = await started(d)
+        steps = [tap({"id": "save"}, seen={"role": "button", "bucket": "c1r3"}, expect={"text": "Home"})]
+        with pytest.raises(Refused) as e:
+            await replay(d, script(tmp_path, [tap({"id": "save"}, expect={"text": "Home"})]), "apply")
+        assert e.value.code == "ambiguous" and "no repair was made. The best two scores" in str(e.value)  # no facts: can't tell
+        r = await replay(d, script(tmp_path, steps), "apply")
+        assert "with 1 repair" in r["text"]
+        fixed = json.loads((tmp_path / "sign_in.repaired.json").read_text("utf-8"))
+        assert fixed["steps"][0]["target"] == {"id": "save", "index": 1}
         await finish(stop, task)
     run(go)

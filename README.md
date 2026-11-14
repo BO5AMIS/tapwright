@@ -179,6 +179,18 @@ it, and without either it refuses): it reopens the app, stops at the first step
 that fails and says which, and exits 0, 1 (a step failed) or 2 (it couldn't start). Tapline runs the
 same files inside your app.
 
+**Scripts that repair themselves.** When the app's screens moved, `replay` with `repair: "suggest"` (or `tapwright replay
+FILE --apps ID --repair suggest`) adds the likely fix after the failed step and touches nothing. `repair: "apply"` repairs a
+renamed or moved target, a new screen in the way, or a target now behind a scroll, as the run goes, and keeps a repair only
+when its own check holds (the step's `expect`, else the next step's target resolves to one element) and the whole script then
+runs to its end; at most 3 candidates a step and 5 repairs a script. It writes `FILE.repaired.json` and `FILE.repair.md` beside
+the script, never over it, and nothing at all when the run fails. A failing `expect` is a finding, never repaired, and so is a
+step that types, a policy word, a native Back or a `draftsOnly` route. Every trial is a line of kind `repair` in the audit log.
+`--repair apply --adopt` (the command line, a person's choice; no tool call can adopt) replaces the script with the repaired one
+after that same run passed, keeping the original once as `FILE.orig.json`. The score only orders the candidates: Tapwright's
+weights are role 0.15, id_stem 0.35, words 0.35, position 0.10, component 0.05. `record` now saves each step's `place` and the
+`seen` facts of its element (role, position bucket, class, id stem; never text) so a repair can tell what moved.
+
 **Checks of how it looks, too.** `"expect": {"matches": "trip-saved"}` on a step (or a `compare_screen`
 step) holds when the screen matches the reference picture of that name. `record` keeps the pictures next to the
 script, in `sign-up.references/`, so they travel together. After an intended design change, `tapwright replay

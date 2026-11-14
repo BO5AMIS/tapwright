@@ -31,6 +31,7 @@
                      [--policy FILE | --no-policy] [--ux-rules FILE]
                      connect an agent in one go: register the MCP server and install the skill
   tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated | --phone) [--junit OUT] [--update-references]
+                                [--repair suggest|apply [--adopt]]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
 
@@ -817,6 +818,13 @@ def replay(a) -> int:
         # a script comes from anyone (a pull request, a download): its own `app` must not choose what it may drive
         print("tapwright replay: pass --apps <bundle id> (the apps these scripts may use), or --dedicated (or --phone)")
         return 2
+    repair, adopt = getattr(a, "repair", None), bool(getattr(a, "adopt", False))
+    if adopt and repair != "apply":  # adopting is a person's choice, and acts only on a run that passed (AGENT-TOOLS §26.5)
+        print("tapwright replay: --adopt goes with --repair apply: it adopts what that same run repaired and checked")
+        return 2
+    if repair and getattr(a, "update_references", False):
+        print("tapwright replay: --repair can't be used with --update-references")
+        return 2
     results: list[tuple[str, str, str, float]] = []  # (file, "ok" | "failed" | "error", message, seconds)
     for f in a.files:
         path = str(Path(f).resolve()) if Path(f).exists() else str(batch.named(f))  # a file, else a saved name
@@ -833,7 +841,8 @@ def replay(a) -> int:
             client.set_scope(apps, a.dedicated)
         try:
             # (a failed picture check writes its diff next to the script, and its message ends `(diff: <path>)`)
-            answer = client.call("replay", {"path": path, **({"update_references": True} if getattr(a, "update_references", False) else {})},
+            answer = client.call("replay", {"path": path, **({"update_references": True} if getattr(a, "update_references", False) else {}),
+                                            **({"repair": repair} if repair else {})},
                                  "cli-replay", timeout=200.0)
         except client.DaemonError as e:
             print(f"{f}: Error {e.code}: {e}")
@@ -847,11 +856,30 @@ def replay(a) -> int:
             results.append((f, kind, message, time.monotonic() - began))
             continue
         print(f"{f}: {answer.get('text', '')}")
+        if adopt:
+            print(f"{f}: {adopt_repair(path, answer.get('text', ''))}")
         results.append((f, "ok", "", time.monotonic() - began))
     if a.junit:
         write_junit(a.junit, results)
     kinds = {r[1] for r in results}
     return 2 if "error" in kinds else 1 if "failed" in kinds else 0
+
+
+def adopt_repair(path: str, answer: str) -> str:
+    """`--repair apply --adopt`, after the run passed: the script is replaced by the repaired one it just wrote, the original kept
+    as `<script>.orig.json` once (AGENT-TOOLS §26.5). Done here, by the person's command, and never by the daemon: no tool call
+    can adopt. A run that made no repair wrote nothing, so nothing is adopted."""
+    from . import auditlog, batch, scriptrepair
+    script = Path(path)
+    if f"Wrote {script.stem}.repaired.json" not in answer:
+        return "nothing to adopt: that run made no repair, so it wrote no repaired script"
+    try:
+        data = batch.load_script(path)
+    except Exception as e:  # noqa: BLE001 - a script that can't be read again isn't adopted over
+        return f"nothing was adopted: {e}"
+    name, app = str(data.get("name") or script.stem), data.get("app") if isinstance(data.get("app"), str) else None
+    log = auditlog.AuditLog()
+    return scriptrepair.adopt(script, lambda detail: log.write("repair", name=name, app=app, detail=detail))[1]
 
 
 EXPLORE_WAIT = 600.0  # seconds `explore` waits for a phone in use before it starts (AGENT-TOOLS §22.3, §25.2)
@@ -938,7 +966,11 @@ def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
         case = ET.SubElement(suite, "testcase", classname="tapwright.replay", name=Path(f).stem, file=f,
                              time=f"{seconds:.2f}")
         if kind != "ok":
-            node = ET.SubElement(case, "failure" if kind == "failed" else "error", message=message.splitlines()[0])
+            lines = message.splitlines()
+            at = next((n for n, line in enumerate(lines) if line.startswith("Repair (suggest")), None)
+            # `--repair suggest --junit` puts the suggestion into the failure message (AGENT-TOOLS §26.5)
+            text = " ".join([lines[0], *lines[at:]]) if at is not None else lines[0]
+            node = ET.SubElement(case, "failure" if kind == "failed" else "error", message=text)
             node.text = message
             if output := diagnostics.junit_output(message):  # the app's log lines and crash, for whoever reads the report
                 ET.SubElement(case, "system-out").text = output
@@ -1089,6 +1121,12 @@ def main() -> int:
     p.add_argument("--update-references", action="store_true",
                    help="picture checks (matches, compare_screen) save the screen into the script's "
                         "<name>.references folder instead of comparing; exit 0 when every step ran")
+    p.add_argument("--repair", choices=("suggest", "apply"),
+                   help="when a step's target moved or was renamed: suggest the fix after the failure (touches nothing), or "
+                        "apply it as the run goes, checked, and write <script>.repaired.json and .repair.md beside the script")
+    p.add_argument("--adopt", action="store_true",
+                   help="with --repair apply: when that run passed, replace the script with the repaired one, keeping the "
+                        "original as <script>.orig.json (once). Only a person can do this: no tool call can")
     p = sub.add_parser("explore", help="search an app for what breaks, with no agent: the same search and report as the explore tool")
     p.add_argument("--minutes", type=float, metavar="N", help="time budget, 1 to 60 (default 10)")
     p.add_argument("--steps", type=int, metavar="N", help="move budget, 1 to 5000 (default 500)")
