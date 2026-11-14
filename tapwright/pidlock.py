@@ -10,8 +10,12 @@ process id, and the process's start time when the OS gives it, so a reused pid i
   is unchanged and its holder still dead is it unlinked and replaced.
 - **A live holder is never displaced.** **Release** only while the content is still yours.
 
-No new dependencies: the start time comes from ctypes (OpenProcess + GetProcessTimes) on Windows and `ps -o lstart=`
-elsewhere, written in the same text Tapline writes, since both tools take the same edit lock."""
+**`started` (v1.16):** the holder's process start time as an integer, milliseconds since 1970-01-01 UTC, rounded down: the
+creation time from ctypes (OpenProcess + GetProcessTimes) on Windows, `ps -o lstart=` read with `LC_ALL=C` and `TZ=UTC`
+on macOS and Linux. A reader compares whole seconds (`started // 1000` against the live process's start, floored the
+same way). A `started` that isn't an integer (an older tool's text) can't prove a reused pid: its holder counts as alive
+while that pid runs, and a person clears it with `unlock`. Both tools take the same edit lock, so this is one format.
+No new dependencies."""
 from __future__ import annotations
 
 import dataclasses
@@ -19,6 +23,7 @@ import datetime
 import errno
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -69,21 +74,49 @@ def process_alive(pid: int) -> bool:
     return True
 
 
-def filetime_text(ticks: int) -> str:
-    """A Windows FILETIME (100 ns ticks since 1601-01-01 UTC) as .NET's round-trip UTC text, `2026-11-14T06:00:12.4810000Z`:
-    the text Tapline writes (`(Get-Process -Id N).StartTime.ToUniversalTime().ToString('o')`), so either tool reads
-    the other's lock with the same start time (§22.3: the policy edit lock is shared)."""
-    seconds, frac = divmod(ticks, 10_000_000)
-    at = datetime.datetime(1601, 1, 1) + datetime.timedelta(seconds=seconds)
-    return f"{at:%Y-%m-%dT%H:%M:%S}.{frac:07d}Z"
+_EPOCH_TICKS = 116_444_736_000_000_000  # 1970-01-01 as a Windows FILETIME (100 ns ticks since 1601-01-01 UTC)
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_LSTART = re.compile(r"[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s+(\d{4})")
 
 
-def process_start(pid: int) -> str | None:
-    """When a process started, as text that is the same each time for one process, and the same text Tapline writes
-    for it (Windows: .NET's round-trip UTC time; elsewhere `ps -o lstart=`); None when it can't be told."""
+def filetime_ms(ticks: int) -> int:
+    """A Windows FILETIME as whole milliseconds since 1970-01-01 UTC, rounded down (what .NET's
+    `ToUnixTimeMilliseconds` gives Tapline for the same process)."""
+    return (ticks - _EPOCH_TICKS) // 10_000
+
+
+def parse_lstart(text: str) -> int | None:
+    """`ps -o lstart=` read under `LC_ALL=C` and `TZ=UTC` (`Fri Nov 13 05:00:00 2026`, the day may be padded) as UTC
+    milliseconds; None when it isn't that shape."""
+    m = _LSTART.fullmatch(text.strip())
+    if m is None or m.group(1) not in _MONTHS:
+        return None
+    try:
+        at = datetime.datetime(int(m.group(6)), _MONTHS.index(m.group(1)) + 1, int(m.group(2)), int(m.group(3)),
+                               int(m.group(4)), int(m.group(5)), tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    return int(at.timestamp()) * 1000
+
+
+def _run_ps(pid: int) -> str:
+    env = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                          env=env).stdout
+
+
+def is_ms(started: object) -> bool:
+    """Is a lock's `started` the v1.16 form, an integer (never a bool, a float or text)?"""
+    return isinstance(started, int) and not isinstance(started, bool)
+
+
+def process_start(pid: int, platform: str | None = None, run_ps: Callable[[int], str] | None = None) -> int | None:
+    """When a process started (§22.3, v1.16): whole milliseconds since 1970-01-01 UTC, rounded down; None when it can't
+    be told. Windows: GetProcessTimes' creation time; elsewhere `ps -o lstart=` under `LC_ALL=C TZ=UTC` (whole
+    seconds), so both tools write the same number for one process."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
-    if sys.platform == "win32":
+    if (platform or sys.platform) == "win32":
         import ctypes
         from ctypes import wintypes
         kernel32, handle, _ = _win_handle(pid)
@@ -94,17 +127,16 @@ def process_start(pid: int) -> str | None:
             if not kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(ended), ctypes.byref(kernel),
                                             ctypes.byref(user)):
                 return None
-            return filetime_text((created.dwHighDateTime << 32) | created.dwLowDateTime)
+            return filetime_ms((created.dwHighDateTime << 32) | created.dwLowDateTime)
         finally:
             kernel32.CloseHandle(handle)
     try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        return parse_lstart((run_ps or _run_ps)(pid))
     except (OSError, subprocess.SubprocessError):
         return None
-    return out.stdout.strip() or None
 
 
-_OWN_START: list[str | None] = []
+_OWN_START: list[int | None] = []
 
 
 @dataclasses.dataclass
@@ -112,11 +144,11 @@ class Deps:
     """What a lock needs from the process and the system; tests replace any of it."""
     pid: int = dataclasses.field(default_factory=os.getpid)
     alive: Callable[[int], bool] = process_alive
-    start_of: Callable[[int], str | None] = process_start
+    start_of: Callable[[int], int | None] = process_start
     link: Callable[[str, str], None] = os.link
     before_publish: Callable[[str], None] | None = None  # for tests: after the temp file, before the link
 
-    def own_start(self) -> str | None:
+    def own_start(self) -> int | None:
         if self.pid != os.getpid():
             return self.start_of(self.pid)
         if not _OWN_START:
@@ -198,17 +230,23 @@ def publish_new(deps: Deps, path: str, text: str) -> str:
 
 
 def _dead(deps: Deps, holder: dict) -> bool:
-    """Is the holder a lock names provably gone? Its pid doesn't run, or that pid's process started at another time."""
+    """Is the holder a lock names provably gone? Its pid doesn't run, or that pid's process started in another second
+    (v1.16: `started` is an integer of UTC ms, compared as whole seconds). Any other `started` can't prove a reuse."""
     pid = holder.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(holder.get("owner"), str):
         return False  # unreadable: never taken over
     if not deps.alive(pid):
         return True
     started = holder.get("started")
-    if isinstance(started, str):
+    if is_ms(started):
         now = deps.start_of(pid)
-        return now is not None and now != started
+        return is_ms(now) and now // 1000 != started // 1000
     return False
+
+
+def _legacy(holder: dict) -> bool:
+    """A holder whose `started` is an older tool's text: alive while its pid runs, but `unlock` may clear it."""
+    return isinstance(holder.get("started"), str)
 
 
 def _remove_if_unchanged(deps: Deps, path: str, seen: str) -> bool:
@@ -287,8 +325,9 @@ def release(path: str | os.PathLike, token: str) -> None:
 
 
 def state(path: str | os.PathLike, deps: Deps | None = None) -> tuple[str, int | None]:
-    """What the lock is now, for `doctor` and `grants unlock` (later): ("absent" | "live" | "empty" | "unreadable" |
-    "dead", the holder's pid)."""
+    """What the lock is now, for `doctor` and `grants unlock`: ("absent" | "live" | "old" | "empty" | "unreadable" |
+    "dead", the holder's pid). "old": the holder's pid runs but its `started` is an older tool's text, so a reuse
+    can't be proven: it counts as alive (never taken over), and only a person's `unlock` clears it (v1.16)."""
     deps = deps or Deps()
     try:
         with open(path, encoding="utf-8") as f:
@@ -303,7 +342,9 @@ def state(path: str | os.PathLike, deps: Deps | None = None) -> tuple[str, int |
     pid = holder.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(holder.get("owner"), str):
         return "unreadable", None
-    return ("dead" if _dead(deps, holder) else "live"), pid
+    if _dead(deps, holder):
+        return "dead", pid
+    return ("old" if _legacy(holder) else "live"), pid
 
 
 # ---- the way out of a stuck lock (`tapwright grants unlock`, §19.5, 1.14.2) ---------------------------------------
@@ -313,6 +354,8 @@ def stuck_words(kind: str, pid: int | None) -> str:
         return f"held by pid {pid}, which is not running"
     if kind == "empty":
         return "empty (its holder stopped while writing it)"
+    if kind == "old":
+        return f"started in an older format, cleared by unlock (pid {pid})"
     return "unreadable"
 
 
@@ -328,7 +371,8 @@ class Unlocked:
 
 def unlock(path: str | os.PathLike, deps: Deps | None = None) -> Unlocked:
     """A person's removal of a stuck lock and its `.takeover`: only when no holder is proven alive. A live holder (or a
-    lock this process can't tell is stale) is never removed. A file is removed only while it still holds what was seen."""
+    lock this process can't tell is stale) is never removed; one whose `started` is an older tool's text can't be
+    proven alive, so `unlock` clears it (v1.16). A file is removed only while it still holds what was seen."""
     deps = deps or Deps()
     paths = [str(path), f"{path}.takeover"]
     seen: list[tuple[str, str, str, int | None]] = []
