@@ -64,6 +64,14 @@ FAST_READ = os.environ.get("TAPWRIGHT_FAST_READ", "1")
 TREE_PATH = "/wda/tw/tree"  # (without a session, as SOURCE_PATH: the same app is read)
 FRONT_IN_TAP = os.environ.get("TAPWRIGHT_FRONT_IN_TAP", "1")
 FRONT_REFUSED = "tapwright front:"  # how the fork's tap starts its refusal: another app is in front, nothing touched
+# The fork's route version 5 (Tapwright 1.7 part 7) adds the keyboard focus to the compact read ("f": Element.focused)
+# and a hit test: GET HIT_PATH?x=&y= answers the element iOS finds at a portrait point, the one a touch there goes to
+# (QUALITY-BAR 2.5 R3: a target something the list doesn't show as a bar is drawn over is refused `covered`). One more
+# request before a touch on an element; any error, an older runner or landscape means no check (1.6's behaviour).
+# TAPWRIGHT_HIT_CHECK=0 turns the check off.
+HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
+HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
+HIT_WAIT = 3.0  # seconds: the runner waits at most 0.3 s for the element and 2 s for its values
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -132,6 +140,7 @@ class Session:
         self.tw_version = 0  # the fork's route version the runner answered with (0: Appium's build, or not asked yet)
         self.fast_read: bool | None = None  # whether the compact read works on this runner (None: not tried yet)
         self.last_compact: tuple[str, str] | None = None  # (token, XML) of the last compact read: "unchanged" reuses it
+        self.last_source: str | None = None  # the XML of the latest tree read, for placing a hit test's element in it
         # Set by the daemon for a personal-mode tap whose app-in-front check the fork's tap makes (see FRONT_IN_TAP):
         # the given bundle ids. While it is set, nothing else may act on the phone (FrontUnchecked); the tap that
         # passes the check clears it.
@@ -206,6 +215,7 @@ class Session:
         self.typed_into = None
         self.last_point = None
         self.last_compact = None
+        self.last_source = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30,
                     again: bool | None = None) -> dict:
@@ -321,6 +331,7 @@ class Session:
                 still = " and it is still there" if await self._banner_over_an_app(source) else ""
                 getattr(self.device, "log", lambda *a: None)(
                     f"a notification banner was over the app: the read waited {waited:.1f} s{still}")
+            self.last_source = source if isinstance(source, str) else None
             return source
         except (PhoneLocked, AppNotAnswering):
             raise
@@ -591,6 +602,33 @@ class Session:
             self.front_apps = None  # the app in front was one of them as the touch went out: the check is done
         return True
 
+    async def hit_at(self, x: float, y: float) -> ui.Hit | None:
+        """The element a touch at (x, y) would land on, as the fork's hit test says (HIT_PATH, route version 5). None
+        when it can't be asked or told: the check is off, the phone isn't upright (the route takes portrait points),
+        the runner is older, or any error but a dropped line (raised, as the touch would raise it)."""
+        if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
+            return None
+        await self.ensure()
+        await self._fast_routes()
+        if self.tw_version < 5:
+            return None
+        began = time.monotonic()
+        try:
+            # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again)
+            answer = await self._call("GET", f"{HIT_PATH}?x={x:.2f}&y={y:.2f}", timeout=HIT_WAIT, again=False)
+        except ConnectionLost:
+            raise
+        except Exception as e:  # noqa: BLE001 - whatever stopped the check, the touch goes unchecked
+            getattr(self.device, "log", lambda *a: None)(f"hit test refused ({e}): the touch goes unchecked")
+            trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
+            return None
+        trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
+        value = answer.get("value") if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("hit_wda_ms", {k: v for k, v in value["ms"].items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        return ui.hit_of(value)
+
     def front_by_touch(self) -> bool:
         """Can the next tap check the app in front itself (personal mode, FRONT_IN_TAP)? Only when it would go through
         the fork's fast tap with `apps`: a runner known to be version 4, in portrait, the fast tap on."""
@@ -705,6 +743,12 @@ class Session:
             focused, self.typed_into = self.typed_into, None
             if key and focused and focused[0] == key and await self._active_element() == focused[1]:
                 element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
+            elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
+                  and (element := await self._active_element()) is not None):
+                # the runner's read says this very field has the keyboard focus (its `f`, never a guess from frames or
+                # labels: 1.6.2): a tap on it would only open iOS's caret menu (Select, Paste). Where the caret is
+                # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype
+                switched = False
             else:
                 # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
                 # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than

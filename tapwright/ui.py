@@ -25,8 +25,10 @@ from .device import DeviceError
 USERS_EYES: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_users_eyes", default=False)
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
-# or focus attribute, so visibility comes from the rect and a focused input can't be known.
+# or focus attribute, so visibility comes from the rect. The fork's compact read (route version 5) says which element
+# has the keyboard focus: xml_of_tree writes it as FOCUSED_ATTR, which `read` turns into Element.focused.
 SOURCE_PATH = "/source?format=xml&excluded_attributes=visible,accessible"
+FOCUSED_ATTR = "focused"  # (only ever "true", and only from the compact read: /source on iOS never writes it)
 
 # Element types worth listing even without a label (things an agent can act on).
 INTERACTIVE = {"Button", "TextField", "SecureTextField", "TextView", "SearchField", "Switch", "Slider",
@@ -149,7 +151,9 @@ class Element:
     actions: tuple[str, ...] = ()
     type: str = ""  # the XCUIElementType without its prefix
     in_alert: bool = False  # inside an OS alert
-    focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
+    # the keyboard's target, as the runner's compact read says (route version 5: the node or, for an input, one inside
+    # it has XCTest's hasKeyboardFocus). False when the read can't tell (/source, an older runner)
+    focused: bool = False
     name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
     secure: bool = False  # a password field: its value is never shown
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
@@ -459,6 +463,8 @@ def xml_of_tree(root: object) -> str:
             parts.append(f' processId="{pid}"')
         if "b" in node:
             parts.append(f' bundleId="{_attr(node["b"])}"')
+        if node.get("f") == 1 and not isinstance(node.get("f"), bool):
+            parts.append(f' {FOCUSED_ATTR}="true"')  # (version 5) the keyboard focus
         children = node.get("c")
         if children:
             if not isinstance(children, list):
@@ -471,6 +477,93 @@ def xml_of_tree(root: object) -> str:
             parts.append("/>")
             out.append("".join(parts))
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class Hit:
+    """What the fork's hit test (GET /wda/tw/hit, route version 5) says a touch at a point lands on: the element's
+    type (without the prefix), name, label and frame as the tree has them, and its app's bundle id ("" unknown)."""
+    type: str
+    name: str
+    label: str
+    rect: tuple[float, float, float, float]
+    bundle: str = ""
+
+
+def hit_of(value: object) -> Hit | None:
+    """The runner's hit test answer as a Hit; None when it isn't one (the touch then goes unchecked)."""
+    if not isinstance(value, dict):
+        return None
+    kind, rect = value.get("t"), value.get("r")
+    if not isinstance(kind, str) or not _TYPE_NAME.fullmatch(kind) or not isinstance(rect, list) or len(rect) != 4:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in rect):
+        return None
+    name, label, bundle = (value.get(k) for k in ("n", "l", "b"))
+    return Hit(kind.removeprefix(TYPE_PREFIX), _text(name) if isinstance(name, str) else "",
+               _text(label) if isinstance(label, str) else "", tuple(float(v) for v in rect),  # type: ignore[arg-type]
+               bundle if isinstance(bundle, str) else "")
+
+
+def _is_node(node: ET.Element, kind: str, rect: tuple[float, ...], name: str) -> bool:
+    return _kind(node) == kind and _text(node.get("name")) == name and _same_rect(_rect(node), rect)
+
+
+def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
+    """Where the element a touch at the target's point lands on (`hit`) stands to the target, by the tree `source`
+    (the latest read's XML): "same" (the target itself), "inside" (an element within it), "ancestor" (one that holds
+    it: iOS found nothing deeper there, so nothing else is over it), or "other" (something else takes the touch: the
+    target is covered). Elements are told apart by type, name and frame (within a point), as both reads give them.
+    Where the tree can't place both, the frames decide: within the target's frame is "inside", else "other"."""
+    if hit.type == target.type and hit.name == target.name and _same_rect(hit.rect, target.rect):
+        return "same"
+    root = None
+    if source:
+        try:
+            root = ET.fromstring(_clean(source))
+        except ET.ParseError:
+            root = None
+    if root is not None:
+        targets = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name)]
+        hits = [n for n in root.iter() if _is_node(n, hit.type, hit.rect, hit.name)]
+        if targets and hits:
+            parents = {child: up for up in root.iter() for child in up}
+            for node in hits:
+                up: ET.Element | None = node
+                while up is not None:
+                    if any(up is t for t in targets):
+                        return "same" if up is node else "inside"
+                    up = parents.get(up)
+            for node in targets:
+                up = parents.get(node)
+                while up is not None:
+                    if any(up is h for h in hits):
+                        return "ancestor"
+                    up = parents.get(up)
+            return "other"
+    x, y, w, h = hit.rect
+    tx, ty, tw, th = target.rect
+    inside = x >= tx - 1 and y >= ty - 1 and x + w <= tx + tw + 1 and y + h <= ty + th + 1
+    return "inside" if inside else "other"
+
+
+def hit_line(hit: Hit, items: list[Element]) -> str:
+    """The hit element as an agent's list shows it: its line with its ref when the list has it (type, name and frame
+    agree), else a line without a ref."""
+    for e in items:
+        if e.type == hit.type and e.name == hit.name and _same_rect(e.rect, hit.rect):
+            return e.line(actions=False)
+    identifier = "" if hit.name == hit.label else hit.name
+    return Element("", ROLES.get(hit.type, hit.type.lower()), hit.label, identifier, rect=hit.rect,
+                   type=hit.type, name=hit.name).line(ref=False, actions=False)
+
+
+def _has_focus(node: ET.Element, role: str) -> bool:
+    """Does the runner's read say this element has the keyboard focus (FOCUSED_ATTR)? An input counts when the focus
+    is on a node inside it too, as XCTest's own typing check counts it (a text view's inner text)."""
+    if node.get(FOCUSED_ATTR) == "true":
+        return True
+    return role == "input" and any(n.get(FOCUSED_ATTR) == "true" for n in node.iter())
 
 
 def _kind(node: ET.Element) -> str:
@@ -739,13 +832,14 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             checked = loose.checked if loose else (value == "1") if role == "switch" else None
             candidate = Element("", role, label, identifier, value, rect, enabled,
                                 "Selected" in traits, checked, ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind,
-                                in_alert, False, name, kind == "SecureTextField",
+                                in_alert, _has_focus(node, role), name, kind == "SecureTextField",
                                 placeholder=_text(node.get("placeholderValue")),
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
-                # that takes an action; both or neither, the ancestor
+                # that takes an action; both or neither, the ancestor. The one listed has the focus either had
+                parent.focused = candidate.focused = parent.focused or candidate.focused
                 if candidate.actions and not parent.actions:
                     i = next(i for i, f in enumerate(found) if f[0] is parent)
                     found[i] = (candidate, found[i][1], found[i][2])  # in the parent's place and span
@@ -946,7 +1040,7 @@ def _plain(node: ET.Element) -> Element | None:
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
     return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
                    loose.checked if loose else (value == "1") if role == "switch" else None,
-                   ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, False, name,
+                   ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, _has_focus(node, role), name,
                    kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")), no_trait=loose is not None)
 
 

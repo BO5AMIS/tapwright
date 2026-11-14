@@ -344,9 +344,18 @@ class FakeSession:
         # as Session._touching does; a hook that raises touches nothing. Off: the hook is never called (as before)
         self.calls_touch_hook = False
         self.touch_hook = None
+        # the runner's hit test (route version 5, Session.hit_at): what it answers (None: no check, as an older runner)
+        # and each point it was asked at; `last_source` is the XML the relation is judged in
+        self.hit_answer: ui.Hit | None = None
+        self.hit_asks: list = []
+        self.last_source: str | None = None
 
     def front_by_touch(self) -> bool:
         return self.touch_checks_front
+
+    async def hit_at(self, x, y):
+        self.hit_asks.append((x, y))
+        return self.hit_answer
 
     def _record(self, name: str) -> None:
         self.calls.append(name)

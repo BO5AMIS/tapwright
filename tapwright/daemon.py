@@ -6202,6 +6202,24 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
+    async def _refuse_hit(self, element: ui.Element, at: tuple[float, float]) -> None:
+        """QUALITY-BAR 2.5 R3 (`lab-behind-bar`): before a touch on an element, ask the runner what iOS would deliver a
+        touch at that point to (Session.hit_at, route version 5) and refuse `covered` when it is something other than
+        the element, one inside it, or one holding it. No answer (an older runner, landscape, an error), or an answer
+        from another app than the one read (the app-in-front check deals with that), leaves the touch as in 1.6."""
+        hit = await self.session.hit_at(*at)
+        if hit is None:
+            return
+        app = self._app_bundle()
+        if hit.bundle and app and hit.bundle != app:
+            trace.note("hit", "other app")
+            return
+        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
+        trace.note("hit", relation)
+        if relation == "other":
+            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "
+                                            f"{ui.hit_line(hit, self.session.items)}; move or close it first.")
+
     async def _press(self, target: ui.Target, hold_ms: int) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
         double = _DOUBLE.get()
@@ -6294,12 +6312,14 @@ class Daemon(journey_tool.JourneyTools):
             return done
         self._guard(view, found)
         point = self._touch_point(found)
+        await self._refuse_hit(found, point or found.center)
         aimed_with = s.items
         said = await self._police(tool, a, found)
         if s.items is not aimed_with:  # the policy waited for a person's OK and read the screen again (_still_there)
             found = ui.resolve(s.items, target)  # (it checked that the target still names that very element)
             self._guard(view, found)
             point = self._touch_point(found)  # what is drawn over it now
+            await self._refuse_hit(found, point or found.center)
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
