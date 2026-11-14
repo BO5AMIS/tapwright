@@ -684,13 +684,16 @@ class Redaction:
                 if not hay.startswith(form[k:k + shortest], at):
                     continue
                 if at_slot is None:
+                    # each slot's escapes as the set of their beginnings (up to `seam` characters): many escapes can share
+                    # a slot (dropped direction marks all land on one), and a lookup must not scan them (Codex, cycle 19)
                     at_slot = {}
                     for y, other, dropped in made:
-                        at_slot.setdefault((slots[y] & ~1 if y < n else end) if dropped else slots[y], []).append(other)
+                        starts = at_slot.setdefault((slots[y] & ~1 if y < n else end) if dropped else slots[y], set())
+                        starts.update(other[:m] for m in range(1, min(seam, len(other)) + 1))
                 for k2 in range(1, min(seam, rest) + 1):
                     q, tail = at + rest - k2, form[len(form) - k2:]
                     for own2 in (1, 0):
-                        if q + own2 > i and any(r.startswith(tail) for r in at_slot.get(2 * q + own2, ())) and \
+                        if q + own2 > i and tail in at_slot.get(2 * q + own2, ()) and \
                                 hay.startswith(form[k:len(form) - k2], at):
                             yield i, q + own2, rank, label, not own, not own2
             for form, k, rank, label in tails or ():

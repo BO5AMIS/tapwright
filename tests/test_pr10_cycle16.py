@@ -49,3 +49,13 @@ def test_a_four_byte_percent_escape_can_take_in_up_to_eleven_characters_of_a_val
         assert loaded.holds(text), text
         assert "%62c" not in loaded.scrub(text) and "F0%9F" not in loaded.scrub(text)
     assert accountlib.SEAM >= 11
+
+
+def test_many_escapes_at_one_place_are_looked_up_not_scanned():
+    """Codex, PR #10 cycle 19: dropped direction marks all land on one slot; scanning them took 9.98 s for this line."""
+    import time
+    loaded = _loaded("Ex%4")
+    line = "%E2%80%8E" * 16000 + "x" + "%E2%80%8E" * 16000
+    began = time.perf_counter()
+    loaded.scrub(line)
+    assert time.perf_counter() - began < 1.5
