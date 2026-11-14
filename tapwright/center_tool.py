@@ -180,6 +180,10 @@ class CenterTools:
         if setting is None:
             return None
         field_at = field_at if field_at is not None else (self.code_fields.shown_at(app) or time.time())
+        # Both callers know the code field shows NOW (it is being typed into, or /otp's read just saw it), so a code
+        # counts when it came after the field was first seen and at most 2 minutes ago: a field left open longer
+        # (seen in the joint check 2026-11-14: Verify stayed up 3 minutes) still takes a fresh code, never an old one.
+        field_at = max(field_at, time.time() - notes_lib.WINDOW + FIELD_MARGIN)
         try:
             found, _ = await self._on_phone(lambda: self._read_center(lambda b: b in setting.sources,
                                                                        caption="Read a one-time code"))
@@ -229,8 +233,8 @@ class CenterTools:
                     self.log(f"one-time code for {app}: none handed over, no code field shows")
                     return None
                 if seen_before is None:
-                    # Tapline's host drove the app to its code field, so this daemon never saw it before: a code field
-                    # showing now counts from 2 minutes ago, so a code that came at most 2 minutes ago is taken
+                    # Tapline's host drove the app to its code field, unseen by this daemon: this read's sighting
+                    # isn't when it appeared, so the field counts from 2 minutes ago
                     field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
                 found = await self._code_from_center(app, field_at)
             except Exception as e:  # busy, paused, a dropped line: there is no code to give

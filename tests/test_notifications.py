@@ -475,6 +475,23 @@ def test_otp_for_tapline_counts_a_code_field_this_daemon_didnt_see_from_two_minu
     assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 404
 
 
+def test_a_code_field_left_open_longer_than_two_minutes_still_takes_a_fresh_code_never_an_old_one(tmp_path):
+    """The joint check, 2026-11-14: Verify stayed up 3 minutes after this daemon first saw it; a code that came then
+    counts (it is at most 2 minutes old and came after the field showed), an older one never."""
+    app, d, s = handover_daemon(tmp_path)
+    d.code_fields._at[BUNDLE] = time.time() - 180
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 200  # (SCREEN's code came "now")
+    (tmp_path / "old").mkdir()
+    app, d, s = handover_daemon(tmp_path / "old")
+    d.code_fields._at[BUNDLE] = time.time() - 300
+    s.center_source = center(cell("Messages", "4m ago", "+1 555 0100", f"Your Wayfare code is {CODE}"))
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 404
+
+
 def test_otp_reads_nothing_unless_the_app_is_in_front_and_its_setting_is_on(tmp_path):
     app, d, s = handover_daemon(tmp_path, foreground=CHAT)
     c = TestClient(app, client=A)
