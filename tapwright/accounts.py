@@ -211,7 +211,8 @@ _WHITESPACE = " \t\n\r\f\v+"  # (a run collapsed or reflowed can hold any of the
 def _space(run: str) -> str:
     """A run of whitespace in a value: any run of whitespace, a `+`, or their encodings (a line collapsed, a form encoded)."""
     shapes = {s for c in {*run, *_WHITESPACE} for s in _encoded(c)}
-    return r"(?:\s|\+|" + "|".join(sorted(shapes)) + ")+"
+    unit = r"(?:\s|\+|" + "|".join(sorted(shapes)) + ")"
+    return unit + f"(?:{_BETWEEN}{unit})*"  # (a direction mark may sit anywhere inside the run too, Codex, PR #10 cycle 11)
 
 
 @functools.lru_cache(maxsize=512)
@@ -270,13 +271,19 @@ class Redaction:
     def _spans(self, text: str) -> list[tuple[int, int, str]]:
         """Where the values are in `text`, as (start, end, placeholder): the longest value's first, a shorter one's only
         where it overlaps none of them; in the text's order."""
-        taken: list[tuple[int, int, str]] = []
-        for each, label in self._each:
+        found: list[tuple[int, int, int, int, str]] = []  # (start, -length, precedence, end, label)
+        for rank, (each, label) in enumerate(self._each):
             for m in each.finditer(text):
                 start, end = _quoted(text, m.start(), m.end())
-                if not any(start < e and s < end for s, e, _ in taken):
-                    taken.append((start, end, label))
-        return sorted(taken)
+                found.append((start, start - end, rank, end, label))
+        found.sort()
+        taken: list[tuple[int, int, str]] = []
+        reached = 0  # one ordered sweep with a running end: linear in the matches, not one scan of the taken for each
+        for start, _, _, end, label in found:
+            if start >= reached:
+                taken.append((start, end, label))
+                reached = end
+        return taken
 
     def _scrubbed(self, part: str) -> str:
         out, at = [], 0

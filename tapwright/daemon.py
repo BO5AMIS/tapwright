@@ -2593,7 +2593,7 @@ class Daemon(journey_tool.JourneyTools):
             text = step.get("text")
             if step.get("tool") != "type_text" or not isinstance(text, str) or not text:
                 continue
-            literal = [part for k, part in enumerate(batch.KEPT.split(text)) if not k % 2]
+            literal = [part for k, part in enumerate(batch.kept(rec.get("variables") if "route" in rec else None).split(text)) if not k % 2]
             kinds = {kind for _, kind, value in loaded.entries() if value == text}
             if kinds:
                 kind = "password" if step.get("secure") else "username"

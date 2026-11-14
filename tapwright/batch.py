@@ -2,6 +2,7 @@
 answer, the script file, and the target a recording saves. The daemon runs the steps (Daemon._batch)."""
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Callable
@@ -256,8 +257,30 @@ def check_script(data: object, path: str) -> dict:
 # expectation's, an `if`'s, an ignore entry's, a typed or waited-for text, a link): the persistence backstop redacts
 # these, and nothing else (a key, a tool, a format, a script's or a picture's name, an app is never the screen's)
 CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url"})
-# what a step's text keeps as it is: a variable (`${name}`, an account's `${account.username}`) and a literal `$${`
-KEPT = re.compile(r"(\$\$\{|\$\{(?:account\.(?:username|password)|[A-Za-z_][A-Za-z0-9_]*)\})")
+# what a step's text keeps as it is: an account's `${account.username}` / `${account.password}`, and in a version 2 route
+# its declared variables (`${name}`) and a literal `$${`. In a version 1 script any other `${...}` is ordinary text (Codex,
+# PR #10 cycle 11): it is checked and redacted like anything typed.
+_ACCOUNT_VARIABLES = r"account\.(?:username|password)"
+
+
+def kept(variables: "list[str] | None" = None) -> "re.Pattern[str]":
+    """What a step's text keeps as it is. `variables` is a route's declared names (a version 2 script's), or None."""
+    return _kept_pattern(None if variables is None else tuple(sorted(v for v in variables if isinstance(v, str))))
+
+
+@functools.lru_cache(maxsize=64)
+def _kept_pattern(variables: "tuple[str, ...] | None") -> "re.Pattern[str]":
+    if variables is None:
+        return re.compile(r"(\$\{" + _ACCOUNT_VARIABLES + r"\})")
+    names = "|".join([_ACCOUNT_VARIABLES, *map(re.escape, variables)])
+    return re.compile(r"(\$\$\{|\$\{(?:" + names + r")\})")
+
+
+def variables_of(data: object) -> "list[str] | None":
+    """The variables a script declares: a version 2 script's `variables`, None for any other."""
+    if isinstance(data, dict) and data.get("version") == 2 and isinstance(data.get("variables"), list):
+        return data["variables"]
+    return None
 
 
 def redacted_content(data: object, redact: Callable[[str], str]) -> object:
@@ -265,8 +288,10 @@ def redacted_content(data: object, redact: Callable[[str], str]) -> object:
     never a key, a tool's name, the format, the version or another structural field, and never a variable's
     `${…}` syntax (Codex, PR #10 cycle 3: an account whose username is `tap` had made the saved step's tool
     `<tester2's username>`)."""
+    keep = kept(variables_of(data))
+
     def text(value: str) -> str:
-        parts = KEPT.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
+        parts = keep.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
         return "".join(p if n % 2 else redact(p) for n, p in enumerate(parts))
 
     def walk(value: object, content: bool) -> object:
