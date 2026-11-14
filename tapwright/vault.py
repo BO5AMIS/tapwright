@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -117,6 +118,22 @@ def run_security(args: list[str], stdin: str) -> "tuple[int | None, str, str]":
 def _quote(text: str) -> str:
     """An argument of one `security -i` line."""
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# a vault's chunk items are `<realpath>#<n>` (§20.2, the format both tools share): a vault file whose own real path ends in
+# `#<digits>` would have its main item at another vault's chunk account, and the two would overwrite each other
+# (CodeRabbit, PR #12, vault.py). Such a path is never written to the keychain.
+CHUNK_LIKE = re.compile(r"#[0-9]+$")
+
+
+def _whole_json(text: str | None) -> bool:
+    """Is this item's text a whole JSON object (a vault or a manifest: another vault's main item), not a chunk's piece?"""
+    if text is None or not text.startswith("{"):
+        return False
+    try:
+        return isinstance(json.loads(text), dict)
+    except (ValueError, RecursionError):
+        return False
 
 
 def _all_hex(text: str) -> bool:
@@ -219,7 +236,12 @@ class Keychain:
 
     def write(self, account: str, text: str) -> None:
         """Store the vault JSON: one item when it fits a line, else chunks #1…#n, then the manifest, then the stale
-        chunks of an earlier, longer vault dropped. Each item is read back; raises VaultOpenError when one didn't keep."""
+        chunks of an earlier, longer vault dropped. Each item is read back; raises VaultOpenError when one didn't keep.
+        Nothing is written for a path that looks like a chunk's account, nor over a chunk account that holds another
+        vault's main item (CHUNK_LIKE)."""
+        if CHUNK_LIKE.search(account):
+            raise VaultOpenError("the vault file's name ends in # and a number, which the keychain keeps for the pieces "
+                                 "of another vault; rename the file first")
         try:
             previous = (_manifest(self._read_text(account)) or (0, None))[0]
         except VaultOpenError:
@@ -245,6 +267,10 @@ class Keychain:
                 end -= 1
             pieces.append(data[at:end])
             at = end
+        for i in range(1, len(pieces) + 1):  # (checked before any is written: nothing of the other vault is lost)
+            if i > previous and _whole_json(self._read_text(f"{account}#{i}")):
+                raise VaultOpenError("another vault file's entry is kept where this vault's pieces go (a file named "
+                                     "like this one with # and a number); rename one of them first")
         for i, piece in enumerate(pieces, 1):
             self._store(f"{account}#{i}", piece)
             back = self._read_both(f"{account}#{i}")
@@ -344,10 +370,12 @@ def _as_version2(top: dict, dropped: list[str] | None = None) -> dict | None:
         return top
     if top.get("version") != 1 or not isinstance(top.get("accounts"), dict):
         return None
+    if not all(isinstance(entry, dict) for entry in top["accounts"].values()):
+        return None  # (an entry that isn't an object is never made an empty account: CodeRabbit, PR #12, vault.py)
     rest = {k: v for k, v in top.items() if k not in ("version", "accounts")}
     vault: dict[str, object] = {}
     for name, entry in top["accounts"].items():
-        fields = entry if isinstance(entry, dict) else {}
+        fields = entry
         if name == PHONE_ENTRY and "passcode" in fields and "username" not in fields and "password" not in fields:
             vault[name] = {"kind": "phone", **fields}
             continue
@@ -384,6 +412,15 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
     if protection(top) is not None:
         return False, f"the vault file {file} is already protected."
     dropped: list[str] = []
+    accounts_v1 = top.get("accounts") if top.get("version") == 1 else None
+    if isinstance(accounts_v1, dict) and (bad := [str(n) for n, e in accounts_v1.items() if not isinstance(e, dict)]):
+        # the source is left as it is: never protected with the entry dropped (CodeRabbit, PR #12, vault.py)
+        return False, (f"the vault file {file} can't be protected as it is (the account {', '.join(bad[:5])} isn't an "
+                       "object with its fields); fix it first. The file stays plain.")
+    if how == KEYCHAIN and CHUNK_LIKE.search(real):
+        return False, (f"the vault file {file} can't be kept in the macOS keychain under a name that ends in # and a "
+                       "number (the keychain keeps those for the pieces of another vault); rename it first. The file "
+                       "stays plain.")
     payload = _as_version2(top, dropped)
     if payload is None:
         return False, f"the vault file {file} isn't a version 1 or 2 vault."

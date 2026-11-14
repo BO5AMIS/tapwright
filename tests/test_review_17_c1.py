@@ -590,3 +590,40 @@ def test_cr_focus_that_moved_after_the_read_is_never_typed_into(monkeypatch):
     s = ready(runner)
     asyncio.run(s.type_text("hi@example.com", target=ui.Target(ref=find(s.items, "email").ref)))
     assert touches(runner) == []
+
+
+# ---- CodeRabbit, PR #12 (vault.py:249, :350) -----------------------------------------------------------------------------
+def test_cr_a_vault_named_like_another_vaults_chunk_never_overwrites_it(tmp_path):
+    from test_vault import FakeSecurity, big_vault, mac, write
+    from tapwright import accounts, vault
+    no_git = lambda args, cwd: None  # noqa: E731
+    fake = FakeSecurity()
+    first = write(tmp_path, big_vault(), "v.json")
+    assert vault.protect(first, mac(fake), accounts.check_text)[0]
+    real = vault.real_path(first)
+    assert f"{real}#1" in fake.items  # chunked
+    kept = dict(fake.items)
+    second = write(tmp_path, {"version": 2, "vault": {"n": {"kind": "note", "text": "another synthetic note"}}},
+                   "v.json#1")
+    done, said = vault.protect(second, mac(fake), accounts.check_text)
+    assert not done and "rename it first" in said and "stays plain" in said
+    assert fake.items == kept  # the first vault's chunk is as it was
+    assert accounts.load(first, no_git, protection=mac(fake)).problem is None
+    assert json.loads(open(second, encoding="utf-8").read())["vault"]  # still plain
+    # a vault item already kept at a chunk account (written before this check) is never written over
+    fake = FakeSecurity()
+    fake.items[f"{real}#1"] = json.dumps({"version": 2, "vault": {}}).encode()
+    with pytest.raises(vault.VaultOpenError):
+        vault.Keychain(fake).write(real, json.dumps(big_vault()))
+    assert json.loads(fake.items[f"{real}#1"]) == {"version": 2, "vault": {}} and real not in fake.items
+
+
+def test_cr_a_version_1_entry_that_isnt_an_object_is_refused_and_the_file_stays(tmp_path):
+    from test_vault import win_deps, write
+    from tapwright import accounts, vault
+    path = write(tmp_path, {"version": 1, "accounts": {"tester": "Synthetic-Pass-77",
+                                                         "ok": {"username": "u@example.com", "password": "Pw-1234567"}}})
+    before = open(path, encoding="utf-8").read()
+    done, said = vault.protect(path, win_deps(), accounts.check_text)
+    assert not done and "tester" in said and "stays plain" in said and "Synthetic-Pass-77" not in said
+    assert open(path, encoding="utf-8").read() == before
