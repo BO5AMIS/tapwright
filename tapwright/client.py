@@ -18,9 +18,10 @@ from . import policy, store, uxcheck
 class DaemonError(RuntimeError):
     """A refusal or error from the daemon, with its code (docs/VIEWER-PROTOCOL.md)."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, draft: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.draft = draft  # internal: the daemon said the touch stopped at a draft (a schedule run reads it)
 
 
 def base_url(info: dict) -> str:
@@ -149,7 +150,8 @@ def _request(info: dict, method: str, path: str, body: dict | None = None, timeo
             err = {}
         if not isinstance(err, dict):
             err = {}
-        raise DaemonError(err.get("code", f"http-{reply.status}"), err.get("message", f"HTTP {reply.status}"))
+        raise DaemonError(err.get("code", f"http-{reply.status}"), err.get("message", f"HTTP {reply.status}"),
+                          draft=err.get("draft") is True)
     return json.loads(raw or b"{}")
 
 

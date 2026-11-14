@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from tapwright import auditlog, cli, pidlock, schedulerun, schedules
+from tapwright import auditlog, cli, pidlock, schedulerun, schedules, unlock
 
 NOW = datetime.datetime(2026, 11, 14, 8, 0, 0)
 UTC = datetime.timezone.utc
@@ -234,9 +234,10 @@ class Phone:
     """A fake client module: a status, and what `drive` answers."""
 
     class DaemonError(RuntimeError):
-        def __init__(self, code, message):
+        def __init__(self, code, message, draft=False):
             super().__init__(message)
             self.code = code
+            self.draft = draft
 
     def __init__(self, states=None, answer=None, error=None, between=None):
         self.states = list(states or [{"state": "live", "driver": None, "paused": False}])
@@ -286,6 +287,7 @@ def setup(tmp_path, home, phone, name="post_update", **over):
     schedules.write(schedules.Schedule(name, "post_update", {"caption": "Hello", "account": "tester2"}, "09:00 daily", None,
                                        over.pop("policy", None), over.pop("accounts", None), None), where)
     clock = Clock()
+    over.setdefault("unlock_phone", None)  # the default hook talks to a real daemon; the tests that want it pass it
     deps = schedulerun.Deps(client=phone, sleep=clock.sleep, monotonic=clock.monotonic, where=where, runs=tmp_path / "runs",
                             audit_folder=tmp_path / "audit", now=lambda: datetime.datetime(2026, 11, 14, 6, 0, tzinfo=UTC),
                             lock=pidlock.Deps(pid=4242, alive=lambda p: True, start_of=lambda p: T1), **over)
@@ -344,20 +346,20 @@ def test_the_vault_and_grants_files_reach_the_daemon_as_this_clients_own(tmp_pat
     assert ("policy", str(policy.resolve())) in phone.scope and ("accounts", str(vault)) in phone.scope
 
 
-@pytest.mark.parametrize("code,message,result,status", [
+@pytest.mark.parametrize("code,message,result,status,draft", [
     ("expect_failed", "Ran 2 of 5 steps; stopped at step 3 (tap id=save): text \"x\" didn't appear within 2 s.",
-     "failed at step 3 (expect)", "failed"),
-    ("off_route", "Stopped at step 2 of 4: the app is at a screen the route doesn't know.", "failed at step 2 (off_route)", "failed"),
-    ("draft_stopped", "needs_confirmation: the draft wasn't sent. Ask your user what to do.",
-     "stopped: a draft is waiting for a person.", "stopped"),
-    # the signal is the code: the text decides nothing
-    ("draft_stopped", "something else entirely", "stopped: a draft is waiting for a person.", "stopped"),
-    ("not_allowed", "needs_confirmation: Allow deleting the draft \"Trip notes\"?", schedulerun.NEEDS_PERSON, "stopped"),
-    ("not_allowed", "needs_confirmation: the draft wasn't sent. Ask your user what to do.", schedulerun.NEEDS_PERSON, "stopped"),
-    ("not_allowed", "needs_confirmation: Allow tapping \"Post\"?", schedulerun.NEEDS_PERSON, "stopped"),
+     "failed at step 3 (expect)", "failed", False),
+    ("off_route", "Stopped at step 2 of 4: the app is at a screen the route doesn't know.", "failed at step 2 (off_route)", "failed", False),
+    ("not_allowed", "needs_confirmation: the draft wasn't sent (They declined.). Ask your user what to do.",
+     "stopped: a draft is waiting for a person.", "stopped", True),
+    # the signal is the daemon's internal flag: the text decides nothing
+    ("not_allowed", "something else entirely", "stopped: a draft is waiting for a person.", "stopped", True),
+    ("not_allowed", "needs_confirmation: Allow deleting the draft \"Trip notes\"?", schedulerun.NEEDS_PERSON, "stopped", False),
+    ("not_allowed", "needs_confirmation: the draft wasn't sent. Ask your user what to do.", schedulerun.NEEDS_PERSON, "stopped", False),
+    ("not_allowed", "needs_confirmation: Allow tapping \"Post\"?", schedulerun.NEEDS_PERSON, "stopped", False),
 ])
-def test_a_run_stops_at_the_first_failure_and_reports_it(tmp_path, home, code, message, result, status):
-    phone = Phone(error=Phone.DaemonError(code, message))
+def test_a_run_stops_at_the_first_failure_and_reports_it(tmp_path, home, code, message, result, status, draft):
+    phone = Phone(error=Phone.DaemonError(code, message, draft=draft))
     deps, _ = setup(tmp_path, home, phone)
     out = schedulerun.run("post_update", deps=deps)
     assert (out.status, out.result, out.code) == (status, result, 1) and len(phone.calls) == 1  # nothing more is done
@@ -401,6 +403,34 @@ def test_a_locked_phone_is_unlocked_only_through_the_passcode_route_once(tmp_pat
     locked = Phone(states=[{"state": "locked", "driver": None, "paused": False}])
     deps, _ = setup(tmp_path, home, locked, unlock_phone=lambda s: False)
     assert schedulerun.run("post_update", deps=deps).result == "skipped: the phone is locked"
+
+
+def test_the_default_unlock_is_the_passcode_hook(tmp_path, home):
+    assert schedulerun.Deps().unlock_phone is unlock.schedule_hook
+
+
+def test_a_locked_phone_with_a_passcode_in_the_vault_is_unlocked_by_the_default_hook(tmp_path, home, monkeypatch):
+    from tapwright import client
+    asked = []
+    monkeypatch.setattr(client, "unlock_phone", lambda accounts=None, timeout=60.0: asked.append(accounts) or
+                        {"ok": True, "code": "unlocked", "message": "ok"})
+    vault = str(tmp_path / "vault.json")
+    phone = Phone(states=[{"state": "locked", "driver": None, "paused": False},
+                          {"state": "live", "driver": None, "paused": False}])
+    deps, _ = setup(tmp_path, home, phone, unlock_phone=schedulerun.Deps().unlock_phone, accounts=vault)
+    assert schedulerun.run("post_update", deps=deps).status == "done" and asked == [vault] and len(phone.calls) == 1
+
+
+def test_a_locked_phone_with_no_passcode_is_skipped_by_the_default_hook(tmp_path, home, monkeypatch):
+    from tapwright import client
+    asked = []
+    monkeypatch.setattr(client, "unlock_phone", lambda accounts=None, timeout=60.0: asked.append(accounts) or
+                        {"ok": False, "code": "no_passcode", "message": "no passcode"})
+    phone = Phone(states=[{"state": "locked", "driver": None, "paused": False}])
+    deps, _ = setup(tmp_path, home, phone, unlock_phone=schedulerun.Deps().unlock_phone)
+    out = schedulerun.run("post_update", deps=deps)
+    assert (out.status, out.result, out.code) == ("skipped", "skipped: the phone is locked", 3) and len(asked) == 1
+    assert phone.calls == []
 
 
 def test_the_previous_run_still_going_is_skipped(tmp_path, home):

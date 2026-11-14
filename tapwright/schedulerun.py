@@ -23,8 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
-from . import auditlog, mapfile, pidlock, schedules, store
-from .errors import DRAFT_STOPPED
+from . import auditlog, mapfile, pidlock, schedules, store, unlock
 
 WAIT_SECONDS = 600.0  # how long a run waits for a busy phone (§22.3)
 POLL_SECONDS = 5.0
@@ -58,7 +57,7 @@ class Deps:
     runs: Path | None = None
     audit_folder: Path | None = None
     lock: pidlock.Deps | None = None
-    unlock_phone: Callable[[schedules.Schedule], bool] | None = None  # the passcode unlock (Tapwright 1.7, a later part)
+    unlock_phone: Callable[[schedules.Schedule], bool] | None = unlock.schedule_hook  # the passcode unlock (§18.6); False with no passcode
     wait: float = WAIT_SECONDS
     poll: float = POLL_SECONDS
 
@@ -89,10 +88,10 @@ def find_route(s: schedules.Schedule) -> str:
     return found[0]
 
 
-def classify(code: str, message: str) -> tuple[str, str]:
+def classify(code: str, message: str, draft: bool = False) -> tuple[str, str]:
     """(status, result) of a refusal that ended the drive."""
     first = message.strip().splitlines()[0][:200] if message.strip() else ""
-    if code == DRAFT_STOPPED:  # the daemon's own code for a stop at a draft (21.3), never the words of the message
+    if draft:  # the daemon's internal flag for a stop at a draft (21.3), never the words of the message
         return "stopped", DRAFT
     if code == "not_allowed" and "needs_confirmation" in message or code == "needs_confirmation":
         return "stopped", NEEDS_PERSON
@@ -255,7 +254,7 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
     try:
         answer = api.call("drive", args, f"schedule-{s.name}", timeout=TIMEOUT)
     except api.DaemonError as e:
-        state, result = classify(e.code, str(e))
+        state, result = classify(e.code, str(e), getattr(e, "draft", False))
         return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)
     except Exception as e:  # the server went away mid-run
         return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {str(e)[:150]}", began, 1, bundle=bundle)

@@ -46,9 +46,10 @@ CALLER_LEFT = "the caller left before the phone was free; nothing was done"
 class Refused(Exception):
     """An action not run, with a machine-readable code (docs/VIEWER-PROTOCOL.md)."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, draft: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.draft = draft  # INTERNAL: the touch stopped at a draft (21.3); the daemon's error JSON carries it for a schedule run, no agent sees it
 
 
 @dataclass

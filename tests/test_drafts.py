@@ -97,7 +97,7 @@ def test_dont_post_refuses_with_the_specs_words_and_touches_nothing(tmp_path):
         assert d.dialog_answer("a", ask["id"], "decline") is True
         with pytest.raises(Refused) as e:
             await asyncio.wait_for(call, 2)
-        assert e.value.code == "draft_stopped"
+        assert e.value.code == "not_allowed" and e.value.draft is True  # the spec's code; the flag is internal
         assert str(e.value) == "needs_confirmation: the draft wasn't sent (They declined.). Ask your user what to do."
         assert taps(d) == []
         await finish(stop, task)

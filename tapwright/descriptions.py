@@ -45,7 +45,6 @@ _CORE = (
     "- `bad_params`: the call's arguments are invalid. Fix the call.\n"
     "- `unsupported`: this tool can't do it. Use the alternative the message names.\n"
     "- `not_allowed`: the first word is the reason: `outside_apps` (another app is in front, or the call names one: go back with `open_app`), `no_apps` (you were given none: tell the user), `needs_confirmation` (a person must OK this touch in the live view; when they have, make the same call again) or `blocked` (the policy forbids it; don't try another way).\n"
-    "- `draft_stopped`: a draft awaits a person.\n"
     "- `expect_failed`: a `run` step's expectation didn't hold. `look`, then fix the step or report the bug.\n"
     "- `off_route`: `drive` stopped where the screen isn't what the road expects; nothing else was touched. Go on by hand.\n"
     '- `internal`: a bug. Report it.\n'

@@ -268,7 +268,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
                                                       policy=rules, ux_rules=ux_rules, **via))
         except Refused as e:
-            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
+            reply = _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
+            if e.draft:  # internal: a schedule run reads it; `tapwright call` and the MCP server print only code and message
+                reply = JSONResponse({"error": {"code": e.code, "message": str(e), "draft": True}}, status_code=reply.status_code)
+            return reply
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net
             logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
