@@ -52,7 +52,12 @@ def daemon_with(tmp_path, setting=True):
         data["otp"] = {APP: {"from": ["com.apple.MobileSMS"], "match": "Wayfare"}}
     path.write_text(json.dumps(data), "utf-8")
     clock = Clock()
-    d = Daemon(FakeSession(), control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None,
+    session = FakeSession()
+    # the app in front with its code field: /otp hands a code over only while the screen shows both (M3)
+    from tapwright.ui import Element
+    session.tree = [Element("e1", "input", "Verification code", "otp-input", type="TextField")]
+    session.tree_app = ("Wayfare", APP)
+    d = Daemon(session, control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None,
                stream_linger=0, stream_retry=0.01)
     d._set_state("live")
     d.ceiling = type("C", (), {"accounts": str(path), "brief": False, "maps": None})()

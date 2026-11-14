@@ -49,7 +49,9 @@ class CenterTools:
             return
         if app not in self._loaded().otp:
             return
-        self.code_fields.seen(app, any(e.role == "input" and notes_lib.code_like_field(e) for e in tree.items))
+        # the same strict test as typing's (otp_target): a one-line field that says code by its own words, never an
+        # input whose typed text says "code" (Codex, PR #12 cycle 1, M3)
+        self.code_fields.seen(app, any(notes_lib.otp_target(e) for e in tree.items))
 
     # ---- the read ----
     async def _on_phone(self, fn):
@@ -258,29 +260,34 @@ class CenterTools:
         path = getattr(getattr(self, "ceiling", None), "accounts", None)
         if not path or app not in self.accounts.get(path).otp:
             return None
-        found = self.otp_codes.take(app)
-        if found is None:
-            try:
-                # One read of the screen, which waits out a notification banner over the app (the code's own banner,
-                # seen in the joint check 2026-11-14: while it shows, iOS says SpringBoard is in front), tells both
-                # which app is in front and whether its code field shows (the read notes it, _watch_code_field).
-                seen_before = self.code_fields.shown_at(app)
-                tree = await self._on_phone(self.session.refresh)
-                if not tree.app or tree.app[1] != app:
-                    self.log(f"one-time code for {app}: none handed over, the app isn't in front")
-                    return None
-                field_at = self.code_fields.shown_at(app)
-                if field_at is None:
-                    self.log(f"one-time code for {app}: none handed over, no code field shows")
-                    return None
-                if seen_before is None:
-                    # Tapline's host drove the app to its code field, unseen by this daemon: this read's sighting
-                    # isn't when it appeared, so the field counts from 2 minutes ago
-                    field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
-                found = await self._code_from_center(app, field_at)
-            except Exception as e:  # busy, paused, a dropped line: there is no code to give
-                self.log(f"one-time code for {app}: none handed over ({type(e).__name__}: {getattr(e, 'code', '')})")
+
+        async def in_one_turn() -> "otplib.Code | None":
+            # One read of the screen, which waits out a notification banner over the app (the code's own banner, seen in
+            # the joint check 2026-11-14: while it shows, iOS says SpringBoard is in front), tells both which app is in
+            # front and whether its code field shows NOW, by the strict test typing uses (M3). The check and the read of
+            # the code are one turn on the phone: nobody switches apps between them (CodeRabbit, PR #12, center_tool).
+            seen_before = self.code_fields.shown_at(app)
+            tree = await self.session.refresh()
+            if not tree.app or tree.app[1] != app:
+                self.log(f"one-time code for {app}: none handed over, the app isn't in front")
                 return None
+            if not any(notes_lib.otp_target(e) for e in tree.items):
+                self.log(f"one-time code for {app}: none handed over, no code field shows")
+                return None
+            held = self.otp_codes.take(app)  # (one read for typing a moment ago, not typed)
+            if held is not None:
+                return held
+            field_at = self.code_fields.shown_at(app)
+            if seen_before is None or field_at is None:
+                # Tapline's host drove the app to its code field, unseen by this daemon: this read's sighting isn't
+                # when it appeared, so the field counts from 2 minutes ago
+                field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
+            return await self._code_from_center(app, field_at)
+        try:
+            found = await self._on_phone(in_one_turn)
+        except Exception as e:  # busy, paused, a dropped line: there is no code to give
+            self.log(f"one-time code for {app}: none handed over ({type(e).__name__}: {getattr(e, 'code', '')})")
+            return None
         if found is not None and self.audit is not None:
             self.audit.write("otp", app=app, detail=f"from {found.source}")
         return found
