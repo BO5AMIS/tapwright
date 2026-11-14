@@ -453,7 +453,7 @@ class Trip:
     async def run_route(self, name: str, route: dict) -> None:
         """Run a saved route's steps, with its variables filled in, through `run`'s own executor: every step passes the
         same checks as a single call, `if` and `optional` work, and a step that fails stops the drive (§18.5)."""
-        steps = routes.substitute(route["steps"], self.req.values)
+        steps = routes.substitute(route["steps"], self.req.values, route.get("variables"))
         try:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:

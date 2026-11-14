@@ -93,12 +93,12 @@ def test_the_persistence_redactor_keeps_the_variable_only_in_typed_text():
 
 
 def test_the_persistence_redactor_redacts_a_route_selector_whole():
-    route = {"format": "agent-tools-script", "version": 2, "variables": ["name"],
+    route = {"format": "agent-tools-script", "version": 2, "variables": ["other"],  # (name is not declared: literal text)
              "steps": [{"tool": "tap", "target": {"label": "a${name}b"}},
-                       {"tool": "type_text", "text": "${name}"}]}
+                       {"tool": "type_text", "text": "${other}"}]}
     out = batch.redacted_content(route, lambda t: t.replace("a${name}b", "<x>"))
     assert out["steps"][0]["target"]["label"] == "<x>"
-    assert out["steps"][1]["text"] == "${name}"
+    assert out["steps"][1]["text"] == "${other}"
 
 
 def test_the_refusal_names_the_step(tmp_path):

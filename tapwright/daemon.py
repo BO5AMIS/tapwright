@@ -2456,7 +2456,7 @@ class Daemon(journey_tool.JourneyTools):
                                 {"look": False}).reach()
             finally:
                 _NESTED.reset(nested)
-            steps = routes.substitute(steps, {})
+            steps = routes.substitute(steps, {}, data.get("variables"))
         points = [n for n, step in enumerate(steps, 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
@@ -2545,6 +2545,9 @@ class Daemon(journey_tool.JourneyTools):
             self._recheck_typed(rec)
             self._refuse_unsaved(client_id, rec)
             if rec.get("route"):
+                # a route's every field is a template at the replay: a literal `${` recorded in a selector, an expectation or
+                # a link is written `$${`, so replay gives back the exact text (typed text was written so as it was typed)
+                rec["steps"] = [routes.escaped(step) for step in rec["steps"]]
                 return await self._save_route(client_id, rec, scope)
             path = args.get("path")
             if path is not None and (not isinstance(path, str) or not path):
@@ -2590,9 +2593,10 @@ class Daemon(journey_tool.JourneyTools):
         kept; only the literal text around it is checked."""
         loaded = self._loaded()
         for n, step in enumerate(rec["steps"], 1):
-            # every field that isn't typed (a selector, an expectation, an ignore entry, an `if`) is literal: an account's
-            # `${account.…}` there is ordinary text, checked as a whole string, and the save is refused when it holds a
-            # value (Codex, PR #10 cycle 13)
+            # every field that isn't typed (a selector, an expectation, an ignore entry, an `if`) is checked as the text it
+            # stands for. While recording it is the raw text (a route's `$${` is written only at the save),
+            # which is what the decoded literal runs of the saved field are. The save is refused when it holds a value
+            # (Codex, PR #10 cycle 13 and 14)
             if any(loaded.holds(s) or self.accounts.holds(s) for s in batch.literal_strings(step)):
                 rec.setdefault("unsaved", []).append(n)
             text = step.get("text")

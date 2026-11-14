@@ -2,10 +2,11 @@
 app's map folder (`routes/<name>.json`). Its steps may hold `${variable}` values, filled when the route is driven, and an
 account's `${account.username}` and `${account.password}`, which are left for the typing itself to fill (accounts.py): an
 account's value is the whole text of a step, never part of one, so joining text can't get around the secure-field rule.
-Only the text a `type_text` types is a template: there a `${name}` is filled in and a literal `${` is written `$${`. Every
-other field (a target's label, a link, an expectation) is literal, at the save and at the replay alike, so a selector
-replays the element it was recorded on and is checked for account values as the text it is (Codex, PR #10 cycle 14).
-Pure functions: no phone, no files.
+Every string field of a step is a template, at the save and at the replay alike: a declared `${name}` is filled in (a
+target's text, a link, an expectation, the typed text) and a literal `${` is written `$${`; an undeclared `${...}` is
+literal text. The recorder writes a literal `${` as `$${` in every field it saves, so a recorded label replays the element it
+was recorded on, and the save-time privacy check reads every field's literal runs decoded (Codex, PR #10 cycle 14). An
+account's placeholder stands only as the whole text of a typed field. Pure functions: no phone, no files.
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ACCOUNT_FIELDS = ("username", "password")
 ACCOUNT = "account"
 _TOKEN = re.compile(r"\$\$\{|\$\{([^}]*)\}")
-_PLACED = re.compile(r"\$\{(" + ACCOUNT + r"\.[^}]*)\}")  # an account's placeholder in a literal field
 
 
 def route(name: str, app: str | None, start: str, end: str | None, variables: list[str], steps: list[dict]) -> dict:
@@ -31,6 +31,19 @@ def route(name: str, app: str | None, start: str, end: str | None, variables: li
 def literal(text: str) -> str:
     """Typed text as a step keeps it: a `${` in it is written `$${`, so it is never taken for a variable."""
     return text.replace("${", "$${")
+
+
+def escaped(step: object) -> object:
+    """A recorded step with a literal `${` written `$${` in every string it holds but a typed text (that one is written by
+    `recorded_text`), so replay, which reads every field as a template, gives back the very text that was recorded."""
+    if isinstance(step, str):
+        return literal(step)
+    if isinstance(step, dict):
+        typing = step.get("tool") == "type_text"
+        return {k: v if typing and k == "text" else escaped(v) for k, v in step.items()}
+    if isinstance(step, list):
+        return [escaped(v) for v in step]
+    return step
 
 
 def recorded_text(text: str, name: str | None) -> str:
@@ -95,10 +108,11 @@ def check(data: dict) -> None:
         if "$${" + ACCOUNT + "." in text:  # filled to a literal ${account.…}, which typing would then take for a placeholder
             raise Refused("bad_params", "a literal account placeholder can't be written in a route: it would be typed as "
                                         f"the account's value, not as text: {text!r}")
-    for text in _strings(data.get("steps", []), typed=False):  # (literal there, so it would find nothing on the phone)
-        if (placed := _PLACED.search(text)) is not None:
-            raise Refused("bad_params", f"an account's value is the whole text of a type_text step, never part of one or "
-                                        f"anywhere else: {text!r} holds ${{{placed.group(1)}}}")
+    for text in _strings(data.get("steps", []), typed=False):  # (a placeholder there is no field's typing: it finds nothing)
+        for match in _TOKEN.finditer(text):
+            if match.group(1) is not None and match.group(1).startswith(ACCOUNT + "."):
+                raise Refused("bad_params", f"an account's value is the whole text of a type_text step, never part of one or "
+                                            f"anywhere else: {text!r} holds ${{{match.group(1)}}}")
     for ref, text, tool in references(data.get("steps", [])):
         if ref.startswith(ACCOUNT + "."):
             field = ref[len(ACCOUNT) + 1:]
@@ -128,29 +142,31 @@ def need(data: dict, values: dict[str, str], account: str | None) -> None:
                                         f'with: {{"{variable}": "..."}}')
 
 
-def _fill(text: str, values: dict[str, str]) -> str:
+def _fill(text: str, values: dict[str, str], declared: "list[str] | None" = None) -> str:
     def one(match: re.Match) -> str:
         if match.group(1) is None:
             return "${"  # `$${` is a literal `${`
         name = match.group(1)
         if name.startswith(ACCOUNT + "."):
             return match.group(0)  # the typing fills it, from the account, where the field is known
+        if declared is not None and name not in declared:
+            return match.group(0)  # undeclared: literal text
         return values.get(name, match.group(0))
     return _TOKEN.sub(one, text)
 
 
-def _walk(value: object, values: dict[str, str]) -> object:
+def _walk(value: object, values: dict[str, str], declared: "list[str] | None") -> object:
+    if isinstance(value, str):
+        return _fill(value, values, declared)
     if isinstance(value, dict):
-        typing = value.get("tool") == "type_text"
-        return {k: _fill(v, values) if typing and k == "text" and isinstance(v, str) else _walk(v, values)
-                for k, v in value.items()}
+        return {k: _walk(v, values, declared) for k, v in value.items()}
     if isinstance(value, list):
-        return [_walk(v, values) for v in value]
-    return value  # (a string anywhere else is literal: kept as it is, `$${` and `${name}` included)
+        return [_walk(v, values, declared) for v in value]
+    return value
 
 
-def substitute(steps: list[dict], values: dict[str, str]) -> list[dict]:
-    """The steps with each `${variable}` filled in and each `$${` made `${` in the text a `type_text` types, the only
-    template; every other field is left literal, as the save checked it (Codex, PR #10 cycle 14). The route itself is
-    left as it was. An account's placeholder stays: the value is typed from the account and goes no further."""
-    return [_walk(step, values) for step in steps]
+def substitute(steps: list[dict], values: dict[str, str], declared: "list[str] | None" = None) -> list[dict]:
+    """The steps with each declared `${variable}` filled in and each `$${` made `${`, in every string field (`declared`: the
+    route's variables; None fills any name `values` has); the route itself is left as it was. An account's placeholder
+    stays: the value is typed from the account and goes no further."""
+    return [_walk(step, values, declared) for step in steps]

@@ -316,7 +316,7 @@ def literal_strings(step: object, content: bool = False) -> Iterator[str]:
 
 
 def redacted_content(data: object, redact: Callable[[str], str]) -> object:
-    """A script (or a route) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
+    """A script (or a route; there every content field's literal runs, `$${` decoded, are what is redacted) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
     never a key, a tool's name, the format, the version or another structural field, and never a variable's
     `${…}` syntax (Codex, PR #10 cycle 3: an account whose username is `tap` had made the saved step's tool
     `<tester2's username>`)."""
@@ -346,7 +346,9 @@ def redacted_content(data: object, redact: Callable[[str], str]) -> object:
 
     def walk(value: object, content: bool) -> object:
         if isinstance(value, str):
-            return redact(value) if content else value  # (literal: an account's `${...}` here is ordinary text)
+            if not content:
+                return value
+            return text(value) if version2 else redact(value)  # (a route's field is a template: its literal runs are redacted)
         if isinstance(value, dict):
             typing = value.get("tool") == "type_text"  # the only field that is typed: its `text` (Codex, PR #10 cycle 13)
             return {k: text(v) if typing and k == "text" and isinstance(v, str) else walk(v, k in CONTENT_KEYS)

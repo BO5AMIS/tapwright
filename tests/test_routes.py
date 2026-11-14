@@ -57,14 +57,26 @@ def test_an_account_value_is_the_whole_text_of_a_step_never_part_of_one():
         routes.check(sign_in(steps=[{"tool": "type_text", "text": "${account.token}"}]))
 
 
-def test_variables_are_filled_in_only_in_typed_text_and_every_other_field_is_literal():
-    # (Codex, PR #10 cycle 14: a selector, a link or an expectation is literal at the save and at the replay alike)
+def test_variables_are_filled_in_everywhere_a_step_has_text():
     steps = [{"tool": "tap", "target": {"text": "${language}"}}, {"tool": "type_text", "text": "to ${language}!"},
-             {"tool": "open_url", "url": "wayfare://trips/${id}"}, {"tool": "tap", "target": {"id": "x"}, "expect": {"text": "$${language}"}}]
+             {"tool": "open_url", "url": "wayfare://trips/${id}"}, {"tool": "tap", "target": {"id": "x"}, "expect": {"text": "${language}"}}]
     got = routes.substitute(steps, {"language": "Arabic", "id": "42"})
-    assert got[1]["text"] == "to Arabic!"
-    assert got[0]["target"] == {"text": "${language}"} and got[2]["url"] == "wayfare://trips/${id}"
-    assert got[3]["expect"] == {"text": "$${language}"} and steps[1]["text"] == "to ${language}!"  # the route itself is untouched
+    assert got[0]["target"] == {"text": "Arabic"} and got[1]["text"] == "to Arabic!" and got[2]["url"] == "wayfare://trips/42"
+    assert got[3]["expect"] == {"text": "Arabic"} and steps[0]["target"] == {"text": "${language}"}  # the route itself is untouched
+
+
+def test_an_undeclared_variable_is_literal_text_in_every_field():
+    steps = [{"tool": "tap", "target": {"text": "a ${x} b $${language}"}}]
+    got = routes.substitute(steps, {"language": "Arabic", "x": "X"}, ["language"])
+    assert got[0]["target"] == {"text": "a ${x} b ${language}"}  # (`x` is not declared; `$${` is a literal `${`)
+    routes.check(sign_in(steps=steps, variables=["language"]))
+
+
+def test_the_recorder_writes_a_literal_dollar_brace_twice_in_every_field_but_the_typed_text_it_writes_itself():
+    step = {"tool": "tap", "target": {"label": "hi ${a}"}, "expect": {"text": "ok $${b}"}}
+    saved = routes.escaped(step)
+    assert saved == {"tool": "tap", "target": {"label": "hi $${a}"}, "expect": {"text": "ok $$${b}"}}
+    assert routes.substitute([saved], {}, [])[0] == step  # (replay reads the exact text back)
 
 
 def test_an_account_placeholder_is_left_for_the_typing_to_fill():

@@ -290,25 +290,26 @@ TYPED_LIKE = "hi $${fresh_login42}"  # (the review's: a button's label, as the s
 NEW_PASSWORD = "hi ${fresh_login42}"  # (what the account's password is changed to before the stop)
 
 
-def test_substitute_keeps_every_field_but_typed_text_literal():
+def test_substitute_fills_declared_variables_and_decodes_in_every_field():
     steps = [{"tool": "tap", "target": {"label": TYPED_LIKE}},
-             {"tool": "wait_for", "text": "$${x}"},
+             {"tool": "wait_for", "text": "$${x} ${v}"},
              {"tool": "type_text", "text": "a $${b} ${v}"}]
-    got = routes.substitute(steps, {"v": "V"})
-    assert got[0]["target"]["label"] == TYPED_LIKE and got[1]["text"] == "$${x}"
+    got = routes.substitute(steps, {"v": "V"}, ["v"])
+    assert got[0]["target"]["label"] == NEW_PASSWORD and got[1]["text"] == "${x} V"
     assert got[2]["text"] == "a ${b} V"
 
 
-def test_a_literal_field_may_hold_dollar_braces_and_an_account_placeholder_there_is_still_refused():
+def test_a_literal_field_may_hold_an_undeclared_dollar_brace_and_an_account_placeholder_there_is_still_refused():
     route = routes.route("r", BUNDLE, "profile", None, [], [{"tool": "tap", "target": {"label": "a ${undeclared} b"}}])
-    routes.check(route)  # (literal: no variable there to declare)
+    routes.check(route)  # (undeclared: literal text, nothing to declare)
+    routes.check(routes.route("r", BUNDLE, "profile", None, [], [{"tool": "tap", "target": {"label": "a $${account.x}"}}]))
     with pytest.raises(Refused) as e:
         routes.check(routes.route("r", BUNDLE, "profile", None, ["account"],
                                   [{"tool": "tap", "target": {"label": "${account.password}"}}]))
     assert e.value.code == "bad_params" and "type_text" in str(e.value)
 
 
-def test_the_review_trace_saves_the_literal_selector_and_replay_taps_the_recorded_button(tmp_path, monkeypatch):
+def test_the_review_trace_saves_the_label_written_twice_and_replay_taps_the_recorded_button(tmp_path, monkeypatch):
     async def no_drive(self):
         return None
     monkeypatch.setattr(trip.Trip, "reach", no_drive)
@@ -344,8 +345,57 @@ def test_the_review_trace_saves_the_literal_selector_and_replay_taps_the_recorde
     run(go)
     assert out["said"].startswith("Saved route literal_selector"), out["said"]
     saved = json.loads(out["raw"])
-    assert saved["steps"] == [{"tool": "tap", "target": {"label": TYPED_LIKE}}]
-    assert NEW_PASSWORD not in out["raw"]  # (no form of the password: the label is literal, `$${` is never decoded)
-    assert all(NEW_PASSWORD not in s for s in routes._strings(saved))
+    assert saved["steps"] == [{"tool": "tap", "target": {"label": TYPED_LIKE.replace("${", "$${")}}]  # (written twice)
+    assert NEW_PASSWORD not in out["raw"]
     assert out["replayed"].startswith("Ran 1 of 1 steps"), out["replayed"]
     assert out["taps"][-1] == out["recorded_at"]  # the recorded button, not the one labelled with the password
+
+
+def test_a_label_that_is_the_new_password_refuses_the_save(tmp_path, monkeypatch):
+    async def no_drive(self):
+        return None
+    monkeypatch.setattr(trip.Trip, "reach", no_drive)
+    out = {}
+
+    async def go():
+        d = daemon(tmp_path, password="pw-secret-0042")
+        d.maps = mapkeeper.Maps(str(tmp_path / "maps"))
+        d.ceiling.maps = str(tmp_path / "maps")
+        d.session.buttons = [("", NEW_PASSWORD), ("", TYPED_LIKE)]
+
+        async def place(scope):
+            return BUNDLE, "profile"
+        d._route_place = place
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "record", {"start": True, "route": "literal_selector"})
+        await d.run_tool("a", "tap", {"target": {"label": NEW_PASSWORD}, "look": False})
+        path = d.ceiling.accounts
+        data = json.loads(open(path, encoding="utf-8").read())
+        data["accounts"]["tester2"]["password"] = NEW_PASSWORD
+        open(path, "w", encoding="utf-8").write(json.dumps(data, indent=2) + "\n")
+        await d.run_tool("a", "look", {"screenshot": False})
+        try:
+            await d.run_tool("a", "record", {"stop": True})
+        except Refused as e:
+            out["refused"] = str(e)
+        out["files"] = [str(f) for f in (tmp_path / "maps").rglob("literal_selector.json")]
+        await finish(stop, task)
+    run(go)
+    assert "step 1" in out["refused"] and NEW_PASSWORD not in out["refused"], out
+    assert out["files"] == []
+
+
+def test_a_version_1_script_has_no_templates_and_nothing_is_decoded():
+    from tapwright import batch
+    assert batch.literal_runs("a $${b} ${account.username}")[0] == ["a $${b} ", ""]
+    out = batch.redacted_content(batch.script("s", None, [{"tool": "tap", "target": {"label": "a $${b} ${c}"}}]),
+                                 lambda t: t.replace("${c}", "<x>"))
+    assert out["steps"][0]["target"]["label"] == "a $${b} <x>"
+
+
+def test_a_route_redaction_reads_a_field_decoded():
+    from tapwright import batch
+    route = routes.route("r", BUNDLE, "profile", None, [], [{"tool": "tap", "target": {"label": "hi $${pw}"}}])
+    out = batch.redacted_content(route, lambda t: t.replace("hi ${pw}", "<p>"))
+    assert out["steps"][0]["target"]["label"] == "<p>"
