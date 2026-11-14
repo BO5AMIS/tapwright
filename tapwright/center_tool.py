@@ -310,6 +310,14 @@ class CenterTools:
             return await self._code_from_center(app, field_at)
         try:
             found = await self._on_phone(in_one_turn)
+        except Refused as e:
+            if e.code == "internal":
+                # Notification Center couldn't be shown closed (NOT_CLOSED): never swallowed as "no code". /otp answers
+                # this error and hands no code over, so the host knows the phone wasn't put back (Codex, PR #12 cycle 3, M1)
+                self.log(f"one-time code for {app}: none handed over (internal: {e})")
+                raise
+            self.log(f"one-time code for {app}: none handed over ({type(e).__name__}: {e.code})")
+            return None
         except Exception as e:  # busy, paused, a dropped line: there is no code to give
             self.log(f"one-time code for {app}: none handed over ({type(e).__name__}: {getattr(e, 'code', '')})")
             return None

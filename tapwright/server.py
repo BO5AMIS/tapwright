@@ -236,7 +236,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                                          "so no app's code is handed over", HTTP_STATUS["not_allowed"])
         if (why := await over_ceiling((app,), False, None)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
-        found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
+        try:
+            found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
+        except Refused as e:  # (only `internal`: Notification Center may still be open. No code goes with it: M1)
+            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
         if found is None:
             return _error("not_found", "no one-time code", 404)
         return JSONResponse(otplib.answer(found), headers={"Cache-Control": "no-store"})
