@@ -92,7 +92,7 @@ def find_route(s: schedules.Schedule) -> str:
 
 def classify(code: str, message: str, draft: bool = False) -> tuple[str, str]:
     """(status, result) of a refusal that ended the drive."""
-    first = message.strip().splitlines()[0][:200] if message.strip() else ""
+    first = message.strip().splitlines()[0][:200] if message.strip() else ""  # (the caller redacted it whole first)
     if draft:  # the daemon's internal flag for a stop at a draft (21.3), never the words of the message
         return "stopped", DRAFT
     if code == "not_allowed" and "needs_confirmation" in message or code == "needs_confirmation":
@@ -135,6 +135,9 @@ def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
     except schedules.ScheduleError as e:
         audit.write("schedule", name=name, detail=f"failed: {e}"[:300])
         return finish(name, deps, "failed", f"failed: {e}", None, deps.now(), code=2)
+    # the run's redactor, from its own vault, before anything is written: every audit line and the report go through it,
+    # whole and before any cut (§20.3, §23; Codex, PR #12 cycle 2, H7)
+    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=scrubber(s))
     # a serve this run starts is started with the schedule's own vault file, so a scheduled unlock can type the
     # passcode (the daemon types it only from its own --accounts); a serve already running keeps what it has
     serve_args = getattr(deps.api(), "set_serve_args", None)
@@ -216,9 +219,17 @@ def _check_once(s: schedules.Schedule, deps: Deps, api: ModuleType) -> bool | No
 
 def end(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, status: str, result: str, began: datetime.datetime,
         code: int, text: str = "", picture: bytes | None = None, bundle: str | None = None, used: bool = True) -> Outcome:
+    """The run's audit line and report, both through the run's redactor (`audit.scrub`, made from its vault when the run
+    began): a vault value in an error (a file's name, a server's words) never reaches either (H7)."""
+    result = audit.scrub(result)
     audit.write("schedule", name=s.name, app=bundle, detail=result)
     return finish(s.name, deps, status, result, s, began, text=text, code=code, picture=picture, used=used,
-                  scrub=scrubber(s))
+                  scrub=audit.scrub)
+
+
+def cut(scrub: Callable[[str], str], text: str, n: int) -> str:
+    """`text` redacted whole, THEN cut to `n` characters: a cut first could leave part of a value (§20.3)."""
+    return scrub(text)[:n]
 
 
 def scrubber(s: schedules.Schedule) -> Callable[[str], str]:
@@ -320,8 +331,8 @@ def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog
         try:
             status = api.status()
         except Exception as e:
-            return end(s, deps, audit, "failed", f"failed: the phone's server didn't start ({str(e)[:150]})", began, 2,
-                       bundle=bundle, used=False)
+            return end(s, deps, audit, "failed", f"failed: the phone's server didn't start ({cut(audit.scrub, str(e), 150)})",
+                       began, 2, bundle=bundle, used=False)
         if status is None:
             return end(s, deps, audit, "failed", "failed: the phone's server didn't answer", began, 2, bundle=bundle,
                        used=False)
@@ -334,8 +345,8 @@ def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog
             return end(s, deps, audit, "skipped", LOCKED, began, 3, bundle=bundle, used=False)
         if state != "live":
             detail = status.get("detail") or state
-            return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({str(detail)[:120]})", began, 2,
-                       bundle=bundle, used=False)
+            return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({cut(audit.scrub, str(detail), 120)})",
+                       began, 2, bundle=bundle, used=False)
         if not in_use(status):
             # the route, as a client that asks nobody. The daemon opens the route's app (the scope's one app) before it
             # drives (M5), and refuses `busy` when another client or a person has the phone after all (M2)
@@ -358,12 +369,13 @@ def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog
             except api.DaemonError as e:
                 if not (e.code == "busy" and str(e).startswith(schedules.ADMISSION_BUSY)):  # (else not admitted: waits)
                     audit.write("schedule", name=s.name, app=bundle, detail="started")
-                    state, result = classify(e.code, str(e), getattr(e, "draft", False))
-                    return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)
+                    said = audit.scrub(str(e))  # (whole, before classify cuts it)
+                    state, result = classify(e.code, said, getattr(e, "draft", False))
+                    return end(s, deps, audit, state, result, began, 1, text=said, bundle=bundle)
             except Exception as e:  # the server went away mid-run
                 audit.write("schedule", name=s.name, app=bundle, detail="started")
-                return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {str(e)[:150]}", began, 1,
-                           bundle=bundle)
+                return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {cut(audit.scrub, str(e), 150)}", began,
+                           1, bundle=bundle)
             else:
                 audit.write("schedule", name=s.name, app=bundle, detail="started")
                 break
