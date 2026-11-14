@@ -3,7 +3,7 @@
   tapwright setup     one time, phone on USB: pair, sign and install WebDriverAgent,
                      pair for network use. Signing: --asc-key-id/--asc-issuer-id/--asc-key-file
                      with --bundle-prefix (App Store Connect API key), or --p12/--profile
-  tapwright doctor [--fix] [--unattended [--accounts FILE]]
+  tapwright doctor [--fix] [--unattended [--accounts FILE]] [--policy FILE]
                      check the setup and say what's missing; --fix repairs what it can (the
                      developer disk image, WebDriverAgent and its signature, network pairing)
   tapwright smoke --app BUNDLE_ID
@@ -19,6 +19,9 @@
   tapwright report [--since TIME] [--client ID]
                      where an agent's calls went, from the action log: calls per tool, failures,
                      and waste to cut (the agent tool session_report answers the same)
+  tapwright grants --policy FILE [--revoke-all]
+                     the grants of a policy file, today's counts and the last uses; --revoke-all revokes
+                     every one and stops a running route; `grants unlock --policy FILE` removes a stuck edit lock
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -420,6 +423,26 @@ def report_accounts(path: str | None) -> int:
     return 0
 
 
+def report_grants(policy: str | None) -> int:
+    """`doctor --policy FILE`: the grants this policy file refuses (AGENT-TOOLS §19.1) and a stuck edit lock, with its
+    path (§19.5). The number of problems."""
+    if not policy:
+        return 0
+    from . import grants, grantscmd
+    path = Path(policy).expanduser().resolve()
+    problems = 0
+    book = grants.Book(path, None)
+    for line in book.notes():
+        note(line.removeprefix("Note: "))
+    stuck = grantscmd.stuck_lock(str(path))
+    for lock, why in stuck:
+        problems += fail(f"the policy file's edit lock {lock} is stuck: {why}. Remove it with: "
+                         f"tapwright grants unlock --policy {path}")
+    if not book.notes() and not stuck:
+        ok(f"policy file {path}: grants load, no stuck edit lock")
+    return problems
+
+
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
@@ -429,6 +452,7 @@ async def doctor(a) -> int:
     if problems:  # before the signing modules are imported: a conflicted one would raise SyntaxError first
         return problems
     problems += report_accounts(getattr(a, "accounts", None))
+    problems += report_grants(getattr(a, "policy", None))
     from pymobiledevice3 import usbmux
 
     from . import repair, signing
@@ -782,6 +806,16 @@ def main() -> int:
     p.add_argument("--fix", action="store_true",
                    help="repair what it can with the phone on USB: mount the developer disk image, install or "
                         "re-sign WebDriverAgent with the stored profile, refresh the network pairing")
+    p.add_argument("--policy", metavar="FILE",
+                   help="also check this policy file's grants: which ones it refuses and why, and whether its edit "
+                        "lock is stuck (its path, and the command that removes it)")
+    p = sub.add_parser("grants", help="the grants of a policy file, their counts and last uses; --revoke-all; unlock")
+    p.add_argument("action", nargs="?", choices=["unlock"],
+                   help="unlock: remove a stuck policy edit lock (refused while its holder is alive)")
+    p.add_argument("--policy", metavar="FILE", help="the policy file you give `tapwright mcp --policy` (version 2)")
+    p.add_argument("--revoke-all", action="store_true",
+                   help="revoke every grant in the file (it stays there, marked revoked) and stop any running route "
+                        "between moves")
     p = sub.add_parser("smoke")
     p.add_argument("--app", required=True, help="bundle id, e.g. com.example.app")
     p.add_argument("--wait", type=float, default=3.0, help="seconds to let the app start (default 3)")
@@ -920,6 +954,14 @@ def main() -> int:
         return view()
     if a.cmd == "report":
         return report(a)
+    if a.cmd == "grants":
+        from . import grantscmd
+        if a.action == "unlock":
+            text, code = grantscmd.run_unlock(a.policy)
+        else:
+            text, code = grantscmd.run_grants(a.policy, revoke_all=a.revoke_all)
+        print(text)
+        return code
     if a.cmd == "replay":
         return replay(a)
     if a.cmd == "skill":

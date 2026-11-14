@@ -304,3 +304,54 @@ def state(path: str | os.PathLike, deps: Deps | None = None) -> tuple[str, int |
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(holder.get("owner"), str):
         return "unreadable", None
     return ("dead" if _dead(deps, holder) else "live"), pid
+
+
+# ---- the way out of a stuck lock (`tapwright grants unlock`, §19.5, 1.14.2) ---------------------------------------
+def stuck_words(kind: str, pid: int | None) -> str:
+    """Why a lock is stuck, for `doctor` and `unlock`."""
+    if kind == "dead":
+        return f"held by pid {pid}, which is not running"
+    if kind == "empty":
+        return "empty (its holder stopped while writing it)"
+    return "unreadable"
+
+
+@dataclasses.dataclass
+class Unlocked:
+    """What `unlock` did: status `none` (no lock), `live` (a holder is proven alive: nothing was removed), `removed`, or
+    `failed` (it changed or can't be deleted); the files removed, each with why; the pid of a live holder."""
+    status: str
+    pid: int | None = None
+    removed: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    failed: str | None = None
+
+
+def unlock(path: str | os.PathLike, deps: Deps | None = None) -> Unlocked:
+    """A person's removal of a stuck lock and its `.takeover`: only when no holder is proven alive. A live holder (or a
+    lock this process can't tell is stale) is never removed. A file is removed only while it still holds what was seen."""
+    deps = deps or Deps()
+    paths = [str(path), f"{path}.takeover"]
+    seen: list[tuple[str, str, str, int | None]] = []
+    for p in paths:
+        kind, pid = state(p, deps)
+        if kind == "absent":
+            continue
+        if kind == "live":
+            return Unlocked("live", pid)
+        text = _read(p)
+        if text is None and kind != "unreadable":
+            continue
+        seen.append((p, text or "", kind, pid))
+    if not seen:
+        return Unlocked("none")
+    done = Unlocked("removed")
+    for p, text, kind, pid in seen:
+        if not text.strip() or kind == "unreadable":
+            gone = _remove_if_unchanged(deps, p, text) if text else _remove(p)
+        else:
+            gone = _remove_if_unchanged(deps, p, text)
+        if not gone:
+            done.status, done.failed = "failed", p
+            break
+        done.removed.append((p, stuck_words(kind, pid)))
+    return done
