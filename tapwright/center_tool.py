@@ -198,15 +198,16 @@ class CenterTools:
         scrub = self.scrub_everywhere
         marked = " (from others)" if x.bundle in FROM_OTHERS_APPS else ""
         when = f" {x.when}" if x.when else ""
-        body = f' "{scrub(x.body)}"' if x.body else ""
-        return f'n{i} {scrub(x.app)} ({x.bundle}){when}{marked} "{scrub(x.title)}"{body}'
+        # redacted whole, THEN collapsed and cut (§20.3; Codex, PR #12 cycle 1, H5)
+        body = f' "{notes_lib.shown(scrub(x.body), notes_lib.BODY_MAX)}"' if x.body else ""
+        return f'n{i} {scrub(x.app)} ({x.bundle}){when}{marked} "{notes_lib.shown(scrub(x.title), notes_lib.TITLE_MAX)}"{body}'
 
     def _hide_codes(self, found: "list[notes_lib.Notification]") -> None:
         """Every code a source app's matching notification holds joins the redactor before any text is made (§20.4)."""
         for app, setting in self._loaded().otp.items():
             for x in found:
                 if x.bundle in setting.sources and notes_lib.matches(x, setting.match):
-                    for code in notes_lib.candidates(f"{x.title}\n{x.body}", setting.pattern):
+                    for code in notes_lib.codes_to_hide(x, setting.pattern):  # (every form of each: H4)
                         self.accounts.remember_code(code)
 
     # ---- one-time codes (§20.4, §24.3, §18.11) ----

@@ -163,6 +163,13 @@ def _cut(text: str, most: int) -> str:
     return text if len(text) <= most else text[:most - 1] + "…"
 
 
+def shown(text: str, most: int) -> str:
+    """A title or body as an answer shows it: whitespace collapsed and cut at `most` (TITLE_MAX, BODY_MAX). Only for text
+    already redacted: a cut before the redactor could leave part of a value it no longer finds (§20.3, "redact before any
+    cut"; Codex, PR #12 cycle 1, H5)."""
+    return _cut(text, most)
+
+
 def names_to_bundles(installed: Mapping[str, str]) -> dict[str, str | None]:
     """{shown name, case folded: bundle id} of every app a notification may name; None for a name two apps share, in
     any case (it proves neither). `installed`: {bundle id: name} of the installed apps (the daemon's list)."""
@@ -188,7 +195,7 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
     except ET.ParseError:
         return []
     names = names_to_bundles(installed)
-    shown = {**{b: n for n, b in SYSTEM_APPS.items()}, **{b: n for b, n in installed.items() if n}}  # (its home screen name)
+    names_shown = {**{b: n for n, b in SYSTEM_APPS.items()}, **{b: n for b, n in installed.items() if n}}  # (home screen name)
     found: list[tuple[int, Notification]] = []
 
     def walk(node: ET.Element) -> None:
@@ -212,9 +219,10 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
                 bundle = names.get(app.casefold()) if app else None
                 if bundle is not None and keep(bundle):
                     x, y, w, h = _rect(child)
+                    # the whole title and body: they are cut only as an answer shows them, after the redactor (H5)
                     found.append((len(found), Notification(
-                        bundle, shown.get(bundle) or app, when, age_of(when, now) if when else None,
-                        _cut(title, TITLE_MAX), _cut(body, BODY_MAX), (x + w / 2, y + h / 2))))
+                        bundle, names_shown.get(bundle) or app, when, age_of(when, now) if when else None,
+                        title, body, (x + w / 2, y + h / 2))))
                 continue  # (a notification's own parts are never a second notification)
             walk(child)
     walk(root)
@@ -310,6 +318,15 @@ def is_center(source: str) -> bool:
 # ---- one-time codes (§20.4, §24.3) ----------------------------------------------------------------------------------------
 CODE = re.compile(r"(?<![\d])(\d{4,8})(?![\d])")
 SPLIT_CODE = re.compile(r"(?<![\d])(\d{3})[ -](\d{3})(?![\d])")  # `123 456`, `123-456`
+
+
+def code_forms(code: str) -> list[str]:
+    """Every way a code is written that candidates() takes it from (Codex, PR #12 cycle 1, H4): the code, and for six
+    digits `123 456` and `123-456` too. What the redactor must know, not only the code typed."""
+    forms = [code]
+    if len(code) == 6 and code.isascii() and code.isdigit():
+        forms += [f"{code[:3]} {code[3:]}", f"{code[:3]}-{code[3:]}"]
+    return forms
 CODE_SHAPE = re.compile(r"^[A-Za-z0-9]{4,12}$")
 WINDOW = 120.0  # §20.4: within 2 minutes after the app showed its code field
 
@@ -329,6 +346,23 @@ def candidates(text: str, pattern: "re.Pattern[str] | None" = None) -> list[str]
             found.append(m.group(1))
     if not found:
         for m in SPLIT_CODE.finditer(text):
+            if m.group(1) + m.group(2) not in found:
+                found.append(m.group(1) + m.group(2))
+    return found
+
+
+def codes_to_hide(n: Notification, pattern: "re.Pattern[str] | None" = None) -> list[str]:
+    """Every code a matching notification may hold, for the redactor (Codex, PR #12 cycle 1, H4): what candidates() finds
+    in the title, in the body and in both, and every `123 456` one as well (candidates() looks for those only when there
+    is no plain number, and a sender's `+1 555 0100` is one). Wider than find_code's: hiding one more number costs
+    nothing; showing a code is the leak."""
+    found: list[str] = []
+    for text in (n.title, n.body, f"{n.title}\n{n.body}"):
+        for code in candidates(text, pattern):
+            if code not in found:
+                found.append(code)
+    if pattern is None:
+        for m in SPLIT_CODE.finditer(f"{n.title}\n{n.body}"):
             if m.group(1) + m.group(2) not in found:
                 found.append(m.group(1) + m.group(2))
     return found

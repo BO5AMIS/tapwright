@@ -1357,7 +1357,9 @@ class Store:
         """A one-time code handed over or typed (§20.4): kept out of text from now on, as `<one-time code>`, in the same
         single pass as every vault value."""
         if code and not weak(code):
-            self._keep((("", CODE_LABEL, code),))
+            # every form a notification writes it in: `123 456` and `123-456` as well as `123456` (Codex, PR #12 c1, H4)
+            from .notifications import code_forms
+            self._keep(tuple(("", CODE_LABEL, form) for form in code_forms(code)))
 
     def _keep(self, entries: "tuple[tuple[str, str, str], ...]") -> None:
         fresh = [e for e in entries if e not in self._ever]

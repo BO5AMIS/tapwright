@@ -206,3 +206,43 @@ def test_h3_a_draft_changed_while_the_dialog_waits_is_not_sent(tmp_path):
             daemon_module._DRAFTS_ROUTE.reset(token)
         await finish(stop, task)
     run(go)
+
+
+# ---- H4, H5: what the notifications answer shows -----------------------------------------------------------------------
+from test_notifications import cell, center, otp_daemon, SMS  # noqa: E402
+from test_daemon_accounts import BUNDLE as CODE_APP  # noqa: E402
+
+SECRET_NOTE = "syntheticSECRET_value_1234567890"
+
+
+@pytest.mark.parametrize("shown", ["123 456", "123-456"])
+def test_h4_a_split_code_is_hidden_in_the_notifications_answer(tmp_path, shown):
+    async def go():
+        source = center(cell("Messages", "now", "+1 555 0100", f"Your Wayfare code is {shown}."))
+        d, s, said = otp_daemon(tmp_path, source=source)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "notifications", {})
+        await finish(stop, task)
+        assert "Your Wayfare code is <one-time code>." in r["text"], r["text"]
+        for form in ("123 456", "123-456", "123456"):
+            assert form not in r["text"] and form not in d.scrub_everywhere(f"again {form}")
+    run(go)
+
+
+@pytest.mark.parametrize("where", ["title", "body"])
+def test_h5_a_vault_value_across_the_cut_is_redacted_before_it(tmp_path, where):
+    async def go():
+        data = {"version": 2, "vault": {"n": {"kind": "note", "text": SECRET_NOTE}},
+                "otp": {CODE_APP: {"from": [SMS], "match": "Wayfare"}}}
+        pad = "pad " * (15 if where == "title" else 45)  # 60 or 180 characters: the value crosses the 80 or 200 cut
+        title, body = (pad + SECRET_NOTE, "short body") if where == "title" else ("Trip", pad + SECRET_NOTE)
+        source = center(cell("Messages", "now", title, body))
+        d, s, said = otp_daemon(tmp_path, data=data, source=source)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "notifications", {})
+        await finish(stop, task)
+        text = r["text"]
+        assert "n1 Messages" in text
+        for i in range(len(SECRET_NOTE) - 11):  # no 12-character piece of it (§20.3's test)
+            assert SECRET_NOTE[i:i + 12] not in text, (SECRET_NOTE[i:i + 12], text)
+    run(go)
