@@ -463,6 +463,11 @@ class FakeSession:
         self._record(("audit", tuple(types)))
         return list(self.audit_issues)
 
+    async def peek_tree(self, timeout=None):
+        """A read that keeps nothing: `items` stay as they are (Session.peek_tree)."""
+        self._record("peek_tree")
+        return ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+
     async def refresh(self, timeout=None):
         self._record("refresh")
         self.read_timeouts.append(timeout)

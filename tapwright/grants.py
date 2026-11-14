@@ -107,11 +107,19 @@ def never_reason(word: str, block: tuple[str, ...]) -> str | None:
     return None
 
 
-def touch_never(app: str | None, name: str | None) -> bool:
+def touch_never(app: str | None, name: str | None, alert: tuple[str, ...] = (), screen: tuple[str, ...] = ()) -> bool:
     """Is this touch in §19.2, whatever the grants say? A payment or an account deletion on the element (by word, phrase
-    or pattern), or an app where the account, privacy and security settings, the passwords and the cards live."""
-    return (app in NEVER_APPS) or (bool(name) and (payment(name or "") is not None
-                                                   or account_deletion(name or "") is not None))
+    or pattern), or an app where the account, privacy and security settings, the passwords and the cards live. What
+    surrounds the touch counts too (Codex, PR #12 cycle 1, H1): a `Delete` or `Confirm` in an alert titled "Delete your
+    account?" deletes the account, so `alert` (the alert's title, message and texts, for a touch on its button) is read
+    for an account deletion or a payment, and `screen` (the texts and headers on screen) for an account deletion."""
+    if app in NEVER_APPS:
+        return True
+    if name and (payment(name) is not None or account_deletion(name) is not None):
+        return True
+    if any(t and (payment(t) is not None or account_deletion(t) is not None) for t in alert):
+        return True
+    return any(t and account_deletion(t) is not None for t in screen)
 
 
 def reaches_people(word: str) -> bool:
@@ -322,6 +330,8 @@ class Touch:
     name: str | None  # the element's own label or text, as the policy matches it (§11.1)
     routes: tuple[str, ...] = ()  # the saved routes running now (a drive of one, a replay, a scheduled run)
     tool: str = "tap"
+    alert: tuple[str, ...] = ()  # the alert's words around a touch on its button (touch_never)
+    screen: tuple[str, ...] = ()  # the texts and headers on screen (touch_never)
 
 
 @dataclasses.dataclass
@@ -603,7 +613,7 @@ class Book:
     def holds(self, grant: Grant, touch: Touch, at: datetime.datetime) -> bool:
         """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)? `draft`: for the use a
         person's Send of a draft counts (§21.3), which a draftsOnly grant holds too."""
-        return (grant.app == touch.app and not touch_never(touch.app, touch.name)
+        return (grant.app == touch.app and not touch_never(touch.app, touch.name, touch.alert, touch.screen)
                 and _any(grant.words, touch.name or "") is not None
                 and (grant.route is None or grant.route in touch.routes)
                 and grant.revoked is None and not grant.drafts_only and at.date() <= grant.until
@@ -655,7 +665,7 @@ class Book:
         words, such as `tap "Post"`. `line` False: the caller writes the line itself (write_line) once still_covers
         held, so the log never names a use that then asked a person (review 1.7 A-L1)."""
         loaded = self.load()
-        if not loaded.ok or touch_never(touch.app, touch.name):
+        if not loaded.ok or touch_never(touch.app, touch.name, touch.alert, touch.screen):
             return Decision("ask")
         at = self.now()
         notes: list[str] = []

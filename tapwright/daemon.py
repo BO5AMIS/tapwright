@@ -11,6 +11,7 @@ import json
 import dataclasses
 import datetime
 import hashlib
+import hmac
 import math
 import os
 import pathlib
@@ -679,6 +680,9 @@ class Confirm:
     dialog: bool = False  # the host was asked too (a `dialog.CONFIRM` ask went to the owner's channel)
     origin: str = ""  # where the answer came from: "chat" or "the live view"
     draft: str | None = None  # a draft's request (§21.3): the draftsOnly grant that stopped it, "" for a route's
+    # a draft's request: a keyed digest of the draft and where it goes, as the person was shown them (Daemon._draft_digest).
+    # The send goes only while the screen still holds exactly that (Codex, PR #12 cycle 1, H3)
+    draft_digest: bytes | None = None
     used: bool = False  # an allow was taken by one call (Daemon._claim): no other call touches under it
     offer: "dict | None" = None  # what the follow-up grant offer (§19.6) needs, kept when the host was asked too
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # set at the first answer
@@ -1045,6 +1049,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
         self._queues: set = set()
+        self._draft_key = secrets.token_bytes(32)  # the drafts' digests (_draft_digest, H3): this process's own, kept nowhere
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
         self._needs: dict[str, Need] = {}  # "needs a person" asks open now, by id (see _hold_for_person)
@@ -5980,7 +5985,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         reach = grantlib.reach_word(name)
         route_draft = bool(_DRAFTS_ROUTE.get()) and reach is not None
         book = self._book()
-        touch = grantlib.Touch(app, name, _ROUTES.get(), tool) if book is not None else None
+        alert_words, screen_words = self._never_context(tool, element)
+        touch = (grantlib.Touch(app, name, _ROUTES.get(), tool, alert_words, screen_words)
+                 if book is not None else None)
         if hit is None:
             if reach is None:
                 return ""
@@ -6015,7 +6022,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if a.get("dry_run"):
             if grant:
                 return ""
-            if book is not None and touch is not None:  # §19.3: a dry run counts nothing
+            # §21.3: a route's draftsOnly stop comes before any grant: no grant lifts it (Codex, PR #12 cycle 1, H2)
+            if book is not None and touch is not None and not route_draft:  # §19.3: a dry run counts nothing
                 decided = book.decide(touch, "peek")
                 if decided.kind == "covered":
                     return f" {decided.dry}"
@@ -6023,6 +6031,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if route_draft:
                 return f' It would stop at a draft a person sees first (policy word "{reach}").'
             return f' It needs a person\'s OK (policy word "{word}").'
+        if grant is not None and grant.draft is not None and grant.draft_digest != await self._draft_digest(app):
+            # the draft or where it goes changed since the person saw it: their OK is for that draft only, so it is
+            # dropped and they are asked again with what the screen holds now (Codex, PR #12 cycle 1, H3)
+            self._confirms.pop(grant.id, None)
+            grant = None
         if grant is not None and self._claim(grant):
             if grant.draft is not None:  # a draft a person sent (§21.3): logged, noted as sent, not counted as a use
                 self._sent_draft(grant)
@@ -6030,13 +6043,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             else:
                 _GRANTED.get().append(grant.origin or "the live view")
             return ""
-        if book is not None and touch is not None and self._by_grant(book, touch, tool):
+        # §21.3: a route's draftsOnly stop comes before any grant, which never lifts it and is never counted for a draft
+        # a person sends (Codex, PR #12 cycle 1, H2)
+        if not route_draft and book is not None and touch is not None and self._by_grant(book, touch, tool):
             return ""
         held = _GRANT_CALL.get()
         stopped = held.draft if held is not None and reach is not None else None  # a draftsOnly grant's name
-        drafted: "tuple[str, str | None, bool] | None" = None
+        drafted: "tuple[str, str | None, bool, bytes] | None" = None
         if route_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
-            drafted = (stopped or "", *(await self._draft_text()))
+            shown_draft, has_code = await self._draft_text()
+            drafted = (stopped or "", shown_draft, has_code, await self._draft_digest(app))
             word = reach or word  # (the draft's question names the word that sends: `Send this in Mail?`)
         message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
@@ -6045,8 +6061,48 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                  "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
         await self._wait_for_person(request, message, tool, a, key, element, taken)
         if request.draft is not None:
+            # the screen was read again after the wait (_still_there): the draft and where it goes must be the ones the
+            # person was shown, or nothing is sent (Codex, PR #12 cycle 1, H3)
+            if request.draft_digest != await self._draft_digest(app):
+                raise Refused("not_allowed", "needs_confirmation: the draft changed while waiting for the OK; nothing "
+                                             "was sent. Make the call again to show the person the draft as it is now.",
+                              draft=True)
             self._sent_draft(request)
         return ""
+
+    def _never_context(self, tool: str, element: ui.Element) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """What surrounds a touch, for §19.2 (grantlib.touch_never; Codex, PR #12 cycle 1, H1): the alert's title, message
+        and texts when the touch is an alert's button (`alert`, or a tap on an element in it), and the screen's own texts
+        and headers (not other people's words: §21.1). Raw, for matching only."""
+        s = self.session
+        items = list(getattr(s, "items", None) or [])
+        alert: tuple[str, ...] = ()
+        if tool == "alert" or element.in_alert:
+            shown = getattr(s, "last_alert", None)
+            alert = tuple(t for t in ((shown.title, shown.message) if shown is not None else ()) if t)
+            alert += tuple(e.text for e in items if e.in_alert and e.role in ui.PASSIVE and e.text)
+        screen = tuple(e.text for e in items if e.role in ("text", "header") and not e.in_alert and not e.others
+                       and e.text)
+        return alert, screen
+
+    async def _draft_digest(self, app: str | None) -> bytes:
+        """A keyed digest of what a draft's send would send and where (Codex, PR #12 cycle 1, H3): the app, and every text
+        input on screen now with its own words, its place and its whole value (not the redacted one: two values can
+        share a placeholder); a password field without its value. Under the daemon's own random key, kept nowhere. The
+        screen is read now (Session.peek_tree, which leaves the agent's list as it is); when it can't be, the digest
+        can't match the one the person was shown, and the draft is asked again."""
+        peek = getattr(self.session, "peek_tree", None)
+        try:
+            items = (await peek()).items if peek is not None else list(self.session.items)
+        except Exception:  # noqa: BLE001 - no read: a digest nothing matches
+            return secrets.token_bytes(32)
+        parts = [app or ""]
+        for e in items:
+            if e.role != "input":
+                continue
+            value = "" if e.secure or e.shows_placeholder else e.value
+            parts += [e.identifier, e.label, ",".join(f"{v:g}" for v in e.rect), value]
+        return hmac.new(self._draft_key, "\0".join(parts).encode("utf-8", "surrogatepass"), hashlib.sha256).digest()
 
     def _sent_draft(self, request: Confirm) -> None:
         """A person sent the draft (§21.3): the call's log line says which draftsOnly grant showed it (`grant_draft`), and
@@ -6192,7 +6248,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float, caption: str | None = None, why: str | None = None,
-             drafted: "tuple[str, str | None, bool] | None" = None) -> tuple[str, Confirm | None]:
+             drafted: "tuple[str, str | None, bool, bytes] | None" = None) -> tuple[str, Confirm | None]:
         """The `needs_confirmation` message, after asking the live view (once for a request still open), and, for an
         agent whose host can show a dialog, the host too: then the request to wait for comes with it. An earlier
         request for this call that was declined, or ran out unanswered, is said at the message's end (when nobody
@@ -6207,7 +6263,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if c.state == "pending" and c.until >= now:
                 # reused only for a call that asks the same way: a person shown "Allow tap Send?" with no draft never
                 # answers for a touch that must show its draft first, nor the other way (review 1.7 B-L9)
-                if (c.draft is not None) == (drafted is not None):
+                if (c.draft is not None) == (drafted is not None) and \
+                        (drafted is None or c.draft_digest == drafted[3]):  # (another draft is another question: H3)
                     open_ = c
                 continue
             if c.state == "declined" and c.until >= now:
@@ -6231,7 +6288,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             drafting = drafted is not None  # §21.3: the request shows the draft, and its choices are the word and Don't <word>
             app_name = (self.session.app or (None, None))[0]
             if drafted is not None:
-                request.draft = drafted[0]
+                request.draft, request.draft_digest = drafted[0], drafted[3]
                 shown = dialog.draft_caption(scrub(word), scrub(app_name) if app_name else None, drafted[1], drafted[2])
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
@@ -6248,7 +6305,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                                       "message": scrub(shown), "choices": dialog.draft_choices(scrub(word))})
                 else:
                     if caption is None:  # (a card's typing is never offered as a grant, §20.1)
+                        alert_words, screen_words = self._never_context(tool, element)
                         request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
+                                         "raw": element.label if element.role == "input" else element.text,
+                                         "alert": alert_words, "screen": screen_words,
                                          "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
                     self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
                                                       "message": scrub(caption or dialog.caption(tool, label, app, word)),
@@ -6344,7 +6404,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 return
             loaded = book.load()
             if not loaded.ok or grantlib.never_reason(word, loaded.block_for(app)) is not None \
-                    or grantlib.touch_never(app, info["label"]):
+                    or grantlib.touch_never(app, info["label"], info.get("alert", ()), info.get("screen", ())) \
+                    or grantlib.touch_never(app, info.get("raw"), info.get("alert", ()), info.get("screen", ())):
                 return
             once = (owner, app, word.lower())
             if once in self._offered:

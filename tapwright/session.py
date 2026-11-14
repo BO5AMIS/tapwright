@@ -522,6 +522,12 @@ class Session:
         # (kept as XCTest says it, to be matched with the tree's elements: audit.rows_of redacts what it shows)
         return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
+    async def peek_tree(self, timeout: float = 60) -> ui.Tree:
+        """Read the tree and keep nothing of it: `items` and the rest stay as the last read left them (one request). For a
+        check right before a touch that must see the screen as it is now without renumbering the agent's list (a draft's
+        digest: Codex, PR #12 cycle 1, H3)."""
+        return ui.read(await self._source(timeout), self.screen)
+
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = await self._source(timeout)
