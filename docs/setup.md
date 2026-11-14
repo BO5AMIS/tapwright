@@ -145,16 +145,22 @@ ones as the daemon's own settings.
   vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
 - **One-time codes only into a code field.** `${otp.<app>}` is typed only into a one-line field whose id, label or
   placeholder says code, OTP, verification or PIN. Any other field is refused (`not_allowed`) and no code is read. A
-  draft that holds a code says so. Tapline's `/otp` gets a code only while the tool's own read shows the app in front
-  with such a field, and each code goes out once, also across a restart of the daemon: a handed-over code leaves a
+  draft that holds a code says so. Tapline's `/otp` gets a code only for an app within `serve --apps` (or with
+  `--dedicated`, `--phone`), only while the tool's own read shows the app in front with such a field, and each code
+  goes out once, also across a restart of the daemon: a handed-over code leaves a
   mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes.
 - **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
   touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
   with `--no-policy`. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
-  refused there: type without it, then tap the send button. Your OK is for the draft you saw: if the text, or any
-  field on the screen, changed before the send, nothing is sent and you are asked again.
-- **Deleting an account always asks you.** No grant covers a Delete or Confirm in an alert or on a screen that says it
-  deletes the account ("Delete your account?"), or in an alert about a payment, and no grant is offered for it.
+  refused there, and so is text with a line break in it (a vault value too, named, never shown): a line break is
+  Return, which sends in many apps. Type without it, then tap the send button. Your OK is for the draft you saw, as
+  one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, a
+  recipient) changed before the send, nothing is sent and you are asked again.
+- **Deleting an account or paying always asks you**, whatever the policy file says (also with `--no-policy`). On a
+  screen or in an alert that says it deletes the account ("Delete your account?"), and on a payment screen (titled
+  Send money, Checkout, Transfer and the like, or with a text such as "Transfer $25 to Alice", or an amount on its own
+  beside a Send), every button but Cancel, Back, Not now and the like asks you each time: Confirm and OK too. No grant
+  covers those, and none is offered. A price among other words ("The latte was $4") doesn't make a payment screen.
 - **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
   of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
   draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
@@ -163,6 +169,11 @@ ones as the daemon's own settings.
   stops a running batch or drive that began before it, whatever grants it began with.
 - **A vault in the macOS keychain can't be named `…#<number>`.** The keychain keeps those names for the pieces of a
   large vault, so `vault protect` refuses such a file name; rename it first.
+- **A route a grant names stays as it is**, whatever policy a call sends: a stricter call policy turns off the grants
+  for its own touches, never the protection of a route the daemon's grants name, so `record` refuses that name.
+- **A control that changed is not touched.** If the element at the target's place has the target's id and frame but
+  other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Another
+  app's banner or sheet over the target is named by its kind and place only, never by its words.
 - **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
   app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
 
@@ -170,11 +181,21 @@ ones as the daemon's own settings.
 
 - **One run on the phone at a time.** Scheduled runs and notification checks share a phone lock
   (`~/.tapwright/schedules/.phone.lock`). A run that finds it held waits, then reports `skipped: the phone was in use`.
-  If a crash leaves it behind, `tapwright doctor` names it and `tapwright schedule unlock --phone` removes it.
+  If a crash leaves it behind, `tapwright doctor` names it and `tapwright schedule unlock --phone` removes it. A lock
+  file that is empty is removed only once it is 2 seconds old (younger, its holder may still be writing it), and a
+  stuck `.takeover` beside a lock is cleared under a lock of its own, so an unlock never displaces a run that took the
+  lock meanwhile.
 - **The 90-second rule.** For a schedule, the phone is in use while a call is running, when an agent called in the
   last 90 seconds, or when you acted in the live view in the last 90 seconds. A run waits up to 10 minutes for that.
   While a scheduled run drives, other agents' actions answer `busy`. The daemon also checks this itself when the run
-  starts: if an agent or you got to the phone after the run's last look, the run waits and asks again.
+  starts: if an agent or you got to the phone after the run's last look, the run waits and asks again. A notification
+  trigger's check is decided again the moment it gets the phone, so an agent's call that came in meanwhile makes it
+  wait too.
+- **Notification Center is closed, or the answer says it may not be.** If closing it fails, the app that was in front
+  is opened again anyway; if Notification Center can't be shown closed, the call answers `internal` and says to look
+  at the screen first, instead of answering as if nothing were wrong.
+- **A run's errors are redacted.** A scheduled run's audit line and report go through its vault's redactor before
+  anything is cut or written, so a vault value in a file name or an error never reaches either.
 - **A run opens its app.** A scheduled run opens its route's app first, so it doesn't matter which app (or the home
   screen) is in front when it falls due.
 - **A locked phone.** `run-schedule` starts `tapwright serve` with the schedule's own `--accounts` when no daemon is
