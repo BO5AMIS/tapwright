@@ -251,3 +251,33 @@ def test_a_scroll_reveals_what_lies_below_up_to_five_times(tmp_path):
     phone.screens["home"].below = 2
     result = run(build(tmp_path, phone)[0])
     assert phone.scrolls == explore.SCROLLS and result.stopped == "frontier_empty"
+
+
+def element(ref: str, ident: str, x: float, y: float, label: str = "", role: str = "button"):
+    from tapwright import ui
+    return ui.Element(ref, role, label, ident, rect=(x, y, 100, 40), actions=("tap",), type=role.title())
+
+
+def test_the_actions_of_a_place_go_top_to_bottom_then_left_to_right_then_by_signature(tmp_path):
+    from tapwright import ui
+    items = [element("e1", "z-top-right", 200, 100), element("e2", "a-bottom", 10, 300), element("e3", "m-top-left", 10, 100),
+             element("e4", "b-tie", 10, 200), element("e5", "a-tie", 10, 200)]
+    tree = ui.Tree(items=items, app=("Example", "com.example.app"))
+    explorer, _ = build(tmp_path, world())
+    sigs = [a.sig for a in explorer._actions(tree, "place_1", False)]
+    assert sigs == ["id:m-top-left", "id:z-top-right", "id:a-tie", "id:b-tie", "id:a-bottom"]
+    assert [a.sig for a in explorer._actions(tree, "place_1", True)][-1] == explore.BACK_SIG  # `back` is the last move
+
+
+def test_signatures_follow_the_rules_of_25_3(tmp_path):
+    from tapwright import ui
+    long_label = "L" * 100
+    items = [element("e1", "", 10, 100, label=long_label), element("e2", "", 10, 150, label="Same"),
+             element("e3", "", 200, 150, label="Same"), element("e4", "", 10, 200), element("e5", "", 150, 700)]
+    items[3].value = "Plain text"
+    explorer, _ = build(tmp_path, world())
+    sigs = [a.sig for a in explorer._actions(ui.Tree(items=items, app=("Example", "com.example.app")), "place_1", False)]
+    assert f"label:{'L' * 80}" in sigs  # text is cut at 80 characters
+    assert "label:Same#0" in sigs and "label:Same#1" in sigs  # several elements: `#<index>` from 0
+    assert "text:Plain text" in sigs
+    assert "role:button@c2r7" in sigs  # no id, label or text: the role at its position on the 4 by 8 grid
