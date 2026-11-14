@@ -129,12 +129,18 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
 
 
 def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
-    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now)
+    # the redactor comes first, from the vault the file names, before the schedule is validated: an error that quotes a
+    # value or a path ("with's caption must be a text, not ['@<email>.txt']") is redacted whole, then cut, in the audit
+    # line, the report and what is printed (§20.3; Codex, PR #12 cycle 3, H6). Where it can't be made, the error's own
+    # words are never shown
+    early, sure = early_scrubber(name, deps.where)
+    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=early)
     try:
         s = schedules.load(name, deps.where)
     except schedules.ScheduleError as e:
-        audit.write("schedule", name=name, detail=f"failed: {e}"[:300])
-        return finish(name, deps, "failed", f"failed: {e}", None, deps.now(), code=2)
+        result = cut(early, f"failed: {e}" if sure else WITHHELD.format(name=name), 300)
+        audit.write("schedule", name=name, detail=result)
+        return finish(name, deps, "failed", result, None, deps.now(), code=2, scrub=early)
     # the run's redactor, from its own vault, before anything is written: every audit line and the report go through it,
     # whole and before any cut (§20.3, §23; Codex, PR #12 cycle 2, H7)
     audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=scrubber(s))
@@ -230,6 +236,45 @@ def end(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, status: str
 def cut(scrub: Callable[[str], str], text: str, n: int) -> str:
     """`text` redacted whole, THEN cut to `n` characters: a cut first could leave part of a value (§20.3)."""
     return scrub(text)[:n]
+
+
+WITHHELD = ("failed: the schedule \"{name}\" isn't valid. Its details aren't shown: the vault it names can't be read, so a "
+            "value in them couldn't be hidden. Check the schedule's file.")
+
+
+def early_scrubber(name: str, where: Path | None) -> tuple[Callable[[str], str], bool]:
+    """The run's redactor before its schedule is validated (Codex, PR #12 cycle 3, H6), from the `accounts` the file names,
+    read from its JSON as it stands, before any other field is checked. With it, whether the error's words may be shown:
+    True when the file names no vault (or there is no such schedule), or the vault loaded; False when the file can't be
+    read as a JSON object, or names a vault that can't be read or names it wrongly (its values can't be known)."""
+    def same(text: str) -> str:
+        return text
+    try:
+        schedules.check_name(name)
+        path = schedules.file_of(name, where)
+    except Exception:  # noqa: BLE001 - a bad name: its own error quotes only the name
+        return same, True
+    if not path.exists():
+        return same, True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001 - unreadable, or not JSON: what it names can't be known
+        return same, False
+    if not isinstance(data, dict):
+        return same, False
+    accounts = data.get("accounts")
+    if accounts is None:
+        return same, True
+    if not isinstance(accounts, str) or not accounts.strip():
+        return same, False
+    try:
+        from . import accounts as accountlib
+        loaded = accountlib.load(accounts)
+    except Exception:  # noqa: BLE001 - a vault that can't be read hides nothing
+        return same, False
+    if loaded.problem is not None:
+        return same, False
+    return (loaded.scrub if loaded.redacts else same), True
 
 
 def scrubber(s: schedules.Schedule) -> Callable[[str], str]:
