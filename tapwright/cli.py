@@ -22,6 +22,10 @@
   tapwright grants --policy FILE [--revoke-all]
                      the grants of a policy file, today's counts and the last uses; --revoke-all revokes
                      every one and stops a running route; `grants unlock --policy FILE` removes a stuck edit lock
+  tapwright schedule add ROUTE (--at "09:00 daily" | --on-file DIR | --on-notification APP) [--with k=v|k=@file]
+                     [--name NAME] [--policy FILE] [--accounts FILE] [--maps DIR]; schedule list; schedule remove NAME;
+                     schedule unlock NAME (a stuck run lock); tapwright run-schedule NAME: one scheduled run, now, with
+                     no agent (Windows: a time schedule is a Task Scheduler task that wakes the PC)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -448,6 +452,15 @@ def report_grants(policy: str | None) -> int:
     return problems
 
 
+def report_schedules() -> int:
+    """`doctor`: a schedule's run lock that is stuck, with its path and the command that removes it (§22.3). Problems."""
+    from . import schedules
+    stuck = schedules.stuck_locks()
+    for n, lock, why in stuck:
+        fail(f"the run lock {lock} of schedule \"{n}\" is stuck: {why}. Remove it with: tapwright schedule unlock {n}")
+    return len(stuck)
+
+
 async def doctor(a) -> int:
     """Check the setup. With `--fix`, repair what can be repaired with the signing material already stored."""
     from importlib.metadata import version
@@ -458,6 +471,7 @@ async def doctor(a) -> int:
         return problems
     problems += report_accounts(getattr(a, "accounts", None))
     problems += report_grants(getattr(a, "policy", None))
+    problems += report_schedules()
     from pymobiledevice3 import usbmux
 
     from . import repair, signing
@@ -821,6 +835,30 @@ def main() -> int:
     p.add_argument("--revoke-all", action="store_true",
                    help="revoke every grant in the file (it stays there, marked revoked) and stop any running route "
                         "between moves")
+    p = sub.add_parser("schedule", help="routes that run on a time or a trigger, with no model (add, list, remove, unlock)")
+    ss = p.add_subparsers(dest="schedule_cmd", required=True)
+    q = ss.add_parser("add", help="schedule a saved route")
+    q.add_argument("route")
+    q.add_argument("--at", metavar="WHEN", help='"09:00 daily", "09:00 weekdays" or an ISO date-time (one run)')
+    q.add_argument("--on-file", "--trigger-file", dest="on_file", metavar="DIR",
+                   help="run when a file appears in this folder (checked while the PC is awake)")
+    q.add_argument("--on-notification", metavar="APP", help="run when a notification from this app arrives (Tapwright only; "
+                   "stored now, it fires once notifications can be read)")
+    q.add_argument("--with", dest="with_", action="append", metavar="NAME=VALUE|NAME=@FILE",
+                   help="a value for one of the route's variables; @FILE is the text of that file, read at each run")
+    q.add_argument("--name", help="the schedule's name (default: the route's)")
+    q.add_argument("--policy", metavar="FILE", help="the policy file whose grants are in force in the run (version 2)")
+    q.add_argument("--accounts", metavar="FILE", help="the vault the run uses")
+    q.add_argument("--maps", metavar="DIR", help="where the route's map is kept (default: ~/.tapwright/maps)")
+    ss.add_parser("list", help="the schedules and their tasks")
+    q = ss.add_parser("remove", help="remove a schedule and its task")
+    q.add_argument("name")
+    q = ss.add_parser("unlock", help="remove a stuck run lock (refused while its holder is alive)")
+    q.add_argument("name")
+    p = sub.add_parser("run-schedule", help="one run of a schedule, now (what the system's scheduler starts)")
+    p.add_argument("name")
+    p.add_argument("--if-triggered", action="store_true",
+                   help="run only if a file appeared in the schedule's trigger folder since the last check")
     p = sub.add_parser("vault", help="the vault file (--accounts): protect a plain one with this system's protection")
     p.add_argument("action", choices=["protect"],
                    help="protect: write FILE in this system's protected form (Windows DPAPI, the macOS keychain); "
@@ -972,6 +1010,25 @@ def main() -> int:
             text, code = grantscmd.run_grants(a.policy, revoke_all=a.revoke_all)
         print(text)
         return code
+    if a.cmd == "schedule":
+        from . import schedules
+        if a.schedule_cmd == "add":
+            text, code = schedules.add(a.route, at=a.at, on_file=a.on_file, on_notification=a.on_notification,
+                                       with_=a.with_, name=a.name, policy=a.policy, accounts=a.accounts, maps=a.maps)
+        elif a.schedule_cmd == "list":
+            text, code = schedules.listing_text()
+        elif a.schedule_cmd == "remove":
+            text, code = schedules.remove(a.name)
+        else:
+            text, code = schedules.unlock(a.name)
+        print(text)
+        return code
+    if a.cmd == "run-schedule":
+        from . import schedulerun
+        outcome = schedulerun.run(a.name, if_triggered=a.if_triggered)
+        if outcome.status != "idle":
+            print(outcome.text or outcome.result)
+        return outcome.code
     if a.cmd == "vault":
         from . import accounts, vault
         done, text = vault.protect(str(Path(a.file).expanduser()), check=accounts.check_text)
