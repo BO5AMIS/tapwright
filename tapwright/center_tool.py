@@ -314,5 +314,12 @@ class CenterTools:
             raise Refused("internal", f"the notification trigger's key at {schedules.trigger_key_path()} can't be read or "
                                       "made; nothing was read")
         await self.wait_connected()
-        found, _ = await self._on_phone(lambda: self._read_center(lambda b: b == app, caption="Check for notifications"))
+        # the trigger's app as written in the schedule, a bundle id or a name (review 1.7 B-L6: a name never matched a
+        # bundle id, so `--on-notification Wayfare` polled forever): one installed app, or refused
+        from .server import resolve_app
+        bundle, why = resolve_app(app, await self.installed_names())
+        if bundle is None:
+            raise Refused("not_found", f"the trigger's app: {why}; nothing was read")
+        found, _ = await self._on_phone(lambda: self._read_center(lambda b: b == bundle,
+                                                                   caption="Check for notifications"))
         return [x.key(secret) for x in found]

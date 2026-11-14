@@ -429,7 +429,15 @@ def scheduled_tasks(module=None) -> dict:
         missing = tuple(n for n in names if scheduler.exists(n) is False)
     except Exception:
         return {}
-    return {"tasks": len(names), "tasks_missing": missing}
+    polling: list[str] = []
+    for n in names:
+        try:
+            trigger = module.load(n).trigger
+        except Exception:
+            continue
+        if trigger and "notification" in trigger:
+            polling.append(n)
+    return {"tasks": len(names), "tasks_missing": missing, "polling": tuple(polling)}
 
 
 async def unattended_facts(usb: list[str], accounts: str | None, connect=None, status: dict | None = None,
@@ -464,10 +472,14 @@ async def unattended_stops(usb: list[str], accounts: str | None, connect=None, s
     return needs.unattended(needs.Facts(**await unattended_facts(usb, accounts, connect, status, machine)))
 
 
-def print_unattended(stops: list, ready: list[str] | None = None) -> None:
+def print_unattended(stops: list, ready: list[str] | None = None, notes: list[str] | None = None) -> None:
     if ready:
         print("\nReady for an unattended run:")
         for line in ready:
+            print(f"  - {line}", flush=True)
+    if notes:
+        print("\nGood to know:")
+        for line in notes:
             print(f"  - {line}", flush=True)
     print("\nWhat would stop an unattended run:" if stops else "\nNothing doctor can see would stop an unattended run.")
     for stop in stops:
@@ -614,7 +626,7 @@ async def doctor(a) -> int:
         facts = needs.Facts(**await unattended_facts(usb, a.accounts, status=client.healthy(store.read_serve_info()),
                                                      machine=True))
         stops = needs.unattended(facts)
-        print_unattended(stops, needs.unattended_ready(facts))
+        print_unattended(stops, needs.unattended_ready(facts), needs.unattended_notes(facts))
         problems += len(stops)
     print(f"\n{problems} problem(s)." if problems else
           "\nSet up, but the phone needs a person (above)." if waiting else "\nAll set.")
@@ -1179,8 +1191,16 @@ def main() -> int:
     if a.cmd == "audit-log":
         from . import auditlog
         if a.delete:
+            # a person's own decision, asked for on a terminal, and it leaves its own line behind (review 1.7 B-L12)
+            if sys.stdin is not None and sys.stdin.isatty():
+                typed = input("This deletes every line of the audit log. Type delete to go on: ").strip()
+                if typed.casefold() != "delete":
+                    print("Nothing was deleted.")
+                    return 1
             gone = auditlog.delete()
-            print(f"Deleted the audit log ({gone} line{'' if gone == 1 else 's'}).")
+            auditlog.AuditLog().write("approval", name="audit log",
+                                      detail=f"audit log deleted by the person ({gone} line{'' if gone == 1 else 's'})")
+            print(f"Deleted the audit log ({gone} line{'' if gone == 1 else 's'}). One line now says it was deleted.")
             return 0
         try:
             since = auditlog.since_of(a.since) if a.since else None

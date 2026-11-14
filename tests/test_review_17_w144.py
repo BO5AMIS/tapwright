@@ -564,3 +564,153 @@ def test_a_l1_a_use_is_given_back_when_the_call_is_refused_before_any_touch(tmp_
         assert book.counts(g, box[0])[0] == 0
         await finish(stop, task)
     run(go)
+
+
+# ---- A-L4: the grant written ends on the date the person was shown ----
+
+def test_a_l4_an_answer_after_midnight_writes_the_end_date_that_was_shown(tmp_path):
+    import datetime
+    import json
+
+    from tapwright import grants
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps({"version": 2, "confirm": ["Post"]}), encoding="utf-8")
+    box = [datetime.datetime(2026, 11, 14, 23, 59)]
+    book = grants.Book(path, None, now=lambda: box[0])
+    shown = box[0].date() + datetime.timedelta(days=grants.OFFER_DAYS)  # what the dialog said: 2026-11-21
+    box[0] = datetime.datetime(2026, 11, 15, 0, 1)  # the person answered two minutes later
+    made = book.create(grants.Spec("chat_post", "com.example.chat", ("Post",), until=shown))
+    assert isinstance(made, grants.Grant) and made.until == datetime.date(2026, 11, 21)
+    far = grants.Spec("chat_post2", "com.example.chat", ("Post",), until=datetime.date(2026, 12, 20))
+    assert isinstance(book.create(far), str)  # (31 days from the answer: never written)
+
+
+# ---- B-L6, B-L7, run-schedule's serve ----
+
+def test_b_l6_a_notification_trigger_named_by_the_apps_name_finds_its_notifications(tmp_path):
+    """B-L6: `--on-notification Wayfare` compared the name with bundle ids and polled forever with no keys."""
+    from test_daemon import finish, run, started
+    tn = _nc()
+
+    async def go():
+        d, s = tn.center_daemon(tmp_path, [])
+        stop, task = await started(d)
+        by_name = await d.notification_keys("Wayfare")
+        await finish(stop, task)
+        assert len(by_name) == 2
+    run(go)
+
+
+def _scheduled(tmp_path, monkeypatch, accounts=None):
+    from test_notifications import TriggerPhone, trigger_deps
+
+    from tapwright import schedules, store
+    monkeypatch.setattr(store, "HOME", tmp_path / "home")
+    phone = TriggerPhone([["a"]])
+    deps, _ = trigger_deps(tmp_path, phone)
+    schedules.write(schedules.Schedule("daily", "post_update", {}, "09:00 daily", None, accounts=accounts), deps.where)
+    return phone, deps
+
+
+def test_b_l7_an_unexpected_error_in_a_scheduled_run_ends_as_failed_internal_with_its_line(tmp_path, monkeypatch):
+    import json
+
+    from tapwright import schedulerun, schedules
+    phone, deps = _scheduled(tmp_path, monkeypatch)
+
+    def broken(s):
+        raise KeyError("boom")
+    monkeypatch.setattr(schedules, "read_values", broken)
+    out = schedulerun.run("daily", deps=deps)
+    assert out.status == "failed" and out.result.startswith(schedulerun.INTERNAL)
+    lines = [json.loads(x) for f in (tmp_path / "audit").glob("*.jsonl") for x in f.read_text("utf-8").splitlines()]
+    assert any(x["kind"] == "schedule" and x["detail"].startswith("failed: internal") for x in lines)
+
+
+def test_run_schedule_starts_serve_with_the_schedules_own_accounts(tmp_path, monkeypatch):
+    """W142's open point: a serve that run-schedule starts had no --accounts, so a scheduled unlock was refused."""
+    from tapwright import client, schedulerun
+    vault = str(tmp_path / "vault.json")
+    phone, deps = _scheduled(tmp_path, monkeypatch, accounts=vault)
+    given: list = []
+    phone.set_serve_args = given.append
+    schedulerun.run("daily", deps=deps)
+    assert given == [["--accounts", vault]]
+    started_with: list = []
+    monkeypatch.setattr(client.subprocess, "Popen", lambda cmd, **kw: started_with.append(cmd))
+    try:
+        client.set_serve_args(["--accounts", vault])
+        client.start_daemon()
+    finally:
+        client.set_serve_args([])
+    assert started_with[0][-2:] == ["--accounts", vault]
+
+
+# ---- B-L8: the watchdog ----
+
+def test_b_l8_a_frozen_app_is_its_own_event_and_back_never_names_the_phones_address():
+    from tapwright import watchdog
+    said: list = []
+    t = [0.0]
+    w = watchdog.Watchdog(lambda kind, text: said.append((kind, text)), clock=lambda: t[0], grace=60)
+    w.state("live", "network 192.0.2.10:62078")
+    w.state("not-answering")
+    t[0] = 61
+    w.state("not-answering")
+    assert said == [("not_answering", watchdog.NOT_ANSWERING)]
+    w.state("live", "network 192.0.2.10:62078")
+    w.state("no-device")
+    t[0] = 200
+    w.state("no-device")
+    w.state("live", "network 192.0.2.10:62078")
+    assert said[-1] == ("back", "Watchdog: the phone is back (over Wi-Fi).")
+    assert not any("192.0.2.10" in text for _, text in said)
+
+
+# ---- B-L12: audit-log --delete asks on a terminal and leaves its own line ----
+
+def test_b_l12_deleting_the_audit_log_asks_on_a_terminal_and_leaves_a_line(tmp_path, monkeypatch, capsys):
+    import io
+
+    from tapwright import auditlog, cli
+    folder = tmp_path / "audit"
+    monkeypatch.setattr(auditlog, "default_folder", lambda: folder)
+    auditlog.AuditLog(folder).write("grant", name="chat_send", detail="tap Send (1 of 3 today)")
+
+    class Terminal(io.StringIO):
+        def isatty(self):
+            return True
+    monkeypatch.setattr("sys.argv", ["tapwright", "audit-log", "--delete"])
+    monkeypatch.setattr("sys.stdin", Terminal("no\n"))
+    assert cli.main() == 1 and "Nothing was deleted" in capsys.readouterr().out
+    assert len(auditlog.read_lines(folder)) == 1 and "chat_send" in auditlog.read_lines(folder)[0]
+    monkeypatch.setattr("sys.stdin", Terminal("delete\n"))
+    assert cli.main() == 0
+    left = auditlog.read_lines(folder)
+    assert len(left) == 1 and "audit log deleted by the person (1 line)" in left[0]
+
+
+# ---- B-L11: doctor --unattended says what the schedules do to a phone and what they can miss ----
+
+def test_b_l11_doctor_says_a_notification_poll_pulls_the_center_down_and_a_missed_run_leaves_no_trace():
+    from tapwright import cli, needs
+
+    class Module:
+        class Scheduler:
+            def exists(self, name):
+                return True
+
+        @staticmethod
+        def names():
+            return ["daily", "on_chat"]
+
+        @staticmethod
+        def load(name):
+            from tapwright import schedules
+            trigger = {"notification": "com.example.chat"} if name == "on_chat" else None
+            return schedules.Schedule(name, "r", {}, None if trigger else "09:00 daily", trigger)
+    facts = needs.Facts(**cli.scheduled_tasks(Module))
+    notes = needs.unattended_notes(facts)
+    assert facts.polling == ("on_chat",)
+    assert any("leaves no line in the audit log" in n and "logged on" in n for n in notes)
+    assert any('"on_chat"' in n and "Notification Center down" in n for n in notes)

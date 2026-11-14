@@ -95,6 +95,7 @@ class Facts(NamedTuple):
     tasks: int | None = None  # schedules found (None: not checked)
     vault_problem: str | None = None  # the vault file can't be used (its own words; never a value)
     unlock_stopped: bool = False  # the passcode unlock stopped after a refused passcode (unlock.Ledger; review 1.7, H2)
+    polling: tuple[str, ...] = ()  # schedules with a notification trigger (they look at the phone every 2 minutes)
 
 
 class Stop(NamedTuple):
@@ -147,6 +148,21 @@ def unattended(f: Facts) -> list[Stop]:
         stops.append(Stop(f"The schedule \"{name}\" has no Task Scheduler task: it never runs.",
                           f"Add it again (tapwright schedule add), or remove it: tapwright schedule remove {name}."))
     return stops
+
+
+def unattended_notes(f: Facts) -> list[str]:
+    """What a person should know about the schedules, though nothing is wrong (review 1.7 B-L11)."""
+    notes: list[str] = []
+    if f.tasks:
+        notes.append("A scheduled run that falls due while this PC is off (or asleep with wake timers off) doesn't run "
+                     "later and leaves no line in the audit log; and a run happens only while you are logged on to "
+                     "Windows.")
+    for name in f.polling:
+        notes.append(f"The schedule \"{name}\" checks for notifications every 2 minutes while this PC is awake: each "
+                     "check pulls Notification Center down over the phone's screen for about a second. It waits while "
+                     "the tool or the live view uses the phone, but it can't see a person holding the phone; on a phone "
+                     "you use yourself, remove it when you don't need it (tapwright schedule remove).")
+    return notes
 
 
 def unattended_ready(f: Facts) -> list[str]:

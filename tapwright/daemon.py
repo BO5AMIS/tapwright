@@ -6327,9 +6327,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             routes = info["routes"]
             name = info["app_name"] or app
             spec = grantlib.Spec(grantlib.name_base(name, word), app, (word,), route=routes[-1] if routes else None)
+            # the end date is fixed when the person is asked: the grant written is the one they were shown (A-L4)
+            spec = dataclasses.replace(spec, until=book.now().date() + datetime.timedelta(days=spec.days))
             reach = grantlib.reaches_people(word)
-            shown = grantlib.Grant(spec.name_base, app, spec.words,
-                                   book.now().date() + datetime.timedelta(days=spec.days), spec.per_day,
+            shown = grantlib.Grant(spec.name_base, app, spec.words, spec.until, spec.per_day,
                                    None, spec.route, None, reach)
             if await self._ask_offer(owner, dialog.GRANT, self.scrub_everywhere(grantlib.caption(shown, name))) != "allow":
                 return

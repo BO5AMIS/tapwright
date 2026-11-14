@@ -30,7 +30,8 @@ def test_lists_since_and_deletes(tmp_path, monkeypatch, capsys):
     assert cli.main() == 2 and "--since takes a date" in capsys.readouterr().out
     monkeypatch.setattr("sys.argv", ["tapwright", "audit-log", "--delete"])
     assert cli.main() == 0 and "2 lines" in capsys.readouterr().out
-    assert auditlog.read_lines(folder) == []
+    left = auditlog.read_lines(folder)  # (review 1.7 B-L12: the deletion leaves its own line)
+    assert len(left) == 1 and '"kind": "approval"' in left[0] and "audit log deleted by the person" in left[0]
     with pytest.raises(SystemExit):  # one or the other
         monkeypatch.setattr("sys.argv", ["tapwright", "audit-log", "--delete", "--since", "2026-11-01"])
         cli.main()

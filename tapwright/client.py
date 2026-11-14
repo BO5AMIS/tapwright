@@ -171,10 +171,19 @@ def status() -> dict | None:
     return healthy(find_or_start())
 
 
+_SERVE_ARGS: list[str] = []  # what a serve this process starts is given (a scheduled run: its own --accounts)
+
+
+def set_serve_args(args: list[str]) -> None:
+    """The arguments a `tapwright serve` this process starts gets (`run-schedule`: the schedule's `--accounts`, so its
+    unlock can type the passcode). A serve already running is used as it is."""
+    _SERVE_ARGS[:] = [str(a) for a in args]
+
+
 def start_daemon() -> subprocess.Popen:
     """`tapwright serve` in the background: no console window, and it outlives the agent that
     started it (on Windows it leaves the agent host's job object when Windows allows that)."""
-    cmd = [sys.executable, "-m", "tapwright", "serve"]
+    cmd = [sys.executable, "-m", "tapwright", "serve", *_SERVE_ARGS]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True}
     if os.name != "nt":

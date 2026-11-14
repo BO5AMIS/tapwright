@@ -104,16 +104,42 @@ def classify(code: str, message: str, draft: bool = False) -> tuple[str, str]:
     return "failed", f"failed: {code}: {first}"
 
 
+INTERNAL = "failed: internal"
+
+
 def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> Outcome:
     """One run of schedule `name`, now. With `if_triggered` (the poll of a file trigger) it runs only when a file appeared
-    in the trigger's folder since the last check, and does nothing, silently, otherwise."""
+    in the trigger's folder since the last check, and does nothing, silently, otherwise. Whatever goes wrong inside ends
+    as `failed: internal`, with its audit line and report (review 1.7 B-L7: under `pythonw` a traceback is seen by
+    nobody)."""
     deps = deps or Deps()
+    began = deps.now()
+    try:
+        return _run(name, if_triggered, deps)
+    except Exception as e:
+        detail = f"{INTERNAL} ({type(e).__name__})"
+        try:
+            auditlog.AuditLog(deps.audit_folder, now=deps.now).write("schedule", name=name, detail=detail)
+        except Exception:
+            pass
+        try:
+            return finish(name, deps, "failed", detail, None, began, code=1, used=False)
+        except Exception:
+            return Outcome("failed", detail, f"{name}: {detail}", 1)
+
+
+def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
     audit = auditlog.AuditLog(deps.audit_folder, now=deps.now)
     try:
         s = schedules.load(name, deps.where)
     except schedules.ScheduleError as e:
         audit.write("schedule", name=name, detail=f"failed: {e}"[:300])
         return finish(name, deps, "failed", f"failed: {e}", None, deps.now(), code=2)
+    # a serve this run starts is started with the schedule's own vault file, so a scheduled unlock can type the
+    # passcode (the daemon types it only from its own --accounts); a serve already running keeps what it has
+    serve_args = getattr(deps.api(), "set_serve_args", None)
+    if callable(serve_args):
+        serve_args(["--accounts", s.accounts] if s.accounts else [])
     if if_triggered:
         if not s.trigger:
             return Outcome("failed", "failed: --if-triggered is for a schedule with a file or notification trigger",

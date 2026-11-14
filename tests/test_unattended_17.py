@@ -210,7 +210,7 @@ def test_one_message_per_event_and_a_short_drop_says_nothing():
         w.state("no-device")
     assert said == [("gone", watchdog.GONE_USB)]  # once, however long it stays gone
     w.state("live", "local network")
-    assert said[-1] == ("back", "Watchdog: the phone is back (over local network).") and len(said) == 2
+    assert said[-1] == ("back", "Watchdog: the phone is back (over Wi-Fi).") and len(said) == 2
     w.state("reconnecting")
     clock.t += 61
     w.state("reconnecting")
@@ -341,7 +341,7 @@ def test_the_scheduled_tasks_are_checked_when_schedules_exist():
         class Scheduler:
             def exists(self, name):
                 return name != "weekly"
-    assert cli.scheduled_tasks(Schedules) == {"tasks": 2, "tasks_missing": ("weekly",)}
+    assert cli.scheduled_tasks(Schedules) == {"tasks": 2, "tasks_missing": ("weekly",), "polling": ()}
 
 
 def test_the_runner_check_reads_what_setup_recorded(monkeypatch):

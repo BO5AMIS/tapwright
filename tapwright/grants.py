@@ -312,6 +312,7 @@ class Spec:
     route: str | None = None
     quiet: tuple[str, str] | None = None
     drafts_only: bool | None = None  # only False is written: the person said Yes to sending without drafts
+    until: datetime.date | None = None  # the end date the person was shown (review 1.7 A-L4); None: today + days
 
 
 # ---- what a touch is, and what the grants say -------------------------------------------------------------------
@@ -920,7 +921,11 @@ class Book:
         rules, a version 1 file becoming version 2. The creation is audited (§23, `approval`, `grant created`). Only
         the daemon's dialog calls this, with what the person answered. The grant, or why nothing was written."""
         today = self.now().date()
-        until = today + datetime.timedelta(days=min(MAX_DAYS, max(0, spec.days)))
+        until = spec.until or today + datetime.timedelta(days=min(MAX_DAYS, max(0, spec.days)))
+        if not today <= until <= today + datetime.timedelta(days=MAX_DAYS):
+            # the date the person was shown no longer fits (the answer came after midnight, 30 days on): nothing is
+            # written rather than a date they weren't shown (A-L4)
+            return f"the end date the person was shown ({until.isoformat()}) no longer fits {MAX_DAYS} days from today."
         made: list[Grant] = []
         refusal: list[str] = []
 
