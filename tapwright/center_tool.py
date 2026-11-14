@@ -80,9 +80,16 @@ class CenterTools:
             found = notes_lib.parse(source, dict(getattr(s, "app_names", {}) or {}), keep)
             del source  # (every other app's notification goes with it)
             if open_index is not None and 1 <= open_index <= len(found):
-                opened = found[open_index - 1]
-                await s.tap(ui.Target(x=opened.center[0], y=opened.center[1]))
+                chosen = found[open_index - 1]
+                await s.tap(ui.Target(x=chosen.center[0], y=chosen.center[1]))
                 await asyncio.sleep(OPEN_WAIT)
+                if await s.foreground_bundle_id() != chosen.bundle:
+                    # Its app didn't come to the front: Notification Center must never stay open (the phone locks
+                    # soon after, as it does on the lock screen), so it is closed, and the call says so.
+                    raise Refused("not_found", f"n{open_index} didn't open: its app didn't come to the front, so "
+                                               f"Notification Center was closed again and the app you were in is back. "
+                                               f"Open {chosen.app} with open_app instead.")
+                opened = chosen
         finally:
             if opened is None:
                 await self._close_center(before)

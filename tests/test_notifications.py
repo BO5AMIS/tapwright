@@ -117,12 +117,12 @@ def test_ios26_shape_app_in_any_case_long_times_stacks_and_commas():
     )
     got = nl.parse(screen, INSTALLED, lambda b: b == BUNDLE)
     assert [(n.bundle, n.app, n.when, n.title, n.body) for n in got] == [
-        (BUNDLE, "WAYFARE", "12 minutes ago", "Trip booked, Lisbon", "Seats 4, 5 and 6, row 2"),
+        (BUNDLE, "Wayfare", "12 minutes ago", "Trip booked, Lisbon", "Seats 4, 5 and 6, row 2"),
         (BUNDLE, "Wayfare", "2 hours ago", "Price drop", "Porto, from 49")]
     assert got[0].age == (720.0, 780.0) and got[1].age == (7200.0, 10800.0)
     assert got[0].center == (215.0, 148.5)
     assert CHAT_SECRET not in repr(got)
-    assert [n.app for n in nl.parse(screen, INSTALLED, lambda b: True)][:3] == ["WAYFARE", "Chat", "Wayfare"]
+    assert [n.app for n in nl.parse(screen, INSTALLED, lambda b: True)][:3] == ["Wayfare", "Chat", "Wayfare"]
     assert nl.age_of("1 hour ago") == (3600.0, 7200.0) and nl.age_of("3 days ago")[0] == 259200.0
     assert nl.age_of("1 week ago") == (604800.0, 1209600.0) and nl.is_time("5 mins ago")
 
@@ -227,6 +227,21 @@ def test_open_takes_a_number_from_the_list_and_says_when_it_isnt_there(tmp_path)
             assert e.value.code == "bad_params"
         r = await d.run_tool("a", "notifications", {"open": 1}, scope=Scope((BUNDLE,)))
         assert r["text"].startswith("Opened n1:") and s.tap_points[-1] == (8 + 207, 190 + 40)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_open_that_doesnt_bring_the_app_closes_notification_center_and_says_so(tmp_path):
+    """Seen on the phone 2026-11-14: a tap that leaves Notification Center down must not leave it there (the phone locks
+    soon after, as on the lock screen)."""
+    async def go():
+        d, s = center_daemon(tmp_path, [])
+        s.center_opens, s.center_tap_stays = BUNDLE, True
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "notifications", {"open": 1}, scope=Scope((BUNDLE,)))
+        assert e.value.code == "not_found" and "n1 didn't open" in str(e.value)
+        assert not s.center_open and s.foreground == BUNDLE and len(s.tap_points) == 1
         await finish(stop, task)
     run(go)
 

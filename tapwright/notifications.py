@@ -51,7 +51,7 @@ UNIT = {"m": 60, "h": 3600, "d": 86400, "w": 604800}  # by the unit's first lett
 @dataclasses.dataclass(frozen=True)
 class Notification:
     bundle: str
-    app: str  # the name Notification Center shows
+    app: str  # the app's home screen name (Notification Center may write it in capitals)
     when: str  # as it shows it: "now", "5m ago", "09:41", "Yesterday", or "" when it shows none
     age: tuple[float, float] | None  # (at least, at most) seconds old, when `when` says
     title: str = dataclasses.field(repr=False)
@@ -178,6 +178,7 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
     except ET.ParseError:
         return []
     names = names_to_bundles(installed)
+    shown = {**{b: n for n, b in SYSTEM_APPS.items()}, **{b: n for b, n in installed.items() if n}}  # (its home screen name)
     found: list[tuple[int, Notification]] = []
 
     def walk(node: ET.Element) -> None:
@@ -198,7 +199,7 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
                 if bundle is not None and keep(bundle):
                     x, y, w, h = _rect(child)
                     found.append((len(found), Notification(
-                        bundle, app, when, age_of(when, now) if when else None,
+                        bundle, shown.get(bundle) or app, when, age_of(when, now) if when else None,
                         _cut(title, TITLE_MAX), _cut(body, BODY_MAX), (x + w / 2, y + h / 2))))
                 continue  # (a notification's own parts are never a second notification)
             walk(child)

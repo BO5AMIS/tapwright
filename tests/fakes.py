@@ -509,6 +509,8 @@ class FakeSession:
         if self.center_open and getattr(target, "x", None) is not None:
             self._record("tap")
             self.tap_points.append((target.x, target.y))
+            if getattr(self, "center_tap_stays", False):  # the tap opened nothing: Notification Center is still down
+                return f"Tapped ({round(target.x)}, {round(target.y)})."
             self.center_open, self.foreground = False, self.center_opens
             return f"Tapped ({round(target.x)}, {round(target.y)})."
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
