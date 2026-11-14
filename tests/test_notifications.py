@@ -567,6 +567,19 @@ def test_the_check_route_is_within_the_apps_ceiling(tmp_path):
     assert c.post("/api/notifications/new", json={"nope": 1}, headers=AUTH).status_code == 400
     got = c.post("/api/notifications/new", json={"app": CHAT}, headers=AUTH)
     assert got.status_code == 200 and len(got.json()["keys"]) == 1 and CHAT_SECRET not in got.text
+    # serve --apps by the app's exact name, as on the phone 2026-11-14 (`--apps Wayfare`): the check sends the bundle id
+    by_name = TestClient(create_app(d, TOKEN, hosts={"testserver"}, ceiling=Ceiling(apps=("Chat",))), client=A)
+    got = by_name.post("/api/notifications/new", json={"app": CHAT}, headers=AUTH)
+    assert "over_ceiling" not in got.text and got.status_code in (200, 409)  # (409: the first check's turn still counts)
+    got = by_name.post("/api/notifications/new", json={"app": BUNDLE}, headers=AUTH)
+    assert got.status_code == 403 and "over_ceiling" in got.text
+    # and every call: a scheduled run names the route's bundle id under `serve --apps <name>`, and the other way round
+    for ceiling_apps, call_apps in ((("Chat",), CHAT), ((CHAT,), "Chat")):
+        c2 = TestClient(create_app(d, TOKEN, hosts={"testserver"}, ceiling=Ceiling(apps=ceiling_apps)), client=A)
+        got = c2.post("/api/apps", json={}, headers={**AUTH, "X-Tapwright-Apps": call_apps})
+        assert "over_ceiling" not in got.text, got.text
+        got = c2.post("/api/apps", json={}, headers={**AUTH, "X-Tapwright-Apps": f"{call_apps},{BUNDLE}"})
+        assert got.status_code == 403 and "over_ceiling" in got.text and BUNDLE in got.text
 
 
 def test_a_notification_trigger_polls_without_waking_the_pc():

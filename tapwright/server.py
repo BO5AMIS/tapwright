@@ -109,6 +109,23 @@ def _hv(request, name: str, default: str | None = None) -> str | None:
 
 
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
+    async def over_ceiling(apps: tuple[str, ...], dedicated: bool, mode: str | None) -> str | None:
+        """Why a call's scope is wider than serve's --apps, or None (§18.10). An app counts as within it when the
+        ceiling names it by its bundle id or by its exact installed name, whichever the call used (seen on the phone
+        2026-11-14: `serve --apps Wayfare`, and a scheduled run naming the route's bundle id)."""
+        if ceiling is None:
+            return None
+        why = ceiling.refuse_scope(apps, dedicated, mode)
+        if why is None or dedicated:
+            return why
+        names = await daemon.installed_names() if hasattr(daemon, "installed_names") else {}
+        listed = set(ceiling.apps)
+
+        def within(app: str) -> bool:
+            return app in listed or names.get(app) in listed or any(n == app and b in listed for b, n in names.items())
+        outside = tuple(a for a in apps if not within(a))
+        return ceiling.refuse_scope(outside, False, mode) if outside else None
+
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
     proved = otplib.Proved()  # the connections that proved this daemon a moment ago: only they may ask /otp (§18.11)
 
@@ -208,7 +225,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         dedicated = mode in WHOLE_PHONE
         scope = None if dedicated else Scope(apps)
         # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
-        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated, mode)) is not None:
+        if (why := await over_ceiling(apps, dedicated, mode)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
         sent = _hv(request, "x-tapwright-policy")
@@ -312,10 +329,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
         if not isinstance(app, str) or not app.strip() or len(app) > 200:
             return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
-        if ceiling is not None and (why := ceiling.refuse_scope((app,), False, None)) is not None:
+        app = app.strip()
+        if (why := await over_ceiling((app,), False, None)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         try:
-            keys = await daemon.notification_keys(app.strip())
+            keys = await daemon.notification_keys(app)
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
         return JSONResponse({"keys": keys}, headers={"Cache-Control": "no-store"})

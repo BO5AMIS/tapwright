@@ -945,7 +945,7 @@ def main() -> int:
     q.add_argument("--on-file", "--trigger-file", dest="on_file", metavar="DIR",
                    help="run when a file appears in this folder (checked while the PC is awake)")
     q.add_argument("--on-notification", metavar="APP", help="run when a notification from this app arrives (Tapwright only; "
-                   "stored now, it fires once notifications can be read)")
+                   "checked every 2 minutes while the PC is awake, never while the phone is in use)")
     q.add_argument("--with", dest="with_", action="append", metavar="NAME=VALUE|NAME=@FILE",
                    help="a value for one of the route's variables; @FILE is the text of that file, read at each run")
     q.add_argument("--name", help="the schedule's name (default: the route's)")

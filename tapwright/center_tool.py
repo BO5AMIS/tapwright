@@ -223,6 +223,17 @@ class CenterTools:
         return found
 
     # ---- the notification trigger (§22.1) ----
+    async def installed_names(self) -> dict[str, str]:
+        """{bundle id: home screen name} of the installed apps (`serve --apps` and a call may name an app either way);
+        empty when the phone can't say."""
+        s = self.session
+        try:
+            if not getattr(s, "app_names", None):
+                await s.read_app_names()
+        except Exception:
+            return {}
+        return dict(getattr(s, "app_names", {}) or {})
+
     async def notification_keys(self, app: str) -> list[str]:
         """The digests of `app`'s notifications in Notification Center now, newest first (never their text): what a
         notification trigger's check compares with what it saw before. Refused `busy` while a person or an agent uses
