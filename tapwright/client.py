@@ -161,6 +161,11 @@ def healthy(info: dict, timeout: float = 2.0) -> dict | None:
     return status if isinstance(status, dict) and "protocol" in status else None
 
 
+def status() -> dict | None:
+    """The daemon's status (state, driver, paused), starting it if needed; None when it doesn't answer."""
+    return healthy(find_or_start())
+
+
 def start_daemon() -> subprocess.Popen:
     """`tapwright serve` in the background: no console window, and it outlives the agent that
     started it (on Windows it leaves the agent host's job object when Windows allows that)."""
