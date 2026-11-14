@@ -37,7 +37,8 @@ def test_the_passcode_is_kept_and_shown_nowhere(tmp_path):
 
 
 @pytest.mark.parametrize("data, why", [
-    ({"version": 2, "accounts": {}}, "version"),
+    ({"version": 3, "accounts": {}}, "version"),
+    ({"version": 2, "accounts": {}}, "vault"),  # (1.7: version 2 is the vault)
     ({"version": 1}, "accounts"),
     ({"version": 1, "accounts": []}, "accounts"),
     ({"version": 1, "accounts": {"a b": {"username": "x", "password": "y"}}}, "name"),

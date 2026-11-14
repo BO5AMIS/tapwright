@@ -354,11 +354,8 @@ def passcode_given(accounts: str | None) -> bool:
     """Is there an accounts file (`--accounts FILE`) with a `phone.passcode`? Only whether: the value is never read out."""
     if not accounts:
         return False
-    try:
-        data = json.loads(Path(accounts).expanduser().read_text(encoding="utf-8"))
-        passcode = data["accounts"]["phone"]["passcode"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+    from . import accounts as accountlib
+    passcode = accountlib.load(str(Path(accounts).expanduser().resolve())).passcode  # (a version 1 or 2 file, protected too)
     return isinstance(passcode, str) and bool(passcode.strip())
 
 
@@ -417,9 +414,17 @@ def report_accounts(path: str | None) -> int:
         return 0
     from . import accounts
     loaded = accounts.load(str(Path(path).expanduser().resolve()))
+    if loaded.note is not None:
+        for line in loaded.note.split("Note: "):
+            if line.strip():
+                note(line.strip())
     if loaded.problem is not None:
         return fail(loaded.problem)
     ok(f"test accounts: {', '.join(loaded.names) or 'none'} (values are never shown)")
+    if loaded.version == accounts.VERSION2:
+        kept = {"dpapi-user": "protected with Windows DPAPI", "keychain": "protected in the macOS keychain"}
+        ok(f"vault: {', '.join(loaded.entry_names) or 'no entries'}; {kept.get(loaded.protection or '', 'plain')}"
+           + (f"; one-time codes on for {', '.join(loaded.otp)}" if loaded.otp else ""))
     return 0
 
 
@@ -816,6 +821,11 @@ def main() -> int:
     p.add_argument("--revoke-all", action="store_true",
                    help="revoke every grant in the file (it stays there, marked revoked) and stop any running route "
                         "between moves")
+    p = sub.add_parser("vault", help="the vault file (--accounts): protect a plain one with this system's protection")
+    p.add_argument("action", choices=["protect"],
+                   help="protect: write FILE in this system's protected form (Windows DPAPI, the macOS keychain); "
+                        "Tapline reads it too. The plain file stays until the protected copy reads back the same")
+    p.add_argument("file", metavar="FILE")
     p = sub.add_parser("smoke")
     p.add_argument("--app", required=True, help="bundle id, e.g. com.example.app")
     p.add_argument("--wait", type=float, default=3.0, help="seconds to let the app start (default 3)")
@@ -962,6 +972,11 @@ def main() -> int:
             text, code = grantscmd.run_grants(a.policy, revoke_all=a.revoke_all)
         print(text)
         return code
+    if a.cmd == "vault":
+        from . import accounts, vault
+        done, text = vault.protect(str(Path(a.file).expanduser()), check=accounts.check_text)
+        print(text if done else f"Error: {text}")
+        return 0 if done else 1
     if a.cmd == "replay":
         return replay(a)
     if a.cmd == "skill":
