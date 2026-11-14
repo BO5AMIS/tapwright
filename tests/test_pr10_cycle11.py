@@ -154,3 +154,11 @@ def test_many_matches_in_one_line_are_filtered_in_linear_time():
 def test_the_longest_value_still_wins_an_overlap():
     found = accountlib.Redaction((("a", "username", "short-name"), ("b", "password", "x-short-name-y")))
     assert found.scrub("1 x-short-name-y 2 short-name") == "1 <b's password> 2 <a's username>"
+
+
+def test_overlapping_values_leave_no_piece_of_either_behind():
+    """Lead, after cycle 11: with the earlier match winning, the later value's tail stayed in the text."""
+    loaded = accountlib.Loaded(path="x", accounts={"t": accountlib.Account("t", "abcdef", "cdefgh")})
+    out = loaded.scrub("token=abcdefgh;")
+    assert out.startswith("token=<") and out.endswith(">;")
+    assert "gh" not in out and "ab" not in out and "cdef" not in out

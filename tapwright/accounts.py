@@ -269,8 +269,9 @@ class Redaction:
         return bool(self._each)
 
     def _spans(self, text: str) -> list[tuple[int, int, str]]:
-        """Where the values are in `text`, as (start, end, placeholder): the longest value's first, a shorter one's only
-        where it overlaps none of them; in the text's order."""
+        """Where the values are in `text`, as (start, end, placeholder), in the text's order. Overlapping matches are
+        merged into one span (the first one's placeholder), so no piece of either value is left out of it: a username
+        `abcdef` and a password `cdefgh` in `abcdefgh` leave no `gh` behind."""
         found: list[tuple[int, int, int, int, str]] = []  # (start, -length, precedence, end, label)
         for rank, (each, label) in enumerate(self._each):
             for m in each.finditer(text):
@@ -282,6 +283,9 @@ class Redaction:
         for start, _, _, end, label in found:
             if start >= reached:
                 taken.append((start, end, label))
+                reached = end
+            elif end > reached:  # overlaps the span before and runs past it: that span grows to cover it
+                taken[-1] = (taken[-1][0], end, taken[-1][2])
                 reached = end
         return taken
 
