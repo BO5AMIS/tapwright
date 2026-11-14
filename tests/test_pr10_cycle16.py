@@ -39,3 +39,13 @@ def test_joining_surrogate_halves_stays_linear():
     began = time.perf_counter()
     loaded.scrub(line)
     assert time.perf_counter() - began < 1.0
+
+
+def test_a_four_byte_percent_escape_can_take_in_up_to_eleven_characters_of_a_value():
+    """Codex, PR #10 cycle 18: `abc%F0%9F%98` shown as `a%62c%F0%9F%98%80` (the last escape takes in 9 of its characters)."""
+    import json
+    loaded = _loaded("abc%F0%9F%98")
+    for text in ("token=a%62c%F0%9F%98%80;", json.dumps({"token": "a%62c%F0%9F%98%80"})):
+        assert loaded.holds(text), text
+        assert "%62c" not in loaded.scrub(text) and "F0%9F" not in loaded.scrub(text)
+    assert accountlib.SEAM >= 11

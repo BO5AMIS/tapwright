@@ -514,7 +514,10 @@ def _forms(value: str) -> "list[tuple[str, bool, bool]]":
     return found
 
 
-SEAM = 8  # how many of a value's characters an escape around it can take in (\\U and 8 hex digits)
+# how many of a value's characters an escape around it can take in: the longest escape that makes one character is a
+# percent-encoded 4-byte UTF-8 character, `%F0%9F%98%80` (12 characters), so up to 11 of them; `\\U` and 8 hex digits is
+# 10 (Codex, PR #10 cycle 18: 8 missed `a%62c%F0%9F%98` + `%80`)
+SEAM = 11
 
 
 def _failure(needle: str) -> list[int]:
@@ -660,6 +663,9 @@ class Redaction:
         slots, n, end = level.slots(), len(level.source), 2 * len(hay)
         made = _made(chain, known)
         at_slot: dict[int, list[str]] | None = None  # the escapes' texts by where their characters are in this level
+        # an escape takes in at most its own length less one of a value's characters: the longest escape in this level
+        # bounds the tail lengths tried below (SEAM is the bound over every escape there is)
+        seam = min(SEAM, max((len(raw) for _, raw, _ in made), default=1) - 1)
         for x, raw, gone in made:
             heads, tails = self._heads.get(raw[-1]), self._tails.get(raw[0])
             if heads is None and tails is None:
@@ -674,14 +680,14 @@ class Redaction:
                     yield i, at + rest, rank, label, not own, False
                 # its last characters taken into a later escape too (Codex, PR #10 cycle 15: `%2` + `a%62c%2` + `F`).
                 # Every middle the loop below tries starts with the shortest one: when that isn't there, none is
-                shortest = rest - min(SEAM, rest)
+                shortest = rest - min(seam, rest)
                 if not hay.startswith(form[k:k + shortest], at):
                     continue
                 if at_slot is None:
                     at_slot = {}
                     for y, other, dropped in made:
                         at_slot.setdefault((slots[y] & ~1 if y < n else end) if dropped else slots[y], []).append(other)
-                for k2 in range(1, min(SEAM, rest) + 1):
+                for k2 in range(1, min(seam, rest) + 1):
                     q, tail = at + rest - k2, form[len(form) - k2:]
                     for own2 in (1, 0):
                         if q + own2 > i and any(r.startswith(tail) for r in at_slot.get(2 * q + own2, ())) and \
