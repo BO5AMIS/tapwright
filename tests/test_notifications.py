@@ -435,8 +435,9 @@ def handover_daemon(tmp_path, foreground=BUNDLE, setting=True):
     s.tree, s.tree_app = [Element("e1", "input", "Verification code", "otp-input", type="TextField")], (INSTALLED.get(foreground, foreground), foreground)
     d = make(s, audit=AuditLog(tmp_path / "audit"))
     d._set_state("live")
-    d.ceiling = type("C", (), {"accounts": str(path), "brief": False, "maps": None, "apps": None})()
-    return create_app(d, TOKEN, hosts={"testserver"}), d, s
+    from tapwright.ceiling import Ceiling
+    d.ceiling = Ceiling(dedicated=True, accounts=str(path))  # (/otp needs serve's scope: Codex, PR #12 cycle 2, M5)
+    return create_app(d, TOKEN, hosts={"testserver"}, ceiling=d.ceiling), d, s
 
 
 def test_otp_hands_tapline_the_code_with_its_source_once(tmp_path):

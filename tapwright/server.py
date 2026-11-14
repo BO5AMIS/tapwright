@@ -229,6 +229,13 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
         if not isinstance(app, str) or not app.strip():
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
+        # the app asked for is within serve's scope, as any call's is (§18.10; Codex, PR #12 cycle 2, M5): a code setting
+        # for another app in the vault never widens it. Nothing is read before this
+        if ceiling is None or not (ceiling.apps or ceiling.dedicated or ceiling.phone):
+            return _error("not_allowed", "no_apps: tapwright serve was started without --apps (or --dedicated, --phone), "
+                                         "so no app's code is handed over", HTTP_STATUS["not_allowed"])
+        if (why := await over_ceiling((app,), False, None)) is not None:
+            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
         if found is None:
             return _error("not_found", "no one-time code", 404)

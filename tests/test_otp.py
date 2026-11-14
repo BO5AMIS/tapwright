@@ -60,8 +60,9 @@ def daemon_with(tmp_path, setting=True):
     d = Daemon(session, control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None,
                stream_linger=0, stream_retry=0.01)
     d._set_state("live")
-    d.ceiling = type("C", (), {"accounts": str(path), "brief": False, "maps": None})()
-    return create_app(d, TOKEN, hosts={"testserver"}), d
+    from tapwright.ceiling import Ceiling
+    d.ceiling = Ceiling(dedicated=True, accounts=str(path))  # (/otp needs serve's scope: Codex, PR #12 cycle 2, M5)
+    return create_app(d, TOKEN, hosts={"testserver"}, ceiling=d.ceiling), d
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

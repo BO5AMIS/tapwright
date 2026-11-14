@@ -35,6 +35,9 @@ NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a sec
                   "showed it too); only {whose} notifications were read out.")
 FROM_OTHERS_APPS = ("com.apple.MobileSMS", "com.apple.mobilemail")  # their notifications are others' words (§21.1)
 NOT_OPENED = "Notification Center didn't open, so nothing was read."
+TRIGGER_CLIENT = "notification-trigger"  # the trigger's check: never a client with calls of its own
+NOT_CLOSED = ("Notification Center may still be on the phone's screen: closing it didn't work, so nothing read is "
+              "answered. Look at the screen, and close it (or ask the user to) before anything else.")
 
 
 class CenterTools:
@@ -142,22 +145,44 @@ class CenterTools:
 
     async def _close_center(self, before: str | None, home_ok: bool = True) -> None:
         """Notification Center up again (a swipe up from the bottom edge), and the app that was in front back. The home
-        button only when the home screen was in front before (`home_ok`: never when an app may be under a banner)."""
+        button only when the home screen was in front before (`home_ok`: never when an app may be under a banner).
+        Each step is tried even when the one before failed (a swipe that raised still leaves the app's launch to try),
+        and the end is checked: the app back in front, or, from the home screen, Notification Center no longer there.
+        When that can't be shown, `internal` with NOT_CLOSED, never an answer as if it closed (Codex, PR #12 cycle 2, M6)."""
         s = self.session
         w, h = s.screen
+        failed: list[str] = []
         try:
             if await s.foreground_bundle_id() == SPRINGBOARD:  # (it opened: else a swipe up would leave the app)
                 await s.swipe(w / 2, h - 2.0, w / 2, h * 0.3, duration_ms=250)
                 await asyncio.sleep(CENTER_CLOSE_WAIT)
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the app's launch below may still close it
+            failed.append(type(e).__name__)
+        try:
             front = await s.foreground_bundle_id()
             if before and before != SPRINGBOARD and front != before:
                 await s.launch(before)  # (it was running: this brings it back as it was)
             elif home_ok and (not before or before == SPRINGBOARD) and front == SPRINGBOARD:
                 await s.press_button("home")  # the home screen, with nothing pulled down over it
+            # the check: the app that was in front is again, or (from the home screen) no Notification Center is read
+            if before and before != SPRINGBOARD:
+                closed = await s.foreground_bundle_id() == before
+                if closed and failed:  # (the app came back without the swipe: the read says whether it is still down)
+                    closed = not notes_lib.is_center(await s.read_center())
+            else:
+                closed = not notes_lib.is_center(await s.read_center())
         except Refused:
             raise
-        except Exception as e:  # the answer still says what was read; the log says why it stayed open
-            self.log(f"notifications: couldn't close Notification Center ({type(e).__name__})")
+        except Exception as e:  # noqa: BLE001 - not shown closed
+            failed.append(type(e).__name__)
+            closed = False
+        if failed:
+            self.log(f"notifications: closing Notification Center: {', '.join(failed)}")
+        if not closed:
+            self.log("notifications: Notification Center may still be open")
+            raise Refused("internal", NOT_CLOSED)
 
     # ---- the tool (§24.2) ----
     async def _notifications_tool(self, client_id: str, args: dict, notes: list[str], given: "dict[str, str] | None") -> dict:
@@ -228,7 +253,7 @@ class CenterTools:
             found, _ = await self._on_phone(lambda: self._read_center(lambda b: b in setting.sources,
                                                                        caption="Read a one-time code"))
         except Refused as e:
-            if e.code in ("busy", "paused", "locked"):
+            if e.code in ("busy", "paused", "locked", "internal"):  # (internal: it may still be open, NOT_CLOSED)
                 raise
             return None
         self._hide_codes(found)
@@ -328,6 +353,18 @@ class CenterTools:
         bundle, why = resolve_app(app, await self.installed_names())
         if bundle is None:
             raise Refused("not_found", f"the trigger's app: {why}; nothing was read")
-        found, _ = await self._on_phone(lambda: self._read_center(lambda b: b == bundle,
-                                                                   caption="Check for notifications"))
+        async def admitted() -> "list[notes_lib.Notification]":
+            # The decision above was made before awaits (connecting, the installed apps): an agent's call may have
+            # started or ended since. It is made again here, inside the phone's turn, where nothing else runs before the
+            # read: another client's call in flight or in the last 90 s, or a person, means busy (Codex, PR #12 cycle 2,
+            # M4). The check's own turn isn't counted against it.
+            if self.control.paused:
+                raise Refused("paused", "paused by the user in the live view")
+            if self._someone_else_on_phone(TRIGGER_CLIENT):
+                raise Refused("busy", "the phone is in use; the check waits")
+            found, _ = await self._read_center(lambda b: b == bundle, caption="Check for notifications")
+            return found
+        if self.phone_in_use():  # (and once more right before the turn is asked for)
+            raise Refused("busy", "the phone is in use; the check waits")
+        found = await self._on_phone(admitted)
         return [x.key(secret) for x in found]
