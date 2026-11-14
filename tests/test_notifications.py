@@ -246,6 +246,32 @@ def test_an_open_that_doesnt_bring_the_app_closes_notification_center_and_says_s
     run(go)
 
 
+OPEN_BUTTON = ('<XCUIElementTypeButton type="XCUIElementTypeButton" name="swipe-action-button-identifier" label="Open" '
+               'x="14" y="{y}" width="90" height="74"/>')
+
+
+def test_ios26_the_first_tap_shows_the_rows_open_action_and_a_second_tap_on_it_opens(tmp_path):
+    """Seen on the phone 2026-11-14: a tap on a notification shows its row's actions; Open (left, by its id and place,
+    never its words) opens the app."""
+    async def go():
+        d, s = center_daemon(tmp_path, [])
+        s.center_opens, s.center_tap_stays = BUNDLE, True
+        row_y = 190 + 40  # Wayfare's "Trip booked" row in SCREEN
+        s.center_after_tap = SCREEN.replace("</XCUIElementTypeScrollView>", OPEN_BUTTON.format(y=row_y - 30)
+                                            + OPEN_BUTTON.replace('x="14"', 'x="320"').format(y=row_y - 30)
+                                            + "</XCUIElementTypeScrollView>")
+        s.center_open_spot = (14 + 45, row_y - 30 + 37)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "notifications", {"open": 1}, scope=Scope((BUNDLE,)))
+        assert r["text"].startswith("Opened n1:") and s.tap_points == [(8 + 207, row_y), (59, row_y + 7)]
+        assert not s.center_open and s.foreground == BUNDLE
+        await finish(stop, task)
+    run(go)
+    assert nl.open_action("not xml", 10, 400) is None
+    assert nl.open_action(OPEN_BUTTON.format(y=100), 500, 430) is None  # (another row)
+    assert nl.open_action(OPEN_BUTTON.replace('x="14"', 'x="320"').format(y=100), 130, 430) is None  # (the right side)
+
+
 def test_personal_mode_reads_nothing_while_another_app_is_in_front(tmp_path):
     async def go():
         d, s = center_daemon(tmp_path, [], foreground=CHAT)

@@ -510,6 +510,11 @@ class FakeSession:
             self._record("tap")
             self.tap_points.append((target.x, target.y))
             if getattr(self, "center_tap_stays", False):  # the tap opened nothing: Notification Center is still down
+                spot = getattr(self, "center_open_spot", None)  # iOS 26: the row's Open action, shown after a first tap
+                if spot is not None and (target.x, target.y) == spot:
+                    self.center_open, self.foreground = False, self.center_opens
+                elif getattr(self, "center_after_tap", None) is not None:
+                    self.center_source = self.center_after_tap
                 return f"Tapped ({round(target.x)}, {round(target.y)})."
             self.center_open, self.foreground = False, self.center_opens
             return f"Tapped ({round(target.x)}, {round(target.y)})."

@@ -208,6 +208,27 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
     return [n for _, n in found[:MAX]]
 
 
+OPEN_ACTION = "swipe-action-button-identifier"
+
+
+def open_action(source: str, y: float, width: float) -> tuple[float, float] | None:
+    """Where to touch the Open action iOS 26 shows on a notification's row after a first tap on it (seen on the phone
+    2026-11-14: the tap doesn't open the app; it shows the row's actions, Open on the left). Told by its identifier and
+    its place (the left half, on the row the tap was on), never by its words, which follow the phone's language. None
+    when there is none (the tree isn't XML, or no such action is on that row)."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    for node in root.iter():
+        if node.get("name") != OPEN_ACTION:
+            continue
+        x, top, w, h = _rect(node)
+        if w > 0 and h > 0 and x + w / 2 < width / 2 and top <= y <= top + h:
+            return x + w / 2, top + h / 2
+    return None
+
+
 def is_center(source: str) -> bool:
     """Is this SpringBoard's tree (what Notification Center is)?"""
     return 'bundleId="com.apple.springboard"' in source[:800]
