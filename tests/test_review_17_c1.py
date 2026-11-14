@@ -665,3 +665,57 @@ def test_cr_unlock_never_removes_or_moves_a_holder_that_came_after_its_verdict(t
     done = pidlock.unlock(lock, person)
     assert done.status == "removed" and not lock.exists() and str(lock) not in renamed
     assert pidlock.take(lock, c) is not None
+
+
+# ---- CodeRabbit, PR #12 (daemon.py:2982): the last held-route check and the write are one step under the edit lock ------
+def test_cr_a_grant_made_while_a_recording_stops_keeps_its_route(tmp_path):
+    from mapfakes import APP as MAP_APP
+    from test_daemon_routes import mapped
+    from tapwright import pidlock
+
+    async def go():
+        today = datetime.date.today()
+        path = tmp_path / "policy.json"
+        path.write_text(json.dumps({"version": 2, "confirm": ["Post"], "block": [], "grants": []}), encoding="utf-8")
+        rules = policy.load(path)
+        d = mapped(tmp_path / "maps")
+        stop, task = await started(d)
+        await explore(d)
+        await d.run_tool("a", "record", {"start": True, "route": "sign_in"}, policy=rules)
+        await d.run_tool("a", "tap", {"target": {"id": "continue-btn"}}, policy=rules)
+        real_place = d._route_place
+
+        async def place_while_a_grant_is_made(scope):
+            got = await real_place(scope)
+            # a person grants Post in route sign_in this moment (as `tapwright grants` or the grant dialog does)
+            path.write_text(json.dumps({"version": 2, "confirm": ["Post"], "block": [], "grants": [
+                {"name": "g", "app": MAP_APP[1], "words": ["Post"], "route": "sign_in", "perDay": 1,
+                 "until": (today + datetime.timedelta(days=5)).isoformat()}]}), encoding="utf-8")
+            return got
+        d._route_place = place_while_a_grant_is_made
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "record", {"stop": True}, policy=rules)
+        assert e.value.code == "not_allowed" and 'grant "g" names it' in str(e.value)
+        assert not (tmp_path / "maps" / MAP_APP[1] / "routes" / "sign_in.json").exists()
+        # the edit lock held by another change (a live process): nothing is written, and the call says busy
+        path.write_text(json.dumps({"version": 2, "confirm": ["Post"], "block": [], "grants": []}), encoding="utf-8")
+        d._route_place = real_place
+        d._books.clear()
+        held = pidlock.take(f"{path}.edit.lock", pidlock.Deps())  # (this live process: never taken over)
+        assert held is not None
+        rules2 = policy.load(path)
+        token = daemon_module._POLICY.set(rules2)
+        try:
+            book = d._book()
+            book.lock_wait = 0.1
+        finally:
+            daemon_module._POLICY.reset(token)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "record", {"stop": True}, policy=rules2)
+        assert e.value.code == "busy" and "wasn't saved" in str(e.value)
+        assert not (tmp_path / "maps" / MAP_APP[1] / "routes" / "sign_in.json").exists()
+        pidlock.release(f"{path}.edit.lock", held)
+        r = await d.run_tool("a", "record", {"stop": True}, policy=rules2)
+        assert r["text"].startswith("Saved route sign_in")
+        await finish(stop, task)
+    run(go)

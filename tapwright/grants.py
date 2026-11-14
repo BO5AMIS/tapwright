@@ -790,6 +790,19 @@ class Book:
         return True
 
     # ---- changing the file (§19.5) ----
+    def take_edit_lock(self) -> str | None:
+        """The policy file's edit lock, waited for up to `lock_wait`: its token, or None. For a change elsewhere that must
+        not cross a grant's change (a route a grant may name being replaced: CodeRabbit, PR #12, daemon.py)."""
+        deadline = time.monotonic() + self.lock_wait
+        while (token := pidlock.take(self.lock_path, self.lock_deps)) is None:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.025)
+        return token
+
+    def release_edit_lock(self, token: str) -> None:
+        pidlock.release(self.lock_path, token)
+
     def edit(self, change: Callable[[dict], bool]) -> str | None:
         """Change the policy file under its edit lock: the file is read again under the lock, `change` edits that
         content (True: it changed something), and it is written with a temporary file and a rename. None when done

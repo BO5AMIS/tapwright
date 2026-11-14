@@ -3012,10 +3012,23 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         route = batch.saved_script(route, self._redact, f"route {rec['route']}")
         routes.check(route)
         root = self._maps_root()
+        # The last check and the write are one step under the policy file's edit lock, which every grant change takes
+        # (§19.5): a grant made while the place was read, or by `tapwright grants` in another process right now, is seen,
+        # and the route it names is never replaced (CodeRabbit, PR #12, daemon.py)
+        book = self._book()
+        token = await asyncio.to_thread(book.take_edit_lock) if book is not None else None
+        if book is not None and token is None:
+            raise Refused("busy", f"route {rec['route']} wasn't saved: the policy file is being changed this moment. "
+                                  "Stop the recording again in a moment.")
         try:
-            path = self.maps.file(root, bundle).write_route(rec["route"], route)
-        except (OSError, ValueError, mapfile.MapError) as e:
-            raise Refused("bad_params", f"can't save the route: {getattr(e, 'strerror', None) or e}") from None
+            self._refuse_held_route(rec["route"])
+            try:
+                path = self.maps.file(root, bundle).write_route(rec["route"], route)
+            except (OSError, ValueError, mapfile.MapError) as e:
+                raise Refused("bad_params", f"can't save the route: {getattr(e, 'strerror', None) or e}") from None
+        finally:
+            if book is not None and token is not None:
+                book.release_edit_lock(token)
         self.maps.edit(root, bundle, lambda d: d["routes"].__setitem__(rec["route"], f"routes/{rec['route']}.json"))
         del self._recording[client_id]
         secure = rec.get("secure_steps") or []
