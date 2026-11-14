@@ -89,6 +89,44 @@ def test_newest_first_and_at_most_twenty_from_either_shape():
     assert nl.age_of("11/12/26", now) is None
 
 
+def ios26_cell(app, when, title, body, y=100, more=""):
+    """A notification as iOS 26's Notification Center shows it (captured on the phone 2026-11-14 with every text
+    replaced): the label is `app[, more], time, title, body`; the Seamless button carries it from the time on; the
+    title and the body are their own static texts. `more` is the piece a stack adds after the app's name."""
+    rest = ", ".join(p for p in (when, title, body) if p)
+    label = ", ".join(p for p in (app, more, rest) if p)
+    return (f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="ListCell" label={quoteattr(label)} x="14" '
+            f'y="{y}" width="402" height="97"><XCUIElementTypeOther type="XCUIElementTypeOther" '
+            f'name="NotificationShortLookView" label={quoteattr(label)} x="14" y="{y}" width="402" height="97">'
+            f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="ShortLook.Platter.Content.Seamless" '
+            f'label={quoteattr(rest)} x="14" y="{y}" width="402" height="97">'
+            f'<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="NotificationTitle" '
+            f'label={quoteattr(title)} x="78" y="{y + 11}" width="282" height="24"/>'
+            f'<XCUIElementTypeOther type="XCUIElementTypeOther" name="NotificationBody.TopAligned.originalMessage" '
+            f'x="78" y="{y + 34}" width="321" height="50"><XCUIElementTypeStaticText type="XCUIElementTypeStaticText" '
+            f'name="TextContent.Primary" label={quoteattr(body)} x="78" y="{y + 34}" width="321" height="50"/>'
+            f'</XCUIElementTypeOther></XCUIElementTypeButton></XCUIElementTypeOther></XCUIElementTypeButton>')
+
+
+def test_ios26_shape_app_in_any_case_long_times_stacks_and_commas():
+    screen = center(
+        ios26_cell("WAYFARE", "12 minutes ago", "Trip booked, Lisbon", "Seats 4, 5 and 6, row 2", y=100),
+        ios26_cell("Chat", "1 hour ago", "Ana", CHAT_SECRET, y=210),
+        ios26_cell("Wayfare", "2 hours ago", "Price drop", "Porto, from 49", y=320, more="2 more"),
+        ios26_cell("Somebody Else", "now", "x", "y", y=430),
+    )
+    got = nl.parse(screen, INSTALLED, lambda b: b == BUNDLE)
+    assert [(n.bundle, n.app, n.when, n.title, n.body) for n in got] == [
+        (BUNDLE, "WAYFARE", "12 minutes ago", "Trip booked, Lisbon", "Seats 4, 5 and 6, row 2"),
+        (BUNDLE, "Wayfare", "2 hours ago", "Price drop", "Porto, from 49")]
+    assert got[0].age == (720.0, 780.0) and got[1].age == (7200.0, 10800.0)
+    assert got[0].center == (215.0, 148.5)
+    assert CHAT_SECRET not in repr(got)
+    assert [n.app for n in nl.parse(screen, INSTALLED, lambda b: True)][:3] == ["WAYFARE", "Chat", "Wayfare"]
+    assert nl.age_of("1 hour ago") == (3600.0, 7200.0) and nl.age_of("3 days ago")[0] == 259200.0
+    assert nl.age_of("1 week ago") == (604800.0, 1209600.0) and nl.is_time("5 mins ago")
+
+
 def test_a_code_is_found_only_from_a_source_within_two_minutes_after_the_field_and_once():
     items = nl.parse(SCREEN, {**INSTALLED}, lambda b: True)
     used: set = set()

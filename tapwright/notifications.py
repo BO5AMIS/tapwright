@@ -7,13 +7,17 @@ notification trigger's app. So `parse` takes a `keep` test and drops every other
 tree: what it returns holds nothing else, and the tree's text is never kept, logged or traced (the daemon reads it with
 the session's raw read and lets it go at once).
 
-The tree's shape (ASSUMED: tests/data holds no Notification Center capture; check it on the phone). SpringBoard is the
-root (`bundleId="com.apple.springboard"`). Each notification is an element whose identifier is one of NOTIFICATION_IDS
-(a banner over an app is `NotificationShortLookView`, seen on the phone 2026-11-10 with the label `Mail, now`). Its
-words are its static texts in order when it has any, else its label split at ", ": the app's shown name first, then the
-time (`now`, `5m ago`, `2h ago`, `09:41`, `Yesterday`), then the title, then the body. The app is the FIRST piece only,
-and only when it is exactly the shown name of one app (the installed apps' names, and iOS's own apps below): a
-notification whose first piece names no app, or two, is dropped, since it can't be proven to be a kept app's.
+The tree's shape, as read on the phone (iOS 26, 2026-11-14, from a capture with every text replaced). SpringBoard is the
+root (`bundleId="com.apple.springboard"`). Each notification is a `NotificationShortLookView` whose label is
+`<app>[, <more>], <time>, <title>, <body>[, <more>]`; inside it, the button `ShortLook.Platter.Content.Seamless` carries
+the same label from the time on, the static text `NotificationTitle` the title, and the static texts `TextContent.*` the
+body. So the part of the label before the button's label is the app (its first piece: a stack adds a piece after the
+name), the button's first piece is the time (`now`, `12 minutes ago`, `1 hour ago`, `5m ago`, `09:41`, `Yesterday`), and
+the title and body are their own texts (they may hold ", "). A notification without that button (a banner over an app,
+seen 2026-11-10 as `Mail, now`) is read from its static texts in order, else its label split at ", ". Notification
+Center may write the app's name in another case than its home screen name, so names are compared ignoring case. The app
+must be the shown name of exactly ONE app (the installed apps' names, and iOS's own apps below): a notification whose app
+names no app, or two, is dropped, since it can't be proven to be a kept app's.
 """
 from __future__ import annotations
 
@@ -38,10 +42,10 @@ SYSTEM_APPS = {
     "Home": "com.apple.Home", "Clock": "com.apple.mobiletimer", "Shortcuts": "com.apple.shortcuts",
     "Weather": "com.apple.weather", "Fitness": "com.apple.Fitness", "Files": "com.apple.DocumentsApp",
 }
-_AGO = re.compile(r"^(\d{1,3})\s*(m|min|h|hr|d)\.?\s+ago$", re.I)
+_AGO = re.compile(r"^(\d{1,3})\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?)\.?\s+ago$", re.I)
 _CLOCK = re.compile(r"^(\d{1,2}):(\d{2})(?:\s*([AP]M))?$", re.I)
 _DAYS = ("Yesterday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-UNIT = {"m": 60, "min": 60, "h": 3600, "hr": 3600, "d": 86400}
+UNIT = {"m": 60, "h": 3600, "d": 86400, "w": 604800}  # by the unit's first letter
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,7 +74,7 @@ def age_of(piece: str, now: datetime.datetime | None = None) -> tuple[float, flo
     if piece.lower() == "now":
         return 0.0, 60.0
     if m := _AGO.match(piece):
-        n, unit = int(m.group(1)), UNIT[m.group(2).lower()]
+        n, unit = int(m.group(1)), UNIT[m.group(2)[0].lower()]
         return float(n * unit), float((n + 1) * unit)
     now = now or datetime.datetime.now()
     midnight = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
@@ -99,6 +103,36 @@ def _is_notification(node: ET.Element) -> bool:
     return name in NOTIFICATION_IDS
 
 
+SEAMLESS = "ShortLook.Platter.Content.Seamless"
+
+
+def _named(node: ET.Element, name: str) -> ET.Element | None:
+    return next((n for n in node.iter() if n is not node and n.get("name") == name), None)
+
+
+def _said(node: ET.Element) -> str:
+    return (node.get("label") or node.get("value") or "").strip()
+
+
+def _parts(node: ET.Element) -> tuple[list[str], str, str, str] | None:
+    """(the app's possible names, time, title, body) of a notification of iOS 26's shape (the module's docstring), or
+    None when it hasn't that shape."""
+    button = _named(node, SEAMLESS)
+    label = (node.get("label") or "").strip()
+    rest = (button.get("label") or "").strip() if button is not None else ""
+    if not rest or not label.endswith(", " + rest):
+        return None
+    before = label[:-len(rest) - 2]
+    when = rest.split(", ")[0].strip()
+    if not is_time(when):
+        when = ""
+    title_node = _named(node, "NotificationTitle")
+    title = _said(title_node) if title_node is not None else ""
+    body = ", ".join(t for t in (_said(n) for n in node.iter()
+                                 if n is not node and (n.get("name") or "").startswith("TextContent")) if t)
+    return [before, before.split(", ")[0].strip()], when, title, body
+
+
 def _pieces(node: ET.Element) -> list[str]:
     """The notification's words in order: its static texts, else its label split at ", "."""
     texts: list[str] = []
@@ -120,10 +154,11 @@ def _cut(text: str, most: int) -> str:
 
 
 def names_to_bundles(installed: Mapping[str, str]) -> dict[str, str | None]:
-    """{shown name: bundle id} of every app a notification may name; None for a name two apps share (it proves
-    neither). `installed`: {bundle id: name} of the installed apps (the daemon's list)."""
+    """{shown name, case folded: bundle id} of every app a notification may name; None for a name two apps share, in
+    any case (it proves neither). `installed`: {bundle id: name} of the installed apps (the daemon's list)."""
     found: dict[str, str | None] = {}
     for bundle, name in [*((b, n) for n, b in SYSTEM_APPS.items()), *installed.items()]:
+        name = (name or "").strip().casefold()
         if not name:
             continue
         if name in found and found[name] != bundle:
@@ -148,18 +183,23 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
     def walk(node: ET.Element) -> None:
         for child in node:
             if _is_notification(child):
-                pieces = _pieces(child)
-                bundle = names.get(pieces[0]) if pieces else None
-                if bundle is not None and keep(bundle):
-                    rest = pieces[1:]
+                parts = _parts(child)
+                if parts is not None:
+                    tried, when, title, body = parts
+                    app = next((a for a in tried if a and names.get(a.casefold()) is not None), tried[-1])
+                else:
+                    pieces = _pieces(child)
+                    app, rest = (pieces[0], pieces[1:]) if pieces else ("", [])
                     when = next((p for p in rest if is_time(p)), "")
                     if when:
                         rest.remove(when)
+                    title, body = (rest[0] if rest else ""), ", ".join(rest[1:])
+                bundle = names.get(app.casefold()) if app else None
+                if bundle is not None and keep(bundle):
                     x, y, w, h = _rect(child)
                     found.append((len(found), Notification(
-                        bundle, pieces[0], when, age_of(when, now) if when else None,
-                        _cut(rest[0], TITLE_MAX) if rest else "", _cut(", ".join(rest[1:]), BODY_MAX),
-                        (x + w / 2, y + h / 2))))
+                        bundle, app, when, age_of(when, now) if when else None,
+                        _cut(title, TITLE_MAX), _cut(body, BODY_MAX), (x + w / 2, y + h / 2))))
                 continue  # (a notification's own parts are never a second notification)
             walk(child)
     walk(root)
