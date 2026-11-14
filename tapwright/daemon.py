@@ -4236,8 +4236,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 element = reflex.touched(r, view.items)
                 if do.get("tool") != "back" and element is None:
                     continue  # what it would touch isn't on this screen
-                if element is not None and _POLICY.get().check(bundle, reflex.word(element)) is not None:
-                    continue  # a policy word: never a reflex, and nobody is asked
+                if element is not None and self._held(do.get("tool") or "tap", element, bundle):
+                    continue  # whatever the policy would hold (its word, §19.2, a draft): never a reflex, nobody is asked
                 call = {} if do["tool"] == "back" else {"target": dict(do["target"])}
                 if call and ui.USERS_EYES.get() and element is not None and element.text:
                     call = {"target": {"text": element.text}}  # a user can't see ids: by the words on the glass
@@ -5361,8 +5361,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             forced = self._forced(view, field)
         else:
             self._guard(view, field)
-            field = await self._hit_clears(field)
-            at = self._touch_point(field)
+            # the focusing tap's hit test (Codex, PR #12 cycle 3, M2): typing isn't policed (§11.1), the touch is checked
+            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=self._touch_point)
+            field = checked if checked is not None else field
         active = _ACCOUNT.get()
         using = None
         if accountlib.mentions(a["text"]):
@@ -5394,12 +5395,22 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             real, using = code.code, dataclasses.replace(using, field=code.source)
             self._refuse_line_break(real, "the one-time code")
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
+        aimed = [at]
+
+        async def checked_again() -> None:
+            # a person's OK for a card, a read of Notification Center for a code, or a keyboard closed came between the
+            # check above and the focusing tap: the hit test runs again right before it (one path for every touch)
+            if not a.get("force"):
+                now = next((e for e in self.session.items if field.ref and e.ref == field.ref), field)  # (as listed now)
+                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=self._touch_point)
+        if using is not None and (using.kind == accountlib.CARD or using.otp_app is not None):
+            await checked_again()
 
         self._touching(field)
 
         async def typed() -> None:
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
-                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
+                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0])
         try:
             await typed()
         except Refused as e:
@@ -5408,6 +5419,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if not (view.read_keyboard and "didn't take focus" in str(e)):
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
+            await checked_again()
             await typed()
         view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
@@ -5431,19 +5443,23 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                      "Nothing was typed.")
 
     def _submit_sends(self) -> str | None:
-        """Why `type_text`'s `submit` is refused now (review 1.7 B-H2): in a draftsOnly route, or under a draftsOnly grant
-        for the app in front, pressing Return could send with no draft shown. None when it may."""
+        """Why `type_text`'s `submit` (and a line break in its text) is refused now (review 1.7 B-H2): in a draftsOnly
+        route, or under a draftsOnly grant for the app in front, pressing Return could send with no draft shown. The
+        grants are those of every grants file the daemon knows, whatever policy the call runs under: a stricter call
+        policy, or one with no file, never lifts a restriction only a person may lift (Codex, PR #12 cycle 3, H3). None
+        when it may."""
         if _DRAFTS_ROUTE.get():
             return "the route is draftsOnly"
-        book = self._book()
-        if book is None:
-            return None
-        try:
-            name = book.drafts_only_for(self._app_bundle(), _ROUTES.get())
-        except Exception as e:  # any doubt keeps Return from sending
-            self.log(f"grants: {type(e).__name__}: {e}")
-            return "the grants can't be read"
-        return None if name is None else f"grant {json.dumps(name)} is draftsOnly"
+        app = self._app_bundle()
+        for book in self._route_books():
+            try:
+                name = book.drafts_only_for(app, _ROUTES.get())
+            except Exception as e:  # any doubt keeps Return from sending
+                self.log(f"grants: {type(e).__name__}: {e}")
+                return "the grants can't be read"
+            if name is not None:
+                return f"grant {json.dumps(name)} is draftsOnly"
+        return None
 
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
@@ -5898,9 +5914,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return None  # (on screen already: the action touches it where it is)
         said = ""
         if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
-            said = await self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
-            if self._held_back(hit):
-                self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
+            # before anything moves: a block word refuses, a person is asked (a dry run is told, and nothing is asked).
+            # A draft and a grant wait for the touch, whose own checks (_last_checks) run on the screen after the scroll
+            said = await self._police(name, args, hit, before_scroll=True)
         shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
         area = ui.scroll_holding(view.items, hit, s.screen)
         why = ""
@@ -5958,12 +5974,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
                                        f"scroll (its identifier \"{ui.shown(hit.identifier)}\" is gone or no longer its own), "
                                        f"so nothing was touched. Look, then target what is there.")
-        if name != "type_text" and self._police_key(final) != self._police_key(hit):
-            # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
-            self._policed = None
-            await self._police(name, args, final)
-            if self._held_back(final):
-                self._policed = (name, self._police_key(final))
+        if self._policed is not None and self._police_key(final) != self._police_key(hit):
+            self._policed = None  # (a person's OK was for the element checked first; the touch's own checks judge this one)
         self._scrolled_first.add(client_id)
         return ui.Target(ref=final.ref) if final.ref else target
 
@@ -6012,25 +6024,27 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
-    def _held_back(self, element: ui.Element) -> bool:
-        """Does the policy, or the words that send to other people (§21.3), have a say on a touch of `element`?"""
-        name = element.label if element.role == "input" else element.text
-        return _POLICY.get().check(self._app_bundle(), name) is not None or grantlib.reach_word(name) is not None
-
-    async def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
+    async def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None,
+                      before_scroll: bool = False) -> str:
         try:
-            return await self._police_check(tool, a, element, bundle)
+            return await self._police_check(tool, a, element, bundle, before_scroll)
         finally:
             trace.mark("policy")  # (the timing trace: the policy has had its say, or a person's answer came)
 
-    async def _police_check(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
+    async def _police_check(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None,
+                            before_scroll: bool = False) -> str:
         """The safety policy's say on a touch of `element` (docs/AGENT-TOOLS.md 11): nothing when it has no word,
         `not_allowed: blocked` for a block word, and for a confirm word `not_allowed: needs_confirmation` (a
         request goes to the live view, and to the host's dialog when the agent has one: then this waits for the
         answer, §11.3) unless a person's OK for this very call is waiting. That OK is used up here. For a dry run,
         nothing is asked or used up: the sentence for the answer's end, or "". `force` never skips it, and nothing
         here touches the phone (it reads the screen again after a wait). `bundle`: the app the element is in, when
-        that is not the app of the last read (a journey's second touch, after the first may have opened another app)."""
+        that is not the app of the last read (a journey's second touch, after the first may have opened another app).
+        `before_scroll`: the check on an off-screen target before the scroll that brings it on screen (§16.2). A block
+        word refuses and a person is asked as usual, but a draft is shown, and a grant counted, only at the touch itself,
+        once the scroll is done: what scrolled into view is part of the draft's fingerprint, and the screen the grant is
+        judged on is the one touched (Codex, PR #12 cycle 3, H1). A person's OK given here is remembered for this call's
+        touch (`_policed`); nothing else is."""
         if element is None:
             return ""
         # an input is matched by its label only: what someone typed into it is data, not what a touch does
@@ -6039,31 +6053,28 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         hit = _POLICY.get().check(app, name)
         # §21.3: a touch that sends to other people stops at a draft in a draftsOnly route or under a draftsOnly grant.
         # That is decided by the shared words on the element itself, never by the policy file's lists: a custom policy,
-        # `--no-policy` or an app's empty list can't turn a draft off (review 1.7 B-H2)
+        # `--no-policy` or an app's empty list can't turn a draft off (review 1.7 B-H2), nor can the call's own policy:
+        # a draftsOnly grant in any grants file the daemon knows holds (Codex, PR #12 cycle 3, H3)
         reach = grantlib.reach_word(name)
         route_draft = bool(_DRAFTS_ROUTE.get()) and reach is not None
+        held_draft = None if reach is None or route_draft else self._drafts_grant(app, name)
+        must_draft = route_draft or held_draft is not None
         book = self._book()
         alert_words, screen_words, titles = self._never_context(tool, element)
         touch = (grantlib.Touch(app, name, _ROUTES.get(), tool, alert_words, screen_words, titles)
                  if book is not None else None)
-        if hit is None and element.role not in ui.PASSIVE and element.role != "input" and not grantlib.leaves(name) \
-                and (around := grantlib.never_context(name, alert_words, screen_words, titles)) is not None:
-            # §19.2 by what surrounds the touch, whatever the policy file's lists say: an account deletion's or a payment's
-            # Confirm, OK or Send asks a person each time, as a Delete or a Buy would (Codex, PR #12 cycle 2, H4, H5).
-            # Leaving (Cancel, Back, Not now) asks nobody. No grant covers it (grantlib.touch_never), nor is one offered
+        if hit is None and not grantlib.leaves(name) and (
+                around := grantlib.never_own(name) or grantlib.never_context(name, alert_words, screen_words, titles)) \
+                is not None:
+            # §19.2 by the touch's own words and by what surrounds it, whatever the policy file's lists say and whatever
+            # the element's role: an account deletion's or a payment's Confirm, OK or Send asks a person each time, as a
+            # Delete or a Buy would, and so does text that passes a tap on (Codex, PR #12 cycles 2 and 3, H4, H5). Leaving
+            # (Cancel, Back, Not now) asks nobody. No grant covers it (grantlib.touch_never), nor is one offered
             hit = (safety.CONFIRM, ui.clip(around))
         if hit is None:
-            if reach is None:
+            if not must_draft:
                 return ""
-            if not route_draft:
-                try:  # (no policy word: only a draftsOnly grant for this touch stops it; nothing is counted here)
-                    grant_draft = book is not None and touch is not None and book.decide(touch, "peek").kind == "draft"
-                except Exception as e:  # any doubt stops at the draft
-                    self.log(f"grants: {type(e).__name__}: {e}")
-                    grant_draft = True
-                if not grant_draft:
-                    return ""
-            hit = (safety.CONFIRM, reach)
+            hit = (safety.CONFIRM, reach or "")
         kind, word = hit
         # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
         # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
@@ -6075,24 +6086,28 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
+        dry = bool(a.get("dry_run"))
+        if before_scroll and must_draft and not dry:
+            return ""  # the draft is read, shown and fingerprinted at the touch, after the scroll (H1)
         key = self._police_key(element)
-        if self._policed == (tool, key) and not a.get("dry_run"):
-            self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
+        if self._policed == (tool, key) and not must_draft and not dry:
+            # a person allowed this very touch before the scroll (§16.2): once. Never a draft's (H1)
+            self._policed = None
             return ""
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now
-                      and (not route_draft or c.draft is not None)), None)
-        if a.get("dry_run"):
+                      and (not must_draft or c.draft is not None)), None)
+        if dry:
             if grant:
                 return ""
-            # §21.3: a route's draftsOnly stop comes before any grant: no grant lifts it (Codex, PR #12 cycle 1, H2)
-            if book is not None and touch is not None and not route_draft:  # §19.3: a dry run counts nothing
+            # §21.3: a draftsOnly stop comes before any grant: no grant lifts it (Codex, PR #12 cycle 1, H2)
+            if book is not None and touch is not None and not must_draft:  # §19.3: a dry run counts nothing
                 decided = book.decide(touch, "peek")
                 if decided.kind == "covered":
                     return f" {decided.dry}"
-                route_draft = route_draft or (decided.kind == "draft" and reach is not None)
-            if route_draft:
+                must_draft = must_draft or (decided.kind == "draft" and reach is not None)
+            if must_draft:
                 return f' It would stop at a draft a person sees first (policy word "{reach}").'
             return f' It needs a person\'s OK (policy word "{word}").'
         if grant is not None and grant.draft is not None and grant.draft_digest != await self._draft_digest(app):
@@ -6106,18 +6121,30 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 _GRANTED.get().append(Sent(grant.origin or "the live view"))
             else:
                 _GRANTED.get().append(grant.origin or "the live view")
+                if before_scroll:
+                    self._policed = (tool, key)
             return ""
-        # §21.3: a route's draftsOnly stop comes before any grant, which never lifts it and is never counted for a draft
-        # a person sends (Codex, PR #12 cycle 1, H2)
-        if not route_draft and book is not None and touch is not None and self._by_grant(book, touch, tool):
-            return ""
+        # §21.3: a draftsOnly stop comes before any grant, which never lifts it and is never counted for a draft a person
+        # sends (Codex, PR #12 cycle 1, H2)
+        if not must_draft and book is not None and touch is not None:
+            if before_scroll:
+                try:  # (counted at the touch, on the screen the touch is made on: H1)
+                    if book.decide(touch, "peek").kind == "covered":
+                        return ""
+                except Exception as e:  # any doubt asks a person
+                    self.log(f"grants: {type(e).__name__}: {e}")
+            elif self._by_grant(book, touch, tool):
+                return ""
         held = _GRANT_CALL.get()
-        stopped = held.draft if held is not None and reach is not None else None  # a draftsOnly grant's name
+        stopped = held_draft if held_draft is not None else (
+            held.draft if held is not None and reach is not None else None)  # a draftsOnly grant's name
         drafted: "tuple[str, str | None, bool, bytes] | None" = None
-        if route_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
-            items = await self._draft_read()  # (one read: the draft shown and its digest, H1)
+        if must_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
+            if before_scroll:
+                return ""  # (a grant found draftsOnly only now: shown at the touch, H1)
+            items, title = await self._draft_read()  # (one read: the draft shown and its digest, H1)
             shown_draft, has_code = self._draft_text_of(items)
-            drafted = (stopped or "", shown_draft, has_code, self._draft_digest_of(app, items))
+            drafted = (stopped or "", shown_draft, has_code, self._draft_digest_of(app, items, title))
             word = reach or word  # (the draft's question names the word that sends: `Send this in Mail?`)
         message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
@@ -6133,12 +6160,44 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                              "was sent. Make the call again to show the person the draft as it is now.",
                               draft=True)
             self._sent_draft(request)
+        elif before_scroll:
+            self._policed = (tool, key)
         return ""
 
+    def _held(self, tool: str, element: ui.Element, bundle: str | None = None) -> bool:
+        """Would _police_check have a say on a touch of `element`, by the same rules, asking nobody: a policy word, §19.2
+        by the touch's own words or by what surrounds it, or a draft stop. A reflex (§18.7) never makes such a touch."""
+        name = reflex.word(element)
+        app = bundle or self._app_bundle()
+        if _POLICY.get().check(app, name) is not None:
+            return True
+        if not grantlib.leaves(name):
+            alert_words, screen_words, titles = self._never_context(tool, element)
+            if grantlib.never_own(name) or grantlib.never_context(name, alert_words, screen_words, titles):
+                return True
+        return grantlib.reach_word(name) is not None and (bool(_DRAFTS_ROUTE.get())
+                                                          or self._drafts_grant(app, name) is not None)
+
+    def _drafts_grant(self, app: str | None, name: str | None) -> str | None:
+        """§21.3, whatever policy the call runs under (Codex, PR #12 cycle 3, H3): the name of a draftsOnly grant for a touch
+        on `name` in any grants file this daemon knows (the call's own, serve's `--policy`, every other one it has used),
+        "" when one can't be read (any doubt stops at the draft), None when none holds it."""
+        for book in self._route_books():
+            try:
+                found = book.drafts_only_touch(app, name, _ROUTES.get())
+            except Exception as e:  # noqa: BLE001 - any doubt stops at the draft
+                self.log(f"grants: {type(e).__name__}: {e}")
+                return ""
+            if found is not None:
+                return found
+        return None
+
     def _never_context(self, tool: str, element: ui.Element) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-        """What surrounds a touch, for §19.2 (grantlib.never_context; Codex, PR #12 cycles 1 and 2, H1, H4, H5): the alert's
+        """What surrounds a touch, for §19.2 (grantlib.never_context; Codex, PR #12 cycles 1 to 3, H1, H4, H5): the alert's
         title, message and texts when the touch is an alert's button (`alert`, or a tap on an element in it), the screen's
-        own texts and headers (not other people's words: §21.1), and the headers among them. Raw, for matching only."""
+        own texts and headers (not other people's words: §21.1), and its titles: the headers among them and the navigation
+        bar's title, which iOS gives no Header trait (a native `Send money` screen's title reads as plain text). Raw, for
+        matching only."""
         s = self.session
         items = list(getattr(s, "items", None) or [])
         alert: tuple[str, ...] = ()
@@ -6147,40 +6206,50 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             alert = tuple(t for t in ((shown.title, shown.message) if shown is not None else ()) if t)
             alert += tuple(e.text for e in items if e.in_alert and e.role in ui.PASSIVE and e.text)
         own = [e for e in items if e.role in ("text", "header") and not e.in_alert and not e.others and e.text]
-        return alert, tuple(e.text for e in own), tuple(e.text for e in own if e.role == "header")
+        screen = tuple(e.text for e in own)
+        titles = tuple(e.text for e in own if e.role == "header")
+        if (title := _title_of(getattr(s, "last_tree", None))) and title not in titles:
+            titles += (title,)
+            screen += (title,) if title not in screen else ()
+        return alert, screen, titles
 
     async def _draft_digest(self, app: str | None) -> bytes:
         """The digest (_draft_digest_of) of the screen as it is now, read with Session.peek_tree, which leaves the agent's
         list as it is; when it can't be read, a digest nothing matches, and the draft is asked again."""
         peek = getattr(self.session, "peek_tree", None)
         try:
-            items = (await peek()).items if peek is not None else list(self.session.items)
+            tree = await peek() if peek is not None else None
         except Exception:  # noqa: BLE001 - no read: a digest nothing matches
             return secrets.token_bytes(32)
-        return self._draft_digest_of(app, items)
+        items = list(tree.items) if tree is not None else list(self.session.items)
+        return self._draft_digest_of(app, items, _title_of(tree) if tree is not None else "")
 
-    def _draft_digest_of(self, app: str | None, items: "list[ui.Element]") -> bytes:
-        """A keyed digest of what a draft's send would send and where (Codex, PR #12 cycles 1 and 2, H3 and H1), from one
-        read: the app; every text input with its own words, its place and its whole value (not the redacted one: two
-        values can share a placeholder), a password field without its value; and every other element's role and words
-        except other people's (§21.1), so a conversation's header or a recipient's chip that isn't an input (Alice's chat
-        turned into Bob's) is part of it. Under the daemon's own random key, kept nowhere."""
-        parts = [app or ""]
+    def _draft_digest_of(self, app: str | None, items: "list[ui.Element]", title: str = "") -> bytes:
+        """A keyed digest of what a draft's send would send and where (Codex, PR #12 cycles 1 to 3, H3, H1, H2), from one
+        read: the app; the navigation bar's title; every text input with its own words, its place and its whole value
+        (not the redacted one: two values can share a placeholder), a password field without its value; and every other
+        element's role, id, label, value and selection, except other people's words (§21.1), so a conversation's header,
+        a recipient's chip, a picker's chosen value (`Recipient` = Alice turned to Bob) or a checked destination is part
+        of it. Under the daemon's own random key, kept nowhere, never shown or logged."""
+        parts = [app or "", "t", title]
         for e in items:
             if e.role == "input":
                 value = "" if e.secure or e.shows_placeholder else e.value
                 parts += ["i", e.identifier, e.label, ",".join(f"{v:g}" for v in e.rect), value]
-            elif not e.others and (e.text or e.identifier):
-                parts += ["o", e.role, e.identifier, e.text]
+            elif not e.others and (e.label or e.value or e.identifier):
+                parts += ["o", e.role, e.identifier, e.label, e.value, "s" if e.selected else "-",
+                          "" if e.checked is None else str(e.checked)]
         return hmac.new(self._draft_key, "\0".join(parts).encode("utf-8", "surrogatepass"), hashlib.sha256).digest()
 
-    async def _draft_read(self) -> "list[ui.Element]":
+    async def _draft_read(self) -> "tuple[list[ui.Element], str]":
         """The one read a draft's request is made from (Codex, PR #12 cycle 2, H1): what the person is shown and the digest
-        their OK is checked against come from these very items, never from two reads the app could change between."""
+        their OK is checked against come from these very items (and the navigation title of the same read), never from two
+        reads the app could change between."""
         try:
-            return list((await self.session.snapshot()).tree.items)
+            tree = (await self.session.snapshot()).tree
+            return list(tree.items), _title_of(tree)
         except Exception:  # noqa: BLE001 - the last list will do
-            return list(self.session.items)
+            return list(self.session.items), _title_of(getattr(self.session, "last_tree", None))
 
     def _sent_draft(self, request: Confirm) -> None:
         """A person sent the draft (§21.3): the call's log line says which draftsOnly grant showed it (`grant_draft`), and
@@ -6193,7 +6262,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _draft_text(self) -> "tuple[str | None, bool]":
         """_draft_text_of the screen read now."""
-        return self._draft_text_of(await self._draft_read())
+        return self._draft_text_of((await self._draft_read())[0])
 
     def _draft_text_of(self, items: "list[ui.Element]") -> "tuple[str | None, bool]":
         """The draft a touch would send (§21.3), in `items`: the text input the agent last typed into on this screen, else
@@ -6847,6 +6916,41 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind {shown}; move or close "
                                             "it first.")
 
+    async def _last_checks(self, tool: str, a: dict, element: "ui.Element | None", *, hit: bool = True, police: bool = True,
+                           aim: "Callable[[ui.Element], tuple[float, float] | None] | None" = None,
+                           again: "Callable[[], ui.Element] | None" = None, bundle: str | None = None,
+                           ) -> "tuple[ui.Element | None, tuple[float, float] | None, str]":
+        """THE checks every touch an agent's call makes on the phone goes through, right before it goes out (Codex, PR #12
+        cycle 3: one path, so no way of touching skips one; tests/test_review_17_c3.py lists every touch site and holds
+        each to it). In this order:
+        - `hit`: the runner's hit test at the point the touch goes to (`aim(element)`, None: its centre): `stale` when the
+          control there changed its words, `covered` when something else would get the touch (_refuse_hit). Off for what
+          the spec makes a raw touch: a point, `force`, an alert's button (iOS's own), a short swipe;
+        - `police`: the policy and everything in it (_police_check): a block word, §19.2's never-grantable touches by their
+          own words and by what surrounds them (whatever the policy file says), the drafts-only stop of every grants file
+          (whatever policy the call runs under), the grants, and a draft's fingerprint against the one the person saw;
+        - after a person's OK was waited for (the policy read the screen again): `again()` finds the element as it is now
+          (its own checks: the same element, still enabled), and the hit test runs once more there.
+        Returns (the element, the point to touch, the dry run's sentence for the answer's end). `type_text`'s focusing tap
+        has `police` off: typing is not a touch the policy judges (§11.1); Return is (_refuse_line_break)."""
+        s = self.session
+        point: tuple[float, float] | None = None
+        if element is not None and hit:
+            element = await self._hit_clears(element)
+            point = aim(element) if aim is not None else None
+            await self._refuse_hit(element, point or element.center)
+        said = ""
+        if police:
+            aimed_with = s.items
+            said = await self._police(tool, a, element, bundle)
+            if s.items is not aimed_with and again is not None:  # the policy waited for a person's OK and read again
+                element = again()
+                if element is not None and hit:
+                    element = await self._hit_clears(element)
+                    point = aim(element) if aim is not None else None
+                    await self._refuse_hit(element, point or element.center)
+        return element, point, said
+
     async def _press(self, target: ui.Target, hold_ms: int) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
         double = _DOUBLE.get()
@@ -6884,7 +6988,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                     if (box := _DOUBLE_CHANGED.get()) is not None:  # (an empty list is still the journey's)
                         box.append(f"{said} is {now}")
                     return done
-                await self._police("tap", {}, under, front)
+                await self._last_checks("tap", {}, under, hit=False, bundle=front)  # (a raw second touch: no hit test)
             except Refused:
                 self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
                 raise
@@ -6925,30 +7029,26 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 # the agent's list can't vouch for what is under the point (it acted without a list since, or the
                 # picture moved): read what is there now, so a policy word that came in is seen (safety review H2)
                 under = self._element_at(found, (await s.refresh()).items)
-            said = await self._police(tool, a, under)
+            _, _, said = await self._last_checks(tool, a, under, hit=False)  # (a point is a raw touch: no hit test)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
             self._touching(under)
             return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
-            said = await self._police(tool, a, found)  # `force` skips the checks above, never the policy
+            # `force` skips the checks above and the hit test, never the policy
+            _, _, said = await self._last_checks(tool, a, found, hit=False)
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
             self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
-        found = await self._hit_clears(found)
-        point = self._touch_point(found)
-        await self._refuse_hit(found, point or found.center)
-        aimed_with = s.items
-        said = await self._police(tool, a, found)
-        if s.items is not aimed_with:  # the policy waited for a person's OK and read the screen again (_still_there)
-            found = ui.resolve(s.items, target)  # (it checked that the target still names that very element)
-            self._guard(view, found)
-            found = await self._hit_clears(found)
-            point = self._touch_point(found)  # what is drawn over it now
-            await self._refuse_hit(found, point or found.center)
+
+        def again() -> ui.Element:
+            now = ui.resolve(s.items, target)  # (_still_there checked that the target still names that very element)
+            self._guard(view, now)
+            return now
+        found, point, said = await self._last_checks(tool, a, found, aim=self._touch_point, again=again)
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
@@ -7022,7 +7122,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             alert = getattr(self.session, "last_alert", None)
             for button in (alert.buttons if alert is not None else ()):
                 if button.strip().lower() not in DISMISS_WORDS:
-                    await self._police("alert", a, ui.Element(ref="", role="button", label=button))
+                    # (iOS's own alert button, pressed by WebDriverAgent's alert route: no point to hit-test)
+                    await self._last_checks("alert", a, ui.Element(ref="", role="button", label=button), hit=False)
         return await ACTIONS["alert"][0](self.session, a)
 
     async def _swipe(self, view, a: dict) -> str:
@@ -7033,7 +7134,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         items = (await self.session.refresh()).items
         said = ""
         if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP:
-            said = await self._police("swipe", a, self._element_at((x0, y0), items))
+            # (a touch where it starts, at a point: raw, as a point tap is)
+            _, _, said = await self._last_checks("swipe", a, self._element_at((x0, y0), items), hit=False)
         elif (row := full_row_swipe(items, x0, y0, x1, y1)) is not None:
             said = await self._full_swipe_ok(a, row)
         self._dry(a, f"Would swipe from ({x0:g}, {y0:g}) to ({x1:g}, {y1:g}).{said}")
@@ -7100,20 +7202,30 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if want is not None and found.checked == want:
             self._touching(found)  # nothing is touched, but a recording saves this switch, not the generic lookup's element
             return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
-        aimed_with = self.session.items
-        said = await self._police("toggle", a, found)
-        if self.session.items is not aimed_with:  # the policy waited for a person's OK and read the screen again
-            key = self._police_key(found)  # (_still_there checked the same switch is there, at the same place)
-            found = next(e for e in self.session.items if self._police_key(e) == key and e.rect == found.rect)
-            if found.checked is None or (want is not None and found.checked == want):
+        force = bool(a.get("force"))
+        was = found
+
+        def aim(switch: ui.Element) -> tuple[float, float] | None:
+            spot = self._touch_point(switch)
+            return self._switch_control(self.session.items, switch, spot) if switch.width > WIDE_SWITCH * switch.height \
+                else spot
+
+        def again() -> ui.Element:
+            nonlocal forced
+            key = self._police_key(was)  # (_still_there checked the same switch is there, at the same place)
+            now = next(e for e in self.session.items if self._police_key(e) == key and e.rect == was.rect)
+            if now.checked is None or (want is not None and now.checked == want):
                 raise Refused("not_allowed", "needs_confirmation: the screen changed while waiting for the OK; ask again.")
-            if a.get("force"):
-                forced = self._forced(view, found)
+            if force:
+                forced = self._forced(view, now)
             else:
-                self._guard(view, found)
-                point = shown = self._touch_point(found)
-                if found.width > WIDE_SWITCH * found.height:
-                    point = self._switch_control(self.session.items, found, shown)
+                self._guard(view, now)
+            return now
+        # the hit test at the very point the switch is touched, as for a tap (Codex, PR #12 cycle 3, M2); `force` skips it
+        checked, aimed, said = await self._last_checks("toggle", a, found, hit=not force, aim=aim, again=again)
+        found = checked if checked is not None else found
+        if not force:
+            point, shown = aimed, self._touch_point(found)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)

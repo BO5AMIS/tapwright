@@ -174,6 +174,26 @@ def never_context(name: str | None, alert: tuple[str, ...] = (), screen: tuple[s
     return None
 
 
+OWN_PAYMENT = (*PAYMENT_WORDS, "Send money", "Confirm order", "Confirm payment")
+MOVES_AMOUNT = (*PAYMENT_MORE, *REACH_WORDS, "Confirm", "Continue", "Complete", "Submit")
+
+
+def never_own(name: str | None) -> str | None:
+    """What in a touched element's OWN words puts the touch in §19.2 whatever the policy file says (Codex, PR #12 cycle 3,
+    H4): deleting an account ("Delete account", "Remove my profile"), a payment word or phrase ("Buy", "Pay", "Checkout",
+    "Send money"), or an amount with a word that moves it ("Send $25", "Confirm · $49.99"). A price among other words
+    ("Latte $4") is none. None when nothing does."""
+    if not name:
+        return None
+    if (found := account_deletion(name)) is not None:
+        return found
+    if (found := _any(OWN_PAYMENT, name)) is not None:
+        return found
+    if _amount(name) is not None and _any(MOVES_AMOUNT, name) is not None:
+        return name
+    return None
+
+
 def leaves(name: str | None) -> bool:
     """Does a touch on `name` only leave (Cancel, Back, Not now…), so it needs nobody's OK on a §19.2 screen?"""
     return bool(name) and " ".join((name or "").split()).strip(" .!?").casefold() in LEAVE_WORDS
@@ -517,6 +537,15 @@ class Book:
             return None
         return next((g.name for g in self._active()
                      if g.app == app and g.drafts_only and (g.route is None or g.route in routes)), None)
+
+    def drafts_only_touch(self, app: str | None, name: str | None, routes: tuple[str, ...]) -> str | None:
+        """The name of an active draftsOnly grant whose app, word and route match a touch on `name` (§21.3), or None: that
+        touch stops at a draft whatever grants or policy the call itself runs under (Codex, PR #12 cycle 3, H3)."""
+        if not app or not name:
+            return None
+        return next((g.name for g in self._active()
+                     if g.app == app and g.drafts_only and _any(g.words, name) is not None
+                     and (g.route is None or g.route in routes)), None)
 
     def naming_route(self, route: str) -> str | None:
         """The name of an active grant that names the saved route `route` (§19.1), or None."""
