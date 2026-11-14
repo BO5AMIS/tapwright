@@ -466,3 +466,16 @@ def test_an_alerts_policy_word_button_and_a_swipe_that_is_a_touch_go_through_the
         await d.run_tool("a", "swipe", {"x0": 50, "y0": 120, "x1": 50, "y1": 400, "look": False})  # a real drag
         await finish(stop, task)
     run(go)
+
+
+def test_the_explore_key_holds_a_skip_list_and_submit_ids_and_is_kept_when_the_policy_travels():
+    rules = policy.parse({"explore": {"skip": ["Archive"], "submit": ["save-profile"], "future": 1}})
+    assert rules.explore.skip == ("Archive",) and rules.explore.submit == ("save-profile",)
+    assert policy.parse(json.loads(rules.dumps()), header=True).explore == rules.explore
+    assert policy.parse({}).explore == policy.ExploreWords() and "explore" not in policy.DEFAULT.to_obj()
+
+
+@pytest.mark.parametrize("bad", [[], {"skip": "Archive"}, {"skip": [""]}, {"submit": [3]}])
+def test_a_bad_explore_key_is_refused(bad):
+    with pytest.raises(ValueError, match="explore"):
+        policy.parse({"explore": bad})

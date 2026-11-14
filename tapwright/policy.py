@@ -15,7 +15,8 @@ VERSIONS = (1, 2)
 BLOCKED, CONFIRM = "blocked", "confirm"
 DEFAULT_CONFIRM = ("Buy", "Purchase", "Subscribe", "Pay", "Delete", "Remove", "Send", "Post", "Publish",
                    "Sign out", "Log out", "Erase")
-_KEYS = ("version", "confirm", "block", "apps", "grants")
+_KEYS = ("version", "confirm", "block", "apps", "grants", "explore")
+_EXPLORE_KEYS = ("skip", "submit")
 _APP_KEYS = ("confirm", "block")
 
 
@@ -27,11 +28,20 @@ class AppWords:
 
 
 @dataclass(frozen=True)
+class ExploreWords:
+    """`"explore": {"skip": [...], "submit": [...]}` (§25.5, §25.7): words the explorer never touches, and ids of controls it
+    may treat as a form's submit. Only `explore` reads them; a tool that doesn't know the key ignores it."""
+    skip: tuple[str, ...] = ()
+    submit: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Policy:
     confirm: tuple[str, ...] = ()
     block: tuple[str, ...] = ()
     apps: dict[str, AppWords] = field(default_factory=dict)  # by bundle id; an app's lists replace the global ones
     file: str | None = None  # a version 2 file's absolute path: its grants are read from it at every touch (§19.5)
+    explore: ExploreWords = field(default_factory=ExploreWords)  # only `explore` reads it (§25.5)
 
     def words(self, app_bundle: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """(block, confirm) words in force for an app."""
@@ -65,6 +75,8 @@ class Policy:
         apps = {bundle: {k: list(v) for k, v in (("confirm", w.confirm), ("block", w.block)) if v is not None}
                 for bundle, w in self.apps.items()}
         obj = {"version": VERSION, "confirm": list(self.confirm), "block": list(self.block), "apps": apps}
+        if self.explore.skip or self.explore.submit:
+            obj["explore"] = {k: list(v) for k, v in (("skip", self.explore.skip), ("submit", self.explore.submit)) if v}
         if self.file is not None:  # (to the daemon: the grants are read from the file itself, never from a header)
             obj.update(version=2, file=self.file)
         return obj
@@ -127,7 +139,12 @@ def parse(obj: object, *, header: bool = False) -> Policy:
             raise ValueError(f'apps."{bundle}" must be an object with confirm and block lists')
         _unknown(own, _APP_KEYS, f'apps."{bundle}"')
         apps[bundle] = AppWords(*(_words(own[k], f'apps."{bundle}".{k}') if k in own else None for k in _APP_KEYS))
-    return Policy(_words(obj.get("confirm", []), "confirm"), _words(obj.get("block", []), "block"), apps, file)
+    explore = obj.get("explore", {})
+    if not isinstance(explore, dict):
+        raise ValueError('explore must be an object like {"skip": ["Archive"]}')
+    # (a key inside `explore` this tool doesn't know is ignored: a newer file may hold one, §25.5)
+    words = ExploreWords(*(_words(explore[k], f"explore.{k}") if k in explore else () for k in _EXPLORE_KEYS))
+    return Policy(_words(obj.get("confirm", []), "confirm"), _words(obj.get("block", []), "block"), apps, file, words)
 
 
 def loads(text: str, *, header: bool = False) -> Policy:
@@ -151,5 +168,5 @@ def load(path: str | Path) -> Policy:
     except ValueError as e:
         raise ValueError(f"the policy file {path}: {e}") from None
     if json.loads(text).get("version") == 2:  # its grants are read from the file, again at every touch
-        rules = Policy(rules.confirm, rules.block, rules.apps, str(Path(path).expanduser().resolve()))
+        rules = Policy(rules.confirm, rules.block, rules.apps, str(Path(path).expanduser().resolve()), rules.explore)
     return rules
