@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
-from . import accounts, trace
+from . import accounts, fromothers, trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -67,6 +67,8 @@ def _text(v) -> str:
     """The text, without the invisible direction marks iOS puts around numbers ("‎42")."""
     return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
+
+MARK_OTHERS = "(from others)"  # AGENT-TOOLS §21.1
 
 REDACT: ContextVar[Callable[[str], str] | None] = ContextVar("tapwright_redact", default=None)
 
@@ -154,6 +156,7 @@ class Element:
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
     no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
+    others: bool = False  # text the tool knows other people wrote (AGENT-TOOLS §21.1, fromothers.py); False claims nothing
 
     @property
     def x(self) -> float:
@@ -195,6 +198,8 @@ class Element:
         eyes = USERS_EYES.get()
         parts = [self.ref] if ref else []
         parts.append(self.role)
+        if self.others and self.text:
+            parts.append(MARK_OTHERS)  # between the role and the quoted text, never cut (§21.1)
         if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
             parts.append("(icon only)")
             parts.append(f"(VoiceOver: {clip(self.text)})")
@@ -235,6 +240,7 @@ class Alert:
     title: str
     buttons: tuple[str, ...]
     rect: tuple[float, float, float, float]
+    message: str = ""  # the body text under the title (AGENT-TOOLS 1.14 §3.2), "" when the alert has none
 
 
 @dataclass(frozen=True)
@@ -580,7 +586,28 @@ def _upright_keyboard(root: ET.Element, screen: tuple[float, float]) -> None:
 
 def _alert(node: ET.Element) -> Alert:
     buttons = [_text(n.get("label")) or _text(n.get("name")) for n in node.iter() if _kind(n) == "Button"]
-    return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
+    title = _text(node.get("label")) or _text(node.get("name"))
+    return Alert(title, tuple(b for b in buttons if b), _rect(node), _alert_message(node, title))
+
+
+def _alert_message(node: ET.Element, title: str) -> str:
+    """The alert's body: the text of its StaticTexts that are neither the title nor inside a button, in reading order,
+    each once, joined by a space (AGENT-TOOLS §3.2). WDA gives an alert's title as its label and the title and the message as
+    StaticTexts, so the title's own StaticText is left out."""
+    parts: list[str] = []
+
+    def walk(n: ET.Element) -> None:
+        for child in n:
+            kind = _kind(child)
+            if kind == "Button":
+                continue
+            if kind == "StaticText":
+                text = _text(child.get("value")) or _text(child.get("label")) or _text(child.get("name"))
+                if text and text != title and text not in parts:
+                    parts.append(text)
+            walk(child)
+    walk(node)
+    return " ".join(parts)
 
 
 def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
@@ -770,6 +797,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    if tree.app and tree.app[1] in fromothers.KNOWN_APPS:  # §21.1: only where the tool can know
+        theirs = fromothers.mark(root, tree.app[1], screen)
+        for e, number, _ in found:
+            if e.role in fromothers.MARKED_ROLES and numbered.get(number) in theirs:
+                e.others = True
     tree.structure = _structure(root, screen_rect)
     tree.back = _back_of(root, screen) if screen else None
 
@@ -1011,7 +1043,10 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
 
 
 def alert_line(alert: Alert) -> str:
-    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
+    """`Alert: "<title>" "<message>" [b1] [b2]`. The message is redacted, then cut like element text (`clip`), and left out
+    when empty. A policy word is never matched on it (policy matches buttons only)."""
+    message = f" {clip(alert.message)}" if alert.message.strip() else ""
+    return f"Alert: {quoted(alert.title)}{message} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
 
 
 ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon

@@ -87,6 +87,15 @@ _POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwrig
 # Set to a list by run_tool; a touch a person's OK let through puts where the OK came from in it ("chat", "the live
 # view"), and the answer then ends with NOTE_ALLOWED
 _GRANTED: contextvars.ContextVar[list[str]] = contextvars.ContextVar("tapwright_granted", default=[])
+# The agent (client id) whose call is being run: where the draft of a touch is read from (§21.3: the field it last typed into)
+_CALLER: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_caller", default=None)
+# True while a saved route with `"draftsOnly": true` runs: a touch on a word that reaches other people stops at a draft (§21.3)
+_DRAFTS_ROUTE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_drafts_route", default=False)
+
+
+class Sent(str):
+    """The origin of a person's OK of a DRAFT (§21.3) ("chat", "the live view"): the answer then ends `Note: sent by a person
+    (in chat).` where any other OK ends `Note: allowed by a person (in chat).`"""
 # The scope (personal mode's app list) of the call being run, for a tool that makes calls of its own (`performance`)
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
@@ -188,6 +197,7 @@ CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say
 # the kill switch (§19.5): a run stops between moves when a grant it started with is revoked
 REVOKED_STOP = ("revoked: the grants were revoked while this ran ({names}), so it stopped between moves; nothing more "
                 "was touched. Ask your user what to do.")
+NOTE_SENT = "sent by a person (in {origin})."  # §21.3: a draft a person sent
 NOTE_ALLOWED = "allowed by a person (in {origin})."  # where the OK came from: "chat" (the host's dialog) or "the live view"
 CONFIRM_TICK = 0.25  # seconds between looks at a waited-for request's clock (an answer wakes it at once)
 NUDGE_EVERY = 3.0  # seconds between the daemon's looks at the phone while a call waits for a person (§11.5)
@@ -231,7 +241,7 @@ def _outside(bundle: str | None, name: str | None, given: str, alert: bool = Fal
 class UxRead(NamedTuple):
     """What one ux_check turn read (Daemon._ux_check): checked, filed and shown from this, never from the shared view."""
     items: list
-    alert_now: "tuple[str, tuple[str, ...]] | None"
+    alert_now: "tuple[str, tuple[str, ...], str] | None"
     screen: tuple
     app: "tuple[str, str] | None"
 
@@ -416,8 +426,9 @@ def settled_line(seconds: float) -> str:
     return f"Settled in {seconds:.2f} s."
 
 
-def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...]] | None:
-    return (alert.title, alert.buttons) if alert else None
+def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...], str] | None:
+    """What makes the alert the same one: title, buttons and message (a change in the message alone is a change of the alert)."""
+    return (alert.title, alert.buttons, alert.message) if alert else None
 
 
 def _furniture(view, alert: ui.Alert | None, keyboard: bool) -> list[str]:
@@ -618,6 +629,7 @@ class GrantCall:
     name: str | None = None  # §12 grant: the grant that let the touch through
     use: str | None = None  # §12 grant_use: "2 of 3 today"
     line: str | None = None  # `Note: allowed by grant "…" (2 of 3 today).`
+    draft: str | None = None  # §12 grant_draft: the draftsOnly grant that stopped this touch at a draft
     taken: bool = False
 
 
@@ -634,6 +646,7 @@ class Confirm:
     owner: str | None = None  # the agent (client id) whose call asked: only its host's dialog may answer
     dialog: bool = False  # the host was asked too (a `dialog.CONFIRM` ask went to the owner's channel)
     origin: str = ""  # where the answer came from: "chat" or "the live view"
+    draft: str | None = None  # a draft's request (§21.3): the draftsOnly grant that stopped it, "" for a route's
     used: bool = False  # an allow was taken by one call (Daemon._claim): no other call touches under it
     offer: "dict | None" = None  # what the follow-up grant offer (§19.6) needs, kept when the host was asked too
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # set at the first answer
@@ -1913,6 +1926,7 @@ class Daemon(journey_tool.JourneyTools):
             "grant": grants.name if grants is not None and not read and not self._granted_now else None,
             "grant_use": grants.use if grants is not None and not read and not self._granted_now else None,
             "grant_asked": grants.asked if grants is not None and not read and grants.name is None else None,
+            "grant_draft": grants.draft if grants is not None and not read else None,  # §21.3: the grant that stopped it at a draft
             "screenshot": True if name == "look" and args.get("screenshot", True) else None,  # (look's default is on)
             "to": args.get("to") if name == "scroll" else None,
             "labels": True if name == "look" and args.get("labels") else None,
@@ -2494,11 +2508,14 @@ class Daemon(journey_tool.JourneyTools):
         # a replay of a saved route runs that route: a grant naming it covers its touches (§19.1)
         named = data.get("name") if data.get("version") == 2 and isinstance(data.get("name"), str) else None
         running = _ROUTES.set((*_ROUTES.get(), named)) if named else None
+        drafting = _DRAFTS_ROUTE.set(True) if named and data.get("draftsOnly") is True else None  # §21.3
         run_grants = self._grants_run()
         try:
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
+            if drafting is not None:
+                _DRAFTS_ROUTE.reset(drafting)
             if running is not None:
                 _ROUTES.reset(running)
             if run_grants is not None:
@@ -3017,6 +3034,7 @@ class Daemon(journey_tool.JourneyTools):
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
+        caller_token = _CALLER.set(client_id)
         said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
         own_grants = said is None or said.taken
         if own_grants:
@@ -3055,7 +3073,8 @@ class Daemon(journey_tool.JourneyTools):
                     answer = {**answer, "text": "\n".join([answer["text"], *said.notes])}
                 if granted:  # a person's OK let a touch through: the answer ends with where it came from
                     self._granted_now, self._granted_by = True, granted[-1]
-                    answer = {**answer, "text": f"{answer['text']}\nNote: {NOTE_ALLOWED.format(origin=granted[-1])}"}
+                    note_of = NOTE_SENT if isinstance(granted[-1], Sent) else NOTE_ALLOWED  # §21.3: a draft a person sent
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {note_of.format(origin=str(granted[-1]))}"}
                 elif said.line is not None:  # a grant let it through: the answer ends with it and its count
                     answer = {**answer, "text": f"{answer['text']}\n{said.line}"}
                 return answer
@@ -3071,6 +3090,7 @@ class Daemon(journey_tool.JourneyTools):
             trace.leave(arrival)
             _GRANTED.reset(grant_token)
             _SCOPE.reset(scope_token)
+            _CALLER.reset(caller_token)
             if own_grants:
                 _GRANT_CALL.reset(grants_token)
 
@@ -5040,6 +5060,7 @@ class Daemon(journey_tool.JourneyTools):
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
             await typed()
+        view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
@@ -5408,7 +5429,7 @@ class Daemon(journey_tool.JourneyTools):
         """When the newest read shows an OS alert: `behind_alert`. `force` says whether passing it could help
         (it can't touch an element that isn't found)."""
         if view.alert_now is not None:
-            title, buttons = view.alert_now
+            title, buttons, _message = view.alert_now
             alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
@@ -5633,8 +5654,10 @@ class Daemon(journey_tool.JourneyTools):
             self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
             return ""
         now = self.control.clock()
+        route_draft = bool(_DRAFTS_ROUTE.get()) and grantlib.reaches_people(word)  # §21.3: a route that is draftsOnly
         grant = next((c for c in self._confirms.values()
-                      if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
+                      if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now
+                      and (not route_draft or c.draft is not None)), None)
         book = self._book()
         touch = grantlib.Touch(bundle or self._app_bundle(), element.label if element.role == "input" else element.text,
                                _ROUTES.get(), tool) if book is not None else None
@@ -5645,19 +5668,66 @@ class Daemon(journey_tool.JourneyTools):
                 decided = book.decide(touch, "peek")
                 if decided.kind == "covered":
                     return f" {decided.dry}"
+                route_draft = route_draft or (decided.kind == "draft" and grantlib.reaches_people(word))
+            if route_draft:
+                return f' It would stop at a draft a person sees first (policy word "{word}").'
             return f' It needs a person\'s OK (policy word "{word}").'
         if grant is not None and self._claim(grant):
-            _GRANTED.get().append(grant.origin or "the live view")
+            if grant.draft is not None:  # a draft a person sent (§21.3): logged, noted as sent, not counted as a use
+                self._sent_draft(grant)
+                _GRANTED.get().append(Sent(grant.origin or "the live view"))
+            else:
+                _GRANTED.get().append(grant.origin or "the live view")
             return ""
         if book is not None and touch is not None and self._by_grant(book, touch, tool):
             return ""
-        message, request = self._ask(tool, a, key, element, word, what, now)
+        held = _GRANT_CALL.get()
+        stopped = held.draft if held is not None and grantlib.reaches_people(word) else None  # a draftsOnly grant's name
+        drafted: "tuple[str, str | None] | None" = None
+        if route_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
+            drafted = (stopped or "", await self._draft_text())
+        message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
             raise Refused("not_allowed", message)
         taken = (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and the OK given was used by "
                  "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
         await self._wait_for_person(request, message, tool, a, key, element, taken)
+        if request.draft is not None:
+            self._sent_draft(request)
         return ""
+
+    def _sent_draft(self, request: Confirm) -> None:
+        """A person sent the draft (§21.3): the call's log line says which draftsOnly grant showed it (`grant_draft`), and
+        the approval is audited. It is NOT counted as a use of the grant (§19.3: a draft a person sends is not a use), so
+        it claims no use slot and writes no `grant` audit line."""
+        name = request.draft or ""
+        holder = _GRANT_CALL.get()
+        if name and holder is not None:
+            holder.draft = name
+
+    async def _draft_text(self) -> str | None:
+        """The draft a touch would send (§21.3), read from the screen now: the text input the agent last typed into on this
+        screen, else the focused one, else the only filled one. Redacted (accounts' and vault values) before the cut, cleaned
+        and cut at 500 characters. None when no field can be told (a password field never is)."""
+        try:
+            items = (await self.session.snapshot()).tree.items
+        except Exception:  # noqa: BLE001 - the last list will do
+            items = list(self.session.items)
+        inputs = [e for e in items if e.role == "input" and not e.secure]
+        field: ui.Element | None = None
+        typed = self.control.client(_CALLER.get() or "").typed_field
+        if typed is not None:
+            ident, label, rect = typed
+            same = [e for e in inputs if (e.identifier == ident if ident else e.label == label)]
+            if same:
+                field = min(same, key=lambda e: sum(abs(p - q) for p, q in zip(e.rect, rect)))
+        if field is None and len(focused := [e for e in inputs if e.focused]) == 1:
+            field = focused[0]
+        if field is None and len(filled := [e for e in inputs if e.value and not e.shows_placeholder]) == 1:
+            field = filled[0]
+        if field is None:
+            return None
+        return dialog.draft_text("" if field.shows_placeholder else field.value, self.scrub_everywhere)
 
     def _book(self) -> "grantlib.Book | None":
         """The grants of the policy in force (§19): None for a policy with no file (the built-in one, a version 1
@@ -5679,8 +5749,8 @@ class Daemon(journey_tool.JourneyTools):
     def _by_grant(self, book: "grantlib.Book", touch: "grantlib.Touch", tool: str) -> bool:
         """Does a grant let this touch through without a person (§19.3)? A use is claimed and its audit line written
         (book.decide), then checked again right before the touch (book.still_covers). What the grants said goes to
-        the call's answer and log line. A grant that is draftsOnly stops here: a person sees the draft (§21.3; the
-        draft dialog is a later task, so for now the touch asks a person as any other does)."""
+        the call's answer and log line. A grant that is draftsOnly stops here: a person sees the draft first (§21.3,
+        _police_check), and the call's GrantCall says which grant."""
         holder = _GRANT_CALL.get()
         detail = f"{tool} {ui.clip(self.scrub_everywhere(touch.name or ''))}"
         try:
@@ -5697,6 +5767,8 @@ class Daemon(journey_tool.JourneyTools):
         if holder is not None:
             holder.notes += [n for n in decided.notes if n not in holder.notes]
             holder.asked = decided.asked[0] if decided.asked else holder.asked
+            if decided.kind == "draft":
+                holder.draft = decided.name  # (§21.3: the touch stops at a draft; _police_check shows it)
         return False
 
     def _grants_revoked(self) -> list[str]:
@@ -5736,7 +5808,8 @@ class Daemon(journey_tool.JourneyTools):
                 "label", element.label, "text", element.text)
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
-             now: float, caption: str | None = None, why: str | None = None) -> tuple[str, Confirm | None]:
+             now: float, caption: str | None = None, why: str | None = None,
+             drafted: "tuple[str, str | None] | None" = None) -> tuple[str, Confirm | None]:
         """The `needs_confirmation` message, after asking the live view (once for a request still open), and, for an
         agent whose host can show a dialog, the host too: then the request to wait for comes with it. An earlier
         request for this call that was declined, or ran out unanswered, is said at the message's end (when nobody
@@ -5769,6 +5842,11 @@ class Daemon(journey_tool.JourneyTools):
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
             scrub = self.scrub_everywhere
             shown = step_caption(tool, what, a)
+            drafting = drafted is not None  # §21.3: the request shows the draft, and its choices are the word and Don't <word>
+            app_name = (self.session.app or (None, None))[0]
+            if drafted is not None:
+                request.draft = drafted[0]
+                shown = dialog.draft_caption(scrub(word), scrub(app_name) if app_name else None, drafted[1])
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
                                "caption": scrub(shown) if shown else shown, "word": scrub(word),
@@ -5779,12 +5857,16 @@ class Daemon(journey_tool.JourneyTools):
                 label = scrub(element.label if element.role == "input" else element.text)
                 app = (self.session.app or (None, None))[0]
                 held = _GRANT_CALL.get()  # (a grant that matched and ran out: a new one would only undo its limit)
-                if caption is None:
-                    request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
-                                     "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
-                self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
-                                                  "message": scrub(caption or dialog.caption(tool, label, app, word)),
-                                                  "choices": dialog.CHOICES[dialog.CONFIRM]})
+                if drafting:  # (no grant is offered on a draft: the grant that stopped it is the person's already, or a route's)
+                    self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.DRAFT,
+                                                      "message": scrub(shown), "choices": dialog.draft_choices(scrub(word))})
+                else:
+                    if caption is None:  # (a card's typing is never offered as a grant, §20.1)
+                        request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
+                                         "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
+                    self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
+                                                      "message": scrub(caption or dialog.caption(tool, label, app, word)),
+                                                      "choices": dialog.CHOICES[dialog.CONFIRM]})
         waits = request.dialog and request.owner == caller  # (a retry while its request is open waits on it too)
         return (f"needs_confirmation: {what} needs a person's OK {reason}. The live view asks them "
                 "now; when they allow it, make the same call again. If nobody is watching, ask your user."
@@ -5813,9 +5895,11 @@ class Daemon(journey_tool.JourneyTools):
                 if request.state == "pending" and request.dialog:  # it ran out, or the call was given up on
                     self.dialog_channel(request.owner or "").push({"type": "close", "id": request.id})
             if request.state == "declined":
-                raise Refused("not_allowed", message + " They declined.")
+                raise Refused("not_allowed", self._draft_refusal("They declined.") if request.draft is not None
+                              else message + " They declined.")
             if request.state != "allowed":
-                raise Refused("not_allowed", message + " Nobody answered.")
+                raise Refused("not_allowed", self._draft_refusal("Nobody answered.") if request.draft is not None
+                              else message + " Nobody answered.")
             # used up, whatever happens next (a pause, the re-check); taken by one call only: another call of the same
             # touch that waited on this request too, or repeated it after the allow, got there first (Codex, PR #9 c2)
             if not self._claim(request):
@@ -5823,7 +5907,13 @@ class Daemon(journey_tool.JourneyTools):
         await self._aside(answered)
         await self._offer_grant(request)  # (§19.6) a follow-up dialog; never a reason to refuse this touch
         await self._still_there(tool, a, same or key, element)  # (`same`: the element's own key, when `key` holds more)
-        _GRANTED.get().append(request.origin or "the live view")
+        origin = request.origin or "the live view"
+        _GRANTED.get().append(Sent(origin) if request.draft is not None else origin)
+
+    @staticmethod
+    def _draft_refusal(why: str) -> str:
+        """§21.3: a draft not sent, said the way the spec words it; nothing was touched."""
+        return f"needs_confirmation: the draft wasn't sent ({why}). Ask your user what to do."
 
     async def _ask_offer(self, owner: str, kind: str, message: str) -> str | None:
         """One question of the grant dialog to the owner's host, waited on up to CONFIRM_TTL (the wait lets go of the

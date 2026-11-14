@@ -1329,6 +1329,24 @@ def test_an_alert_appearing_changing_and_going_heads_the_change_block():
     run(go)
 
 
+def test_a_change_in_the_alerts_message_alone_is_a_change_of_the_alert():
+    async def go():
+        from tapwright import ui
+        d = make()
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        d.session.last_alert = ui.Alert("Sync?", ("OK",), (50, 300, 300, 200), "Uploads 3 files.")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
+        assert unsettled(r)[2] == 'Alert: "Sync?" "Uploads 3 files." [OK]'
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
+        assert unsettled(r)[2] == "No visible change."
+        d.session.last_alert = ui.Alert("Sync?", ("OK",), (50, 300, 300, 200), "Uploads 4 files.")
+        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True})
+        assert unsettled(r)[2] == 'Alert: "Sync?" "Uploads 4 files." [OK]'
+        await finish(stop, task)
+    run(go)
+
+
 def test_the_keyboard_showing_and_hiding_heads_the_change_block_before_the_element_lines():
     async def go():
         d = make()

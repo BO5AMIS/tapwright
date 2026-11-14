@@ -570,3 +570,55 @@ def test_an_option_scrolled_off_screen_is_still_a_target_that_is_off_screen():
     tree = ui.read(xml(group), SCREEN)
     assert tree.items == [] and [(e.role, e.label, e.no_trait) for e in tree.offscreen] == [
         ("radio", "Yearly", True), ("text", "Yearly", False)]
+
+
+ALERT_XML = """<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Wayfare" label="Wayfare" x="0" y="0" width="430" height="932">
+<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">
+<XCUIElementTypeAlert type="XCUIElementTypeAlert" name="Allow notifications?" label="Allow notifications?" x="78" y="360" width="274" height="180">
+<XCUIElementTypeOther type="XCUIElementTypeOther" x="78" y="360" width="274" height="180">
+<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Allow notifications?" label="Allow notifications?" value="Allow notifications?" x="94" y="376" width="242" height="22"/>
+{message}
+<XCUIElementTypeButton type="XCUIElementTypeButton" name="Don't Allow" label="Don't Allow" x="78" y="490" width="137" height="50"/>
+<XCUIElementTypeButton type="XCUIElementTypeButton" name="Allow" label="Allow" x="215" y="490" width="137" height="50"/>
+</XCUIElementTypeOther></XCUIElementTypeAlert></XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>"""
+
+
+def alert_tree(message: str = "Wayfare would like to send you notifications.") -> ui.Tree:
+    body = (f'<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="{message}" label="{message}" '
+            f'value="{message}" x="94" y="404" width="242" height="40"/>') if message else ""
+    return ui.read(ALERT_XML.replace("{message}", body), SCREEN)
+
+
+def test_the_alert_line_carries_the_alerts_message():
+    tree = alert_tree()
+    assert tree.alert is not None and tree.alert.message == "Wayfare would like to send you notifications."
+    assert ui.alert_line(tree.alert) == ('Alert: "Allow notifications?" "Wayfare would like to send you notifications." '
+                                         "[Don't Allow] [Allow]")
+    text = ui.describe(tree.items, SCREEN, 3, ("Wayfare", "com.example.wayfare"), tree.alert, False)
+    assert text.splitlines()[2].startswith('Alert: "Allow notifications?" "Wayfare would')
+
+
+def test_an_alert_without_a_message_keeps_todays_line():
+    tree = alert_tree("")
+    assert tree.alert is not None and tree.alert.message == ""
+    assert ui.alert_line(tree.alert) == 'Alert: "Allow notifications?" [Don\'t Allow] [Allow]'
+
+
+def test_the_alert_message_is_cut_like_element_text_and_redacted_before_the_cut():
+    long = "word " * 80
+    line = ui.alert_line(ui.Alert("Title", ("OK",), (0, 0, 1, 1), long))
+    assert '…(+' in line and line.endswith("[OK]")
+    secret = "hunter2-secret"
+    token = ui.REDACT.set(lambda t: t.replace(secret, "<tester's password>"))
+    try:
+        # the value sits across the cut: redacted first, so no half of it is left behind
+        padded = "x" * 195 + secret
+        line = ui.alert_line(ui.Alert("T", ("OK",), (0, 0, 1, 1), padded))
+    finally:
+        ui.REDACT.reset(token)
+    assert "hunter" not in line and "secret" not in line
+
+
+def test_the_message_is_data_for_the_line_not_a_policy_word_and_control_marks_go():
+    alert = ui.Alert("Delete trip?", ("Cancel", "Delete"), (0, 0, 1, 1), "‎Send\n  Post  it")
+    assert 'Alert: "Delete trip?" "Send Post it"' in ui.alert_line(alert) or "Send" in ui.alert_line(alert)

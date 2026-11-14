@@ -534,7 +534,8 @@ class Book:
         return days == 1 and hours == (0 if grant.per_hour is None else 1)
 
     def holds(self, grant: Grant, touch: Touch, at: datetime.datetime) -> bool:
-        """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)?"""
+        """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)? `draft`: for the use a
+        person's Send of a draft counts (§21.3), which a draftsOnly grant holds too."""
         return (grant.app == touch.app and not touch_never(touch.app, touch.name)
                 and _any(grant.words, touch.name or "") is not None
                 and (grant.route is None or grant.route in touch.routes)

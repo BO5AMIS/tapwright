@@ -43,6 +43,31 @@ def caption(tool: str, label: str, app: str | None, word: str) -> str:
     return f'Allow: {VERBS.get(tool, tool)} "{clean(label)}" in {where}? (policy word "{clean(word)}")'
 
 
+DRAFT = "draft"  # §21.3: the draft's ask; its choices come with it (`Send` and `Don't send`)
+DRAFT_LIMIT = 500  # characters of the draft the dialog shows
+
+
+def draft_text(text: str, scrub=None) -> str:
+    """A draft as the dialog shows it (§21.3): redacted of account and vault values FIRST (so no half of one is left by
+    the cut), control characters gone, whitespace made one space, double quotes single (it can't end its own quotation),
+    cut at DRAFT_LIMIT characters with `…(+N)`."""
+    redacted = scrub(text) if scrub is not None else text
+    spaced = "".join(" " if ch.isspace() else ch for ch in redacted)
+    plain = " ".join("".join(ch for ch in spaced if not unicodedata.category(ch).startswith("C")).replace('"', "'").split())
+    return plain if len(plain) <= DRAFT_LIMIT else f"{plain[:DRAFT_LIMIT]}…(+{len(plain) - DRAFT_LIMIT})"
+
+
+def draft_caption(word: str, app: str | None, text: str | None) -> str:
+    """`Send this in Wayfare? "<the field's text>"`; the word is the policy word that matched."""
+    where = clean(app) if app else "the app in front"
+    said = f' "{text}"' if text is not None else " (no text found in the field)"
+    return f"{word[:1].upper()}{word[1:]} this in {where}?{said}"
+
+
+def draft_choices(word: str) -> list[str]:
+    return [f"{word[:1].upper()}{word[1:]}", f"Don't {word.lower()}"]
+
+
 class Channel:
     """The events for one agent's host, oldest first, each with a sequence number. A poll says the last number it has."""
 
