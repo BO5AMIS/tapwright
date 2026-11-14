@@ -128,6 +128,53 @@ ones as the daemon's own settings.
   the answer, 2 for a refusal (`Error <code>: <message>` on stderr) or a mistake in the command, and 3 when the
   daemon can't be reached. Loading the MCP server once, when the session starts, is faster still.
 
+### Safety rules of 1.7 worth knowing
+
+- **`~/.tapwright/serve.json` is trusted like you.** It holds the daemon's key. Any process of your user that can
+  read it can answer the approval dialog (including the offer to make a grant, so it can create a standing grant),
+  fetch one-time codes and ask the daemon to unlock the phone. An agent that runs shell commands as you can read it.
+  Keep the file private, and run agents you don't trust where they can't read your home folder.
+- **Locking the phone stops a run.** A lock in the middle of a `run`, `drive`, `replay`, route or journey ends it with
+  `locked`; the passcode is never typed there. The tool unlocks a locked phone only at the start of a scheduled run,
+  and with `tapwright serve --phone --accounts FILE` at the start of a new call.
+- **Unlock limits.** At most 2 passcode attempts an hour and 3 a day, counted across restarts in
+  `~/.tapwright/unlock-state.json`. Once the phone refuses the passcode, nothing more is typed until you check the
+  vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
+- **One-time codes only into a code field.** `${otp.<app>}` is typed only into a one-line field whose id, label or
+  placeholder says code, OTP, verification or PIN. Any other field is refused (`not_allowed`) and no code is read. A
+  draft that holds a code says so.
+- **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
+  touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
+  with `--no-policy`. `type_text` with `submit: true` is refused there: type without it, then tap the send button.
+- **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
+  of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
+  draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
+- **`--revoke-all` always works.** If the policy file's edit lock is held, it writes `<policy file>.revoked`, which
+  revokes every grant at once; the next change to the file writes the revocation in and removes the mark. It also
+  stops a running batch or drive that began before it, whatever grants it began with.
+- **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
+  app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
+
+### Schedules and the phone
+
+- **One run on the phone at a time.** Scheduled runs and notification checks share a phone lock
+  (`~/.tapwright/schedules/.phone.lock`). A run that finds it held waits, then reports `skipped: the phone was in use`.
+  If a crash leaves it behind, `tapwright doctor` names it and `tapwright schedule unlock --phone` removes it.
+- **The 90-second rule.** For a schedule, the phone is in use while a call is running, when an agent called in the
+  last 90 seconds, or when you acted in the live view in the last 90 seconds. A run waits up to 10 minutes for that.
+  While a scheduled run drives, other agents' actions answer `busy`.
+- **A locked phone.** `run-schedule` starts `tapwright serve` with the schedule's own `--accounts` when no daemon is
+  running, so the unlock at a run's start can use that file's passcode. A daemon that is already running keeps the
+  `--accounts` it was started with: if that's another file, the run is skipped as locked.
+- **A skipped trigger isn't retried.** A file or notification trigger marks what it saw before the run starts. If the
+  run is then skipped (the previous run still going, the phone in use or locked), that file or notification doesn't
+  start a run later. The skip is in the audit log and the run's report.
+- **Notification checks touch the phone.** A notification trigger pulls Notification Center down over the screen for
+  about a second every 2 minutes while the PC is awake. It waits while the tool or the live view uses the phone, but
+  it can't see you holding the phone. `--on-notification` takes the app's bundle id or its exact name.
+- **Missed runs.** A run that falls due while the PC is off, or asleep with wake timers off, doesn't run later and
+  leaves no audit line. Runs happen only while you're logged on to Windows. `tapwright doctor --unattended` says both.
+
 ### Keeping it working
 
 The development profile and certificate last a year. Then WebDriverAgent stops starting.

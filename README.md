@@ -260,6 +260,12 @@ agent with a shell could still forge one, by reading the key from `~/.tapwright`
 opens the page for you and never sees its link, and after you decline, the same touch isn't asked again for a
 minute. Use a test phone with test data for agents you don't trust.
 
+**Keep `~/.tapwright/serve.json` private.** It holds the daemon's key. Every process of your user that can read it is
+trusted like you are: it can answer the approval dialog (Allow, and the offer to make a grant), so it can create a
+standing grant; it can ask for one-time codes (`/otp`); and it can ask the daemon to unlock the phone. An agent that
+can run shell commands as you can read it. Don't share the file, don't copy it to another account or machine, and
+on a phone that matters run agents you don't trust only where they can't read your home folder.
+
 A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
 the agent's last look: a sheet or a banner that came in meanwhile would take the touch.
 
