@@ -622,3 +622,40 @@ def test_the_alert_message_is_cut_like_element_text_and_redacted_before_the_cut(
 def test_the_message_is_data_for_the_line_not_a_policy_word_and_control_marks_go():
     alert = ui.Alert("Delete trip?", ("Cancel", "Delete"), (0, 0, 1, 1), "‎Send\n  Post  it")
     assert 'Alert: "Delete trip?" "Send Post it"' in ui.alert_line(alert) or "Send" in ui.alert_line(alert)
+
+
+def test_the_keyboard_accessory_window_hides_nothing_but_its_bar():
+    """Seen on the phone 2026-11-14 (Reminders' New Reminder sheet): UIKit hosts the bar over the keyboard in a
+    full-screen window that starts with an empty full-screen view, like a sheet's backdrop; it is no layer, so the
+    sheet's fields stay listed. Shape from a capture with every text replaced; synthetic words."""
+    def window(inner):
+        return ('<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+                f'{inner}</XCUIElementTypeWindow>')
+    app_window = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="59" width="430" height="873">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="-430" y="-932" width="1290" height="2796"/>'
+        '<XCUIElementTypeTable type="XCUIElementTypeTable" x="0" y="59" width="430" height="873">'
+        '<XCUIElementTypeCell type="XCUIElementTypeCell" x="20" y="141" width="390" height="76">'
+        '<XCUIElementTypeTextField type="XCUIElementTypeTextField" name="title-field" label="Title" x="40" y="158" '
+        'width="350" height="42"/></XCUIElementTypeCell></XCUIElementTypeTable></XCUIElementTypeOther>')
+    accessory = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932"/>'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="558" width="430" height="374">'
+        '<XCUIElementTypeToolbar type="XCUIElementTypeToolbar" name="Toolbar" x="0" y="558" width="430" height="48">'
+        '<XCUIElementTypeButton type="XCUIElementTypeButton" name="Flag" label="Flag" x="352" y="563" width="53" '
+        'height="38"/></XCUIElementTypeToolbar>'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" name="inputView" x="0" y="614" width="430" height="318"/>'
+        '</XCUIElementTypeOther></XCUIElementTypeOther>')
+    keys = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="631" width="430" height="243">'
+        '<XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" x="0" y="631" width="430" height="243">'
+        '<XCUIElementTypeKey type="XCUIElementTypeKey" name="q" label="q" x="4" y="640" width="40" height="40"/>'
+        '</XCUIElementTypeKeyboard></XCUIElementTypeOther></XCUIElementTypeOther>')
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Reminders" '
+              'label="Reminders" bundleId="com.apple.reminders" x="0" y="0" width="430" height="932">'
+              f'{app_window}{accessory}{keys}</XCUIElementTypeApplication></AppiumAUT>')
+    tree = ui.read(source, (430.0, 932.0))
+    assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"]
+    assert any(e.label == "Flag" for e in tree.items) and tree.keyboard

@@ -292,6 +292,7 @@ COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar", "Keyboard"}  # what a tou
 #   opaque content: no backdrop, and what it lists fills LAYER_FILL of the screen: what is inside those
 #     listed rects is hidden.
 LAYER_MAX_DEPTH = 6
+INPUT_VIEW = "inputView"  # UIKit's own name for the view that hosts the keyboard in the accessory bar's window
 LAYER_COVER = 0.95
 LAYER_FILL = 0.5
 BACKDROP_WIDTH = 0.95
@@ -1118,6 +1119,11 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
         return [], False
     kinds = {_kind(n) for n in child.iter()}
     if "Keyboard" in kinds:
+        return [], False
+    if any(n.get("name") == INPUT_VIEW for n in child.iter()):
+        # the window of the keyboard's accessory bar (UIKit hosts it in a full-screen window that starts with an empty
+        # full-screen view, like a sheet's backdrop): it hides nothing but its own bar (seen on the phone 2026-11-14:
+        # Reminders' bar over the keyboard hid the whole New Reminder sheet, its title field too)
         return [], False
     if "Popover" in kinds:  # a share sheet or popover: a touch outside it closes it, never reaches the app
         return [_rect(child)], True
