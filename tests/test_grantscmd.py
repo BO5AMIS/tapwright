@@ -3,6 +3,7 @@
 import datetime
 import json
 import os
+import time
 
 import pytest
 
@@ -118,6 +119,7 @@ def test_unlock_removes_a_dead_holders_lock_and_an_empty_one_and_audits_it(tmp_p
     assert code == 0 and text == f"Removed {lock} (held by pid 4242, which is not running)."
     assert not os.path.exists(lock)
     open(lock, "w", encoding="utf-8").write("")
+    os.utime(lock, (time.time() - 60, time.time() - 60))  # (left empty a minute ago: pidlock.EMPTY_AGE)
     text, code = grantscmd.run_unlock(str(path), audit_folder=tmp_path / "audit")
     assert code == 0 and text == f"Removed {lock} (empty (its holder stopped while writing it))."
     lines = [json.loads(x) for f in sorted((tmp_path / "audit").iterdir()) for x in f.read_text("utf-8").splitlines()]

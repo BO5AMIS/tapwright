@@ -546,6 +546,8 @@ def test_unlock_refuses_a_live_holder_and_clears_a_dead_one(tmp_path):
     assert code == 0 and "Removed" in text and not lock.exists()
     assert json.loads(auditlog.read_lines(tmp_path / "a")[-1])["kind"] == "approval"
     lock.write_text("", encoding="utf-8")
+    assert schedules.stuck_locks(where) and schedules.unlock("r", where, tmp_path / "a")[1] == 1  # (it may be being written)
+    os.utime(lock, (time.time() - 60, time.time() - 60))  # (left empty a minute ago: pidlock.EMPTY_AGE)
     assert schedules.stuck_locks(where) and schedules.unlock("r", where, tmp_path / "a")[1] == 0
 
 

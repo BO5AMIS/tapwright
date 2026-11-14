@@ -6,6 +6,7 @@ payments recognised by pattern). B-M6 is in test_starters.py. No phone."""
 import asyncio
 import datetime
 import json
+import os
 import time
 
 import pytest
@@ -406,6 +407,8 @@ def test_a_stuck_phone_lock_is_named_by_doctor_and_removed_by_unlock(tmp_path):
     where = tmp_path / "sched"
     where.mkdir()
     schedules.phone_lock_of(where).write_text("", encoding="utf-8")
+    old = time.time() - 60  # (left empty a minute ago: one younger may be a holder still writing it, pidlock.EMPTY_AGE)
+    os.utime(schedules.phone_lock_of(where), (old, old))
     [(path, why)] = schedules.stuck_phone_lock(where)
     assert path.endswith(".phone.lock") and why
     text, code = schedules.unlock_phone(where, tmp_path / "audit")
