@@ -1161,7 +1161,10 @@ def _accessory_window(child: ET.Element, parent_kind: str, span: tuple[int, int]
             continue
         if (o := _overlap(_rect(container), screen))[2] * o[3] >= LAYER_COVER * area:
             continue
-        if any(c is not view and _kind(c) != "Toolbar" for c in container):
+        # its other children are toolbars, or plain views wrapping one (seen on the phone 2026-11-14: Reminders' bar is a
+        # labelled plain view holding the Toolbar)
+        if any(c is not view and not (_kind(c) == "Toolbar" or (_kind(c) == "Other" and any(
+                _kind(n) == "Toolbar" for n in c.iter()))) for c in container):
             continue
         up = parents.get(container)  # between the container and the layer: plain views only
         while up is not None and up is not child and _kind(up) == "Other":

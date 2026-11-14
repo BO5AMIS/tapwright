@@ -659,6 +659,13 @@ def test_the_keyboard_accessory_window_hides_nothing_but_its_bar():
     tree = ui.read(source, (430.0, 932.0))
     assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"]
     assert any(e.label == "Flag" for e in tree.items) and tree.keyboard
+    # as the phone really shows it: the Toolbar inside a labelled plain view, with no focus on the field
+    wrapped = source.replace('<XCUIElementTypeToolbar ', '<XCUIElementTypeOther type="XCUIElementTypeOther" '
+                             'name="Accessory" label="Accessory" x="0" y="558" width="430" height="56">'
+                             '<XCUIElementTypeToolbar ', 1).replace('</XCUIElementTypeToolbar>',
+                                                                    '</XCUIElementTypeToolbar></XCUIElementTypeOther>', 1)
+    tree = ui.read(wrapped, (430.0, 932.0))
+    assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"] and not tree.behind
 
 
 def test_an_id_that_carries_content_is_never_in_a_places_key():
