@@ -980,6 +980,19 @@ def _reaches(node: ET.Element, screen: tuple[float, float, float, float] | None)
     return screen is None or (x < screen[0] + screen[2] and x + w > screen[0] and y < screen[1] + screen[3] and y + h > screen[1])
 
 
+_CONTENT_ID = re.compile(r"[:@/\\]|\d{6}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+STRUCTURAL_ID_MAX = 64
+
+
+def structural_id(name: str) -> bool:
+    """Is this identifier one a developer wrote (kept in a place's key, and so in the map file), not one that carries
+    content? An id with a `:`, `@`, `/` or `\\` (a prefix and then content: seen on the phone 2026-11-14, Calendar's
+    `event-shown:<the event's title>`), six digits in a row, a UUID, a letter outside ASCII, or more than 64 characters is
+    left out. Spaces are kept: iOS's own ids have them ("Quick Entry Title Field")."""
+    return (0 < len(name) <= STRUCTURAL_ID_MAX and name.isascii() and name.isprintable()
+            and _CONTENT_ID.search(name) is None)
+
+
 def _structure(root: ET.Element, screen: tuple[float, float, float, float] | None) -> Structure:
     """What the screen is made of (see Structure), from the parsed tree. Only what is on screen counts; the keyboard
     and an alert are not part of the app's screen. A list row is a Cell and everything inside it: its identifier and
@@ -996,8 +1009,9 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         if not centred and not _reaches(node, screen):
             return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        if centred and name and name != label and name not in IOS_NOISE and kind not in ("Application", "Window", "NavigationBar"):
-            ids.add(name)
+        if (centred and name and name != label and name not in IOS_NOISE
+                and kind not in ("Application", "Window", "NavigationBar") and structural_id(name)):
+            ids.add(name)  # (an id that carries content never goes into a key: structural_id)
         shown = STRUCTURE_KINDS.get(kind)
         if shown == "list" and kind == "ScrollView" and any(_kind(n) in INPUT_TYPES for n in node.iter()):
             shown = "form"

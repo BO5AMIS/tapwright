@@ -659,3 +659,19 @@ def test_the_keyboard_accessory_window_hides_nothing_but_its_bar():
     tree = ui.read(source, (430.0, 932.0))
     assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"]
     assert any(e.label == "Flag" for e in tree.items) and tree.keyboard
+
+
+def test_an_id_that_carries_content_is_never_in_a_places_key():
+    """Seen on the phone 2026-11-14: Calendar's day view names each event `event-shown:<the event's title>`; a learned map
+    would keep the title in plain text. Ids with a prefix and content, an address, a long number, a UUID or non-ASCII
+    text are left out of the structure; a developer's ids (iOS's own have spaces) stay."""
+    kept = ["explore-search", "Quick Entry Title Field", "RemindersUICore.TTRIQuickEntryView"]
+    dropped = ["event-shown:Synthetic Lunch", "someone@example.com", "row-1234567",
+               "3F2504E0-4F89-11D3-9A0C-0305E82C3301", "café-button", "x" * 65, "trip/42"]
+    rows = "".join(f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{n}" label="Tap" x="10" y="{100 + 40 * i}" '
+                   f'width="300" height="30"/>' for i, n in enumerate(kept + dropped))
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" label="Lab" '
+              'bundleId="com.example.lab" x="0" y="0" width="430" height="932">'
+              f'<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">{rows}'
+              '</XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
+    assert set(ui.read(source, (430.0, 932.0)).structure.ids) == set(kept)
