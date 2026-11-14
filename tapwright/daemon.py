@@ -29,7 +29,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import policy as safety
-from . import auditlog, grants as grantlib
+from . import auditlog, grants as grantlib, otp as otplib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -981,6 +981,7 @@ class Daemon(journey_tool.JourneyTools):
         # the maps (AGENT-TOOLS §18): learned from what agents see and do, saved in the background (mapkeeper.py)
         self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
+        self.otp_codes = otplib.Codes(self.accounts.remember_code)  # one-time codes read, not yet used (§20.4)
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
         self._queues: set = set()
@@ -1754,8 +1755,12 @@ class Daemon(journey_tool.JourneyTools):
         locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
         lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
                  if item not in answer["text"]]
-        if (problem := self._loaded().problem) is not None and problem not in answer["text"]:
+        loaded = self._loaded()
+        if (problem := loaded.problem) is not None and problem not in answer["text"]:
             lines.append(f"Note: {problem}")  # the accounts file can't be used: said once, as the first answer
+        for said in (loaded.note or "").split("Note: "):  # a plain vault file, a malformed otp setting (§20.2)
+            if said.strip() and said.strip() not in answer["text"]:
+                lines.append(f"Note: {said.strip()}")
         try:
             book = self._book()
             lines += [line for line in (book.notes() if book is not None else []) if line not in answer["text"]]
@@ -1874,6 +1879,8 @@ class Daemon(journey_tool.JourneyTools):
         built = report.build(entries, client_id, start)
         if names := self._loaded().names:  # the names of the test accounts, never a value (§18.6)
             built = f"{built}\nAccounts: {', '.join(names)}."
+        if others := self._vault_names():  # the vault's other entries, by name and kind (§20.1)
+            built = f"{built}\nVault: {', '.join(others)}."
         return _answer([built])
 
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
@@ -2431,7 +2438,7 @@ class Daemon(journey_tool.JourneyTools):
             step["secure"] = True
             if variable is not None:
                 step["text"] = variable  # the account's password, as the variable that types it
-            elif isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
+            elif isinstance(args.get("text"), str) and accountlib.REFERENCE.fullmatch(args["text"]):
                 step["text"] = args["text"]  # an account's placeholder isn't a password: it is what a script should hold
             else:
                 rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
@@ -4125,7 +4132,7 @@ class Daemon(journey_tool.JourneyTools):
         data, file = self.maps.data(root, bundle), self.maps.file(root, bundle)
         ctx = maptool.Context(bundle, self.session.app_names.get(bundle) or shown, await self._build_of(bundle),
                               seen.name if seen else None, self._loaded().names, file.route_info(data), file.route_edges(data),
-                              _POLICY.get())
+                              _POLICY.get(), self._vault_names())
         if op == "list":
             lines = maptool.listing(data, ctx)
         elif op == "to":
@@ -4997,15 +5004,26 @@ class Daemon(journey_tool.JourneyTools):
             self._guard(view, field)
             at = self._touch_point(field)
         active = _ACCOUNT.get()
-        if active is not None and active.apps is not None and accountlib.mentions(a["text"]):
-            # the account's app limit is checked where its value would be typed, against the app in front now: a step
-            # (a route's, or drive's `then`) may have switched apps since drive began
+        using = None
+        if accountlib.mentions(a["text"]):
+            # the app a value may be typed into is checked where it would be typed, against the app in front now: a
+            # step (a route's, or drive's `then`) may have switched apps since drive began
             front = await self._connected_only(self.session.foreground_bundle_id)  # (inside the agent's turn: no queue)
-            if front not in active.apps:
+            if active is not None and active.apps is not None and "${account." in a["text"] and front not in active.apps:
                 raise Refused("not_allowed", f"account {active.name} is not for this app: it may be used only in "
                                              f"{', '.join(active.apps)}; this is {front or 'no app'}. Nothing was typed.")
-        real = accountlib.typed(a["text"], active, field.secure, field.ref)  # (a placeholder is checked against this field)
+            # (a reference is checked against this field: a password only into a secure one, §18.6, §20.1)
+            using = self._loaded().reference(a["text"], active, bool(field.secure), field.ref, front)
+        real = using.value if using is not None else a["text"]
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
+        if using is not None and using.kind == accountlib.CARD:
+            await self._card_ok(a, field, using)  # a person's OK, every time; never a grant (§20.1, §19.2)
+        if using is not None and using.otp_app is not None:
+            code = self.otp_codes.take(using.otp_app)
+            if code is None:
+                raise Refused("not_found", f"no one-time code for {using.otp_app}: none arrived in the 2 minutes since "
+                                           "the app showed its code field. Nothing was typed.")
+            real, using = code.code, dataclasses.replace(using, field=code.source)
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
 
         self._touching(field)
@@ -5026,7 +5044,59 @@ class Daemon(journey_tool.JourneyTools):
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         done.typed = real
+        if using is not None:
+            self._audit_typed(using, field)
         return done
+
+    def _vault_names(self) -> tuple[str, ...]:
+        """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
+        return tuple(n for n in self._loaded().entry_names if not n.endswith(" (account)"))
+
+    def otp_code(self, app: str) -> "otplib.Code | None":
+        """A one-time code for Tapline's host (`POST /otp`, §18.11): only for an app whose setting is on in the vault
+        file this daemon was started with (§24.3), handed over once. None (the route's 404) otherwise."""
+        path = getattr(getattr(self, "ceiling", None), "accounts", None)
+        if not path or app not in self.accounts.get(path).otp:
+            return None
+        return self.otp_codes.take(app)
+
+    def _audit_typed(self, using: "accountlib.Typing", field: ui.Element) -> None:
+        """§23: a vault value typed is a `vault` line (the entry; the field and where it went, never the value), a
+        one-time code an `otp` line (the app that asked; the source, never the code)."""
+        if self.audit is None:
+            return
+        if using.otp_app is not None:
+            self.audit.write("otp", app=using.otp_app, detail=f"from {using.field}")
+            return
+        where = "secure field" if field.secure else "text field"
+        self.audit.write("vault", app=self._app_bundle(), name=using.entry, detail=f"{using.field} into {where}")
+
+    async def _card_ok(self, a: dict, field: ui.Element, using: "accountlib.Typing") -> None:
+        """§20.1: a card's field is typed only with a person's OK, every time: the live view and the host's dialog are
+        asked, with a caption that names the entry and the field, never the value (`Allow: type card "visa" number into
+        "Card number" in Wayfare?`). No grant covers it and none is offered. The OK is for this entry's field into this
+        element, used up by one call."""
+        element_key = self._police_key(field)
+        key = (*element_key, "card", using.entry or "", using.field or "")
+        now = self.control.clock()
+        allowed = next((c for c in self._confirms.values()
+                        if c.tool == "type_text" and c.key == key and c.state == "allowed" and c.until >= now), None)
+        if allowed is not None and self._claim(allowed):
+            _GRANTED.get().append(allowed.origin or "the live view")
+            return
+        label = self.scrub_everywhere(field.label or field.text or field.ref)
+        app = (self.session.app or (None, None))[0]
+        where = dialog.clean(app) if app else "the app in front"
+        caption = f'Allow: type card "{using.entry}" {using.field} into "{dialog.clean(label)}" in {where}?'
+        what = f'typing card "{using.entry}" {using.field} into {field.role} {ui.clip(label)}'
+        word = f'card "{using.entry}" {using.field}'
+        message, request = self._ask("type_text", a, key, field, word, what, now, caption=caption,
+                                     why="(a card is typed only with a person's OK, every time)")
+        if request is None:
+            raise Refused("not_allowed", message)
+        taken = (f"needs_confirmation: {what}: the OK given was used by another call. Nothing was typed by this call; "
+                 "make it again to ask again.")
+        await self._wait_for_person(request, message, "type_text", a, key, field, taken, same=element_key)
 
     async def _scroll(self, view, a: dict) -> Scrolled:
         """Swipe through the centre of the scroll area (the innermost one around the target, the point or the
@@ -5666,13 +5736,16 @@ class Daemon(journey_tool.JourneyTools):
                 "label", element.label, "text", element.text)
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
-             now: float) -> tuple[str, Confirm | None]:
+             now: float, caption: str | None = None, why: str | None = None) -> tuple[str, Confirm | None]:
         """The `needs_confirmation` message, after asking the live view (once for a request still open), and, for an
         agent whose host can show a dialog, the host too: then the request to wait for comes with it. An earlier
         request for this call that was declined, or ran out unanswered, is said at the message's end (when nobody
         waits for this one)."""
         for stale in [c for c in self._confirms.values() if c.until < now - CONFIRM_KEEP]:
             del self._confirms[stale.id]
+        # (`caption`, `why`: a card's typing (§20.1) has its own dialog words, says why instead of a policy word, and is
+        # never offered as a grant)
+        reason = why or f'(policy word "{word}")'
         said, open_ = "", None
         for c in [c for c in self._confirms.values() if c.tool == tool and c.key == key]:
             if c.state == "pending" and c.until >= now:
@@ -5680,7 +5753,7 @@ class Daemon(journey_tool.JourneyTools):
                 continue
             if c.state == "declined" and c.until >= now:
                 # a person said no a moment ago: asking again at once would only wear them down (safety review L2)
-                return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and they declined "
+                return (f"needs_confirmation: {what} needs a person's OK {reason}, and they declined "
                         "it just now. Don't ask again by repeating the call: ask your user what they want."), None
             if c.state != "allowed":  # an allow nobody used lapses without a word
                 said = " They declined." if c.state == "declined" else " Nobody answered."
@@ -5695,10 +5768,10 @@ class Daemon(journey_tool.JourneyTools):
             # an account's value is never in what a person is shown (as in an answer, _announce): `what` is scrubbed
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
             scrub = self.scrub_everywhere
-            caption = step_caption(tool, what, a)
+            shown = step_caption(tool, what, a)
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                               "caption": scrub(caption) if caption else caption, "word": scrub(word),
+                               "caption": scrub(shown) if shown else shown, "word": scrub(word),
                                "expires": int((time.time() + CONFIRM_TTL) * 1000)}
             self.broadcast(request.message)
             if caller is not None:  # the host's dialog, at the same moment (§11.3)
@@ -5706,18 +5779,19 @@ class Daemon(journey_tool.JourneyTools):
                 label = scrub(element.label if element.role == "input" else element.text)
                 app = (self.session.app or (None, None))[0]
                 held = _GRANT_CALL.get()  # (a grant that matched and ran out: a new one would only undo its limit)
-                request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
-                                 "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
+                if caption is None:
+                    request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
+                                     "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
                 self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
-                                                  "message": scrub(dialog.caption(tool, label, app, word)),
+                                                  "message": scrub(caption or dialog.caption(tool, label, app, word)),
                                                   "choices": dialog.CHOICES[dialog.CONFIRM]})
         waits = request.dialog and request.owner == caller  # (a retry while its request is open waits on it too)
-        return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"). The live view asks them "
+        return (f"needs_confirmation: {what} needs a person's OK {reason}. The live view asks them "
                 "now; when they allow it, make the same call again. If nobody is watching, ask your user."
                 + ("" if waits else said)), (request if waits else None)
 
     async def _wait_for_person(self, request: Confirm, message: str, tool: str, a: dict, key: tuple[str, ...],
-                               element: ui.Element, taken: str) -> None:
+                               element: ui.Element, taken: str, same: tuple[str, ...] | None = None) -> None:
         """A call with a host dialog waits for the request's answer, up to its 120 s (§11.3). The time doesn't count
         toward a batch's own limit. While it waits the action lets go of its turn on the phone (_aside), so the live
         view can pause it or use the phone; the turn is taken back as an action takes it (`paused` while paused, after
@@ -5748,7 +5822,7 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("not_allowed", taken)
         await self._aside(answered)
         await self._offer_grant(request)  # (§19.6) a follow-up dialog; never a reason to refuse this touch
-        await self._still_there(tool, a, key, element)
+        await self._still_there(tool, a, same or key, element)  # (`same`: the element's own key, when `key` holds more)
         _GRANTED.get().append(request.origin or "the live view")
 
     async def _ask_offer(self, owner: str, kind: str, message: str) -> str | None:

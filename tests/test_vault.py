@@ -450,3 +450,57 @@ def test_the_security_line_quotes_the_path():
     line = vault.Keychain._line('/Users/t/a "b"\\c.json', b"{}")
     assert shlex.split(line)[5] == '/Users/t/a "b"\\c.json' and line.endswith("-X 7b7d")
     assert re.fullmatch(r"add-generic-password -U -s \"tapline-tapwright-vault\" -a .* -X [0-9a-f]+", line)
+
+
+# ---- scripts and routes keep a reference, never join it to text ----------------------------------------------------
+def test_a_script_keeps_vault_and_code_references_as_variables():
+    from tapwright import batch
+    assert batch.literal_runs("${vault.home.street}") == (["", ""], True)
+    assert batch.literal_runs("${otp.com.example.wayfare}") == (["", ""], True)
+    assert batch.literal_runs("${vault.home}") == (["${vault.home}"], False)  # (no field: ordinary text)
+
+
+def test_a_route_refuses_a_reference_joined_to_text():
+    from tapwright import routes
+    base = {"version": 2, "name": "fill", "app": "com.example.wayfare", "start": "welcome", "variables": []}
+    routes.check({**base, "steps": [{"tool": "type_text", "target": {"id": "street"}, "text": "${vault.home.street}"}]})
+    for text in ("at ${vault.home.street}", "${otp.com.example.wayfare}!"):
+        with pytest.raises(Refused) as e:
+            routes.check({**base, "steps": [{"tool": "type_text", "target": {"id": "street"}, "text": text}]})
+        assert e.value.code == "bad_params" and "whole text" in str(e.value)
+    with pytest.raises(Refused):
+        routes.check({**base, "steps": [{"tool": "tap", "target": {"label": "${vault.home.street}"}}]})
+    filled = routes.substitute([{"tool": "type_text", "text": "${vault.home.street}"}], {"vault.home.street": "x"})
+    assert filled[0]["text"] == "${vault.home.street}"  # the typing fills it, never a route's value
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell's ProtectedData is Windows only")
+def test_a_file_tapwright_protects_opens_the_way_tapline_opens_it(tmp_path):
+    """B1 interop, the other way: Tapline's own PowerShell script (vault.ts DPAPI_SCRIPT) unprotects Tapwright's blob."""
+    path = write(tmp_path, VAULT)
+    assert vault.protect(path, vault.Deps("win32"), accounts.check_text)[0]
+    blob = json.loads(open(path, encoding="utf-8").read())["data"]
+    script = "; ".join([
+        "$ErrorActionPreference = 'Stop'", "Add-Type -AssemblyName System.Security",
+        "$l = [Console]::In.ReadToEnd() -split '\\r?\\n'", "$d = [Convert]::FromBase64String($l[1])",
+        "$e = [Convert]::FromBase64String($l[2])", "$s = [System.Security.Cryptography.DataProtectionScope]::CurrentUser",
+        "if ($l[0] -eq 'protect') { $o = [System.Security.Cryptography.ProtectedData]::Protect($d, $e, $s) } else "
+        "{ $o = [System.Security.Cryptography.ProtectedData]::Unprotect($d, $e, $s) }",
+        "[Convert]::ToBase64String($o)"])
+    stdin = f"unprotect\n{blob}\n{base64.b64encode(vault.DPAPI_ENTROPY).decode()}\n"
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], input=stdin,
+                             capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("no PowerShell")
+    if out.returncode != 0:
+        pytest.skip("PowerShell's ProtectedData isn't available here")
+    assert json.loads(base64.b64decode(out.stdout.strip()).decode("utf-8")) == VAULT
+
+
+def test_a_plain_vault_inside_a_git_folder_is_refused(tmp_path):
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / ".git" / "vault.json"
+    path.write_text(json.dumps(VAULT), encoding="utf-8")
+    v = accounts.load(str(path), NO_GIT)
+    assert v.problem.startswith("accounts file is inside a git repo's .git folder") and v.entries() == ()

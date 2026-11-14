@@ -1084,6 +1084,8 @@ def _git(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str] | None"
 def git_problem(path: str, git: GitRunner = _git) -> str | None:
     """Why the file may not be used: it is inside a git work tree that doesn't ignore it (a tracked file isn't ignored)."""
     folder = str(Path(path).resolve().parent)
+    if ".git" in Path(path).resolve().parts:  # a repo's own folder: no .gitignore covers it, and git won't say (Tapline's rule)
+        return f"accounts file is inside a git repo's .git folder at {folder}; move it."
     top = git(["rev-parse", "--show-toplevel"], folder)
     if top is None or top.returncode != 0 or not top.stdout.strip():
         return None
