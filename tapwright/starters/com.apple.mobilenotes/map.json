@@ -1,0 +1,59 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.apple.mobilenotes",
+  "places": {
+    "notes_list": {
+      "key": {
+        "signature": "93077d3a25af277a",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "ICNoteBrowseCollectionView",
+            "magnifyingglass"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    },
+    "new_note": {
+      "key": {
+        "signature": "c8dd5963598bc27b",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "OverflowBarButtonItem",
+            "com.apple.pencilkit.tiledView",
+            "dictation",
+            "inputView"
+          ],
+          "kinds": [
+            "nav",
+            "toolbar"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    }
+  },
+  "roads": [],
+  "routes": {
+    "add_note": "routes/add_note.json"
+  },
+  "reflexes": []
+}

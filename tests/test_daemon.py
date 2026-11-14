@@ -3466,6 +3466,35 @@ def test_type_text_without_any_input_is_not_found():
     run(go)
 
 
+def test_type_text_without_a_target_prefers_the_focused_input():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        focused = inp("e2", "Email", y=160)
+        focused.focused = True
+        await looked(d, [inp("e1", "Name"), focused])
+        await d.run_tool("a", "type_text", {"text": "x", "look": False})
+        assert d.session.typed[-1][3].ref and d.session.typed[-1][3] != ui.Target(ref="e1")
+        await finish(stop, task)
+    run(go)
+
+
+def test_type_text_with_the_keyboard_up_and_no_input_in_the_list_types_blind():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        d.session.last_keyboard = True
+        await looked(d, [el("e1", "button", "Date & Time")])
+        r = await d.run_tool("a", "type_text", {"text": "Hello", "submit": True, "look": False})
+        assert d.session.typed[-1] == ("Hello", False, True, None)
+        assert r["text"].startswith("Typed into the field that has the keyboard")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "type_text", {"text": "${account.password}"})
+        assert e.value.code == "bad_params" and len(d.session.typed) == 1
+        await finish(stop, task)
+    run(go)
+
+
 def test_type_text_at_a_point_uses_the_input_under_it_or_refuses():
     async def go():
         d = make()

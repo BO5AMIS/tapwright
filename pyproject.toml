@@ -47,4 +47,5 @@ tapwright = "tapwright.entry:main"  # checks for merge markers, and dispatches `
 packages = ["tapwright"]
 
 [tool.setuptools.package-data]
-tapwright = ["viewer.html", "skill/*.md", "skill/references/*.md", "skill/agents/*.yaml"]
+tapwright = ["viewer.html", "skill/*.md", "skill/references/*.md", "skill/agents/*.yaml",
+    "starters/*/map.json", "starters/*/routes/*.json"]

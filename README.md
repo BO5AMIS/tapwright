@@ -118,6 +118,8 @@ tapwright skill install               # for you: ~/.claude/skills and ~/.agents/
 tapwright skill install --project .   # for one project
 ```
 
+**Starter routes** for the phone's own apps (Notes today; Reminders, Calendar, Mail and Messages follow). `tapwright starters install [--maps DIR]` adds them to your maps for `drive {"route": ...}`; a route or place of yours is never overwritten, and the answer names the routes it kept.
+
 Claude Code reads `.claude/skills`; Codex and other agents read `.agents/skills`. The skill
 is [skills/tapwright](https://github.com/bo5amis/tapwright/blob/main/skills/tapwright/SKILL.md), in the open
 [Agent Skills](https://agentskills.io) format, so skill installers can take it from this

@@ -743,6 +743,7 @@ class Typed(Noted):
     """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
     field: ui.Element = ui.Element("", "input")  # the input as it was when typed into
     typed: str | None = None  # the text really typed (an account's value for its placeholder); never in an answer
+    blind: bool = False  # typed with the keyboard up and no input in the tree (the app's own accessory bar hides it)
 
     def same_field(self, now: ui.Element) -> bool:
         """Is `now` the field typed into (the ref may have gone to another input since)? The same ref and
@@ -3799,7 +3800,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # frames during the call count for actions with the normal cap; a launch may show a still splash first
         if isinstance(result, Toggled):
             landed = await self._toggle_landed(view, result)
-        elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
+        elif isinstance(result, Typed) and not result.blind and args.get("replace", True) and not args.get("submit"):
             # the text the keys made (an account's value, not the ${account.…} the agent wrote), as the tree reads it
             typed = result.typed if result.typed is not None else args["text"]
             landed = await self._typed_landed(view, result, typed)
@@ -3861,7 +3862,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             now = next((e for e in same if e.ref == result.ref), same[0] if len(same) == 1 else None)
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now, bool(view.alert)), 1)
-        if isinstance(result, Typed):  # the value as the new list shows it, not as it was typed
+        if isinstance(result, Typed) and not result.blind:  # the value as the new list shows it, not as it was typed
             old = result.field
             alike_fields = [e for e in view.items if e.role == old.role and (
                 e.identifier == old.identifier if old.identifier else e.label == old.label)]
@@ -5126,8 +5127,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
             inputs = [e for e in view.items if e.role == "input"]
+            if not inputs and view.read_keyboard:
+                return await self._type_blind(view, a)
             if not inputs:
                 raise Refused("not_found", "No input on screen")
+            if len(inputs) > 1 and sum(e.focused for e in inputs) == 1:
+                inputs = [e for e in inputs if e.focused]  # §2: without a target, the focused field
             if len(inputs) > 1:
                 shown = "\n".join([*(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES]),
                                    *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES),
@@ -5198,6 +5203,22 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         done.typed = real
         if using is not None:
             self._audit_typed(using, field)
+        return done
+
+    async def _type_blind(self, view, a: dict) -> Typed:
+        """`type_text` with no target, no input in the tree and the keyboard up: some apps (Reminders, in its quick
+        add) show nothing but their own accessory bar while the keyboard is up, though a field has focus. Plain text
+        only (never an account's, a vault's or a code: a field no one can see is no place for them), typed into
+        whatever has the focus; the answer says the field wasn't in the list."""
+        if accountlib.mentions(a["text"]):
+            raise Refused("bad_params", "an account, vault or one-time code value is typed only into a field that is in "
+                                        "the list; the keyboard is up, but no input shows. Nothing was typed.")
+        self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into the field that has the keyboard.")
+        self._touching(None)
+        await self.session.type_text(a["text"], replace=False, submit=bool(a.get("submit", False)))
+        view.typed_field = None
+        done = Typed("Typed into the field that has the keyboard (no input is in the list while the keyboard is up).")
+        done.blind = True
         return done
 
     def _vault_names(self) -> tuple[str, ...]:

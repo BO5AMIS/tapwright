@@ -30,6 +30,9 @@
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
                      connect an agent in one go: register the MCP server and install the skill
+  tapwright starters install [--maps DIR] [--app ID]...
+                     put the starter maps and routes for the phone's own apps (Reminders, Notes, ...) into your
+                     maps; a route of yours with the same name is kept
   tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated | --phone) [--junit OUT] [--update-references]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
@@ -1044,6 +1047,13 @@ def main() -> int:
                    help="the model of the driver agent written next to the skill: a name the host knows, for both "
                         "hosts, or host=NAME (claude=haiku, codex=gpt-6.1-terra) for one. Default: each host's "
                         "fastest small model")
+    p = sub.add_parser("starters", help="starter maps and routes for the phone's own apps (Reminders, Notes, ...)")
+    p.add_argument("action", choices=("install",),
+                   help="install: add them to your maps, never over a route or place of yours")
+    p.add_argument("--maps", metavar="DIR",
+                   help="where the per-app maps are kept (default: ~/.tapwright/maps), as for tapwright mcp")
+    p.add_argument("--app", metavar="ID", action="append",
+                   help="only this app's starters (a bundle id; repeat for several)")
     p = sub.add_parser("install", help="connect an agent: register the MCP server with it and install the skill")
     p.add_argument("--client", required=True, choices=("claude", "codex", "cursor"),
                    help="the agent to connect: Claude Code, Codex or Cursor")
@@ -1153,6 +1163,11 @@ def main() -> int:
         return replay(a)
     if a.cmd == "skill":
         return skill(a)
+    if a.cmd == "starters":
+        from . import starters
+        text, code = starters.install(a.maps, a.app)
+        print(text)
+        return code
     if a.cmd == "install":
         return install(a)
     if a.cmd == "serve" and a.stop:
