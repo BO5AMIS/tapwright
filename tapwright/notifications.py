@@ -26,6 +26,7 @@ import datetime
 import hashlib
 import hmac
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from xml.etree import ElementTree as ET
 
@@ -317,16 +318,34 @@ def is_center(source: str) -> bool:
 
 # ---- one-time codes (§20.4, §24.3) ----------------------------------------------------------------------------------------
 CODE = re.compile(r"(?<![\d])(\d{4,8})(?![\d])")
-SPLIT_CODE = re.compile(r"(?<![\d])(\d{3})[ -](\d{3})(?![\d])")  # `123 456`, `123-456`
+# `123 456`, `123-456`, and the same with any digits Python's \d takes (Arabic-Indic `١٢٣ ٤٥٦`, full-width…) and any
+# space or dash between them (no-break and thin spaces, U+2010–U+2015, the minus sign); never a line break
+SPLIT_SEPARATORS = "[^\\S\\n\\r\\u2028\\u2029\\x85]|[-\\u2010-\\u2015\\u2212\\ufe58\\ufe63\\uff0d]"
+SPLIT_CODE = re.compile(rf"(?<![\d])(\d{{3}})(?:{SPLIT_SEPARATORS})(\d{{3}})(?![\d])")
+
+
+def ascii_digits(text: str) -> str:
+    """Every Unicode decimal digit as its ASCII one (`١٢٣` is `123`); anything else as it is."""
+    return "".join(str(unicodedata.decimal(c)) if c.isdecimal() and not c.isascii() else c for c in text)
 
 
 def code_forms(code: str) -> list[str]:
-    """Every way a code is written that candidates() takes it from (Codex, PR #12 cycle 1, H4): the code, and for six
-    digits `123 456` and `123-456` too. What the redactor must know, not only the code typed."""
+    """Every way a code is written that candidates() takes it from (Codex, PR #12 cycles 1 and 2, H4, H6): the code as
+    read, the same in ASCII digits, and for six digits `123 456` and `123-456` in both. What the redactor must know, not
+    only the code typed. The exact text a notification showed it as is added by codes_to_hide (code_spans)."""
     forms = [code]
-    if len(code) == 6 and code.isascii() and code.isdigit():
-        forms += [f"{code[:3]} {code[3:]}", f"{code[:3]}-{code[3:]}"]
-    return forms
+    for digits in dict.fromkeys((code, ascii_digits(code))):
+        if digits not in forms:
+            forms.append(digits)
+        if len(digits) == 6 and digits.isdecimal():
+            forms += [f"{digits[:3]} {digits[3:]}", f"{digits[:3]}-{digits[3:]}"]
+    return list(dict.fromkeys(forms))
+
+
+def code_spans(text: str) -> list[str]:
+    """The exact text every split code in `text` is written as (`١٢٣ ٤٥٦`, `123 456`): the redactor hides what was
+    shown, whatever digits and separator it used (Codex, PR #12 cycle 2, H6)."""
+    return list(dict.fromkeys(m.group(0) for m in SPLIT_CODE.finditer(text)))
 CODE_SHAPE = re.compile(r"^[A-Za-z0-9]{4,12}$")
 WINDOW = 120.0  # §20.4: within 2 minutes after the app showed its code field
 
@@ -365,6 +384,9 @@ def codes_to_hide(n: Notification, pattern: "re.Pattern[str] | None" = None) -> 
         for m in SPLIT_CODE.finditer(f"{n.title}\n{n.body}"):
             if m.group(1) + m.group(2) not in found:
                 found.append(m.group(1) + m.group(2))
+        for span in code_spans(f"{n.title}\n{n.body}"):  # (as shown: H6)
+            if span not in found:
+                found.append(span)
     return found
 
 
