@@ -104,6 +104,18 @@ class AuditLog:
             return False
 
 
+def since_of(text: str) -> datetime.datetime:
+    """`--since`: a date (`2026-11-14`, from that day's start on this computer's clock) or an ISO time (`2026-11-14T09:30`,
+    this computer's clock unless it names a zone, `…Z` or `…+03:00`), as an aware time. ValueError for anything else."""
+    text = text.strip()
+    if len(text) == 10:
+        day = datetime.date.fromisoformat(text)
+        at = datetime.datetime(day.year, day.month, day.day)
+    else:
+        at = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return at if at.tzinfo is not None else at.astimezone()
+
+
 def read_lines(folder: Path | None = None, since: datetime.datetime | None = None) -> list[str]:
     """Every line from `since` on (None: all), oldest file first, as written (for `tapwright audit-log` and `grants`)."""
     folder = Path(folder) if folder is not None else default_folder()

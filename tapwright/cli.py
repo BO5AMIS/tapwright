@@ -964,6 +964,11 @@ def main() -> int:
     p.add_argument("name")
     p.add_argument("--if-triggered", action="store_true",
                    help="run only if a file appeared in the schedule's trigger folder since the last check")
+    p = sub.add_parser("audit-log", help="the audit log (~/.tapwright/audit): what was allowed, used and sent, one line "
+                                         "each, never a value; for you, not for an agent (§23)")
+    q = p.add_mutually_exclusive_group()
+    q.add_argument("--since", metavar="DATE|TIME", help="only the lines since then: 2026-11-14 or 2026-11-14T09:30")
+    q.add_argument("--delete", action="store_true", help="delete the audit log")
     p = sub.add_parser("vault", help="the vault file (--accounts): protect a plain one with this system's protection")
     p.add_argument("action", choices=["protect"],
                    help="protect: write FILE in this system's protected form (Windows DPAPI, the macOS keychain); "
@@ -1154,6 +1159,20 @@ def main() -> int:
         if outcome.status != "idle":
             print(outcome.text or outcome.result)
         return outcome.code
+    if a.cmd == "audit-log":
+        from . import auditlog
+        if a.delete:
+            gone = auditlog.delete()
+            print(f"Deleted the audit log ({gone} line{'' if gone == 1 else 's'}).")
+            return 0
+        try:
+            since = auditlog.since_of(a.since) if a.since else None
+        except ValueError:
+            print(f"Error: --since takes a date (2026-11-14) or an ISO time (2026-11-14T09:30), not {a.since!r}")
+            return 2
+        lines = auditlog.read_lines(since=since)
+        print("\n".join(lines) if lines else "No audit lines" + (" since then." if since else "."))
+        return 0
     if a.cmd == "vault":
         from . import accounts, vault
         done, text = vault.protect(str(Path(a.file).expanduser()), check=accounts.check_text)
