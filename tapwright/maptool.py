@@ -5,7 +5,7 @@ testable without a phone; the daemon reads the screen, calls these, and saves wh
 import re
 from dataclasses import dataclass, field
 
-from . import links, places, roads, ui
+from . import explored, links, places, roads, ui
 from . import policy as safety
 from .control import Refused
 
@@ -30,6 +30,7 @@ class Context:
     edges: list[roads.RouteEdge] = field(default_factory=list)
     policy: safety.Policy = safety.DEFAULT
     vault: tuple[str, ...] = ()  # the vault's other entries, `home (address)`: names only (§20.1)
+    not_reached: int | None = None  # places known up front that no visit has saved (§28.3); None: this tool has none
 
 
 def _count(n: int, word: str, plural: str | None = None) -> str:
@@ -73,6 +74,8 @@ def listing(data: dict, ctx: Context) -> list[str]:
              f"Now at: {ctx.current or 'unknown'}."]
     names = [f"{n} (link {p['link']})" if p.get("link") else n for n, p in list(data["places"].items())[:MAX_LISTED]]
     lines.append("Places: " + ", ".join(names) + (", …" if len(data["places"]) > MAX_LISTED else ""))
+    if (coverage := explored.coverage_line(data, ctx.build, ctx.not_reached)) is not None:
+        lines.append(coverage)  # (§28.3: only when some place has an explored record)
     if ctx.routes:
         lines.append("Routes: " + ", ".join(f"{n} ({start} → {end}{'; ' + ', '.join(v) if v else ''})"
                                             for n, start, end, v in ctx.routes[:MAX_LISTED]))

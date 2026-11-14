@@ -21,7 +21,7 @@ import secrets
 import unicodedata
 from dataclasses import dataclass
 
-from . import names, ui
+from . import explored, names, ui
 
 # Two reads are the same place when the parts that agree weigh at least this much of the whole (a starting value, to
 # be tuned on the phone: AGENT-TOOLS §18.1 lets each tool tune its own). The weights: the ids are what tells screens
@@ -271,6 +271,7 @@ def _move(data: dict, old: str, new: str) -> None:
     for reflex in data["reflexes"]:
         if reflex.get("at") == old:
             reflex["at"] = new
+    explored.rename_place(data, old, new)
 
 
 def rename(data: dict, old: str, new: str) -> None:
