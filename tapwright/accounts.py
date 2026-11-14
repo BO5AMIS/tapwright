@@ -9,10 +9,11 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
   - `phone.passcode` is stored and exposed nowhere. (Typing it on the lock screen is a later task.)
 
-What the redaction guarantees (the threat model; Codex, PR #10 cycles 14 and 15):
+What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15 and 20):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
     without direction marks and trimmed. A value still escaped after the work limit's passes is refused too. A file
-    that breaks a limit loads no accounts, and says which account and field, never the value.
+    holds at most 32 accounts (64 values; the `phone` entry isn't counted). A file that breaks a limit loads no
+    accounts, and says which account and field (or how many accounts), never a value.
   - Encodings: a value is found as it is; with whitespace normalized (any run of whitespace or `+` is one space, the
     ends may be trimmed) and direction marks anywhere; percent-encoded (%HH, either case, UTF-8); with JSON or Python
     string escapes (\\uXXXX and surrogate pairs, \\UXXXXXXXX, \\xHH, \\\\, \\", \\', \\/, \\b, \\f, \\n, \\t, \\r);
@@ -52,6 +53,7 @@ PLACEHOLDER = re.compile(r"\$\{account\.(username|password)\}")
 MENTION = re.compile(r"\$\{account\.")
 MIN_SCRUBBED = 3  # a value shorter than this isn't scrubbed out of text (it would eat ordinary words)
 MAX_VALUE = 256  # a username or password longer than this is refused when the file loads (no real credential is longer)
+MAX_ACCOUNTS = 32  # a file with more accounts than this is refused when it loads (a test-account file holds a handful)
 BIDI_MARKS = dict.fromkeys(map(ord, "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))  # the invisible direction marks ui._text drops from screen text
 PHONE = "phone"  # the entry that holds the phone's passcode, not an account to sign in with
 NO_FILE = ("no test accounts: start tapwright serve or mcp with --accounts FILE (a JSON file kept outside any git repo, "
@@ -170,9 +172,10 @@ def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
 # and both at once: `%2` + `a%62c%2` + `F` (the value `abc%2`) reads `*bc/`. So in a decoded level each character an
 # escape made is checked too: when the escape's text ends with a value's first characters and the level goes on with
 # the rest, or with the rest but its last characters, which a later escape's text starts with (or the mirror, at the
-# value's end alone), the value is there, and the escapes are redacted with it. Each such check is a dictionary lookup by
-# the escape's last or first character, then exact comparisons: linear in the escapes, never a search. Matching is
-# case-sensitive but for the hex of an escape.
+# value's end alone), the value is there, and the escapes are redacted with it. Each such check is a few dictionary
+# lookups, by the exact characters the escape's text ends (starts) with and the value's character that must come next
+# (before), then exact comparisons on the forms found: linear in the escapes, never a scan of every value. Escapes at
+# one place with one text are checked once. Matching is case-sensitive but for the hex of an escape.
 
 MAX_PASSES = 16  # the work limit: decoding passes over one text (17 levels, the text as it is included)
 UNCHECKED = "<a value encoded too deep to check>"  # what a token that still decodes at the work limit is redacted as
@@ -560,6 +563,12 @@ def _occurrences(hay: str, needle: str, fail: list[int], merge: bool) -> "Iterat
         at = hay.find(needle, pos) if pos < n else -1
 
 
+def _starter(c: str) -> bool:
+    """Can an escape's text start with `c`? Every escape (`_ESCAPE`) starts with `%` or a backslash, and a surrogate
+    pair joined across passes (`_HALVES`) with its high half."""
+    return c in "%\\" or "\ud800" <= c <= "\udbff"
+
+
 _QUOTE = re.compile(r"(?:\\|%(?:25){0,2}5[cC])*(?:['\"]|%(?:25){0,2}2[27])")  # a quote, escaped or encoded or not
 _QUOTE_LONGEST = 16
 
@@ -594,14 +603,34 @@ class Redaction:
         self._forms = [(form, rank, label, lead, trail, _failure(form))
                        for form, (rank, label, lead, trail) in forms.items()]
         # (a value's first characters taken into an escape of the text before it, `%2` + `abc` read as `%2a` + `bc`, or
-        # its last ones into an escape with the text after it, `ab%2` + `F`: by the character the escape ends or starts
-        # with, each (form, how many characters of it the escape holds, rank, label))
-        self._heads: dict[str, list[tuple[str, int, int, str]]] = {}
-        self._tails: dict[str, list[tuple[str, int, int, str]]] = {}
+        # its last ones into an escape with the text after it, `ab%2` + `F`: by the exact characters the escape holds,
+        # form[:k] (form[-k:]), then by the value's character just after them (before them). So an escape finds only
+        # the forms that can go on where it is: a few lookups, never a scan of the values (Codex, PR #10 cycle 20).
+        # A head entry is (form, k, rank, label, where in the form a later escape's text can start), a tail entry
+        # (form, k, rank, label))
+        self._heads: dict[str, dict[str, list[tuple[str, int, int, str, tuple[int, ...]]]]] = {}
+        self._tails: dict[str, dict[str, list[tuple[str, int, int, str]]]] = {}
         for form, rank, label, _, _, _ in self._forms:
+            # an escape's text starts with `%`, `\` or a high surrogate (one half of a pair joined), so a later escape
+            # can take in a form's last characters only from one of those on (latest first)
+            starts = tuple(p for p in range(len(form) - 1, 0, -1) if _starter(form[p]))
             for k in range(1, min(SEAM, len(form) - 1) + 1):
-                self._heads.setdefault(form[k - 1], []).append((form, k, rank, label))
-                self._tails.setdefault(form[len(form) - k], []).append((form, k, rank, label))
+                self._heads.setdefault(form[:k], {}).setdefault(form[k], []).append((form, k, rank, label, starts))
+                self._tails.setdefault(form[len(form) - k:], {}).setdefault(form[len(form) - k - 1], []).append(
+                    (form, k, rank, label))
+        # (which k to look up for an escape: those for which some form's k-th character is the escape's last (its first,
+        # for a tail), so an escape that can't hold any value's edge costs one lookup)
+        head_ks: dict[str, set[int]] = {}
+        tail_ks: dict[str, set[int]] = {}
+        for key in self._heads:
+            head_ks.setdefault(key[-1], set()).add(len(key))
+        for key in self._tails:
+            tail_ks.setdefault(key[0], set()).add(len(key))
+        self._head_ks = {c: sorted(ks) for c, ks in head_ks.items()}
+        self._tail_ks = {c: sorted(ks) for c, ks in tail_ks.items()}
+        # (by head key, the next characters that can start an escape: a form that goes on with one where the level
+        # has another character is still found when a later escape there takes in all the rest)
+        self._head_starters = {key: tuple(c for c in by_next if _starter(c)) for key, by_next in self._heads.items()}
         shown = sorted(set(labels) | ({UNCHECKED} if labels else set()), key=len, reverse=True)
         self.placeholders = re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
 
@@ -660,47 +689,76 @@ class Redaction:
                 yield i, j, rank, label, lead, trail
         if not chain:
             return
-        slots, n, end = level.slots(), len(level.source), 2 * len(hay)
+        slots, n, end, size = level.slots(), len(level.source), 2 * len(hay), len(hay)
         made = _made(chain, known)
-        at_slot: dict[int, list[str]] | None = None  # the escapes' texts by where their characters are in this level
+        at_slot: dict[int, set[str]] | None = None  # each slot's escapes as the set of their beginnings
+        seen: set[tuple[int, str]] = set()
         # an escape takes in at most its own length less one of a value's characters: the longest escape in this level
         # bounds the tail lengths tried below (SEAM is the bound over every escape there is)
         seam = min(SEAM, max((len(raw) for _, raw, _ in made), default=1) - 1)
+        head_ks, tail_ks = self._head_ks, self._tail_ks
         for x, raw, gone in made:
-            heads, tails = self._heads.get(raw[-1]), self._tails.get(raw[0])
-            if heads is None and tails is None:
+            hks, tks = head_ks.get(raw[-1]), tail_ks.get(raw[0])
+            if hks is None and tks is None:
                 continue
             # (gone: what the escape made was dropped, a direction mark: it has no place, own 0)
-            i, own = divmod((slots[x] & ~1 if x < n else end) if gone else slots[x], 2)
-            for form, k, rank, label in heads or ():
-                if not raw.endswith(form[:k]):
+            place = (slots[x] & ~1 if x < n else end) if gone else slots[x]
+            if not place & 1:  # (what it made is dropped here: many escapes can share that place; one that made a
+                # character the level keeps is alone at its own)
+                if (place, raw) in seen:
+                    continue  # the same escape at the same place finds the same occurrences (dropped marks share one)
+                seen.add((place, raw))
+            i, own = divmod(place, 2)
+            at = i + own  # where the rest of a value goes on after an escape that took in its first characters
+            here = hay[at] if at < size else ""
+            for k in hks or ():
+                if k > len(raw):
+                    break
+                key = raw[-k:]
+                by_next = self._heads.get(key)  # the forms whose first k characters the escape ends with
+                if by_next is None:
                     continue
-                at, rest = i + own, len(form) - k  # where the rest of the form goes on, and how long it is
-                if hay.startswith(form[k:], at):
-                    yield i, at + rest, rank, label, not own, False
-                # its last characters taken into a later escape too (Codex, PR #10 cycle 15: `%2` + `a%62c%2` + `F`).
-                # Every middle the loop below tries starts with the shortest one: when that isn't there, none is
-                shortest = rest - min(seam, rest)
-                if not hay.startswith(form[k:k + shortest], at):
-                    continue
-                if at_slot is None:
-                    # each slot's escapes as the set of their beginnings (up to `seam` characters): many escapes can share
-                    # a slot (dropped direction marks all land on one), and a lookup must not scan them (Codex, cycle 19)
-                    at_slot = {}
-                    for y, other, dropped in made:
-                        starts = at_slot.setdefault((slots[y] & ~1 if y < n else end) if dropped else slots[y], set())
-                        starts.update(other[:m] for m in range(1, min(seam, len(other)) + 1))
-                for k2 in range(1, min(seam, rest) + 1):
-                    q, tail = at + rest - k2, form[len(form) - k2:]
-                    for own2 in (1, 0):
-                        if q + own2 > i and tail in at_slot.get(2 * q + own2, ()) and \
-                                hay.startswith(form[k:len(form) - k2], at):
-                            yield i, q + own2, rank, label, not own, not own2
-            for form, k, rank, label in tails or ():
-                rest = len(form) - k
-                if i >= rest and raw.startswith(form[rest:]) and hay.startswith(form[:rest], i - rest):
-                    yield (i - rest, i + 1, rank, label, False, False) if own else \
-                        (i - rest, i, rank, label, False, True)
+                # a form goes on with the level's character here, or with one a later escape here starts with (that
+                # escape then takes in all the rest)
+                for c in (here, *(c for c in self._head_starters[key] if c != here)):
+                    for form, _, rank, label, starts in by_next.get(c, ()):
+                        rest = len(form) - k
+                        if c == here and hay.startswith(form[k:], at):
+                            yield i, at + rest, rank, label, not own, False
+                        # its last characters taken into a later escape too (Codex, PR #10 cycle 15: `%2` + `a%62c%2` +
+                        # `F`): the form goes on in the level up to p, and an escape there starts with form[p:]. That
+                        # is at most `seam` characters, and starts with what an escape can start with
+                        earliest = len(form) - min(seam, rest)
+                        for p in starts:
+                            if p < earliest:
+                                break
+                            if not hay.startswith(form[k:p], at):
+                                continue
+                            if at_slot is None:
+                                # each slot's escapes as the set of their beginnings (up to `seam` characters): many
+                                # escapes can share a slot (dropped direction marks all land on one), and a lookup must
+                                # not scan them (Codex, cycle 19)
+                                at_slot = {}
+                                for y, other, dropped in made:
+                                    begins = at_slot.setdefault(
+                                        (slots[y] & ~1 if y < n else end) if dropped else slots[y], set())
+                                    begins.update(other[:m] for m in range(1, min(seam, len(other)) + 1))
+                            q, tail = at + p - k, form[p:]
+                            for own2 in (1, 0):
+                                if q + own2 > i and tail in at_slot.get(2 * q + own2, ()):
+                                    yield i, q + own2, rank, label, not own, not own2
+            if i == 0 or tks is None:
+                continue
+            before = hay[i - 1]  # the form's character just before what an escape that took in its last ones holds
+            for k in tks:
+                if k > len(raw):
+                    break
+                by_before = self._tails.get(raw[:k])  # the forms whose last k characters the escape starts with
+                for form, _, rank, label in by_before.get(before, ()) if by_before is not None else ():
+                    rest = len(form) - k
+                    if i >= rest and hay.startswith(form[:rest], i - rest):
+                        yield (i - rest, i + 1, rank, label, False, False) if own else \
+                            (i - rest, i, rank, label, False, True)
 
     def scrub(self, text: str) -> str:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
@@ -783,6 +841,12 @@ def _read(data: object) -> tuple[dict[str, Account], str | None, str | None]:
         return {}, None, 'it has no "accounts" object'
     found: dict[str, Account] = {}
     passcode = None
+    # (Codex, PR #10 cycle 20: the matcher's cost grows with the values; the phone's passcode alone isn't an account)
+    count = sum(1 for name, entry in raw.items()
+                if name != PHONE or (isinstance(entry, dict) and ("username" in entry or "password" in entry)))
+    if count > MAX_ACCOUNTS:
+        return {}, None, (f"it holds {count} accounts; a file holds at most {MAX_ACCOUNTS} (split them into several "
+                          "files, one per run)")
     for name, entry in raw.items():
         if not isinstance(name, str) or not NAME.match(name):
             return {}, None, f"an account's name is letters, digits, - and _, not {name!r}"

@@ -53,7 +53,8 @@
   would still change is redacted whole as `<a value encoded too deep to check>` and counts as holding a value, so
   nothing is released unchecked. Searching is linear in the text and the values. A username or password is 3 to 256
   characters (at most 256 as written, at least 3 once decoded and trimmed, so three spaces are refused) and must settle
-  within the limit; a file that breaks this is refused when it loads, naming the account and the field, never the
+  within the limit, and a file holds at most 32 accounts (64 values); a file that breaks this is refused when it loads,
+  naming the account and the field (or the number of accounts), never the
   value. Not covered: other encodings (base64, HTML entities, a hash, a change of case, a value split by other text), and a
   backslash left bare right before an escaped character (`\` + `\x73`), which JSON and Python, and the matcher, read
   as an escaped backslash.
