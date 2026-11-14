@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.2 (unreleased)
+## 1.6.2 (2026-11-14)
 
 - A WebDriverAgent session re-created in the middle of a run now gets the same settings as the first one (no waiting for
   animations such as a blinking caret, and the stream's current quality) right after it starts. Before, a tap and then
