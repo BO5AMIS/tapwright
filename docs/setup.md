@@ -100,8 +100,15 @@ ones as the daemon's own settings.
   An agent says `account: "tester2"` in `drive`, and the tool types the values: a password only into a secure
   field, a username only into a text field. They are never in an answer, the action log, a map, a script or a
   report. The file may not sit inside a git work tree unless git ignores it. `tapwright doctor --accounts FILE`
-  checks it. An entry named `phone` with a `passcode` is accepted and kept for unlocking the phone, which this
-  release doesn't do yet.
+  checks it. An entry named `phone` with a `passcode` (only that name) unlocks a locked phone on its lock screen, and
+  only where nobody is meant to be at the phone: at the start of a scheduled run, and with `tapwright serve --phone
+  --accounts FILE` at the start of a new call. The passcode comes only from the file `tapwright serve --accounts`
+  names. A lock in the middle of a run stops it (`locked`): locking the phone is how you stop the agent. At most 2
+  attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
+  passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
+  **Experimental in 1.7:** on the test iPhone (Face ID, iOS 26) the unlock didn't yet find the passcode keypad. It
+  answered `locked` and typed nothing. iOS also won't open the USB connection to a phone that is locked when the daemon
+  starts. Plan unattended runs with the phone unlocked for now.
 - **`--maps DIR`**: where each app's map is kept (`<DIR>/<bundle id>/map.json`, and its `routes/`). The default is
   `~/.tapwright/maps`. Point it at a folder in your project and a team, CI and Tapline share what was learned.
 - **`--brief`**: answer every action in brief (the first line, at most 12 lines of changes, then `...N more:
@@ -123,6 +130,96 @@ ones as the daemon's own settings.
   `--client NAME` (keeps one run's report and journey together: pass one), `--json` and `--timeout`. It exits 0 with
   the answer, 2 for a refusal (`Error <code>: <message>` on stderr) or a mistake in the command, and 3 when the
   daemon can't be reached. Loading the MCP server once, when the session starts, is faster still.
+
+### Safety rules of 1.7 worth knowing
+
+- **`~/.tapwright/serve.json` is trusted like you.** It holds the daemon's key. Any process of your user that can
+  read it can answer the approval dialog (including the offer to make a grant, so it can create a standing grant),
+  fetch one-time codes and ask the daemon to unlock the phone. An agent that runs shell commands as you can read it.
+  Keep the file private, and run agents you don't trust where they can't read your home folder.
+- **Locking the phone stops a run.** A lock in the middle of a `run`, `drive`, `replay`, route or journey ends it with
+  `locked`; the passcode is never typed there. The tool unlocks a locked phone only at the start of a scheduled run,
+  and with `tapwright serve --phone --accounts FILE` at the start of a new call.
+- **Unlock limits.** At most 2 passcode attempts an hour and 3 a day, counted across restarts in
+  `~/.tapwright/unlock-state.json`. Once the phone refuses the passcode, nothing more is typed until you check the
+  vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
+- **One-time codes only into a code field.** `${otp.<app>}` is typed only into a one-line field whose id, label or
+  placeholder says code, OTP, verification or PIN. Any other field is refused (`not_allowed`) and no code is read. A
+  draft that holds a code says so. Tapline's `/otp` gets a code only for an app within `serve --apps` (or with
+  `--dedicated`, `--phone`), only while the tool's own read shows the app in front with such a field, and each code
+  goes out once, also across a restart of the daemon: a handed-over code leaves a
+  mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes.
+- **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
+  touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
+  with `--no-policy`. A draftsOnly grant holds in any grants file the daemon knows (its own `--policy`, a call's), so
+  a call that sends another policy, a stricter one or none, doesn't lift it. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
+  refused there, and so is text with a line break in it (a vault value too, named, never shown): a line break is
+  Return, which sends in many apps. Type without it, then tap the send button. Your OK is for the draft you saw, as
+  one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, the
+  navigation title, a recipient, a picker's chosen value, a checked option) changed before the send, nothing is sent
+  and you are asked again. When the Send button is below the screen, the tool scrolls to it first and shows you the
+  draft as it is after the scroll; a grant is counted on that screen too.
+- **Deleting an account or paying always asks you**, whatever the policy file says (also with `--no-policy`). On a
+  screen or in an alert that says it deletes the account ("Delete your account?"), and on a payment screen (titled
+  Send money, Checkout, Transfer and the like, or with a text such as "Transfer $25 to Alice", or an amount on its own
+  beside a Send), every button but Cancel, Back, Not now and the like asks you each time: Confirm and OK too, and text
+  that takes a tap. A navigation bar's title counts as the screen's title. A button that says it itself ("Delete
+  account", "Buy now", "Send $25") asks you whatever the policy file says too. No grant covers those, and none is
+  offered. A price among other words ("The latte was $4") doesn't make a payment screen.
+- **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
+  of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
+  draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
+- **`--revoke-all` always works.** If the policy file's edit lock is held, it writes `<policy file>.revoked`, which
+  revokes every grant at once; the next change to the file writes the revocation in and removes the mark. It also
+  stops a running batch or drive that began before it, whatever grants it began with.
+- **A vault in the macOS keychain can't be named `…#<number>`.** The keychain keeps those names for the pieces of a
+  large vault, so `vault protect` refuses such a file name; rename it first.
+- **A route a grant names stays as it is**, whatever policy a call sends: a stricter call policy turns off the grants
+  for its own touches, never the protection of a route the daemon's grants name, so `record` refuses that name.
+- **A control that changed is not touched.** If the element at the target's place has the target's id and frame but
+  other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Every touch
+  on an element goes through the same checks right before it goes out: `tap`, `long_press`, `toggle`, `type_text`'s tap
+  that focuses the field, and a target scrolled into view first. A point, `force`, an alert's button and a short swipe
+  are raw touches: they skip the runner's hit test, never the policy. Another
+  app's banner or sheet over the target is named by its kind and place only, never by its words.
+- **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
+  app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
+
+### Schedules and the phone
+
+- **One run on the phone at a time.** Scheduled runs and notification checks share a phone lock
+  (`~/.tapwright/schedules/.phone.lock`). A run that finds it held waits, then reports `skipped: the phone was in use`.
+  If a crash leaves it behind, `tapwright doctor` names it and `tapwright schedule unlock --phone` removes it. A lock
+  file that is empty is removed only once it is 2 seconds old (younger, its holder may still be writing it), and a
+  stuck `.takeover` beside a lock is cleared under a lock of its own, so an unlock never displaces a run that took the
+  lock meanwhile.
+- **The 90-second rule.** For a schedule, the phone is in use while a call is running, when an agent called in the
+  last 90 seconds, or when you acted in the live view in the last 90 seconds. A run waits up to 10 minutes for that.
+  While a scheduled run drives, other agents' actions answer `busy`. The daemon also checks this itself when the run
+  starts: if an agent or you got to the phone after the run's last look, the run waits and asks again. A notification
+  trigger's check is decided again the moment it gets the phone, so an agent's call that came in meanwhile makes it
+  wait too.
+- **Notification Center is closed, or the answer says it may not be.** If closing it fails, the app that was in front
+  is opened again anyway; if Notification Center can't be shown closed, the call answers `internal` and says to look
+  at the screen first, instead of answering as if nothing were wrong. Tapline's `/otp` answers the same `internal`
+  error (HTTP 500), with no code.
+- **A run's errors are redacted.** A scheduled run's audit line and report go through its vault's redactor before
+  anything is cut or written, so a vault value in a file name or an error never reaches either. That holds when the
+  schedule file itself is wrong too: the vault it names is read first. When that vault can't be read, the error only
+  says the schedule isn't valid, without its details.
+- **A run opens its app.** A scheduled run opens its route's app first, so it doesn't matter which app (or the home
+  screen) is in front when it falls due.
+- **A locked phone.** `run-schedule` starts `tapwright serve` with the schedule's own `--accounts` when no daemon is
+  running, so the unlock at a run's start can use that file's passcode. A daemon that is already running keeps the
+  `--accounts` it was started with: if that's another file, the run is skipped as locked.
+- **A skipped trigger isn't retried.** A file or notification trigger marks what it saw before the run starts. If the
+  run is then skipped (the previous run still going, the phone in use or locked), that file or notification doesn't
+  start a run later. The skip is in the audit log and the run's report.
+- **Notification checks touch the phone.** A notification trigger pulls Notification Center down over the screen for
+  about a second every 2 minutes while the PC is awake. It waits while the tool or the live view uses the phone, but
+  it can't see you holding the phone. `--on-notification` takes the app's bundle id or its exact name.
+- **Missed runs.** A run that falls due while the PC is off, or asleep with wake timers off, doesn't run later and
+  leaves no audit line. Runs happen only while you're logged on to Windows. `tapwright doctor --unattended` says both.
 
 ### Keeping it working
 

@@ -1,0 +1,61 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.apple.reminders",
+  "places": {
+    "reminders_lists": {
+      "key": {
+        "signature": "b43989b29974e58b",
+        "parts": {
+          "ids": [
+            "AccountsList.ID.AccountsListTable"
+          ],
+          "kinds": [
+            "nav",
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    },
+    "new_reminder": {
+      "key": {
+        "signature": "e053123af50e493d",
+        "parts": {
+          "ids": [
+            "AccountsList.ID.AccountsListTable",
+            "Date & Time",
+            "More Options",
+            "dictation",
+            "inputView"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar",
+            "nav",
+            "list",
+            "toolbar"
+          ],
+          "tab": null,
+          "layer": "sheet"
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    }
+  },
+  "roads": [],
+  "routes": {
+    "add_reminder": "routes/add_reminder.json",
+    "complete_reminder": "routes/complete_reminder.json"
+  },
+  "reflexes": []
+}

@@ -118,6 +118,8 @@ tapwright skill install               # for you: ~/.claude/skills and ~/.agents/
 tapwright skill install --project .   # for one project
 ```
 
+**Starter routes** for the phone's own apps (Notes today; Reminders, Calendar, Mail and Messages follow). `tapwright starters install [--maps DIR]` adds them to your maps for `drive {"route": ...}`; a route or place of yours is never overwritten, and the answer names the routes it kept.
+
 Claude Code reads `.claude/skills`; Codex and other agents read `.agents/skills`. The skill
 is [skills/tapwright](https://github.com/bo5amis/tapwright/blob/main/skills/tapwright/SKILL.md), in the open
 [Agent Skills](https://agentskills.io) format, so skill installers can take it from this
@@ -151,6 +153,7 @@ repository too.
 | `map` | the app's map, learned as you drive: the places Tapwright recognised, the roads (moves) between them, saved routes and reflexes, one line each, and where the app is now; `to` shows the shortest known way to a place and whether each road is proven on this build, `name` names the current place, `link` adds the link that reaches a place, `reflex` / `forget_reflex` and `forget` edit it. The file is `~/.tapwright/maps/<bundle id>/map.json` (`--maps DIR` on `serve`, `mcp` and `call` keeps it with a project); list-row text, typed text and secure values are never in it, and a navigation title only as a hash |
 | `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
 | `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
+| `notifications` | your apps' notifications in Notification Center (every app's with `--dedicated` or `--phone`), newest first, at most 20; `open: n` opens one. Notification Center is on the phone's screen for about a second while it is read; every other app's notification is dropped before anything leaves the reader, and one-time codes are hidden |
 | `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
@@ -233,7 +236,7 @@ live view protocol in [docs/VIEWER-PROTOCOL.md](https://github.com/bo5amis/tapwr
 ## Without the cable
 
 After setup, unplug: on the same Wi-Fi, Tapwright finds the phone by itself, or give its
-address with `tapwright serve --phone 192.168.x.y`. Over Wi-Fi every step is slower than
+address with `tapwright serve --address 192.168.x.y`. Over Wi-Fi every step is slower than
 over USB (see [Status](#status)); for long unattended runs, keep the cable in.
 
 Reaching the phone from another network (a VPN such as Tailscale, or cellular) is not part
@@ -256,6 +259,12 @@ can answer (a request carries a random id, and an answer from anything but the p
 agent with a shell could still forge one, by reading the key from `~/.tapwright`. The agent's `viewer` tool
 opens the page for you and never sees its link, and after you decline, the same touch isn't asked again for a
 minute. Use a test phone with test data for agents you don't trust.
+
+**Keep `~/.tapwright/serve.json` private.** It holds the daemon's key. Every process of your user that can read it is
+trusted like you are: it can answer the approval dialog (Allow, and the offer to make a grant), so it can create a
+standing grant; it can ask for one-time codes (`/otp`); and it can ask the daemon to unlock the phone. An agent that
+can run shell commands as you can read it. Don't share the file, don't copy it to another account or machine, and
+on a phone that matters run agents you don't trust only where they can't read your home folder.
 
 A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
 the agent's last look: a sheet or a banner that came in meanwhile would take the touch.

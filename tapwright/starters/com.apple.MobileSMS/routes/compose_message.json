@@ -1,0 +1,41 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "compose_message",
+  "app": "com.apple.MobileSMS",
+  "start": "conversations",
+  "end": "message_draft",
+  "variables": [
+    "to",
+    "text"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "id": "composeButton"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${to}",
+      "target": {
+        "label": "To:"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${text}",
+      "target": {
+        "id": "messageBodyField"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "id": "sendButton"
+      }
+    }
+  ],
+  "draftsOnly": true
+}

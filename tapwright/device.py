@@ -309,6 +309,22 @@ class Device:
             return PasscodeNeeded()
         return error
 
+    async def battery(self) -> tuple[int | None, bool | None]:
+        """(percent, charging) from lockdown's battery domain, for the watchdog (§24.5); (None, None) when the phone
+        doesn't say. Asks over the open tunnel only: never connects."""
+        if self.rsd is None:
+            return None, None
+        try:
+            values = await self.rsd.get_value("com.apple.mobile.battery")
+        except Exception:
+            return None, None
+        if not isinstance(values, dict):
+            return None, None
+        level = values.get("BatteryCurrentCapacity")
+        charging = values.get("BatteryIsCharging")
+        percent = level if isinstance(level, int) and not isinstance(level, bool) and 0 <= level <= 100 else None
+        return percent, charging if isinstance(charging, bool) else None
+
     def hurry(self) -> None:
         """Someone is asking for the phone now (a tool call, a viewer): the next start doesn't wait its turn."""
         self._hurry = True

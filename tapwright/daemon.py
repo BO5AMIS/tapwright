@@ -4,12 +4,14 @@ that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
 import contextvars
+import copy
 import itertools
 import io
 import json
 import dataclasses
 import datetime
 import hashlib
+import hmac
 import math
 import os
 import pathlib
@@ -28,7 +30,9 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
+from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
+from . import auditlog, center_tool, grants as grantlib, notifications as notes_lib, otp as otplib, schedules as schedulelib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -55,9 +59,10 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
-READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map"})  # (compare_screen writes its own line: _log_compare)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
+UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
@@ -65,8 +70,15 @@ OCR_REF = re.compile(r"o[1-9][0-9]*")
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
+FULL_SWIPE_SHARE = 0.4  # a mostly-across swipe on a list row longer than this share of its width runs its first action
+IN_USE_S = 90.0  # for a schedule's busy test only: a client's call, or a person's input, this recent means the phone is in use
+SCHEDULE_FREE = frozenset({"look", "wait", "wait_for", "audit", "ux_check", "logs", "crash", "apps", "session_report",
+                           "viewer", "filmstrip", "compare_screen"})  # what other agents may still do during a scheduled run
+SCHEDULED_BUSY = "a scheduled run is using the phone; try again when it ends"
 ALERT_ACTIONS = ("accept", "dismiss", "text")  # what `alert` takes (AGENT-TOOLS §4)
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
+# what str.splitlines() breaks a line at: each is Return to a text field (Codex, PR #12 cycle 2, H3)
+LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85  ")
 NO_APP_TO_MEASURE = "no app is in front to measure; open_app the app first."
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
 BATCH = contextvars.ContextVar("batch", default=None)  # {id, step} of the batch step running now, for the log
@@ -86,6 +98,15 @@ _POLICY: contextvars.ContextVar[safety.Policy] = contextvars.ContextVar("tapwrig
 # Set to a list by run_tool; a touch a person's OK let through puts where the OK came from in it ("chat", "the live
 # view"), and the answer then ends with NOTE_ALLOWED
 _GRANTED: contextvars.ContextVar[list[str]] = contextvars.ContextVar("tapwright_granted", default=[])
+# The agent (client id) whose call is being run: where the draft of a touch is read from (§21.3: the field it last typed into)
+_CALLER: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_caller", default=None)
+# True while a saved route with `"draftsOnly": true` runs: a touch on a word that reaches other people stops at a draft (§21.3)
+_DRAFTS_ROUTE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_drafts_route", default=False)
+
+
+class Sent(str):
+    """The origin of a person's OK of a DRAFT (§21.3) ("chat", "the live view"): the answer then ends `Note: sent by a person
+    (in chat).` where any other OK ends `Note: allowed by a person (in chat).`"""
 # The scope (personal mode's app list) of the call being run, for a tool that makes calls of its own (`performance`)
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
@@ -184,12 +205,23 @@ _BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
+# the kill switch (§19.5): a run stops between moves when a grant it started with is revoked
+REVOKED_STOP = ("revoked: the grants were revoked while this ran ({names}), so it stopped between moves; nothing more "
+                "was touched. Ask your user what to do.")
+NOTE_SENT = "sent by a person (in {origin})."  # §21.3: a draft a person sent
 NOTE_ALLOWED = "allowed by a person (in {origin})."  # where the OK came from: "chat" (the host's dialog) or "the live view"
 CONFIRM_TICK = 0.25  # seconds between looks at a waited-for request's clock (an answer wakes it at once)
 NUDGE_EVERY = 3.0  # seconds between the daemon's looks at the phone while a call waits for a person (§11.5)
 # The agent (client id) whose call is being run came with a host dialog: a person's OK is waited for and asked through
 # its channel (dialog.py) instead of answering needs_confirmation at once. None: today's way, the live view alone.
 _DIALOG: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_dialog", default=None)
+# What the grants (§19) said about this call's touch, for its answer and its log line (GrantCall); set per call.
+_GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar("tapwright_grant_call", default=None)
+# The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
+_ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
+# The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
+BEFORE_TOUCH = frozenset({"not_actionable", "stale", "not_found", "ambiguous"})  # refusals made before a touch (A-L1)
+_RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str], float] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
 
 
@@ -221,7 +253,7 @@ def _outside(bundle: str | None, name: str | None, given: str, alert: bool = Fal
 class UxRead(NamedTuple):
     """What one ux_check turn read (Daemon._ux_check): checked, filed and shown from this, never from the shared view."""
     items: list
-    alert_now: "tuple[str, tuple[str, ...]] | None"
+    alert_now: "tuple[str, tuple[str, ...], str] | None"
     screen: tuple
     app: "tuple[str, str] | None"
 
@@ -257,6 +289,8 @@ STILL_FPS = 5
 PACE_QUIET = (30.0, 2.0, 1.0)  # seconds without an agent call, a person's input, a change on the screen
 PACE_TICK = 0.25  # how often the pace is checked
 LOOP_TICK, LOOP_HELD, LOOP_SAY_EVERY = 0.05, 0.3, 10.0  # seconds: see Daemon._watch_loop
+WATCH_TICK, BATTERY_EVERY = 15.0, 300.0  # seconds: the watchdog's look at the state, and at the battery (§24.5)
+WATCH_NOTES = 5  # the watchdog's messages an agent's next answer carries at most
 BACK_STILL_PAUSE, BACK_STILL_TRIES = 0.3, 6  # see Daemon._still_back
 TOGGLE_LAND_WAIT, TOGGLE_POLL = 0.5, 0.05  # seconds: see Daemon._toggle_landed
 # A switch element this many times wider than tall is a whole row (label and control): toggle touches the control,
@@ -335,6 +369,25 @@ def element_name(result: str) -> str:
     return text if len(text) <= MARK_NAME_MAX else text[:MARK_NAME_MAX - 1] + "…"
 
 
+def scheduled(client_id: str) -> bool:
+    """Is this client a scheduled run (`tapwright run-schedule`, §22)?"""
+    return client_id.startswith(schedulelib.CLIENT)
+
+
+def full_row_swipe(items: list[ui.Element], x0: float, y0: float, x1: float, y1: float) -> ui.Element | None:
+    """The list row a swipe would run the first action of (review 1.7 B-M7), or None: a swipe that starts on a row (a
+    cell), moves more across than up or down, and further than FULL_SWIPE_SHARE of the row's width. A shorter one only
+    reveals the row's buttons, and a tap on one of those is policed as any tap."""
+    dx, dy = x1 - x0, y1 - y0
+    if abs(dx) < abs(dy):
+        return None
+    row = next((e for e in reversed(items)
+                if e.role == "cell" and e.x <= x0 < e.x + e.width and e.y <= y0 < e.y + e.height), None)
+    if row is None or row.width <= 0 or abs(dx) <= FULL_SWIPE_SHARE * row.width:
+        return None
+    return row
+
+
 def step_caption(tool: str, result: str, args: dict) -> str | None:
     """The agent's step in plain words for people watching the live view (VIEWER-PROTOCOL 1.4, "Captions"):
     `Tap "Sign up"`, `Type into "Email"`, `Scroll down`, `Open Wayfare`. Never the typed text, a link's address,
@@ -406,8 +459,9 @@ def settled_line(seconds: float) -> str:
     return f"Settled in {seconds:.2f} s."
 
 
-def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...]] | None:
-    return (alert.title, alert.buttons) if alert else None
+def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...], str] | None:
+    """What makes the alert the same one: title, buttons and message (a change in the message alone is a change of the alert)."""
+    return (alert.title, alert.buttons, alert.message) if alert else None
 
 
 def _furniture(view, alert: ui.Alert | None, keyboard: bool) -> list[str]:
@@ -600,6 +654,21 @@ class DryRun(Refused):
 
 
 @dataclasses.dataclass
+class GrantCall:
+    """What the grants said about one call's touch (§19.3, §12): the notes of grants that matched but didn't cover it,
+    and, when one covered it, its note and count. `taken` marks the call the holder belongs to."""
+    notes: list[str] = dataclasses.field(default_factory=list)
+    asked: str | None = None  # §12 grant_asked: limit reached, quiet hours, ended or revoked
+    name: str | None = None  # §12 grant: the grant that let the touch through
+    use: str | None = None  # §12 grant_use: "2 of 3 today"
+    line: str | None = None  # `Note: allowed by grant "…" (2 of 3 today).`
+    draft: str | None = None  # §12 grant_draft: the draftsOnly grant that stopped this touch at a draft
+    taken: bool = False
+    claimed: "tuple[grantlib.Book, grantlib.Use] | None" = None  # the use a grant gave this call (A-L1: given back...)
+    touched: bool = False  # (...when the call is refused before any touch went out)
+
+
+@dataclasses.dataclass
 class Confirm:
     """One request for a person's OK (docs/AGENT-TOOLS.md 11.3) and where it stands: `pending`, then `allowed` or
     `declined`. `until` is the clock time (the controller's) a pending request expires, or an allow lapses."""
@@ -612,7 +681,12 @@ class Confirm:
     owner: str | None = None  # the agent (client id) whose call asked: only its host's dialog may answer
     dialog: bool = False  # the host was asked too (a `dialog.CONFIRM` ask went to the owner's channel)
     origin: str = ""  # where the answer came from: "chat" or "the live view"
+    draft: str | None = None  # a draft's request (§21.3): the draftsOnly grant that stopped it, "" for a route's
+    # a draft's request: a keyed digest of the draft and where it goes, as the person was shown them (Daemon._draft_digest).
+    # The send goes only while the screen still holds exactly that (Codex, PR #12 cycle 1, H3)
+    draft_digest: bytes | None = None
     used: bool = False  # an allow was taken by one call (Daemon._claim): no other call touches under it
+    offer: "dict | None" = None  # what the follow-up grant offer (§19.6) needs, kept when the host was asked too
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # set at the first answer
 
 
@@ -623,6 +697,17 @@ class Need:
     id: str
     owner: str  # the agent (client id) whose call waits
     state: str = "pending"
+    answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+
+@dataclasses.dataclass
+class Offer:
+    """One question of the grant dialog (§19.6) open now: the grant's (`grant`) or the drafts one (`drafts`). `answer`
+    is the word the person gave (`allow`/`decline`, `yes`/`no`), None while open."""
+    id: str
+    owner: str
+    kind: str
+    answer: str | None = None
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
 
 
@@ -783,7 +868,8 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report", "map")
+READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report", "map",
+         "notifications")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -829,7 +915,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(journey_tool.JourneyTools):
+class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -838,9 +924,17 @@ class Daemon(journey_tool.JourneyTools):
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
                  settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
-                 actions: ActionLog | None = None) -> None:
+                 actions: ActionLog | None = None, audit: "auditlog.AuditLog | None" = None,
+                 grant_clock: "Callable[[], datetime.datetime] | None" = None) -> None:
         self.session = session
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
+        # The audit log (§23): every grant use, revocation and person's OK. None (tests): no grant covers anything,
+        # since a grant needs its line; the server always gives one. Its lines are scrubbed of account values (§20.3).
+        self.audit = audit
+        if audit is not None:
+            audit.scrub = self.scrub_everywhere
+        self._grant_clock = grant_clock  # (tests) the local clock the grants count by; None: the computer's
+        self._books: dict[str, grantlib.Book] = {}  # policy file -> its grants (§19)
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._outside_ignored: set[str] = set()  # apps whose forms ignore a touch outside the field: the keyboard reflex goes first
@@ -939,12 +1033,30 @@ class Daemon(journey_tool.JourneyTools):
         # the maps (AGENT-TOOLS §18): learned from what agents see and do, saved in the background (mapkeeper.py)
         self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
+        self.otp_codes = otplib.Codes(self.accounts.remember_code)  # one-time codes read, not yet used (§20.4)
+        self.code_fields = otplib.FieldWatch()  # when each app with codes on showed its code field (§20.4)
+        try:
+            self.session.on_tree = self._watch_code_field  # (each read the daemon builds says whether one shows)
+        except AttributeError:
+            pass
+        # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
+        self.unlocker = unlocklib.Unlocker()
+        self.lock_screen: "unlocklib.LockScreen | None" = None  # (made from the session when first needed; tests set one)
+        # the watchdog (§24.5, watchdog.py): one message per event when the phone has gone or its battery is low
+        self.watchdog = watchlib.Watchdog(self._watchdog_say)
+        self.watch_tick: float | None = WATCH_TICK if pace_tick is not None else None  # (None: no ticking task)
+        self.battery_every = BATTERY_EVERY
+        self._watch_notes: dict[str, list[str]] = {}  # {agent: the watchdog's messages its next answer carries}
+        self._battery_at = -math.inf
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
         self._queues: set = set()
+        self._draft_key = secrets.token_bytes(32)  # the drafts' digests (_draft_digest, H3): this process's own, kept nowhere
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
         self._needs: dict[str, Need] = {}  # "needs a person" asks open now, by id (see _hold_for_person)
+        self._offers: dict[str, Offer] = {}  # grant dialog questions open now, by id (see _offer_grant)
+        self._offered: set[tuple[str, str, str]] = set()  # (agent, app, word) a grant was offered for: once a session
         self._need_seq = 0
         self._channels: dict[str, dialog.Channel] = {}  # what each agent's host is asked (dialog.py), by client id
         self._granted_by: str | None = None  # where the OK that let this agent call through came from (for its log line)
@@ -977,8 +1089,38 @@ class Daemon(journey_tool.JourneyTools):
         # agents that said goodbye (a client id is one MCP process's, never used again): a call of theirs that arrives
         # late, or is still setting a condition when the goodbye comes, must not leave one on the phone
         self._agents_ended: dict[str, None] = {}
+        # {client: its tool calls in flight} and {client: when its last call began or ended}: the schedules' busy test
+        # (phone_in_use) and the refusal of other agents' actions while a scheduled run drives (review 1.7 B-H1)
+        self._calls: dict[str, int] = {}
+        self._call_at: dict[str, float] = {}
+        self.schedules_folder: pathlib.Path | None = None  # where the schedules are (None: ~/.tapwright/schedules)
         # the device reports a condition that ended by itself or with its tunnel (L6)
         self.session.device.on_network_end = self._network_over
+
+    # ---- who uses the phone, for the schedules (§22.3) ----
+    def phone_in_use(self) -> bool:
+        """The schedules' busy test (review 1.7 B-H1): a person or an agent drives now (the queue's own 3 s), a client has
+        a tool call in flight or made one in the last IN_USE_S, a person acted in the live view in the last IN_USE_S, or
+        a scheduled run is going. An agent thinking between its calls still holds the phone; a scheduled run's own
+        finished calls don't (only one run goes at a time: the phone lock, schedulerun)."""
+        now = time.monotonic()
+        return (self.control.driver is not None or now - self._person_at < IN_USE_S
+                or any(n > 0 for n in self._calls.values())
+                or any(now - at < IN_USE_S for c, at in self._call_at.items() if not scheduled(c)))
+
+    def _someone_else_on_phone(self, client_id: str) -> bool:
+        """For a scheduled run's admission (M2): phone_in_use without the run's own activity. A person drives, acted in the
+        last IN_USE_S or paused the live view, another client has a call in flight, or an agent (not a scheduled run)
+        called in the last IN_USE_S. The queue's own `agent` driver isn't asked: the run's trigger check, just before,
+        is that."""
+        now = time.monotonic()
+        return (self.control.driver == "person" or self.control.paused or now - self._person_at < IN_USE_S
+                or any(n > 0 for c, n in self._calls.items() if c != client_id)
+                or any(now - at < IN_USE_S for c, at in self._call_at.items() if c != client_id and not scheduled(c)))
+
+    def scheduled_running(self) -> bool:
+        """Is a scheduled run's call in flight?"""
+        return any(n > 0 and scheduled(c) for c, n in self._calls.items())
 
     # ---- status and events ----
     def status(self) -> dict:
@@ -988,6 +1130,7 @@ class Daemon(journey_tool.JourneyTools):
                else "tailscale" if via.startswith("network") else None)
         return {"type": "status", "protocol": PROTOCOL, "tool": "Tapwright", "state": self.state, "detail": self.detail, "via": via,
                 "fps": self.hub.fps(), "driver": self.control.driver, "paused": self.control.paused,
+                "in_use": self.phone_in_use(),  # (the schedules' busy test, §22.3; `driver` is the queue's own)
                 "size": {"w": w, "h": h}, "quality": self.preset,
                 "accepts": [*ACCEPTS, "video"] if self.video is not None and self.video.live else ACCEPTS}
 
@@ -1010,6 +1153,9 @@ class Daemon(journey_tool.JourneyTools):
     def _set_state(self, state: str, detail: str | None = None) -> None:
         changed = (state, detail) != (self.state, self.detail)
         self.state, self.detail = state, detail
+        watch = getattr(self, "watchdog", None)
+        if watch is not None:
+            watch.state(state, getattr(self.session.device, "via", None))
         if state in ("live", "locked"):
             self._connected.set()
         else:
@@ -1375,14 +1521,117 @@ class Daemon(journey_tool.JourneyTools):
         self._agent_touches.start()  # find Tapline's hosts, if any, before the first touch needs them
         pacer = asyncio.create_task(self._pace(stop), name="pace") if self.pace_tick else None
         watch = asyncio.create_task(self._watch_loop(stop), name="loop-watch") if self.pace_tick else None
+        dog = asyncio.create_task(self._watch_phone(stop), name="watchdog") if self.watch_tick else None
         try:
             await self._supervise(stop)
         finally:
-            for helper in (pacer, watch, *self._log_tasks.values()):
+            for helper in (pacer, watch, dog, *self._log_tasks.values()):
                 if helper is not None:
                     helper.cancel()
                     await asyncio.gather(helper, return_exceptions=True)
             self._log_tasks.clear()
+
+    # ---- the watchdog (§24.5) ----
+    async def _watch_phone(self, stop: asyncio.Event) -> None:
+        """Every `watch_tick` seconds: tell the watchdog the state (a phone gone for its grace is said once), and now
+        and then the battery, read over lockdown while the phone is up."""
+        while not stop.is_set():
+            await _first(self.watch_tick or WATCH_TICK, stop)
+            if stop.is_set():
+                return
+            try:
+                await self.watch_once()
+            except Exception as e:
+                self.log(f"watchdog: {e}")
+
+    async def watch_once(self) -> None:
+        self.watchdog.state(self.state, getattr(self.session.device, "via", None))
+        now = time.monotonic()
+        if self.state in watchlib.UP and now - self._battery_at >= self.battery_every:
+            self._battery_at = now
+            read = getattr(self.session.device, "battery", None)
+            if read is not None:
+                try:
+                    percent, charging = await asyncio.wait_for(read(), 10)
+                except Exception:
+                    percent, charging = None, None
+                self.watchdog.battery(percent, charging)
+
+    def _watchdog_say(self, kind: str, text: str) -> None:
+        """One watchdog message: the log, each host's dialog channel (a `notice`; the MCP server shows it in chat
+        while a call is out), and a Note in the next answer of every agent seen so far (once each)."""
+        self.log(text)
+        for client_id, channel in list(self._channels.items()):
+            channel.push({"type": "notice", "id": f"w{secrets.token_hex(4)}", "kind": kind, "message": text})
+        for client_id in list(self.control.clients):
+            notes = self._watch_notes.setdefault(client_id, [])
+            if text not in notes:
+                notes.append(text)
+                del notes[:-WATCH_NOTES]  # (an agent that never calls again keeps only the newest few)
+
+    def _with_watch_notes(self, client_id: str, text: str) -> str:
+        notes = self._watch_notes.pop(client_id, None)
+        return "\n".join([text, *(f"Note: {n}" for n in notes if n not in text)]) if notes else text
+
+    # ---- the passcode unlock (§18.6, §11.5) ----
+    def _lock_screen(self) -> "unlocklib.LockScreen":
+        if self.lock_screen is None:
+            self.lock_screen = unlocklib.PhoneLockScreen(self.session)
+        return self.lock_screen
+
+    def _passcode_file(self) -> str | None:
+        """The vault file the passcode may come from: the one `tapwright serve --accounts` names, never a file a request or
+        a call names (review 1.7, H2: a caller's own file would make every guess "a changed passcode")."""
+        path = getattr(getattr(self, "ceiling", None), "accounts", None)
+        return path if isinstance(path, str) and path else None
+
+    def passcode_for(self) -> str | None:
+        """The vault's `phone.passcode`, from serve's own `--accounts` file only: only the tool uses it."""
+        path = self._passcode_file()
+        if path is None:
+            return None
+        try:
+            loaded = self.accounts.get(path)
+        except Exception:
+            return None
+        if loaded.problem is not None:
+            return None
+        return loaded.passcode if isinstance(loaded.passcode, str) and loaded.passcode.strip() else None
+
+    async def unlock_phone(self) -> "unlocklib.Result":
+        """Unlock a locked phone with the passcode of serve's own vault (unlock.py has the rules). Never while paused or
+        while a person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode
+        typed; the log gets fixed words. On success the state is live at once. Its callers are the two places unattended
+        running is meant to happen (§19.5, review 1.7 H1): a scheduled run's start (`/api/phone/unlock`), and a new
+        top-level call to `tapwright serve --phone` (_hold_for_phone)."""
+        if self.control.paused:
+            return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
+        if self.control.person_active():
+            return unlocklib.Result(False, "busy", "a person is using the phone; try again in a moment")
+        if self.state != "locked":
+            return unlocklib.Result(self.state == "live", "not_locked" if self.state == "live" else "not_connected",
+                                    "" if self.state == "live" else "the phone isn't connected")
+        passcode = self.passcode_for()
+        source = unlocklib.Source.of(self._passcode_file())
+
+        def audit(detail: str) -> None:
+            if self.audit is not None:
+                self.audit.write("vault", name=unlocklib.AUDIT_NAME, detail=detail)
+
+        async def attempt() -> "unlocklib.Result":
+            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source)
+        try:
+            result = await (attempt() if self.control.holds_turn() else self.control.read(attempt))
+        except Exception as e:  # (a reconnect under way: no key was typed by this, or unlock.py said so itself)
+            self.log(f"passcode unlock: couldn't run ({type(e).__name__})")
+            return unlocklib.Result(False, "failed", unlocklib.FAILED)
+        if result.code == "unlocked":
+            self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
+            if self.state == "locked":
+                self._set_state("live")
+        elif result.code not in ("not_locked", "no_passcode"):
+            self.log(f"passcode unlock: {result.code}")
+        return result
 
     async def _watch_loop(self, stop: asyncio.Event) -> None:
         """Say in the log when this process's event loop was held up. The tunnel to the phone is a TCP/IP stack
@@ -1543,6 +1792,34 @@ class Daemon(journey_tool.JourneyTools):
             else:
                 # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
                 raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(left))))
+        if not scheduled(client_id) and name not in SCHEDULE_FREE and self.scheduled_running():
+            # a scheduled run drives with no model watching: another agent's action would land in the middle of its
+            # route, and its own next step on a screen it didn't leave (review 1.7 B-H1, §22.3)
+            raise Refused("busy", SCHEDULED_BUSY)
+        if scheduled(client_id) and not self._calls.get(client_id) and self._someone_else_on_phone(client_id):
+            # a scheduled run's first call is admitted here, in the same step that counts it as running (no await
+            # between): the scheduler's idle status may be stale by now, and another client's call, or a person, has the
+            # phone first. Nothing was done; the run waits and asks again (Codex, PR #12 cycle 1, M2)
+            raise Refused("busy", schedulelib.ADMISSION_BUSY)
+        now = time.monotonic()
+        for gone in [c for c, at in self._call_at.items() if now - at >= IN_USE_S and not self._calls.get(c)]:
+            del self._call_at[gone]
+        self._calls[client_id] = self._calls.get(client_id, 0) + 1
+        self._call_at[client_id] = now
+        try:
+            return await self._run_tool_counted(client_id, name, args, scope, policy, ux_rules, via, maps, dialog,
+                                                accounts)
+        finally:
+            left_calls = self._calls.get(client_id, 1) - 1
+            if left_calls > 0:
+                self._calls[client_id] = left_calls
+            else:
+                self._calls.pop(client_id, None)
+            self._call_at[client_id] = time.monotonic()
+
+    async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
+                                policy: "safety.Policy | None", ux_rules: "uxcheck.Rules | None", via: str | None,
+                                maps: str | None, dialog: bool, accounts: str | None) -> dict:
         vtoken = _VIA.set(via) if via is not None else None  # how the call came, for the log (session_report)
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
@@ -1623,8 +1900,11 @@ class Daemon(journey_tool.JourneyTools):
                         finally:
                             _BASELINES.reset(basetoken)
             except Refused as e:
-                if (said := self.scrub_everywhere(str(e))) != str(e):  # an account's value is never in an error either
-                    raise Refused(e.code, said) from None
+                said = self.scrub_everywhere(str(e))
+                if top_level and client_id in self._watch_notes:
+                    said = self._with_watch_notes(client_id, said)
+                if said != str(e):  # an account's value is never in an error either
+                    raise Refused(e.code, said, draft=e.draft) from None
                 raise
             if top_level:
                 answer = self._with_network(name, answer)
@@ -1632,6 +1912,8 @@ class Daemon(journey_tool.JourneyTools):
                     answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
             if (said := self.scrub_everywhere(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
                 answer = {**answer, "text": said}
+            if top_level and client_id in self._watch_notes:  # the watchdog's messages since this agent's last call
+                answer = {**answer, "text": self._with_watch_notes(client_id, answer["text"])}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
@@ -1710,8 +1992,17 @@ class Daemon(journey_tool.JourneyTools):
         locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
         lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
                  if item not in answer["text"]]
-        if (problem := self._loaded().problem) is not None and problem not in answer["text"]:
+        loaded = self._loaded()
+        if (problem := loaded.problem) is not None and problem not in answer["text"]:
             lines.append(f"Note: {problem}")  # the accounts file can't be used: said once, as the first answer
+        for said in (loaded.note or "").split("Note: "):  # a plain vault file, a malformed otp setting (§20.2)
+            if said.strip() and said.strip() not in answer["text"]:
+                lines.append(f"Note: {said.strip()}")
+        try:
+            book = self._book()
+            lines += [line for line in (book.notes() if book is not None else []) if line not in answer["text"]]
+        except Exception:
+            pass  # (a grant that can't load is said by doctor too; the touch asks a person either way)
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
@@ -1734,16 +2025,20 @@ class Daemon(journey_tool.JourneyTools):
             if own:
                 resolved = []
                 resolved_token = _RESOLVED.set(resolved)
+            said = GrantCall()  # what the grants say about this call's touch, for its log line (§12)
+            said_token = _GRANT_CALL.set(said)
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
-                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                self._give_back(said, e)
+                self._log_action(name, args, started, e, client=client_id, known_off=known, grants=said)
                 raise
             finally:
                 _TYPED_SECURE.reset(secure_token)
+                _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
-            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved)
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
@@ -1760,6 +2055,8 @@ class Daemon(journey_tool.JourneyTools):
     async def _policed_other(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         """The tools whose log line is written by the caller (reads, and the batch tools)."""
         if name in BATCH_TOOLS:
+            if name in UNLOCK_AT_START:  # serve --phone: a locked phone is unlocked before the first step, never during
+                await self._hold_for_phone(client_id, name)
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
@@ -1822,11 +2119,13 @@ class Daemon(journey_tool.JourneyTools):
         built = report.build(entries, client_id, start)
         if names := self._loaded().names:  # the names of the test accounts, never a value (§18.6)
             built = f"{built}\nAccounts: {', '.join(names)}."
+        if others := self._vault_names():  # the vault's other entries, by name and kind (§20.1)
+            built = f"{built}\nVault: {', '.join(others)}."
         return _answer([built])
 
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
                     frames: int | None = None, *, client: str | None = None, answer: dict | None = None,
-                    known_off: bool | None = None) -> None:
+                    known_off: bool | None = None, grants: GrantCall | None = None) -> None:
         """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
         its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
         read = name in READ_KINDS
@@ -1850,6 +2149,11 @@ class Daemon(journey_tool.JourneyTools):
             "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
             "confirmed": True if self._granted_now and not read else None,
             "confirmed_by": self._granted_by if self._granted_now and not read else None,  # "chat" or "the live view"
+            # §12 (1.14, 1.14.1): the grant that let the touch through and its count, or why a matching one didn't
+            "grant": grants.name if grants is not None and not read and not self._granted_now else None,
+            "grant_use": grants.use if grants is not None and not read and not self._granted_now else None,
+            "grant_asked": grants.asked if grants is not None and not read and grants.name is None else None,
+            "grant_draft": grants.draft if grants is not None and not read else None,  # §21.3: the grant that stopped it at a draft
             "screenshot": True if name == "look" and args.get("screenshot", True) else None,  # (look's default is on)
             "to": args.get("to") if name == "scroll" else None,
             "labels": True if name == "look" and args.get("labels") else None,
@@ -2274,6 +2578,8 @@ class Daemon(journey_tool.JourneyTools):
         if isinstance(args[kind], str) and ui.private(args[kind]):
             rec.setdefault("unsaved", []).append(len(rec["steps"]))  # (the step it would be the expectation of)
             return
+        if "route" in rec and kind == "id" and isinstance(args[kind], str) and not ui.structural_id(args[kind]):
+            return  # (an id that carries content is never written to a route: the step is kept without this check)
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
             expect["gone"] = True
@@ -2375,7 +2681,7 @@ class Daemon(journey_tool.JourneyTools):
             step["secure"] = True
             if variable is not None:
                 step["text"] = variable  # the account's password, as the variable that types it
-            elif isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
+            elif isinstance(args.get("text"), str) and accountlib.REFERENCE.fullmatch(args["text"]):
                 step["text"] = args["text"]  # an account's placeholder isn't a password: it is what a script should hold
             else:
                 rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
@@ -2392,6 +2698,16 @@ class Daemon(journey_tool.JourneyTools):
         if aimed is None and batch.holds_value(given) and resolved:
             found, items = resolved[0]  # the element the touch really went to, in the list it was aimed from
             aimed = batch.recorded_element(found, items, name)
+        if "route" in rec and isinstance(aimed, dict) and "x" not in aimed:
+            # a route is part of the map: an id that carries content (an event's title), and the label or text of the
+            # element that has one, are never written; the point stands for it (review 1.7 B-L3)
+            found = resolved[0][0] if resolved and isinstance(resolved[0][0], ui.Element) else None
+            if (isinstance(aimed.get("id"), str) and not ui.structural_id(aimed["id"])) or (
+                    found is not None and roads.content_id(found)):
+                if found is None:
+                    rec.setdefault("content_steps", []).append(len(rec["steps"]) + 1)
+                    return
+                aimed = {"x": round(found.center[0], 1), "y": round(found.center[1], 1)}
         if aimed is not None:
             step[key] = aimed
         elif batch.holds_value(given):
@@ -2428,19 +2744,41 @@ class Daemon(journey_tool.JourneyTools):
         path = batch.resolve(args.get("name"), args.get("path"))
         data = batch.load_script(path)
         token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
+        # a replay of a saved route runs that route: a grant naming it covers its touches (§19.1). Only the map's own file
+        # for it, `routes/<name>.json` in the app's map folder, is that route: a script that names itself so elsewhere is
+        # not (review 1.7 A-M1)
+        named = self._saved_route_name(path, data)
+        running = _ROUTES.set((*_ROUTES.get(), named)) if named else None
+        # §21.3 (any version 2 file that says so stops at drafts: it only ever holds back more)
+        drafting = _DRAFTS_ROUTE.set(True) if data.get("version") == 2 and data.get("draftsOnly") is True else None
+        run_grants = self._grants_run()
         try:
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
+            if drafting is not None:
+                _DRAFTS_ROUTE.reset(drafting)
+            if running is not None:
+                _ROUTES.reset(running)
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
 
     async def _drive(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
-        """`drive` (AGENT-TOOLS §18.4): to a place over the map's proven roads, or by a link. See trip.py."""
+        """`drive` (AGENT-TOOLS §18.4): to a place over the map's proven roads, or by a link. See trip.py. A scheduled run
+        (§22.2) opens its route's app first, the one app of its scope, inside this same call (it was admitted, and
+        holds the phone, for its whole run: M2): the phone may show any other app or the home screen when it falls due
+        (Codex, PR #12 cycle 1, M5)."""
         req = driving.check(args)
+        if scheduled(client_id) and scope is not None and len(scope.apps) == 1 and not req.dry_run:
+            await self.run_tool(client_id, "open_app", {"app": scope.apps[0], "look": False}, scope)
         made = trip.Trip(self, client_id, scope, req, args)
+        run_grants = self._grants_run()  # a grant revoked while it drives stops it between moves (§19.5)
         try:
             return await made.run()
         finally:
             made.release()
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
 
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
@@ -2533,6 +2871,7 @@ class Daemon(journey_tool.JourneyTools):
                 if not isinstance(route, str) or not routes.NAME.match(route):
                     twin = await self._route_twin(route, scope) if isinstance(route, str) else None
                     raise Refused("bad_params", twin or f"a route's name is lower-case ASCII letters, digits and _, not {route!r}")
+                self._refuse_held_route(route)
                 bundle, start = await self._route_place(scope)
                 self._recording[client_id] = {"name": route, "app": bundle, "steps": [], "route": route, "start": start,
                                               "variables": []}
@@ -2636,6 +2975,14 @@ class Daemon(journey_tool.JourneyTools):
                                         "is saved, as ${account.username} or ${account.password}). Nothing was saved and the "
                                         "recording has ended: record it again, typing the account's value as the whole text "
                                         "of a step.")
+        content = sorted(set(rec.get("content_steps") or ()))
+        if content:
+            del self._recording[client_id]
+            raise Refused("bad_params", f"can't save the route: step{'s' if len(content) > 1 else ''} "
+                                        f"{', '.join(map(str, content))} aimed by an id that carries content (a title, a "
+                                        "name, a number), which a route never keeps, and there is nothing else to save it "
+                                        "by. Nothing was saved and the recording has ended: record it again, aiming at "
+                                        "that element by a ref or a point.")
         unsaved = sorted(set(rec.get("unsaved") or ()))
         if not unsaved:
             return
@@ -2659,6 +3006,7 @@ class Daemon(journey_tool.JourneyTools):
     async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None", steps: list[dict]) -> dict:
         """`record` with `stop` for a route: the steps (`steps`, as they are written), from the place it started to the
         place it ends at, as a file in the app's map folder (§18.5)."""
+        self._refuse_held_route(rec["route"])  # (again at the save: a grant or a schedule may have come meanwhile)
         bundle, end = await self._route_place(scope)
         route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], steps)
         # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
@@ -2666,10 +3014,26 @@ class Daemon(journey_tool.JourneyTools):
         route = batch.saved_script(route, self._redact, f"route {rec['route']}")
         routes.check(route)
         root = self._maps_root()
+        # The last check and the write are one step under the policy file's edit lock, which every grant change takes
+        # (§19.5): a grant made while the place was read, or by `tapwright grants` in another process right now, is seen,
+        # and the route it names is never replaced (CodeRabbit, PR #12, daemon.py)
+        # Every grants file that may name the route is locked (in one order), not only the call's policy's (H2)
+        held: list[tuple[grantlib.Book, str]] = []
         try:
-            path = self.maps.file(root, bundle).write_route(rec["route"], route)
-        except (OSError, ValueError, mapfile.MapError) as e:
-            raise Refused("bad_params", f"can't save the route: {getattr(e, 'strerror', None) or e}") from None
+            for book in self._route_books():
+                token = await asyncio.to_thread(book.take_edit_lock)
+                if token is None:
+                    raise Refused("busy", f"route {rec['route']} wasn't saved: the policy file is being changed this "
+                                          "moment. Stop the recording again in a moment.")
+                held.append((book, token))
+            self._refuse_held_route(rec["route"])
+            try:
+                path = self.maps.file(root, bundle).write_route(rec["route"], route)
+            except (OSError, ValueError, mapfile.MapError) as e:
+                raise Refused("bad_params", f"can't save the route: {getattr(e, 'strerror', None) or e}") from None
+        finally:
+            for book, token in reversed(held):
+                book.release_edit_lock(token)
         self.maps.edit(root, bundle, lambda d: d["routes"].__setitem__(rec["route"], f"routes/{rec['route']}.json"))
         del self._recording[client_id]
         secure = rec.get("secure_steps") or []
@@ -2688,12 +3052,24 @@ class Daemon(journey_tool.JourneyTools):
         began, n, ident = clock(), len(steps), f"b{next(self._batch_ids)}"
         traced: list[str] = []
         step_notes = list(notes or [])
+        held = [0.0]  # seconds spent waiting for a person (see held()): they don't count toward the batch's limit (§9.3)
+        held_token = _HELD.set(held)
+        run_grants = self._grants_run()  # (the outermost run's: a grant revoked since stops it between moves, §19.5)
+        try:
+            return await self._batch_steps(client_id, steps, scope, args, view, clock, began, n, ident, traced,
+                                           step_notes, held, held_token)
+        finally:
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
+
+    async def _batch_steps(self, client_id: str, steps: list[dict], scope: "Scope | None", args: dict, view, clock,
+                           began: float, n: int, ident: str, traced: list[str], step_notes: list[str],
+                           held: list[float], held_token) -> dict:
         failed: tuple[str, str] | None = None
+        stopped_at_draft = False
         done = 0
         marks: dict[str, int | None] = {}
         set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
-        held = [0.0]  # seconds spent waiting for a person (see held()): they don't count toward the batch's limit (§9.3)
-        held_token = _HELD.set(held)
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -2704,6 +3080,10 @@ class Daemon(journey_tool.JourneyTools):
             if clock() - began - held[0] > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
+                break
+            if i > 1 and (gone := self._grants_revoked()):
+                failed = ("not_allowed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
+                                         f"{REVOKED_STOP.format(names=', '.join(json.dumps(g) for g in gone))}")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
@@ -2746,6 +3126,7 @@ class Daemon(journey_tool.JourneyTools):
                 message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
                 step_notes += crash
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {message}")
+                stopped_at_draft = e.draft  # (a scheduled run tells a draft stop by it: CodeRabbit, PR #12, trip.py)
                 break
             finally:
                 BATCH.reset(token)
@@ -2778,7 +3159,7 @@ class Daemon(journey_tool.JourneyTools):
         logs = await self._failure_logs(scope, i, marks) if failed else []
         answer["text"] = "\n".join([answer["text"], *logs, *step_notes])
         if failed:
-            raise Refused(failed[0], answer["text"])
+            raise Refused(failed[0], answer["text"], draft=stopped_at_draft)
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
 
     @staticmethod
@@ -2928,6 +3309,13 @@ class Daemon(journey_tool.JourneyTools):
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
+        caller_token = _CALLER.set(client_id)
+        said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
+        own_grants = said is None or said.taken
+        if own_grants:
+            said = GrantCall()
+            grants_token = _GRANT_CALL.set(said)
+        said.taken = True
         arrival = trace.arrive()  # (None when the trace is off) the touch's trace counts from here, before the front check
         before = self._bundle()  # the app under test when the call began (see _crash_check), and its process if read
         pid_before = self._log_pids.get(before) if before else None
@@ -2936,7 +3324,7 @@ class Daemon(journey_tool.JourneyTools):
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
-                await self._hold_for_phone(name)  # a locked phone, the passcode prompt: a person first (§11.5)
+                await self._hold_for_phone(client_id, name)  # a locked phone, the passcode prompt: a person first (§11.5)
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
                 try:
                     if scope is None:
@@ -2946,17 +3334,24 @@ class Daemon(journey_tool.JourneyTools):
                 except Refused as e:
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
+                    if said.notes and e.code != "dry_run":  # why a matching grant didn't cover it (§19.3)
+                        e = Refused(e.code, "\n".join([str(e), *said.notes]))
                     if note is None or e.code == "dry_run":
-                        raise
+                        raise e from None
                     raise Refused(e.code, f"{e}\nNote: {note}") from None
                 note = await self._crash_note(client_id, scope, name, before, None, pid_before)
                 if note is not None:
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
                     self._crash_since = self._wall()
+                if said.notes:  # a grant matched but didn't cover it: said before the person's OK (§19.3)
+                    answer = {**answer, "text": "\n".join([answer["text"], *said.notes])}
                 if granted:  # a person's OK let a touch through: the answer ends with where it came from
                     self._granted_now, self._granted_by = True, granted[-1]
-                    answer = {**answer, "text": f"{answer['text']}\nNote: {NOTE_ALLOWED.format(origin=granted[-1])}"}
+                    note_of = NOTE_SENT if isinstance(granted[-1], Sent) else NOTE_ALLOWED  # §21.3: a draft a person sent
+                    answer = {**answer, "text": f"{answer['text']}\nNote: {note_of.format(origin=str(granted[-1]))}"}
+                elif said.line is not None:  # a grant let it through: the answer ends with it and its count
+                    answer = {**answer, "text": f"{answer['text']}\n{said.line}"}
                 return answer
         except Refused:
             raise
@@ -2970,6 +3365,9 @@ class Daemon(journey_tool.JourneyTools):
             trace.leave(arrival)
             _GRANTED.reset(grant_token)
             _SCOPE.reset(scope_token)
+            _CALLER.reset(caller_token)
+            if own_grants:
+                _GRANT_CALL.reset(grants_token)
 
     async def _batch_within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """`run`, `record` and `replay` in personal mode: like every tool, nothing without an app list, and the one
@@ -2986,7 +3384,7 @@ class Daemon(journey_tool.JourneyTools):
             if "\n" not in message:
                 raise
             kept = await self._withheld(client_id, name, {"text": message, "image": None}, given, names)
-            raise Refused(e.code, kept["text"]) from None
+            raise Refused(e.code, kept["text"], draft=e.draft) from None
         return await self._withheld(client_id, name, answer, given, names)
 
     # ---- personal mode: the agent stays in the apps it was given ----
@@ -3150,6 +3548,18 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("not_allowed", NO_APPS)
         given = await self._given(scope)
         names = ", ".join(given.values())
+        if name == "notifications":
+            # §24.2: only the given apps' notifications come out, and only from one of them: a swipe from the top over
+            # another app would be a touch of it. The answer is that list, never a screen, so nothing is withheld after.
+            await self.wait_connected()
+            front = await self._front(given)
+            if front not in given:
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
+            given_token = _GIVEN.set(given)
+            try:
+                return await self._run_tool(client_id, name, args)
+            finally:
+                _GIVEN.reset(given_token)
         front = None
         by_read = not bounced and self._scope_by_read(client_id, name, args)
         by_touch = not bounced and not by_read and self._scope_by_touch(name, args)
@@ -3299,6 +3709,8 @@ class Daemon(journey_tool.JourneyTools):
             notes = [*notes, taken]
         if name == "apps":
             return await self._apps(notes)
+        if name == "notifications":  # §24.2: personal mode's apps only (_GIVEN), the whole phone otherwise
+            return await self._notifications_tool(client_id, args, notes, _GIVEN.get())
         if name == "map":
             return await self._map(view, args, notes)
         if name == "wait":
@@ -3400,7 +3812,7 @@ class Daemon(journey_tool.JourneyTools):
                     # out of range the alert's own elements matched, and that miss is the answer.)
                     self._refuse_behind_alert(view, force=False)
                 eyes = ui.USERS_EYES.get()  # a user doesn't know what lies behind a sheet or past an edge (§17.1)
-                if not eyes:
+                if not eyes and not await self._lift_from_behind(target):
                     self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 if not eyes and not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
@@ -3442,8 +3854,6 @@ class Daemon(journey_tool.JourneyTools):
                 if not dry and s.front_by_touch():
                     s.front_apps = tuple(scoped)
             handler = self._handlers.get(name)
-            if dry and name == "swipe":
-                self._dry(args, f"Would swipe from ({args['x0']:g}, {args['y0']:g}) to ({args['x1']:g}, {args['y1']:g}).")
             people = self.control.person_generation
             try:
                 return await (handler(view, use) if handler else call(s, use))
@@ -3455,11 +3865,16 @@ class Daemon(journey_tool.JourneyTools):
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
             # person's input from the live view, queued separately, is never announced as the agent's
             notify = self._agent_touches.notify
+            grant_call = _GRANT_CALL.get()
+            by_read = _SCOPE_BY_READ.get() is not None
 
             async def touching(ms: float) -> None:
-                self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
+                if grant_call is not None:
+                    grant_call.touched = True  # (a grant's use is never given back once a touch went out: A-L1)
+                if by_read:
+                    self._touch_in_scope()  # (personal mode, a tap whose scope came from its read: before each touch)
                 await notify(ms)
-            self.session.touch_hook = notify if _SCOPE_BY_READ.get() is None else touching
+            self.session.touch_hook = touching
             self.session.banner_guard = True
             touched_token = _SCOPE_TOUCHED.set([])
             try:
@@ -3821,8 +4236,8 @@ class Daemon(journey_tool.JourneyTools):
                 element = reflex.touched(r, view.items)
                 if do.get("tool") != "back" and element is None:
                     continue  # what it would touch isn't on this screen
-                if element is not None and _POLICY.get().check(bundle, reflex.word(element)) is not None:
-                    continue  # a policy word: never a reflex, and nobody is asked
+                if element is not None and self._held(do.get("tool") or "tap", element, bundle):
+                    continue  # whatever the policy would hold (its word, §19.2, a draft): never a reflex, nobody is asked
                 call = {} if do["tool"] == "back" else {"target": dict(do["target"])}
                 if call and ui.USERS_EYES.get() and element is not None and element.text:
                     call = {"target": {"text": element.text}}  # a user can't see ids: by the words on the glass
@@ -3861,6 +4276,46 @@ class Daemon(journey_tool.JourneyTools):
         if sent:
             return sent
         return getattr(getattr(self, "ceiling", None), "maps", None)
+
+    def _saved_route_name(self, path: object, data: dict) -> str | None:
+        """The route a replayed file is (§19.1, review 1.7 A-M1): its name when the file is the map's own
+        `routes/<name>.json` for its app, in the maps folder in force; else None (a script that only names itself so)."""
+        name, app = data.get("name"), data.get("app")
+        if data.get("version") != 2 or not isinstance(name, str) or not routes.NAME.match(name) or not isinstance(app, str):
+            return None
+        try:
+            own = self.maps.file(self._maps_root(), app).routes_dir / f"{name}.json"
+            return name if os.path.samefile(str(path), own) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _refuse_held_route(self, name: str) -> None:
+        if (why := self._route_held(name)) is not None:
+            raise Refused("not_allowed", f"route {name} can't be recorded: {why}, and a recording would replace it. Record "
+                                         "under another name; only a person changes that grant or schedule.")
+
+    def _route_held(self, name: str) -> str | None:
+        """Why `record` may not save a route called `name` (review 1.7 A-M1): an active grant of the policy in force, or a
+        schedule, names it, and a recording would put the model's own steps under the person's OK. None when it may. Every
+        grants file the daemon knows counts (_route_books), not only the call's: a stricter policy a call sends has no
+        file, and turning its own grants off never makes a route the daemon's grants name free to replace (H2)."""
+        for book in self._route_books():
+            try:
+                granted = book.naming_route(name)
+            except Exception:  # any doubt keeps the route as it is
+                return "the grants can't be read now"
+            if granted is not None:
+                return f"grant {json.dumps(granted)} names it"
+        try:
+            for schedule in schedulelib.names(self.schedules_folder):
+                try:
+                    if schedulelib.load(schedule, self.schedules_folder).route == name:
+                        return f"schedule {json.dumps(schedule)} runs it"
+                except schedulelib.ScheduleError:
+                    continue
+        except OSError:
+            return "the schedules can't be read now"
+        return None
 
     async def _build_of(self, bundle: str) -> str | None:
         """The app's version and native build number, `1.4.0 (212)`, from the installed apps: a road driven on another build
@@ -4029,7 +4484,7 @@ class Daemon(journey_tool.JourneyTools):
         data, file = self.maps.data(root, bundle), self.maps.file(root, bundle)
         ctx = maptool.Context(bundle, self.session.app_names.get(bundle) or shown, await self._build_of(bundle),
                               seen.name if seen else None, self._loaded().names, file.route_info(data), file.route_edges(data),
-                              _POLICY.get())
+                              _POLICY.get(), self._vault_names())
         if op == "list":
             lines = maptool.listing(data, ctx)
         elif op == "to":
@@ -4868,12 +5323,19 @@ class Daemon(journey_tool.JourneyTools):
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
         The target is tapped first by the session, which waits for the keyboard and for focus to arrive."""
+        if a.get("submit") and (why := self._submit_sends()) is not None:
+            # §21.3: Return sends a message or posts a comment in many apps, with no button for a draft to stop at
+            raise Refused("not_allowed", f"submit would send here ({why}), and a person sees a draft first. Type without "
+                                         "submit, then tap the send button.")
+        self._refuse_line_break(a["text"])  # (the text as given; a vault value is checked once it is resolved, below)
         target = a.get("target")
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
             inputs = [e for e in view.items if e.role == "input"]
             if not inputs:
                 raise Refused("not_found", "No input on screen")
+            if len(inputs) > 1 and sum(e.focused for e in inputs) == 1:
+                inputs = [e for e in inputs if e.focused]  # §2: without a target, the focused field
             if len(inputs) > 1:
                 shown = "\n".join([*(f"  {e.line()}" for e in inputs[:ui.MAX_CANDIDATES]),
                                    *ui.more_candidates(len(inputs), ui.MAX_CANDIDATES),
@@ -4899,24 +5361,56 @@ class Daemon(journey_tool.JourneyTools):
             forced = self._forced(view, field)
         else:
             self._guard(view, field)
-            at = self._touch_point(field)
+            # the focusing tap's hit test (Codex, PR #12 cycle 3, M2): typing isn't policed (§11.1), the touch is checked
+            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=self._touch_point)
+            field = checked if checked is not None else field
         active = _ACCOUNT.get()
-        if active is not None and active.apps is not None and accountlib.mentions(a["text"]):
-            # the account's app limit is checked where its value would be typed, against the app in front now: a step
-            # (a route's, or drive's `then`) may have switched apps since drive began
+        using = None
+        if accountlib.mentions(a["text"]):
+            # the app a value may be typed into is checked where it would be typed, against the app in front now: a
+            # step (a route's, or drive's `then`) may have switched apps since drive began
             front = await self._connected_only(self.session.foreground_bundle_id)  # (inside the agent's turn: no queue)
-            if front not in active.apps:
+            if active is not None and active.apps is not None and "${account." in a["text"] and front not in active.apps:
                 raise Refused("not_allowed", f"account {active.name} is not for this app: it may be used only in "
                                              f"{', '.join(active.apps)}; this is {front or 'no app'}. Nothing was typed.")
-        real = accountlib.typed(a["text"], active, field.secure, field.ref)  # (a placeholder is checked against this field)
+            # (a reference is checked against this field: a password only into a secure one, §18.6, §20.1)
+            using = self._loaded().reference(a["text"], active, bool(field.secure), field.ref, front)
+            if using is not None and using.otp_app is not None and not notes_lib.otp_target(field):
+                # §20.4: a code goes only into a code field of the app; a chat's composer would send it (review 1.7, H3).
+                # Refused before any code is read and before the dry run's line: nothing typed, no code read.
+                raise Refused("not_allowed", f"a one-time code is typed only into the app's code field (a one-line "
+                                             f"field that says code, OTP or verification); {field.ref} isn't one. "
+                                             "Nothing was typed.")
+        real = using.value if using is not None else a["text"]
+        if using is not None:
+            self._refuse_line_break(real, using.entry)  # (never the value: the entry's name only)
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
+        if using is not None and using.kind == accountlib.CARD:
+            await self._card_ok(a, field, using)  # a person's OK, every time; never a grant (§20.1, §19.2)
+        if using is not None and using.otp_app is not None:
+            code = await self._code_for_typing(using.otp_app, field)  # (from the source apps' notifications only)
+            if code is None:
+                raise Refused("not_found", f"no one-time code for {using.otp_app}: none arrived in the 2 minutes since "
+                                           "the app showed its code field. Nothing was typed.")
+            real, using = code.code, dataclasses.replace(using, field=code.source)
+            self._refuse_line_break(real, "the one-time code")
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
+        aimed = [at]
+
+        async def checked_again() -> None:
+            # a person's OK for a card, a read of Notification Center for a code, or a keyboard closed came between the
+            # check above and the focusing tap: the hit test runs again right before it (one path for every touch)
+            if not a.get("force"):
+                now = next((e for e in self.session.items if field.ref and e.ref == field.ref), field)  # (as listed now)
+                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=self._touch_point)
+        if using is not None and (using.kind == accountlib.CARD or using.otp_app is not None):
+            await checked_again()
 
         self._touching(field)
 
         async def typed() -> None:
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
-                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
+                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0])
         try:
             await typed()
         except Refused as e:
@@ -4925,12 +5419,89 @@ class Daemon(journey_tool.JourneyTools):
             if not (view.read_keyboard and "didn't take focus" in str(e)):
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
+            await checked_again()
             await typed()
+        view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         done.typed = real
+        if using is not None:
+            self._audit_typed(using, field)
         return done
+
+    def _refuse_line_break(self, text: str, entry: str | None = None) -> None:
+        """§21.3, drafts only: a line break in the keys is Return, which sends in many apps exactly as `submit` does
+        (Codex, PR #12 cycle 2, H3), so where `submit` is refused a text with one is too: \\n, \\r and every other line
+        break Python's splitlines() knows (U+2028, U+2029, U+0085 and the rest). A vault value is named by its entry,
+        never shown."""
+        if not any(c in LINE_BREAKS for c in text) or (why := self._submit_sends()) is None:
+            return
+        what = f"the value of {entry}" if entry else "the text"
+        raise Refused("not_allowed", f"{what} has a line break, which presses Return and would send here ({why}); a "
+                                     "person sees a draft first. Type it without line breaks, then tap the send button. "
+                                     "Nothing was typed.")
+
+    def _submit_sends(self) -> str | None:
+        """Why `type_text`'s `submit` (and a line break in its text) is refused now (review 1.7 B-H2): in a draftsOnly
+        route, or under a draftsOnly grant for the app in front, pressing Return could send with no draft shown. The
+        grants are those of every grants file the daemon knows, whatever policy the call runs under: a stricter call
+        policy, or one with no file, never lifts a restriction only a person may lift (Codex, PR #12 cycle 3, H3). None
+        when it may."""
+        if _DRAFTS_ROUTE.get():
+            return "the route is draftsOnly"
+        app = self._app_bundle()
+        for book in self._route_books():
+            try:
+                name = book.drafts_only_for(app, _ROUTES.get())
+            except Exception as e:  # any doubt keeps Return from sending
+                self.log(f"grants: {type(e).__name__}: {e}")
+                return "the grants can't be read"
+            if name is not None:
+                return f"grant {json.dumps(name)} is draftsOnly"
+        return None
+
+    def _vault_names(self) -> tuple[str, ...]:
+        """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
+        return tuple(n for n in self._loaded().entry_names if not n.endswith(" (account)"))
+
+    def _audit_typed(self, using: "accountlib.Typing", field: ui.Element) -> None:
+        """§23: a vault value typed is a `vault` line (the entry; the field and where it went, never the value), a
+        one-time code an `otp` line (the app that asked; the source, never the code)."""
+        if self.audit is None:
+            return
+        if using.otp_app is not None:
+            self.audit.write("otp", app=using.otp_app, detail=f"from {using.field}")
+            return
+        where = "secure field" if field.secure else "text field"
+        self.audit.write("vault", app=self._app_bundle(), name=using.entry, detail=f"{using.field} into {where}")
+
+    async def _card_ok(self, a: dict, field: ui.Element, using: "accountlib.Typing") -> None:
+        """§20.1: a card's field is typed only with a person's OK, every time: the live view and the host's dialog are
+        asked, with a caption that names the entry and the field, never the value (`Allow: type card "visa" number into
+        "Card number" in Wayfare?`). No grant covers it and none is offered. The OK is for this entry's field into this
+        element, used up by one call."""
+        element_key = self._police_key(field)
+        key = (*element_key, "card", using.entry or "", using.field or "")
+        now = self.control.clock()
+        allowed = next((c for c in self._confirms.values()
+                        if c.tool == "type_text" and c.key == key and c.state == "allowed" and c.until >= now), None)
+        if allowed is not None and self._claim(allowed):
+            _GRANTED.get().append(allowed.origin or "the live view")
+            return
+        label = self.scrub_everywhere(field.label or field.text or field.ref)
+        app = (self.session.app or (None, None))[0]
+        where = dialog.clean(app) if app else "the app in front"
+        caption = f'Allow: type card "{using.entry}" {using.field} into "{dialog.clean(label)}" in {where}?'
+        what = f'typing card "{using.entry}" {using.field} into {field.role} {ui.clip(label)}'
+        word = f'card "{using.entry}" {using.field}'
+        message, request = self._ask("type_text", a, key, field, word, what, now, caption=caption,
+                                     why="(a card is typed only with a person's OK, every time)")
+        if request is None:
+            raise Refused("not_allowed", message)
+        taken = (f"needs_confirmation: {what}: the OK given was used by another call. Nothing was typed by this call; "
+                 "make it again to ask again.")
+        await self._wait_for_person(request, message, "type_text", a, key, field, taken, same=element_key)
 
     async def _scroll(self, view, a: dict) -> Scrolled:
         """Swipe through the centre of the scroll area (the innermost one around the target, the point or the
@@ -5242,10 +5813,36 @@ class Daemon(journey_tool.JourneyTools):
         """When the newest read shows an OS alert: `behind_alert`. `force` says whether passing it could help
         (it can't touch an element that isn't found)."""
         if view.alert_now is not None:
-            title, buttons = view.alert_now
+            title, buttons, _message = view.alert_now
             alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
+
+    async def _lift_from_behind(self, target: ui.Target) -> bool:
+        """A target the tree put behind a layer, which the runner's hit test (route version 5) says a touch at its centre
+        lands on, itself or inside it: the layer was the tree's guess (seen on the phone 2026-11-14: Calendar's search
+        results, a full-screen container that starts like a sheet's backdrop, put the search bar's Close behind it). It is
+        listed again, with a ref of its own, and the touch goes through every check as any listed element's does. An
+        ancestor, another app's element or no answer leaves it behind."""
+        behind = getattr(self.session, "behind", [])
+        try:
+            hit_element = ui.resolve([e for e, _ in behind], dataclasses.replace(target, index=0))
+        except Refused:
+            return False
+        if not isinstance(hit_element, ui.Element):
+            return False
+        hit = await self.session.hit_at(*hit_element.center)
+        app = self._app_bundle()
+        if hit is None or (hit.bundle and app and hit.bundle != app):
+            return False
+        if ui.hit_relation(getattr(self.session, "last_source", None), hit_element, hit) not in ("same", "inside"):
+            return False
+        trace.note("hit", "lifts an element from behind a guessed layer")
+        lifted = copy.copy(hit_element)
+        lifted.ref = f"e{len(self.session.items) + 1}"
+        self.session.items = [*self.session.items, lifted]
+        self.session.behind = [(e, f) for e, f in behind if e is not hit_element]
+        return True
 
     def _refuse_behind_sheet(self, target: ui.Target) -> None:
         """A target on no listed element but on one an open sheet (or another layer) hides: `covered`, naming what
@@ -5317,9 +5914,9 @@ class Daemon(journey_tool.JourneyTools):
             return None  # (on screen already: the action touches it where it is)
         said = ""
         if name != "type_text":  # (typing is no touch with a word on it: type_text has never been policed)
-            said = await self._police(name, args, hit)  # before anything moves; a dry run is told, and nothing is asked
-            if _POLICY.get().check(self._app_bundle(), hit.label if hit.role == "input" else hit.text) is not None:
-                self._policed = (name, self._police_key(hit))  # (a grant used above is not asked for again)
+            # before anything moves: a block word refuses, a person is asked (a dry run is told, and nothing is asked).
+            # A draft and a grant wait for the touch, whose own checks (_last_checks) run on the screen after the scroll
+            said = await self._police(name, args, hit, before_scroll=True)
         shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
         area = ui.scroll_holding(view.items, hit, s.screen)
         why = ""
@@ -5377,12 +5974,8 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
                                        f"scroll (its identifier \"{ui.shown(hit.identifier)}\" is gone or no longer its own), "
                                        f"so nothing was touched. Look, then target what is there.")
-        if name != "type_text" and self._police_key(final) != self._police_key(hit):
-            # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
-            self._policed = None
-            await self._police(name, args, final)
-            if _POLICY.get().check(self._app_bundle(), final.label if final.role == "input" else final.text) is not None:
-                self._policed = (name, self._police_key(final))
+        if self._policed is not None and self._police_key(final) != self._police_key(hit):
+            self._policed = None  # (a person's OK was for the element checked first; the touch's own checks judge this one)
         self._scrolled_first.add(client_id)
         return ui.Target(ref=final.ref) if final.ref else target
 
@@ -5431,26 +6024,57 @@ class Daemon(journey_tool.JourneyTools):
         return next((e for e in reversed(self.session.items if items is None else items)
                      if e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
 
-    async def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
+    async def _police(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None,
+                      before_scroll: bool = False) -> str:
         try:
-            return await self._police_check(tool, a, element, bundle)
+            return await self._police_check(tool, a, element, bundle, before_scroll)
         finally:
             trace.mark("policy")  # (the timing trace: the policy has had its say, or a person's answer came)
 
-    async def _police_check(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None) -> str:
+    async def _police_check(self, tool: str, a: dict, element: ui.Element | None, bundle: str | None = None,
+                            before_scroll: bool = False) -> str:
         """The safety policy's say on a touch of `element` (docs/AGENT-TOOLS.md 11): nothing when it has no word,
         `not_allowed: blocked` for a block word, and for a confirm word `not_allowed: needs_confirmation` (a
         request goes to the live view, and to the host's dialog when the agent has one: then this waits for the
         answer, §11.3) unless a person's OK for this very call is waiting. That OK is used up here. For a dry run,
         nothing is asked or used up: the sentence for the answer's end, or "". `force` never skips it, and nothing
         here touches the phone (it reads the screen again after a wait). `bundle`: the app the element is in, when
-        that is not the app of the last read (a journey's second touch, after the first may have opened another app)."""
+        that is not the app of the last read (a journey's second touch, after the first may have opened another app).
+        `before_scroll`: the check on an off-screen target before the scroll that brings it on screen (§16.2). A block
+        word refuses and a person is asked as usual, but a draft is shown, and a grant counted, only at the touch itself,
+        once the scroll is done: what scrolled into view is part of the draft's fingerprint, and the screen the grant is
+        judged on is the one touched (Codex, PR #12 cycle 3, H1). A person's OK given here is remembered for this call's
+        touch (`_policed`); nothing else is."""
         if element is None:
             return ""
         # an input is matched by its label only: what someone typed into it is data, not what a touch does
-        hit = _POLICY.get().check(bundle or self._app_bundle(), element.label if element.role == "input" else element.text)
+        name = element.label if element.role == "input" else element.text
+        app = bundle or self._app_bundle()
+        hit = _POLICY.get().check(app, name)
+        # §21.3: a touch that sends to other people stops at a draft in a draftsOnly route or under a draftsOnly grant.
+        # That is decided by the shared words on the element itself, never by the policy file's lists: a custom policy,
+        # `--no-policy` or an app's empty list can't turn a draft off (review 1.7 B-H2), nor can the call's own policy:
+        # a draftsOnly grant in any grants file the daemon knows holds (Codex, PR #12 cycle 3, H3)
+        reach = grantlib.reach_word(name)
+        route_draft = bool(_DRAFTS_ROUTE.get()) and reach is not None
+        held_draft = None if reach is None or route_draft else self._drafts_grant(app, name)
+        must_draft = route_draft or held_draft is not None
+        book = self._book()
+        alert_words, screen_words, titles = self._never_context(tool, element)
+        touch = (grantlib.Touch(app, name, _ROUTES.get(), tool, alert_words, screen_words, titles)
+                 if book is not None else None)
+        if hit is None and not grantlib.leaves(name) and (
+                around := grantlib.never_own(name) or grantlib.never_context(name, alert_words, screen_words, titles)) \
+                is not None:
+            # §19.2 by the touch's own words and by what surrounds it, whatever the policy file's lists say and whatever
+            # the element's role: an account deletion's or a payment's Confirm, OK or Send asks a person each time, as a
+            # Delete or a Buy would, and so does text that passes a tap on (Codex, PR #12 cycles 2 and 3, H4, H5). Leaving
+            # (Cancel, Back, Not now) asks nobody. No grant covers it (grantlib.touch_never), nor is one offered
+            hit = (safety.CONFIRM, ui.clip(around))
         if hit is None:
-            return ""
+            if not must_draft:
+                return ""
+            hit = (safety.CONFIRM, reach or "")
         kind, word = hit
         # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
         # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
@@ -5462,25 +6086,307 @@ class Daemon(journey_tool.JourneyTools):
         if kind == safety.BLOCKED:
             raise Refused("not_allowed", f'blocked: {what} is blocked by the policy ("{word}"); '
                                          "don't try another way.")
+        dry = bool(a.get("dry_run"))
+        if before_scroll and must_draft and not dry:
+            return ""  # the draft is read, shown and fingerprinted at the touch, after the scroll (H1)
         key = self._police_key(element)
-        if self._policed == (tool, key) and not a.get("dry_run"):
-            self._policed = None  # the policy checked this very touch before the scroll (§16.2): once
+        if self._policed == (tool, key) and not must_draft and not dry:
+            # a person allowed this very touch before the scroll (§16.2): once. Never a draft's (H1)
+            self._policed = None
             return ""
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
-                      if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
-        if a.get("dry_run"):
-            return "" if grant else f' It needs a person\'s OK (policy word "{word}").'
+                      if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now
+                      and (not must_draft or c.draft is not None)), None)
+        if dry:
+            if grant:
+                return ""
+            # §21.3: a draftsOnly stop comes before any grant: no grant lifts it (Codex, PR #12 cycle 1, H2)
+            if book is not None and touch is not None and not must_draft:  # §19.3: a dry run counts nothing
+                decided = book.decide(touch, "peek")
+                if decided.kind == "covered":
+                    return f" {decided.dry}"
+                must_draft = must_draft or (decided.kind == "draft" and reach is not None)
+            if must_draft:
+                return f' It would stop at a draft a person sees first (policy word "{reach}").'
+            return f' It needs a person\'s OK (policy word "{word}").'
+        if grant is not None and grant.draft is not None and grant.draft_digest != await self._draft_digest(app):
+            # the draft or where it goes changed since the person saw it: their OK is for that draft only, so it is
+            # dropped and they are asked again with what the screen holds now (Codex, PR #12 cycle 1, H3)
+            self._confirms.pop(grant.id, None)
+            grant = None
         if grant is not None and self._claim(grant):
-            _GRANTED.get().append(grant.origin or "the live view")
+            if grant.draft is not None:  # a draft a person sent (§21.3): logged, noted as sent, not counted as a use
+                self._sent_draft(grant)
+                _GRANTED.get().append(Sent(grant.origin or "the live view"))
+            else:
+                _GRANTED.get().append(grant.origin or "the live view")
+                if before_scroll:
+                    self._policed = (tool, key)
             return ""
-        message, request = self._ask(tool, a, key, element, word, what, now)
+        # §21.3: a draftsOnly stop comes before any grant, which never lifts it and is never counted for a draft a person
+        # sends (Codex, PR #12 cycle 1, H2)
+        if not must_draft and book is not None and touch is not None:
+            if before_scroll:
+                try:  # (counted at the touch, on the screen the touch is made on: H1)
+                    if book.decide(touch, "peek").kind == "covered":
+                        return ""
+                except Exception as e:  # any doubt asks a person
+                    self.log(f"grants: {type(e).__name__}: {e}")
+            elif self._by_grant(book, touch, tool):
+                return ""
+        held = _GRANT_CALL.get()
+        stopped = held_draft if held_draft is not None else (
+            held.draft if held is not None and reach is not None else None)  # a draftsOnly grant's name
+        drafted: "tuple[str, str | None, bool, bytes] | None" = None
+        if must_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
+            if before_scroll:
+                return ""  # (a grant found draftsOnly only now: shown at the touch, H1)
+            items, title = await self._draft_read()  # (one read: the draft shown and its digest, H1)
+            shown_draft, has_code = self._draft_text_of(items)
+            drafted = (stopped or "", shown_draft, has_code, self._draft_digest_of(app, items, title))
+            word = reach or word  # (the draft's question names the word that sends: `Send this in Mail?`)
+        message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
-            raise Refused("not_allowed", message)
+            raise Refused("not_allowed", message, draft=drafted is not None)
         taken = (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and the OK given was used by "
                  "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
         await self._wait_for_person(request, message, tool, a, key, element, taken)
+        if request.draft is not None:
+            # the screen was read again after the wait (_still_there): the draft and where it goes must be the ones the
+            # person was shown, or nothing is sent (Codex, PR #12 cycle 1, H3)
+            if request.draft_digest != await self._draft_digest(app):
+                raise Refused("not_allowed", "needs_confirmation: the draft changed while waiting for the OK; nothing "
+                                             "was sent. Make the call again to show the person the draft as it is now.",
+                              draft=True)
+            self._sent_draft(request)
+        elif before_scroll:
+            self._policed = (tool, key)
         return ""
+
+    def _held(self, tool: str, element: ui.Element, bundle: str | None = None) -> bool:
+        """Would _police_check have a say on a touch of `element`, by the same rules, asking nobody: a policy word, §19.2
+        by the touch's own words or by what surrounds it, or a draft stop. A reflex (§18.7) never makes such a touch."""
+        name = reflex.word(element)
+        app = bundle or self._app_bundle()
+        if _POLICY.get().check(app, name) is not None:
+            return True
+        if not grantlib.leaves(name):
+            alert_words, screen_words, titles = self._never_context(tool, element)
+            if grantlib.never_own(name) or grantlib.never_context(name, alert_words, screen_words, titles):
+                return True
+        return grantlib.reach_word(name) is not None and (bool(_DRAFTS_ROUTE.get())
+                                                          or self._drafts_grant(app, name) is not None)
+
+    def _drafts_grant(self, app: str | None, name: str | None) -> str | None:
+        """§21.3, whatever policy the call runs under (Codex, PR #12 cycle 3, H3): the name of a draftsOnly grant for a touch
+        on `name` in any grants file this daemon knows (the call's own, serve's `--policy`, every other one it has used),
+        "" when one can't be read (any doubt stops at the draft), None when none holds it."""
+        for book in self._route_books():
+            try:
+                found = book.drafts_only_touch(app, name, _ROUTES.get())
+            except Exception as e:  # noqa: BLE001 - any doubt stops at the draft
+                self.log(f"grants: {type(e).__name__}: {e}")
+                return ""
+            if found is not None:
+                return found
+        return None
+
+    def _never_context(self, tool: str, element: ui.Element) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """What surrounds a touch, for §19.2 (grantlib.never_context; Codex, PR #12 cycles 1 to 3, H1, H4, H5): the alert's
+        title, message and texts when the touch is an alert's button (`alert`, or a tap on an element in it), the screen's
+        own texts and headers (not other people's words: §21.1), and its titles: the headers among them and the navigation
+        bar's title, which iOS gives no Header trait (a native `Send money` screen's title reads as plain text). Raw, for
+        matching only."""
+        s = self.session
+        items = list(getattr(s, "items", None) or [])
+        alert: tuple[str, ...] = ()
+        if tool == "alert" or element.in_alert:
+            shown = getattr(s, "last_alert", None)
+            alert = tuple(t for t in ((shown.title, shown.message) if shown is not None else ()) if t)
+            alert += tuple(e.text for e in items if e.in_alert and e.role in ui.PASSIVE and e.text)
+        own = [e for e in items if e.role in ("text", "header") and not e.in_alert and not e.others and e.text]
+        screen = tuple(e.text for e in own)
+        titles = tuple(e.text for e in own if e.role == "header")
+        if (title := _title_of(getattr(s, "last_tree", None))) and title not in titles:
+            titles += (title,)
+            screen += (title,) if title not in screen else ()
+        return alert, screen, titles
+
+    async def _draft_digest(self, app: str | None) -> bytes:
+        """The digest (_draft_digest_of) of the screen as it is now, read with Session.peek_tree, which leaves the agent's
+        list as it is; when it can't be read, a digest nothing matches, and the draft is asked again."""
+        peek = getattr(self.session, "peek_tree", None)
+        try:
+            tree = await peek() if peek is not None else None
+        except Exception:  # noqa: BLE001 - no read: a digest nothing matches
+            return secrets.token_bytes(32)
+        items = list(tree.items) if tree is not None else list(self.session.items)
+        return self._draft_digest_of(app, items, _title_of(tree) if tree is not None else "")
+
+    def _draft_digest_of(self, app: str | None, items: "list[ui.Element]", title: str = "") -> bytes:
+        """A keyed digest of what a draft's send would send and where (Codex, PR #12 cycles 1 to 3, H3, H1, H2), from one
+        read: the app; the navigation bar's title; every text input with its own words, its place and its whole value
+        (not the redacted one: two values can share a placeholder), a password field without its value; and every other
+        element's role, id, label, value and selection, except other people's words (§21.1), so a conversation's header,
+        a recipient's chip, a picker's chosen value (`Recipient` = Alice turned to Bob) or a checked destination is part
+        of it. Under the daemon's own random key, kept nowhere, never shown or logged."""
+        parts = [app or "", "t", title]
+        for e in items:
+            if e.role == "input":
+                value = "" if e.secure or e.shows_placeholder else e.value
+                parts += ["i", e.identifier, e.label, ",".join(f"{v:g}" for v in e.rect), value]
+            elif not e.others and (e.label or e.value or e.identifier):
+                parts += ["o", e.role, e.identifier, e.label, e.value, "s" if e.selected else "-",
+                          "" if e.checked is None else str(e.checked)]
+        return hmac.new(self._draft_key, "\0".join(parts).encode("utf-8", "surrogatepass"), hashlib.sha256).digest()
+
+    async def _draft_read(self) -> "tuple[list[ui.Element], str]":
+        """The one read a draft's request is made from (Codex, PR #12 cycle 2, H1): what the person is shown and the digest
+        their OK is checked against come from these very items (and the navigation title of the same read), never from two
+        reads the app could change between."""
+        try:
+            tree = (await self.session.snapshot()).tree
+            return list(tree.items), _title_of(tree)
+        except Exception:  # noqa: BLE001 - the last list will do
+            return list(self.session.items), _title_of(getattr(self.session, "last_tree", None))
+
+    def _sent_draft(self, request: Confirm) -> None:
+        """A person sent the draft (§21.3): the call's log line says which draftsOnly grant showed it (`grant_draft`), and
+        the approval is audited. It is NOT counted as a use of the grant (§19.3: a draft a person sends is not a use), so
+        it claims no use slot and writes no `grant` audit line."""
+        name = request.draft or ""
+        holder = _GRANT_CALL.get()
+        if name and holder is not None:
+            holder.draft = name
+
+    async def _draft_text(self) -> "tuple[str | None, bool]":
+        """_draft_text_of the screen read now."""
+        return self._draft_text_of((await self._draft_read())[0])
+
+    def _draft_text_of(self, items: "list[ui.Element]") -> "tuple[str | None, bool]":
+        """The draft a touch would send (§21.3), in `items`: the text input the agent last typed into on this screen, else
+        the focused one, else the only filled one. Redacted (accounts' and vault values) before the cut, cleaned and cut at
+        500 characters (None when no field can be told; a password field never is), and whether it holds a one-time
+        code."""
+        inputs = [e for e in items if e.role == "input" and not e.secure]
+        field: ui.Element | None = None
+        typed = self.control.client(_CALLER.get() or "").typed_field
+        if typed is not None:
+            ident, label, rect = typed
+            same = [e for e in inputs if (e.identifier == ident if ident else e.label == label)]
+            if same:
+                field = min(same, key=lambda e: sum(abs(p - q) for p, q in zip(e.rect, rect)))
+        if field is None and len(focused := [e for e in inputs if e.focused]) == 1:
+            field = focused[0]
+        if field is None and len(filled := [e for e in inputs if e.value and not e.shows_placeholder]) == 1:
+            field = filled[0]
+        if field is None:
+            return None, False
+        value = "" if field.shows_placeholder else field.value
+        # a one-time code shows as its placeholder: the person is told in plain words that the draft holds one (H3)
+        code = f"<{accountlib.CODE_LABEL}>"
+        return dialog.draft_text(value, self.scrub_everywhere), code in self.scrub_everywhere(value) and code not in value
+
+    def _book(self) -> "grantlib.Book | None":
+        """The grants of the policy in force (§19): None for a policy with no file (the built-in one, a version 1
+        file, a thin call's). Made once per file; its leftover uses are pruned then (§19.4)."""
+        path = _POLICY.get().file
+        return None if path is None else self._book_of(path)
+
+    def _book_of(self, path: str) -> "grantlib.Book":
+        """The Book of one policy file, made once."""
+        book = self._books.get(path)
+        if book is None:
+            book = self._books[path] = grantlib.Book(path, self.audit, now=self._grant_clock)
+            try:
+                book.prune()
+                if self.audit is not None:
+                    self.audit.prune()
+            except OSError:
+                pass
+        return book
+
+    def _route_books(self) -> "list[grantlib.Book]":
+        """Every grants file a saved route may be protected by (Codex, PR #12 cycle 2, H2), whatever policy this call runs
+        under: the call's own, the daemon's (`serve --policy`, whose grants a stricter call policy turns off for its own
+        touches but never for the route they name), and every other file this daemon has used. In the order of their paths,
+        so edit locks are always taken in one order."""
+        paths = {p for p in (_POLICY.get().file, getattr(getattr(getattr(self, "ceiling", None), "policy", None), "file",
+                                                          None)) if p}
+        paths.update(self._books)
+        return [self._book_of(p) for p in sorted(paths)]
+
+    def _by_grant(self, book: "grantlib.Book", touch: "grantlib.Touch", tool: str) -> bool:
+        """Does a grant let this touch through without a person (§19.3)? A use is claimed and its audit line written
+        (book.decide), then checked again right before the touch (book.still_covers). What the grants said goes to
+        the call's answer and log line. A grant that is draftsOnly stops here: a person sees the draft first (§21.3,
+        _police_check), and the call's GrantCall says which grant."""
+        holder = _GRANT_CALL.get()
+        detail = f"{tool} {ui.clip(self.scrub_everywhere(touch.name or ''))}"
+        try:
+            decided = book.decide(touch, "use", detail, line=False)
+            if decided.kind == "covered" and decided.use is not None:
+                # the check right before the touch, THEN the audit line, with the count as it stands after it (a
+                # re-claim across midnight or the hour): never a line for a use that then asked a person (A-L1)
+                if not book.still_covers(touch, decided.use):
+                    decided = grantlib.Decision("ask")
+                elif not book.write_line(touch, decided.use, detail):
+                    book.release(decided.use)
+                    decided = grantlib.Decision("ask")
+                else:
+                    use = decided.use
+                    decided = grantlib.Decision("covered", decided.name, f"{use.today} of {use.per_day}", use)
+        except Exception as e:  # any doubt asks a person
+            self.log(f"grants: {type(e).__name__}: {e}")
+            return False
+        if decided.kind == "covered":
+            if holder is not None:
+                holder.name, holder.use, holder.line = decided.name, f"{decided.counts} today", decided.line
+                holder.claimed = (book, decided.use) if decided.use is not None else None
+            return True
+        if holder is not None:
+            holder.notes += [n for n in decided.notes if n not in holder.notes]
+            holder.asked = decided.asked[0] if decided.asked else holder.asked
+            if decided.kind == "draft":
+                holder.draft = decided.name  # (§21.3: the touch stops at a draft; _police_check shows it)
+        return False
+
+    def _give_back(self, said: GrantCall, e: Refused) -> None:
+        """A call a grant covered that was refused before any touch went out (off screen, stale, covered: §19.4 "a use
+        proven not delivered gives its slot back", review 1.7 A-L1): its use is given back, and its log line names no
+        grant. A refusal that may come after a touch (a timeout, a dropped line) keeps it: the safe side."""
+        if said.claimed is None or said.touched or e.code not in BEFORE_TOUCH:
+            return
+        book, use = said.claimed
+        try:
+            book.release(use)
+        except Exception as x:  # (kept counted: the safe side)
+            self.log(f"grants: {type(x).__name__}: {x}")
+            return
+        said.claimed, said.name, said.use, said.line = None, None, None, None
+
+    def _grants_revoked(self) -> list[str]:
+        """The grants in force when the running batch began that are revoked now: it stops between moves (§19.5). A
+        `--revoke-all` after it began stops it too, whatever it began with (review 1.7 A-L2: none, or ones revoked
+        already)."""
+        held = _RUN_GRANTS.get()
+        if held is None:
+            return []
+        try:
+            gone = held[0].revoked_since(held[1]) if held[1] else []
+            return gone or (sorted(held[1]) or ["every grant"] if held[0].revoked_after(held[2]) else [])
+        except Exception:
+            return sorted(held[1])
+
+    def _grants_run(self) -> "contextvars.Token | None":
+        """At the start of the outermost batch, drive or replay: the grants in force then, for _grants_revoked."""
+        if _RUN_GRANTS.get() is not None or (book := self._book()) is None:
+            return None
+        try:
+            return _RUN_GRANTS.set((book, book.active(), time.time()))
+        except Exception:
+            return None
 
     def _claim(self, grant: Confirm) -> bool:
         """Take an allow for the one call about to touch under it: True once; False for every later call (it was
@@ -5500,21 +6406,29 @@ class Daemon(journey_tool.JourneyTools):
                 "label", element.label, "text", element.text)
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
-             now: float) -> tuple[str, Confirm | None]:
+             now: float, caption: str | None = None, why: str | None = None,
+             drafted: "tuple[str, str | None, bool, bytes] | None" = None) -> tuple[str, Confirm | None]:
         """The `needs_confirmation` message, after asking the live view (once for a request still open), and, for an
         agent whose host can show a dialog, the host too: then the request to wait for comes with it. An earlier
         request for this call that was declined, or ran out unanswered, is said at the message's end (when nobody
         waits for this one)."""
         for stale in [c for c in self._confirms.values() if c.until < now - CONFIRM_KEEP]:
             del self._confirms[stale.id]
+        # (`caption`, `why`: a card's typing (§20.1) has its own dialog words, says why instead of a policy word, and is
+        # never offered as a grant)
+        reason = why or f'(policy word "{word}")'
         said, open_ = "", None
         for c in [c for c in self._confirms.values() if c.tool == tool and c.key == key]:
             if c.state == "pending" and c.until >= now:
-                open_ = c
+                # reused only for a call that asks the same way: a person shown "Allow tap Send?" with no draft never
+                # answers for a touch that must show its draft first, nor the other way (review 1.7 B-L9)
+                if (c.draft is not None) == (drafted is not None) and \
+                        (drafted is None or c.draft_digest == drafted[3]):  # (another draft is another question: H3)
+                    open_ = c
                 continue
             if c.state == "declined" and c.until >= now:
                 # a person said no a moment ago: asking again at once would only wear them down (safety review L2)
-                return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and they declined "
+                return (f"needs_confirmation: {what} needs a person's OK {reason}, and they declined "
                         "it just now. Don't ask again by repeating the call: ask your user what they want."), None
             if c.state != "allowed":  # an allow nobody used lapses without a word
                 said = " They declined." if c.state == "declined" else " Nobody answered."
@@ -5529,26 +6443,42 @@ class Daemon(journey_tool.JourneyTools):
             # an account's value is never in what a person is shown (as in an answer, _announce): `what` is scrubbed
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
             scrub = self.scrub_everywhere
-            caption = step_caption(tool, what, a)
+            shown = step_caption(tool, what, a)
+            drafting = drafted is not None  # §21.3: the request shows the draft, and its choices are the word and Don't <word>
+            app_name = (self.session.app or (None, None))[0]
+            if drafted is not None:
+                request.draft, request.draft_digest = drafted[0], drafted[3]
+                shown = dialog.draft_caption(scrub(word), scrub(app_name) if app_name else None, drafted[1], drafted[2])
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                               "caption": scrub(caption) if caption else caption, "word": scrub(word),
+                               "caption": scrub(shown) if shown else shown, "word": scrub(word),
                                "expires": int((time.time() + CONFIRM_TTL) * 1000)}
             self.broadcast(request.message)
             if caller is not None:  # the host's dialog, at the same moment (§11.3)
                 request.dialog = True
                 label = scrub(element.label if element.role == "input" else element.text)
                 app = (self.session.app or (None, None))[0]
-                self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
-                                                  "message": scrub(dialog.caption(tool, label, app, word)),
-                                                  "choices": dialog.CHOICES[dialog.CONFIRM]})
+                held = _GRANT_CALL.get()  # (a grant that matched and ran out: a new one would only undo its limit)
+                if drafting:  # (no grant is offered on a draft: the grant that stopped it is the person's already, or a route's)
+                    self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.DRAFT,
+                                                      "message": scrub(shown), "choices": dialog.draft_choices(scrub(word))})
+                else:
+                    if caption is None:  # (a card's typing is never offered as a grant, §20.1)
+                        alert_words, screen_words, titles = self._never_context(tool, element)
+                        request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
+                                         "raw": element.label if element.role == "input" else element.text,
+                                         "alert": alert_words, "screen": screen_words, "titles": titles,
+                                         "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
+                    self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
+                                                      "message": scrub(caption or dialog.caption(tool, label, app, word)),
+                                                      "choices": dialog.CHOICES[dialog.CONFIRM]})
         waits = request.dialog and request.owner == caller  # (a retry while its request is open waits on it too)
-        return (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"). The live view asks them "
+        return (f"needs_confirmation: {what} needs a person's OK {reason}. The live view asks them "
                 "now; when they allow it, make the same call again. If nobody is watching, ask your user."
                 + ("" if waits else said)), (request if waits else None)
 
     async def _wait_for_person(self, request: Confirm, message: str, tool: str, a: dict, key: tuple[str, ...],
-                               element: ui.Element, taken: str) -> None:
+                               element: ui.Element, taken: str, same: tuple[str, ...] | None = None) -> None:
         """A call with a host dialog waits for the request's answer, up to its 120 s (§11.3). The time doesn't count
         toward a batch's own limit. While it waits the action lets go of its turn on the phone (_aside), so the live
         view can pause it or use the phone; the turn is taken back as an action takes it (`paused` while paused, after
@@ -5570,16 +6500,95 @@ class Daemon(journey_tool.JourneyTools):
                 if request.state == "pending" and request.dialog:  # it ran out, or the call was given up on
                     self.dialog_channel(request.owner or "").push({"type": "close", "id": request.id})
             if request.state == "declined":
-                raise Refused("not_allowed", message + " They declined.")
+                raise (Refused("not_allowed", self._draft_refusal("They declined."), draft=True) if request.draft is not None
+                       else Refused("not_allowed", message + " They declined."))
             if request.state != "allowed":
-                raise Refused("not_allowed", message + " Nobody answered.")
+                raise (Refused("not_allowed", self._draft_refusal("Nobody answered."), draft=True) if request.draft is not None
+                       else Refused("not_allowed", message + " Nobody answered."))
             # used up, whatever happens next (a pause, the re-check); taken by one call only: another call of the same
             # touch that waited on this request too, or repeated it after the allow, got there first (Codex, PR #9 c2)
             if not self._claim(request):
                 raise Refused("not_allowed", taken)
         await self._aside(answered)
-        await self._still_there(tool, a, key, element)
-        _GRANTED.get().append(request.origin or "the live view")
+        await self._offer_grant(request)  # (§19.6) a follow-up dialog; never a reason to refuse this touch
+        await self._still_there(tool, a, same or key, element)  # (`same`: the element's own key, when `key` holds more)
+        origin = request.origin or "the live view"
+        _GRANTED.get().append(Sent(origin) if request.draft is not None else origin)
+
+    @staticmethod
+    def _draft_refusal(why: str) -> str:
+        """§21.3: a draft not sent, said the way the spec words it; nothing was touched."""
+        return f"needs_confirmation: the draft wasn't sent ({why}). Ask your user what to do."
+
+    async def _ask_offer(self, owner: str, kind: str, message: str) -> str | None:
+        """One question of the grant dialog to the owner's host, waited on up to CONFIRM_TTL (the wait lets go of the
+        phone and doesn't count toward a batch's own limit). The answer's word (`allow`/`decline`, `yes`/`no`), or None
+        when nobody answered (the dialog is closed)."""
+        self._need_seq += 1
+        offer = Offer(f"g{self._need_seq}-{secrets.token_hex(4)}", owner, kind)
+        self._offers[offer.id] = offer
+        self.dialog_channel(owner).push({"type": "ask", "id": offer.id, "kind": kind, "message": message,
+                                         "choices": dialog.CHOICES[kind]})
+        began = self.control.clock()
+
+        async def waiting() -> None:
+            while offer.answer is None and self.control.clock() < began + CONFIRM_TTL:
+                try:
+                    await asyncio.wait_for(offer.answered.wait(), CONFIRM_TICK)
+                except asyncio.TimeoutError:
+                    pass
+        try:
+            await self._aside(waiting)
+        finally:
+            self.held(self.control.clock() - began)
+            self._offers.pop(offer.id, None)
+            if offer.answer is None:
+                self.dialog_channel(owner).push({"type": "close", "id": offer.id})
+        return offer.answer
+
+    async def _offer_grant(self, request: Confirm) -> None:
+        """AGENT-TOOLS §19.6: a person has just allowed a touch (in the host's dialog or the live view) and the host can
+        show a dialog: offer to make it a standing grant, as a follow-up dialog. Only a person creates it: this starts
+        from a person's OK and writes only from their answers; no argument, header or answer of the model reaches it.
+        Never offered for a word no grant can cover (§19.2), nor where a grant matched and ran out, once per app and
+        word in a session. 3 a day for 7 days, route-scoped inside a route. The drafts question is separate and
+        defaults to No. The file is written under the edit lock; the creation is audited as `approval`."""
+        info, owner = request.offer, request.owner
+        if info is None or not owner or request.state != "allowed" or not request.dialog or self.audit is None:
+            return
+        try:
+            book = self._book()
+            word, app = info["word"], info["app"]
+            if book is None or not app or not word or info["asked"] not in (None, "ended"):
+                return
+            loaded = book.load()
+            if not loaded.ok or grantlib.never_reason(word, loaded.block_for(app)) is not None \
+                    or grantlib.touch_never(app, info["label"], info.get("alert", ()), info.get("screen", ()),
+                                            info.get("titles", ())) \
+                    or grantlib.touch_never(app, info.get("raw"), info.get("alert", ()), info.get("screen", ()),
+                                            info.get("titles", ())):
+                return
+            once = (owner, app, word.lower())
+            if once in self._offered:
+                return
+            self._offered.add(once)
+            routes = info["routes"]
+            name = info["app_name"] or app
+            spec = grantlib.Spec(grantlib.name_base(name, word), app, (word,), route=routes[-1] if routes else None)
+            # the end date is fixed when the person is asked: the grant written is the one they were shown (A-L4)
+            spec = dataclasses.replace(spec, until=book.now().date() + datetime.timedelta(days=spec.days))
+            reach = grantlib.reaches_people(word)
+            shown = grantlib.Grant(spec.name_base, app, spec.words, spec.until, spec.per_day,
+                                   None, spec.route, None, reach)
+            if await self._ask_offer(owner, dialog.GRANT, self.scrub_everywhere(grantlib.caption(shown, name))) != "allow":
+                return
+            if reach and await self._ask_offer(owner, dialog.DRAFTS, dialog.DRAFTS_QUESTION) == "yes":
+                spec = dataclasses.replace(spec, drafts_only=False)
+            made = await asyncio.to_thread(book.create, spec)
+            if isinstance(made, str):
+                self.log(f"grants: no grant written: {made}")
+        except Exception as e:  # a failed offer never costs the person's touch
+            self.log(f"grants: offer: {type(e).__name__}: {e}")
 
     async def _aside(self, wait: Callable[[], Awaitable[None]]) -> None:
         """Inside an agent's action: `wait()` for a person's answer without holding the phone (Controller.aside), so a
@@ -5656,6 +6665,14 @@ class Daemon(journey_tool.JourneyTools):
         """The host's dialog answered for an agent. Only `allow` allows; anything else refuses. False when there is no
         such open request for that agent (an unknown, answered, expired or another agent's id): nothing happens. For a
         "needs a person" ask (§11.5) the answers are `done` and `cant`; anything else is `cant`."""
+        offer = self._offers.get(ask_id) if isinstance(ask_id, str) else None
+        if offer is not None:  # a question of the grant dialog (§19.6): only the agent whose call waits answers it
+            if offer.owner != client_id or offer.answer is not None:
+                return False
+            yes = "allow" if offer.kind == dialog.GRANT else "yes"
+            offer.answer = yes if answer == yes else ("decline" if offer.kind == dialog.GRANT else "no")
+            offer.answered.set()
+            return True
         need = self._needs.get(ask_id) if isinstance(ask_id, str) else None
         if need is not None:
             if need.owner != client_id or need.state == "cant":
@@ -5680,17 +6697,55 @@ class Daemon(journey_tool.JourneyTools):
             return moment
         return None
 
-    async def _hold_for_phone(self, name: str) -> None:
-        """Before a call, for an agent whose host has a dialog: if the phone is locked or asking for its passcode, ask a
-        person and wait for it to clear (the daemon looks at the phone again by itself). If it doesn't clear, the call
-        goes on and answers its usual `locked`."""
-        moment = self._phone_moment(name)
-        if moment is None or _DIALOG.get() is None:
-            return
+    @staticmethod
+    def _top_level() -> bool:
+        """Is the call running now one of its own, not a step of a `run`, `drive`, `replay`, route or journey moment?"""
+        return BATCH.get() is None and not _NESTED.get() and not _JOURNEY_OWN.get() and SCRIPT.get() is None
 
-        async def cleared() -> bool:
-            return self._phone_moment(name) is None
-        await self._hold_for_person(moment, cleared, nudge=self._asked_for)
+    def _unlocks_itself(self, client_id: str, name: str) -> bool:
+        """May this call unlock the locked phone with the vault's passcode (§18.6, §19.5; review 1.7, H1)? Only with
+        `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call that
+        needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a lock is the owner's
+        stop: `locked`, for a person to unlock (personal mode and `--dedicated` as in 1.6)."""
+        if not getattr(getattr(self, "ceiling", None), "phone", False) or client_id in self._journeys:
+            return False
+        if needs.phone_moment(self.state, self.detail) is not needs.UNLOCK:
+            return False
+        if not ((name in ACTIONS and name != "look") or name in UNLOCK_AT_START):
+            return False
+        return self.passcode_for() is not None
+
+    async def _hold_for_phone(self, client_id: str, name: str) -> None:
+        """Before a call. A step of a running `run`, `drive`, `replay`, route or journey moment never unlocks and never
+        waits out a lock: a lock there ends it with `locked` (the step's own refusal), because locking the phone is how
+        the owner stops the agent (AGENTS.md, §19.5). (iOS's XCTest prompt is no stop: a step still asks a person to
+        enter the passcode there, as in 1.6.) A top-level call to `serve --phone` unlocks a locked phone with the vault's
+        passcode (unlock.py; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
+        locked or asking for its passcode, ask a person and wait for it to clear (the daemon looks at the phone again by
+        itself). If it doesn't clear, the call answers `locked`: the unlock's own words when it was tried (`the
+        passcode in the file was refused`), else its usual ones."""
+        if not self._top_level():
+            moment = self._phone_moment(name)
+            if moment is needs.PASSCODE_PROMPT and _DIALOG.get() is not None:
+                async def prompt_gone() -> bool:
+                    return self._phone_moment(name) is None
+                await self._hold_for_person(moment, prompt_gone, nudge=self._asked_for)
+            return
+        tried: unlocklib.Result | None = None
+        if self._unlocks_itself(client_id, name):
+            tried = await self.unlock_phone()
+            if tried.ok or needs.phone_moment(self.state, self.detail) is None:
+                return
+            if tried.code in ("busy", "paused"):
+                raise Refused(tried.code, tried.message)
+        moment = self._phone_moment(name)
+        if moment is not None and _DIALOG.get() is not None:
+            async def cleared() -> bool:
+                return self._phone_moment(name) is None
+            if await self._hold_for_person(moment, cleared, nudge=self._asked_for):
+                return
+        if tried is not None and tried.message:
+            raise Refused("locked", tried.message)
 
     async def _hold_for_person(self, moment: needs.Moment, cleared: Callable[[], Awaitable[bool]],
                                every: float = CONFIRM_TICK, nudge: Callable[[], object] | None = None) -> bool:
@@ -5746,6 +6801,11 @@ class Daemon(journey_tool.JourneyTools):
         if request.state != "pending" or request.until < now:
             return False
         request.state, request.origin = "allowed" if allow else "declined", origin
+        if self.audit is not None:  # §23 approval: the policy word, never more of the app's text
+            word = (request.message or {}).get("word")
+            self.audit.write("approval", app=(request.key[0] if request.key else "") or None,
+                             name=word if isinstance(word, str) else None,
+                             detail=f"allowed by a person (in {origin})" if allow else "declined")
         # an allow is good for one call within CONFIRM_TTL; a decline holds for DECLINE_HOLD, then may be asked again
         request.until = now + (CONFIRM_TTL if allow else DECLINE_HOLD)
         request.answered.set()
@@ -5789,6 +6849,108 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
+    async def _hit_clears(self, element: ui.Element) -> ui.Element:
+        """The element with the tree's guess of what covers its centre dropped when the runner's hit test (route version
+        5) says a touch there lands on it, inside it or on what holds it. Only a later element's cover is a guess (a
+        scroll view listed after a bar it overlaps: seen on the phone 2026-11-14, Reminders' New Reminder sheet, whose
+        table is listed after its nav bar and drawn under it); bars, the keyboard and the status bar always count. No
+        answer leaves it as the tree says."""
+        centre = element.center
+        guessed = [b for b in element.covered_by if b.kind not in ui.COVERING_BARS and ui._holds(b.rect, centre)]
+        if not guessed:
+            return element
+        hit = await self.session.hit_at(*centre)
+        if hit is None:
+            return element
+        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
+        app = self._app_bundle()
+        foreign = bool(hit.bundle and app and hit.bundle != app)
+        if relation not in (("same", "inside") if foreign else ("same", "inside", "ancestor")):
+            return element  # (a holder, a Window or a full-screen view, proves nothing: the guess stands)
+        trace.note("hit", "clears a guessed cover")
+        cleared = copy.copy(element)
+        cleared.covered_by = tuple(b for b in element.covered_by if b not in guessed)
+        return cleared
+
+    async def _refuse_hit(self, element: ui.Element, at: tuple[float, float]) -> None:
+        """QUALITY-BAR 2.5 R3 (`lab-behind-bar`): before a touch on an element, ask the runner what iOS would deliver a
+        touch at that point to (Session.hit_at, route version 5) and refuse `covered` when it is something other than
+        the element, one inside it, or one holding it. No answer (an older runner, landscape, an error), or a holder that
+        proves nothing (a Window, the Application, a full-screen view: ui.hit_relation) leaves the touch as in 1.6. A hit
+        in another process than the app read (a banner, a share sheet in SpringBoard's) is covered unless it is the
+        target or inside it (a remote view the app's tree lists) or the keyboard's own process."""
+        hit = await self.session.hit_at(*at)
+        if hit is None:
+            return
+        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
+        if relation == "unplaced":
+            # the hit isn't in the read the list came from: something drawn after it, or a part of the target the read
+            # left out. Only the tree proves which (Codex, PR #12 cycle 1, M1): it is read again, and a hit it still can't
+            # place under the target counts as covering it
+            reread = getattr(self.session, "read_source", None)
+            try:
+                source = await reread() if reread is not None else None
+            except Exception:  # noqa: BLE001 - no read: nothing proves the hit is the target's
+                source = None
+            relation = ui.hit_relation(source, element, hit) if source else "other"
+            if relation == "unplaced":
+                relation = "other"
+        app = self._app_bundle()
+        if hit.bundle and app and hit.bundle != app:
+            trace.note("hit", "other app")
+            if hit.bundle in ui.KEYBOARD_HOSTS or relation in ("same", "inside"):
+                return
+            # another app's words never go into an answer, the log or a report (personal mode, §21; Codex, PR #12 cycle
+            # 2, M2): what covers the target is said by its kind and frame only
+            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "
+                                            f"{ui.foreign_hit_line(hit)}; wait for it to go, then look again.")
+        trace.note("hit", relation)
+        if relation == "changed":
+            # the control at the target's place has the target's id and frame but other words now (Terms became Delete
+            # account): what the policy judged isn't what the touch would land on (Codex, PR #12 cycle 2, M1)
+            raise Refused("stale", f"{element.line(actions=False)} changed since your last look (its words are not the "
+                                   "same now); look again.")
+        if relation == "other":
+            shown = ui.hit_line(hit, self.session.items) if hit.bundle == app or ui.listed(hit, self.session.items) \
+                else ui.foreign_hit_line(hit)  # (an app that can't be told is never named by its words)
+            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind {shown}; move or close "
+                                            "it first.")
+
+    async def _last_checks(self, tool: str, a: dict, element: "ui.Element | None", *, hit: bool = True, police: bool = True,
+                           aim: "Callable[[ui.Element], tuple[float, float] | None] | None" = None,
+                           again: "Callable[[], ui.Element] | None" = None, bundle: str | None = None,
+                           ) -> "tuple[ui.Element | None, tuple[float, float] | None, str]":
+        """THE checks every touch an agent's call makes on the phone goes through, right before it goes out (Codex, PR #12
+        cycle 3: one path, so no way of touching skips one; tests/test_review_17_c3.py lists every touch site and holds
+        each to it). In this order:
+        - `hit`: the runner's hit test at the point the touch goes to (`aim(element)`, None: its centre): `stale` when the
+          control there changed its words, `covered` when something else would get the touch (_refuse_hit). Off for what
+          the spec makes a raw touch: a point, `force`, an alert's button (iOS's own), a short swipe;
+        - `police`: the policy and everything in it (_police_check): a block word, §19.2's never-grantable touches by their
+          own words and by what surrounds them (whatever the policy file says), the drafts-only stop of every grants file
+          (whatever policy the call runs under), the grants, and a draft's fingerprint against the one the person saw;
+        - after a person's OK was waited for (the policy read the screen again): `again()` finds the element as it is now
+          (its own checks: the same element, still enabled), and the hit test runs once more there.
+        Returns (the element, the point to touch, the dry run's sentence for the answer's end). `type_text`'s focusing tap
+        has `police` off: typing is not a touch the policy judges (§11.1); Return is (_refuse_line_break)."""
+        s = self.session
+        point: tuple[float, float] | None = None
+        if element is not None and hit:
+            element = await self._hit_clears(element)
+            point = aim(element) if aim is not None else None
+            await self._refuse_hit(element, point or element.center)
+        said = ""
+        if police:
+            aimed_with = s.items
+            said = await self._police(tool, a, element, bundle)
+            if s.items is not aimed_with and again is not None:  # the policy waited for a person's OK and read again
+                element = again()
+                if element is not None and hit:
+                    element = await self._hit_clears(element)
+                    point = aim(element) if aim is not None else None
+                    await self._refuse_hit(element, point or element.center)
+        return element, point, said
+
     async def _press(self, target: ui.Target, hold_ms: int) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
         double = _DOUBLE.get()
@@ -5826,7 +6988,7 @@ class Daemon(journey_tool.JourneyTools):
                     if (box := _DOUBLE_CHANGED.get()) is not None:  # (an empty list is still the journey's)
                         box.append(f"{said} is {now}")
                     return done
-                await self._police("tap", {}, under, front)
+                await self._last_checks("tap", {}, under, hit=False, bundle=front)  # (a raw second touch: no hit test)
             except Refused:
                 self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
                 raise
@@ -5867,26 +7029,26 @@ class Daemon(journey_tool.JourneyTools):
                 # the agent's list can't vouch for what is under the point (it acted without a list since, or the
                 # picture moved): read what is there now, so a policy word that came in is seen (safety review H2)
                 under = self._element_at(found, (await s.refresh()).items)
-            said = await self._police(tool, a, under)
+            _, _, said = await self._last_checks(tool, a, under, hit=False)  # (a point is a raw touch: no hit test)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
             self._touching(under)
             return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
-            said = await self._police(tool, a, found)  # `force` skips the checks above, never the policy
+            # `force` skips the checks above and the hit test, never the policy
+            _, _, said = await self._last_checks(tool, a, found, hit=False)
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
             self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
-        point = self._touch_point(found)
-        aimed_with = s.items
-        said = await self._police(tool, a, found)
-        if s.items is not aimed_with:  # the policy waited for a person's OK and read the screen again (_still_there)
-            found = ui.resolve(s.items, target)  # (it checked that the target still names that very element)
-            self._guard(view, found)
-            point = self._touch_point(found)  # what is drawn over it now
+
+        def again() -> ui.Element:
+            now = ui.resolve(s.items, target)  # (_still_there checked that the target still names that very element)
+            self._guard(view, now)
+            return now
+        found, point, said = await self._last_checks(tool, a, found, aim=self._touch_point, again=again)
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
@@ -5960,17 +7122,57 @@ class Daemon(journey_tool.JourneyTools):
             alert = getattr(self.session, "last_alert", None)
             for button in (alert.buttons if alert is not None else ()):
                 if button.strip().lower() not in DISMISS_WORDS:
-                    await self._police("alert", a, ui.Element(ref="", role="button", label=button))
+                    # (iOS's own alert button, pressed by WebDriverAgent's alert route: no point to hit-test)
+                    await self._last_checks("alert", a, ui.Element(ref="", role="button", label=button), hit=False)
         return await ACTIONS["alert"][0](self.session, a)
 
     async def _swipe(self, view, a: dict) -> str:
         """`swipe`: a drag that barely moves is a touch where it starts, so it goes through the policy as a tap there
-        would (safety review H3)."""
+        would (safety review H3). A full swipe across a list row runs the row's first action (often Delete or Archive)
+        with no button touched, so it needs a person's OK each time (review 1.7 B-M7). The tree is read for every swipe."""
         x0, y0, x1, y1 = (float(a[k]) for k in ("x0", "y0", "x1", "y1"))
-        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP and any(_POLICY.get().words(self._app_bundle())):
-            under = self._element_at((x0, y0), (await self.session.refresh()).items)
-            await self._police("swipe", a, under)
+        items = (await self.session.refresh()).items
+        said = ""
+        if math.hypot(x1 - x0, y1 - y0) < SWIPE_IS_TAP:
+            # (a touch where it starts, at a point: raw, as a point tap is)
+            _, _, said = await self._last_checks("swipe", a, self._element_at((x0, y0), items), hit=False)
+        elif (row := full_row_swipe(items, x0, y0, x1, y1)) is not None:
+            said = await self._full_swipe_ok(a, row)
+        self._dry(a, f"Would swipe from ({x0:g}, {y0:g}) to ({x1:g}, {y1:g}).{said}")
         return await ACTIONS["swipe"][0](self.session, a)
+
+    async def _full_swipe_ok(self, a: dict, row: ui.Element) -> str:
+        """A full swipe on a list row (review 1.7 B-M7): a touch with an unknown destructive word. A person's OK each
+        time, through the live view and the host's dialog; never covered by a grant, none offered, and never made in a
+        draftsOnly route or a scheduled run. For a dry run, the sentence for the answer's end."""
+        label = self.scrub_everywhere(row.text or row.label or row.ref)
+        what = f"a full swipe on {row.role} {ui.clip(label)}"
+        hint = "Reveal the row's actions with a short swipe, then tap the one you want."
+        if _DRAFTS_ROUTE.get() or scheduled(_CALLER.get() or ""):
+            raise Refused("not_allowed", f"needs_confirmation: {what} runs the row's first action (often Delete or "
+                                         f"Archive), which a draftsOnly route or a scheduled run never does. {hint}")
+        if a.get("dry_run"):
+            return " It needs a person's OK (a full swipe on a list row runs its first action)."
+        element_key = self._police_key(row)
+        key = (*element_key, "full swipe")
+        now = self.control.clock()
+        allowed = next((c for c in self._confirms.values()
+                        if c.tool == "swipe" and c.key == key and c.state == "allowed" and c.until >= now), None)
+        if allowed is not None and self._claim(allowed):
+            _GRANTED.get().append(allowed.origin or "the live view")
+            return ""
+        app = (self.session.app or (None, None))[0]
+        caption = (f'Allow: a full swipe on "{dialog.clean(label)}" in {dialog.clean(app) if app else "the app in front"}? '
+                   "It runs the row's first action, often Delete.")
+        message, request = self._ask("swipe", a, key, row, "full swipe", what, now, caption=caption,
+                                     why="(it runs the row's first action, often Delete or Archive; to pick the action "
+                                         "yourself, reveal the row's actions with a short swipe, then tap the one you "
+                                         "want)")
+        if request is None:
+            raise Refused("not_allowed", message)
+        taken = f"needs_confirmation: {what}: the OK given was used by another call. Nothing was touched; make it again."
+        await self._wait_for_person(request, message, "swipe", a, key, row, taken, same=element_key)
+        return ""
 
     async def _long_press(self, view, a: dict) -> str:
         return await self._touch(view, a, int(float(a.get("seconds", 1.0)) * 1000))
@@ -6000,20 +7202,30 @@ class Daemon(journey_tool.JourneyTools):
         if want is not None and found.checked == want:
             self._touching(found)  # nothing is touched, but a recording saves this switch, not the generic lookup's element
             return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
-        aimed_with = self.session.items
-        said = await self._police("toggle", a, found)
-        if self.session.items is not aimed_with:  # the policy waited for a person's OK and read the screen again
-            key = self._police_key(found)  # (_still_there checked the same switch is there, at the same place)
-            found = next(e for e in self.session.items if self._police_key(e) == key and e.rect == found.rect)
-            if found.checked is None or (want is not None and found.checked == want):
+        force = bool(a.get("force"))
+        was = found
+
+        def aim(switch: ui.Element) -> tuple[float, float] | None:
+            spot = self._touch_point(switch)
+            return self._switch_control(self.session.items, switch, spot) if switch.width > WIDE_SWITCH * switch.height \
+                else spot
+
+        def again() -> ui.Element:
+            nonlocal forced
+            key = self._police_key(was)  # (_still_there checked the same switch is there, at the same place)
+            now = next(e for e in self.session.items if self._police_key(e) == key and e.rect == was.rect)
+            if now.checked is None or (want is not None and now.checked == want):
                 raise Refused("not_allowed", "needs_confirmation: the screen changed while waiting for the OK; ask again.")
-            if a.get("force"):
-                forced = self._forced(view, found)
+            if force:
+                forced = self._forced(view, now)
             else:
-                self._guard(view, found)
-                point = shown = self._touch_point(found)
-                if found.width > WIDE_SWITCH * found.height:
-                    point = self._switch_control(self.session.items, found, shown)
+                self._guard(view, now)
+            return now
+        # the hit test at the very point the switch is touched, as for a tap (Codex, PR #12 cycle 3, M2); `force` skips it
+        checked, aimed, said = await self._last_checks("toggle", a, found, hit=not force, aim=aim, again=again)
+        found = checked if checked is not None else found
+        if not force:
+            point, shown = aimed, self._touch_point(found)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)

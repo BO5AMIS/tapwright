@@ -20,6 +20,7 @@ NAME = re.compile(r"^[a-z0-9_]{1,60}$")
 VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ACCOUNT_FIELDS = ("username", "password")
 ACCOUNT = "account"
+REFERENCE_KINDS = (ACCOUNT, "vault", "otp")  # what the typing fills, never a route's variable (§18.6, §20.1, §20.4)
 _TOKEN = re.compile(r"\$\$\{|\$\{([^}]*)\}")
 
 
@@ -98,6 +99,9 @@ def check(data: dict) -> None:
         raise Refused("bad_params", "a route needs a start: the name of the place it starts at, like \"welcome\"")
     if data.get("end") is not None and (not isinstance(data["end"], str) or not data["end"].strip()):
         raise Refused("bad_params", "a route's end is a place's name, or left out")
+    if "draftsOnly" in data and not isinstance(data["draftsOnly"], bool):
+        raise Refused("bad_params", "a route's draftsOnly is true or false (true: a touch on Send, Post, Publish, Reply or "
+                                    "Comment stops at a draft a person sees first)")
     variables = data.get("variables", [])
     if not isinstance(variables, list) or any(not isinstance(v, str) or not VARIABLE.match(v) for v in variables):
         raise Refused("bad_params", "a route's variables are a list of names made of letters, digits and _, like [\"language\"]"
@@ -105,15 +109,18 @@ def check(data: dict) -> None:
     if isinstance(name, str) and not NAME.match(name):
         raise Refused("bad_params", f"a route's name is lower-case ASCII letters, digits and _, not {name!r}")
     for text in _strings(data.get("steps", []), typed=True):
-        if "$${" + ACCOUNT + "." in text:  # filled to a literal ${account.…}, which typing would then take for a placeholder
+        if any("$${" + kind + "." in text for kind in REFERENCE_KINDS):  # filled to a literal ${account.…}, which typing would then take for a placeholder
             raise Refused("bad_params", "a literal account placeholder can't be written in a route: it would be typed as "
                                         f"the account's value, not as text: {text!r}")
     for text in _strings(data.get("steps", []), typed=False):  # (a placeholder there is no field's typing: it finds nothing)
         for match in _TOKEN.finditer(text):
-            if match.group(1) is not None and match.group(1).startswith(ACCOUNT + "."):
+            if match.group(1) is not None and match.group(1).startswith(tuple(k + "." for k in REFERENCE_KINDS)):
                 raise Refused("bad_params", f"an account's value is the whole text of a type_text step, never part of one or "
                                             f"anywhere else: {text!r} holds ${{{match.group(1)}}}")
     for ref, text, tool in references(data.get("steps", [])):
+        if ref.startswith(("vault.", "otp.")) and (text != "${" + ref + "}" or tool != "type_text"):
+            raise Refused("bad_params", f"a vault value or a one-time code is the whole text of a type_text step, never "
+                                        f"part of one: {text!r} holds ${{{ref}}}")
         if ref.startswith(ACCOUNT + "."):
             field = ref[len(ACCOUNT) + 1:]
             if field not in ACCOUNT_FIELDS:
@@ -145,7 +152,7 @@ def _fill(text: str, values: dict[str, str], declared: "list[str] | None" = None
         if match.group(1) is None:
             return "${"  # `$${` is a literal `${`
         name = match.group(1)
-        if name.startswith(ACCOUNT + "."):
+        if name.startswith(tuple(k + "." for k in REFERENCE_KINDS)):
             return match.group(0)  # the typing fills it, from the account, where the field is known
         if declared is not None and name not in declared:
             return match.group(0)  # undeclared: literal text

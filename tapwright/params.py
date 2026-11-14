@@ -33,6 +33,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "filmstrip": ("frames", "interval_ms", "frame_width", "tap"),
     "compare_screen": ("name", "update", "width", "threshold", "ignore"),
     "apps": (),
+    "notifications": ("open",),
     "session_report": ("since",),
     "map": ("to", "name", "link", "place", "reflex", "forget_reflex", "forget"),
     "open_app": ("app", "language", "region", "text_size", *_SHOT, *_BRIEF),

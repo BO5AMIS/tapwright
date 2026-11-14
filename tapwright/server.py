@@ -2,6 +2,7 @@
 WebSocket and the agent API, all behind one token; and starting, finding and stopping it.
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -19,10 +20,10 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import policy, store, trace, uxcheck
+from . import otp as otplib, policy, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
-from .daemon import Scope
+from .daemon import BUNDLE_ID, SYSTEM_APPS, Scope
 from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
@@ -43,6 +44,7 @@ NO_KEY_PAGE = (
     "<p>An agent driving Tapwright through a script opens it with <code>tapwright.client</code>'s "
     "<code>viewer_url</code> and the browser, never by writing the link out.</p>"
 )
+WHOLE_PHONE = ("dedicated", "phone")  # the X-Tapwright-Mode values that mean every app (--dedicated, --phone)
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 DEFAULT_PORT = 8417
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
@@ -106,8 +108,60 @@ def _hv(request, name: str, default: str | None = None) -> str | None:
     return urllib.parse.unquote(value) if request.headers.get("x-tapwright-encoding") == "percent" else value
 
 
+def resolve_app(app: str, names: dict[str, str]) -> tuple[str | None, str | None]:
+    """(the one bundle id an app named in --apps or a call stands for, why it stands for none) (review 1.7 A-M4): an
+    installed bundle id is itself; a name, ignoring case, must be the name of exactly ONE installed app (two apps that
+    show the same name prove neither), else of one of iOS's own apps; a bundle id that isn't installed (iOS's own apps
+    aren't listed) is compared as written. When the phone can't list its apps (`names` empty), a name is compared as
+    written too."""
+    q = app.strip()
+    if q in names:
+        return q, None
+    low = q.casefold()
+    hits = sorted(b for b, n in names.items() if n and n.strip().casefold() == low)
+    if len(hits) > 1:
+        return None, f'"{q}" is the name of {len(hits)} installed apps ({", ".join(hits)}); name it by its bundle id'
+    if hits:
+        return hits[0], None
+    builtin = next((b for n, b in SYSTEM_APPS.items() if n.casefold() == low), None)
+    if builtin is not None:
+        return builtin, None
+    if BUNDLE_ID.match(q) or not names:
+        return q, None
+    return None, f'no installed app is named "{q}"'
+
+
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
+    async def over_ceiling(apps: tuple[str, ...], dedicated: bool, mode: str | None) -> str | None:
+        """Why a call's scope is wider than serve's --apps, or None (§18.10). Every name in the ceiling and in the call is
+        resolved to exactly one bundle id (resolve_app), and only bundle ids are compared (review 1.7 A-M4): `serve
+        --apps Wayfare` takes a call naming its bundle id, and the other way round (seen on the phone 2026-11-14), but
+        never a second app that shows the same name."""
+        if ceiling is None:
+            return None
+        why = ceiling.refuse_scope(apps, dedicated, mode)
+        if dedicated or not ceiling.apps:
+            return why
+        names = await daemon.installed_names() if hasattr(daemon, "installed_names") else {}
+        listed: set[str] = set()
+        for app in ceiling.apps:
+            bundle, problem = resolve_app(app, names)
+            if bundle is None:
+                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and {problem}, so "
+                        "no call runs. Restart tapwright serve with --apps naming each app by its bundle id.")
+            listed.add(bundle)
+        outside: list[str] = []
+        for app in apps:
+            bundle, problem = resolve_app(app, names)
+            if bundle is None:
+                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and the call names "
+                        f"an app it can't be sure of: {problem}.")
+            if bundle not in listed:
+                outside.append(app)
+        return ceiling.refuse_scope(tuple(outside), False, mode) if outside else None
+
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
+    proved = otplib.Proved()  # the connections that proved this daemon a moment ago: only they may ask /otp (§18.11)
 
     def denied(conn, cookie: bool = False) -> Response | None:
         """/api takes only the Authorization header; the page and its stream may use the cookie."""
@@ -154,7 +208,41 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if not isinstance(server[1], int):
             return _error("internal", "can't tell which port this daemon listens on", 500)
         # the address and port this connection really arrived on (the socket's: a relay elsewhere signs its own)
+        proved.mark(request.scope.get("client"))
         return JSONResponse({"proof": proof_of(token, challenge, server[1], str(server[0]))})
+
+    async def otp_code(request):
+        """`POST /otp {"app": "<app id>"}` (§18.11, §20.4): Tapline's host asks for a one-time code with Tapwright's own
+        token, on the keep-alive connection it just proved this daemon on, never a new one. The answer is `{"code",
+        "expires", "source"}`, handed over once, or `404` when there is none. The code is read from the setting's source
+        apps' notifications (center_tool.py) and never logged: only the route's status is."""
+        if not _host_ok(request, hosts):
+            return _error("unauthorized", "unknown host", 403)
+        if not _bearer_ok(request, token):  # (Tapwright's token; never the cookie)
+            return _error("unauthorized", "missing or wrong token", 401)
+        if not proved.holds(request.scope.get("client")):
+            return _error("unauthorized", "prove this daemon first, on this same connection (POST /api/prove)", 403)
+        try:
+            given = json.loads(await request.body())
+            app = given["app"]
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return _error("bad_params", 'send {"app": "<app id>"}', 400)
+        if not isinstance(app, str) or not app.strip():
+            return _error("bad_params", 'send {"app": "<app id>"}', 400)
+        # the app asked for is within serve's scope, as any call's is (§18.10; Codex, PR #12 cycle 2, M5): a code setting
+        # for another app in the vault never widens it. Nothing is read before this
+        if ceiling is None or not (ceiling.apps or ceiling.dedicated or ceiling.phone):
+            return _error("not_allowed", "no_apps: tapwright serve was started without --apps (or --dedicated, --phone), "
+                                         "so no app's code is handed over", HTTP_STATUS["not_allowed"])
+        if (why := await over_ceiling((app,), False, None)) is not None:
+            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        try:
+            found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
+        except Refused as e:  # (only `internal`: Notification Center may still be open. No code goes with it: M1)
+            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
+        if found is None:
+            return _error("not_found", "no one-time code", 404)
+        return JSONResponse(otplib.answer(found), headers={"Cache-Control": "no-store"})
 
     async def health(request):
         # `pages`: live-view pages connected now, so an agent's `viewer` can leave an open one be instead of opening
@@ -174,17 +262,19 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", "the body must be a JSON object", 400)
         # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
         client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client") or "anonymous"
-        # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
+        # Personal mode unless the caller says the device is dedicated (to testing, `dedicated`, or to automation,
+        # `phone`, §24.4; both are every app): a caller that names no apps gets none.
         apps = tuple(a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip())
-        dedicated = _hv(request, "x-tapwright-mode") == "dedicated"
+        mode = _hv(request, "x-tapwright-mode")
+        dedicated = mode in WHOLE_PHONE
         scope = None if dedicated else Scope(apps)
         # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
-        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated)) is not None:
+        if (why := await over_ceiling(apps, dedicated, mode)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
         sent = _hv(request, "x-tapwright-policy")
         try:
-            rules = policy.loads(sent) if sent else None
+            rules = policy.loads(sent, header=True) if sent else None
         except ValueError as e:
             return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
         if ceiling is not None:
@@ -201,6 +291,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
+        if rules is not None and rules.file is not None and via.get("via") == "call" \
+                and (ceiling is None or ceiling.policy is None or rules.file != ceiling.policy.file):
+            # The model writes a thin call's command line: a grants file it names is never in force (§19.6: only a
+            # person makes a grant). Only the policy file `tapwright serve` was started with brings grants.
+            rules = dataclasses.replace(rules, file=None)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
         sent_maps = _hv(request, "x-tapwright-maps")
         if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
@@ -235,12 +330,61 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return JSONResponse(await daemon.run_tool(client, request.path_params["name"], args, scope=scope,
                                                       policy=rules, ux_rules=ux_rules, **via))
         except Refused as e:
-            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
+            reply = _error(e.code, str(e), HTTP_STATUS.get(e.code, 409))
+            if e.draft:  # internal: a schedule run reads it; `tapwright call` and the MCP server print only code and message
+                reply = JSONResponse({"error": {"code": e.code, "message": str(e), "draft": True}}, status_code=reply.status_code)
+            return reply
         except Exception:  # the daemon turns tool failures into `internal` itself; this is the last net
             logging.getLogger("tapwright").exception("tool %s crashed", request.path_params["name"])
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
         finally:
             STILL_WANTED.reset(wanted)
+
+    async def unlock(request):
+        """`POST /api/phone/unlock` (§22.3, §18.6): a scheduled run found the phone locked and asks the daemon to unlock
+        it with `phone.passcode`. The passcode comes only from the vault file `tapwright serve --accounts` names: a
+        request that names another file is refused and nothing is typed (review 1.7, H2: a caller's own file would be a
+        way to guess). The answer is fixed words: `{"ok", "code", "message"}`, never a value."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        sent = _hv(request, "x-tapwright-accounts")
+        if sent is not None and (not os.path.isabs(sent) or "\x00" in sent):
+            return _error("bad_params", "--accounts must be an absolute file path", 400)
+        if ceiling is not None:
+            _, refused = ceiling.check_accounts(sent, False)
+            if refused is not None:
+                return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
+        elif sent is not None:
+            return _error("not_allowed", "the phone's passcode is typed only from the vault file tapwright serve was "
+                                         "started with (--accounts), and this one was started with none; nothing was "
+                                         "typed", HTTP_STATUS["not_allowed"])
+        result = await daemon.unlock_phone()
+        return JSONResponse({"ok": result.ok, "code": result.code, "message": result.message})
+
+    async def notification_check(request):
+        """`POST /api/notifications/new {"app": "<bundle id>"}` (§22.1): a notification trigger's check, from `tapwright
+        run-schedule NAME --if-triggered`. The answer is the digests of that app's notifications now, newest first
+        (`{"keys": [...]}`), never their text; the run compares them with what it saw before. Within serve's --apps
+        ceiling; `busy` while a person or an agent uses the phone, `paused` while the live view is paused."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        try:
+            given = json.loads(await request.body() or b"{}")
+            app = given["app"]
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
+        if not isinstance(app, str) or not app.strip() or len(app) > 200:
+            return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
+        app = app.strip()
+        if (why := await over_ceiling((app,), False, None)) is not None:
+            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        try:
+            keys = await daemon.notification_keys(app)
+        except Refused as e:
+            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
+        return JSONResponse({"keys": keys}, headers={"Cache-Control": "no-store"})
 
     async def dialog_body(request) -> tuple[str, dict] | Response:
         """The agent's client id and the JSON body of one of the host-dialog calls, or the refusal (dialog.py)."""
@@ -462,9 +606,12 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         WebSocketRoute("/video", video),
         Route("/api/health", health),
         Route("/api/prove", prove, methods=["POST"]),  # (before /api/{name}: which is one word)
+        Route("/otp", otp_code, methods=["POST"]),
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
         Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
+        Route("/api/phone/unlock", unlock, methods=["POST"]),
+        Route("/api/notifications/new", notification_check, methods=["POST"]),
         Route("/api/session/{what:str}", session, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/{name}", tool, methods=["POST"]),
     ])
@@ -555,7 +702,9 @@ def _default_daemon(log, phone: str | None):
     from .session import Session
     from . import actionlog
     actions = actionlog.ActionLog(actionlog.default_folder() if actionlog.enabled() else None, report=log)
-    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions)
+    from .auditlog import AuditLog
+    # the audit log (§23) has no off switch: --no-log turns off the action log only
+    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions, audit=AuditLog())
 
 
 def _lock_instance():

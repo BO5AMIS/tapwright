@@ -17,6 +17,7 @@ EXPECTED = {
     "wait": {"seconds", "look", "screenshot", "brief"},
     "wait_for": {"text", "id", "label", "gone", "timeout", "look", "screenshot", "brief"},
     "apps": set(),
+    "notifications": {"open"},  # 1.7 (§24.2), Tapwright only
     "session_report": {"since"},
     "map": {"to", "name", "link", "place", "reflex", "forget_reflex", "forget"},
     "drive": {"to", "route", "with", "account", "then", "by", "dry_run", "look", "screenshot", "brief"},

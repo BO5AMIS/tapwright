@@ -12,10 +12,13 @@ import unicodedata
 
 ALLOW, DENY = "Allow once", "Don't allow"  # a person's OK: the one required field's choices, no default
 DONE, CANT = "Done", "Can't now"  # a "needs a person" moment's
-CONFIRM, NEEDS = "confirm", "needs"  # the kinds of ask
-CHOICES = {CONFIRM: [ALLOW, DENY], NEEDS: [DONE, CANT]}
+GRANT_ALLOW = "Allow"  # §19.6: the grant's question (the choices are Allow and Don't allow, no default)
+YES, NO = "Yes", "No"  # §19.6: the separate drafts question; it defaults to No
+DRAFTS_QUESTION = "Send these without showing you each one first?"
+CONFIRM, NEEDS, GRANT, DRAFTS = "confirm", "needs", "grant", "drafts"  # the kinds of ask
+CHOICES = {CONFIRM: [ALLOW, DENY], NEEDS: [DONE, CANT], GRANT: [GRANT_ALLOW, DENY], DRAFTS: [NO, YES]}
 # what the MCP server sends back for each choice; anything else, and no answer at all, is the refusal
-ANSWERS = {ALLOW: "allow", DENY: "decline", DONE: "done", CANT: "cant"}
+ANSWERS = {ALLOW: "allow", DENY: "decline", DONE: "done", CANT: "cant", GRANT_ALLOW: "allow", YES: "yes", NO: "no"}
 CLIP = 80  # characters of the app's own text a caption keeps
 KEEP = 50  # events a channel remembers
 MAX_POLL = 25.0  # seconds a poll may wait
@@ -38,6 +41,36 @@ def caption(tool: str, label: str, app: str | None, word: str) -> str:
     """The tool's own words for a policy request: `Allow: tap "Delete trip" in Wayfare? (policy word "Delete")`."""
     where = clean(app) if app else "the app in front"
     return f'Allow: {VERBS.get(tool, tool)} "{clean(label)}" in {where}? (policy word "{clean(word)}")'
+
+
+DRAFT = "draft"  # §21.3: the draft's ask; its choices come with it (`Send` and `Don't send`)
+DRAFT_LIMIT = 500  # characters of the draft the dialog shows
+
+
+def draft_text(text: str, scrub=None) -> str:
+    """A draft as the dialog shows it (§21.3): redacted of account and vault values FIRST (so no half of one is left by
+    the cut), control characters gone, whitespace made one space, double quotes single (it can't end its own quotation),
+    cut at DRAFT_LIMIT characters with `…(+N)`."""
+    redacted = scrub(text) if scrub is not None else text
+    spaced = "".join(" " if ch.isspace() else ch for ch in redacted)
+    plain = " ".join("".join(ch for ch in spaced if not unicodedata.category(ch).startswith("C")).replace('"', "'").split())
+    return plain if len(plain) <= DRAFT_LIMIT else f"{plain[:DRAFT_LIMIT]}…(+{len(plain) - DRAFT_LIMIT})"
+
+
+ONE_TIME_CODE = "A one-time code is in this draft."  # said whenever a draft holds one (review 1.7, H3)
+
+
+def draft_caption(word: str, app: str | None, text: str | None, code: bool = False) -> str:
+    """`Send this in Wayfare? "<the field's text>"`; the word is the policy word that matched. `code`: the draft holds a
+    one-time code, which the text shows only as its placeholder, so the caption says it in plain words."""
+    where = clean(app) if app else "the app in front"
+    said = f' "{text}"' if text is not None else " (no text found in the field)"
+    warn = f" {ONE_TIME_CODE}" if code else ""
+    return f"{word[:1].upper()}{word[1:]} this in {where}?{said}{warn}"
+
+
+def draft_choices(word: str) -> list[str]:
+    return [f"{word[:1].upper()}{word[1:]}", f"Don't {word.lower()}"]
 
 
 class Channel:

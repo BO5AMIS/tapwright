@@ -29,6 +29,7 @@ class Context:
     routes: list[tuple[str, str, str, list[str]]] = field(default_factory=list)
     edges: list[roads.RouteEdge] = field(default_factory=list)
     policy: safety.Policy = safety.DEFAULT
+    vault: tuple[str, ...] = ()  # the vault's other entries, `home (address)`: names only (§20.1)
 
 
 def _count(n: int, word: str, plural: str | None = None) -> str:
@@ -79,6 +80,8 @@ def listing(data: dict, ctx: Context) -> list[str]:
         lines.append("Reflexes: " + ", ".join(str(r.get("name")) for r in data["reflexes"]) + ".")
     if ctx.accounts:
         lines.append("Accounts: " + ", ".join(ctx.accounts) + ".")
+    if ctx.vault:
+        lines.append("Vault: " + ", ".join(ctx.vault) + ".")
     return lines
 
 

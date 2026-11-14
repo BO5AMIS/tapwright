@@ -390,6 +390,12 @@ async def apps() -> CallToolResult:
     return await _tool("apps")
 
 
+@server.tool(description=describe("notifications"), structured_output=False)
+async def notifications(open: int | None = None) -> CallToolResult:
+    # (not read-only by hint: it pulls Notification Center down on the phone, and `open` opens an app)
+    return await _tool("notifications", **({"open": open} if open is not None else {}))
+
+
 @server.tool(annotations=READ_ONLY, description=describe("session_report"), structured_output=False)
 async def session_report(since: int | None = None) -> CallToolResult:
     return await _tool("session_report", **({"since": since} if since is not None else {}))
@@ -507,11 +513,11 @@ def _heartbeat(stop: threading.Event) -> None:
 
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
         rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None, brief: bool = False,
-        maps: str | None = None, dialog: bool = True, accounts: str | None = None) -> None:
+        maps: str | None = None, dialog: bool = True, accounts: str | None = None, phone: bool = False) -> None:
     global BRIEF_DEFAULT
     BRIEF_DEFAULT = brief
     DIALOGS.enabled = dialog
-    client.set_scope(apps, dedicated)
+    client.set_scope(apps, dedicated, phone)
     client.set_policy(rules)
     client.set_ux_rules(ux_rules)
     client.set_maps(maps)

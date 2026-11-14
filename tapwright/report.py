@@ -279,6 +279,44 @@ def timing(cs: list[dict]) -> str | None:
     return f"Time: {_span(sum(gaps) + tool_total)}: {thinking}, {in_tool}."
 
 
+def grants_line(cs: list[dict]) -> str | None:
+    """The `Grants:` line (AGENT-TOOLS §16.1, §19.7), after `Time:`; None when no grant was involved:
+    `Grants: instagram_posting 2 uses (2 of 3 today), 1 draft shown; asked a person 1 time (limit reached).`
+    From the log's `grant` and `grant_use` (a touch a grant let through), `grant_draft` (a draft a grant showed first)
+    and `grant_asked` (a grant matched but didn't cover the touch). A dry run counts nothing."""
+    uses: dict[str, list] = {}
+    drafts: dict[str, int] = {}
+    asked: dict[str, int] = {}
+    for e in cs:
+        if e.get("dry_run") is True:
+            continue
+        name, draft, why = e.get("grant"), e.get("grant_draft"), e.get("grant_asked")
+        if isinstance(name, str) and e.get("ok") is not False:
+            seen = uses.setdefault(name, [0, None])
+            seen[0] += 1
+            if isinstance(e.get("grant_use"), str):
+                seen[1] = e["grant_use"]
+        if isinstance(draft, str) and e.get("ok") is not False:
+            drafts[draft] = drafts.get(draft, 0) + 1
+            uses.setdefault(draft, [0, None])
+        if isinstance(why, str) and not isinstance(name, str):
+            asked[why] = asked.get(why, 0) + 1
+    if not uses and not asked:
+        return None
+    parts = []
+    for name, (n, last) in uses.items():
+        part = f"{name} {n} {_plural(n, 'use', 'uses')}" + (f" ({last})" if last else "")
+        if d := drafts.get(name):
+            part += f", {d} {_plural(d, 'draft', 'drafts')} shown"
+        parts.append(part)
+    if asked:
+        total = sum(asked.values())
+        ranked = sorted(asked.items(), key=lambda kv: (-kv[1], kv[0]))
+        why = ranked[0][0] if len(ranked) == 1 else ", ".join(f"{w} {n}" for w, n in ranked)
+        parts.append(f"asked a person {total} {_plural(total, 'time', 'times')} ({why})")
+    return f"Grants: {'; '.join(parts)}."
+
+
 def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
     """The answer of `session_report`."""
     cs = calls(entries, client, since_ms)
@@ -330,6 +368,8 @@ def build(entries: list[dict], client: str | None, since_ms: int | None) -> str:
                      f"(calls {_numbers(named)}): look at what changed")
     time_line = timing(cs)
     top = [head, time_line] if time_line else [head]
+    if granted := grants_line(cs):
+        top.append(granted)
     if okays := [e["confirmed_by"] for e in cs if e.get("confirmed") and isinstance(e.get("confirmed_by"), str)]:
         # where each person's OK came from (AGENT-TOOLS §11.3): chat is the host's dialog
         top.append(f"Approvals: {len(okays)} by a person ("

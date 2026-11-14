@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapwright"
-version = "1.6.2"
+version = "1.7.0"
 description = "Let LLM agents test apps on your real iPhone, from Windows, Linux or macOS. No Mac needed."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -47,4 +47,5 @@ tapwright = "tapwright.entry:main"  # checks for merge markers, and dispatches `
 packages = ["tapwright"]
 
 [tool.setuptools.package-data]
-tapwright = ["viewer.html", "skill/*.md", "skill/references/*.md", "skill/agents/*.yaml"]
+tapwright = ["viewer.html", "skill/*.md", "skill/references/*.md", "skill/agents/*.yaml",
+    "starters/*/map.json", "starters/*/routes/*.json"]

@@ -570,3 +570,140 @@ def test_an_option_scrolled_off_screen_is_still_a_target_that_is_off_screen():
     tree = ui.read(xml(group), SCREEN)
     assert tree.items == [] and [(e.role, e.label, e.no_trait) for e in tree.offscreen] == [
         ("radio", "Yearly", True), ("text", "Yearly", False)]
+
+
+ALERT_XML = """<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Wayfare" label="Wayfare" x="0" y="0" width="430" height="932">
+<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">
+<XCUIElementTypeAlert type="XCUIElementTypeAlert" name="Allow notifications?" label="Allow notifications?" x="78" y="360" width="274" height="180">
+<XCUIElementTypeOther type="XCUIElementTypeOther" x="78" y="360" width="274" height="180">
+<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="Allow notifications?" label="Allow notifications?" value="Allow notifications?" x="94" y="376" width="242" height="22"/>
+{message}
+<XCUIElementTypeButton type="XCUIElementTypeButton" name="Don't Allow" label="Don't Allow" x="78" y="490" width="137" height="50"/>
+<XCUIElementTypeButton type="XCUIElementTypeButton" name="Allow" label="Allow" x="215" y="490" width="137" height="50"/>
+</XCUIElementTypeOther></XCUIElementTypeAlert></XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>"""
+
+
+def alert_tree(message: str = "Wayfare would like to send you notifications.") -> ui.Tree:
+    body = (f'<XCUIElementTypeStaticText type="XCUIElementTypeStaticText" name="{message}" label="{message}" '
+            f'value="{message}" x="94" y="404" width="242" height="40"/>') if message else ""
+    return ui.read(ALERT_XML.replace("{message}", body), SCREEN)
+
+
+def test_the_alert_line_carries_the_alerts_message():
+    tree = alert_tree()
+    assert tree.alert is not None and tree.alert.message == "Wayfare would like to send you notifications."
+    assert ui.alert_line(tree.alert) == ('Alert: "Allow notifications?" "Wayfare would like to send you notifications." '
+                                         "[Don't Allow] [Allow]")
+    text = ui.describe(tree.items, SCREEN, 3, ("Wayfare", "com.example.wayfare"), tree.alert, False)
+    assert text.splitlines()[2].startswith('Alert: "Allow notifications?" "Wayfare would')
+
+
+def test_an_alert_without_a_message_keeps_todays_line():
+    tree = alert_tree("")
+    assert tree.alert is not None and tree.alert.message == ""
+    assert ui.alert_line(tree.alert) == 'Alert: "Allow notifications?" [Don\'t Allow] [Allow]'
+
+
+def test_the_alert_message_is_cut_like_element_text_and_redacted_before_the_cut():
+    long = "word " * 80
+    line = ui.alert_line(ui.Alert("Title", ("OK",), (0, 0, 1, 1), long))
+    assert '…(+' in line and line.endswith("[OK]")
+    secret = "hunter2-secret"
+    token = ui.REDACT.set(lambda t: t.replace(secret, "<tester's password>"))
+    try:
+        # the value sits across the cut: redacted first, so no half of it is left behind
+        padded = "x" * 195 + secret
+        line = ui.alert_line(ui.Alert("T", ("OK",), (0, 0, 1, 1), padded))
+    finally:
+        ui.REDACT.reset(token)
+    assert "hunter" not in line and "secret" not in line
+
+
+def test_the_message_is_data_for_the_line_not_a_policy_word_and_control_marks_go():
+    alert = ui.Alert("Delete trip?", ("Cancel", "Delete"), (0, 0, 1, 1), "‎Send\n  Post  it")
+    assert 'Alert: "Delete trip?" "Send Post it"' in ui.alert_line(alert) or "Send" in ui.alert_line(alert)
+
+
+def test_the_keyboard_accessory_window_hides_nothing_but_its_bar():
+    """Seen on the phone 2026-11-14 (Reminders' New Reminder sheet): UIKit hosts the bar over the keyboard in a
+    full-screen window that starts with an empty full-screen view, like a sheet's backdrop; it is no layer, so the
+    sheet's fields stay listed. Shape from a capture with every text replaced; synthetic words."""
+    def window(inner):
+        return ('<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+                f'{inner}</XCUIElementTypeWindow>')
+    app_window = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="59" width="430" height="873">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="-430" y="-932" width="1290" height="2796"/>'
+        '<XCUIElementTypeTable type="XCUIElementTypeTable" x="0" y="59" width="430" height="873">'
+        '<XCUIElementTypeCell type="XCUIElementTypeCell" x="20" y="141" width="390" height="76">'
+        '<XCUIElementTypeTextField type="XCUIElementTypeTextField" name="title-field" label="Title" x="40" y="158" '
+        'width="350" height="42"/></XCUIElementTypeCell></XCUIElementTypeTable></XCUIElementTypeOther>')
+    accessory = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932"/>'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="558" width="430" height="374">'
+        '<XCUIElementTypeToolbar type="XCUIElementTypeToolbar" name="Toolbar" x="0" y="558" width="430" height="48">'
+        '<XCUIElementTypeButton type="XCUIElementTypeButton" name="Flag" label="Flag" x="352" y="563" width="53" '
+        'height="38"/></XCUIElementTypeToolbar>'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" name="inputView" x="0" y="614" width="430" height="318"/>'
+        '</XCUIElementTypeOther></XCUIElementTypeOther>')
+    keys = window(
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+        '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="631" width="430" height="243">'
+        '<XCUIElementTypeKeyboard type="XCUIElementTypeKeyboard" x="0" y="631" width="430" height="243">'
+        '<XCUIElementTypeKey type="XCUIElementTypeKey" name="q" label="q" x="4" y="640" width="40" height="40"/>'
+        '</XCUIElementTypeKeyboard></XCUIElementTypeOther></XCUIElementTypeOther>')
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Reminders" '
+              'label="Reminders" bundleId="com.apple.reminders" x="0" y="0" width="430" height="932">'
+              f'{app_window}{accessory}{keys}</XCUIElementTypeApplication></AppiumAUT>')
+    tree = ui.read(source, (430.0, 932.0))
+    assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"]
+    assert any(e.label == "Flag" for e in tree.items) and tree.keyboard
+    # as the phone really shows it: the Toolbar inside a labelled plain view, with no focus on the field
+    wrapped = source.replace('<XCUIElementTypeToolbar ', '<XCUIElementTypeOther type="XCUIElementTypeOther" '
+                             'name="Accessory" label="Accessory" x="0" y="558" width="430" height="56">'
+                             '<XCUIElementTypeToolbar ', 1).replace('</XCUIElementTypeToolbar>',
+                                                                    '</XCUIElementTypeToolbar></XCUIElementTypeOther>', 1)
+    tree = ui.read(wrapped, (430.0, 932.0))
+    assert [e.identifier for e in tree.items if e.role == "input"] == ["title-field"] and not tree.behind
+
+
+def test_an_id_that_carries_content_is_never_in_a_places_key():
+    """Seen on the phone 2026-11-14: Calendar's day view names each event `event-shown:<the event's title>`; a learned map
+    would keep the title in plain text. Ids with a prefix and content, an address, a long number, a UUID or non-ASCII
+    text are left out of the structure; a developer's ids (iOS's own have spaces) stay."""
+    kept = ["explore-search", "Quick Entry Title Field", "RemindersUICore.TTRIQuickEntryView"]
+    dropped = ["event-shown:Synthetic Lunch", "someone@example.com", "row-1234567",
+               "3F2504E0-4F89-11D3-9A0C-0305E82C3301", "café-button", "x" * 65, "trip/42"]
+    rows = "".join(f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{n}" label="Tap" x="10" y="{100 + 40 * i}" '
+                   f'width="300" height="30"/>' for i, n in enumerate(kept + dropped))
+    source = ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" label="Lab" '
+              'bundleId="com.example.lab" x="0" y="0" width="430" height="932">'
+              f'<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">{rows}'
+              '</XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
+    assert set(ui.read(source, (430.0, 932.0)).structure.ids) == set(kept)
+
+
+def test_the_focused_field_is_never_behind_a_layer():
+    """Seen on the phone 2026-11-14 (Calendar's search): a later full-screen container that starts with an empty
+    full-screen view (like a sheet's backdrop) and holds a button reads as a presentation over the search bar, whose
+    field has the keyboard. The runner's focus says the field is in front, so that layer hides nothing there."""
+    def search_field(focused):
+        attr = ' focused="true"' if focused else ""
+        return (f'<XCUIElementTypeSearchField type="XCUIElementTypeSearchField" name="Search" label="Search" x="20" '
+                f'y="58" width="331" height="48"{attr}/>')
+
+    def source(focused):
+        return ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="Lab" label="Lab" '
+                'bundleId="com.example.lab" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="121">'
+                f'{search_field(focused)}</XCUIElementTypeOther>'
+                '<XCUIElementTypeOther type="XCUIElementTypeOther" name="results" label="Results" x="0" y="0" width="430" '
+                'height="932"><XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932"/>'
+                '<XCUIElementTypeButton type="XCUIElementTypeButton" name="Today" label="Today" x="176" y="861" '
+                'width="78" height="38"/></XCUIElementTypeOther>'
+                '</XCUIElementTypeOther></XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
+    assert any(e.role == "input" for e in ui.read(source(True), (430.0, 932.0)).items)
+    assert not any(e.role == "input" for e in ui.read(source(False), (430.0, 932.0)).items)  # (the read as before)

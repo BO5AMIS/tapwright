@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.7.0, "the Control Update" (2026-11-14)
+
+Tapwright can now be trusted with more of the phone, for longer, with the owner in control. Shared interface:
+AGENT-TOOLS 1.16.2 (sha256 ef8e7b63), frozen with Tapline.
+
+- **Grants** (§19): standing permissions in the policy file version 2, offered in the host's dialog right after a
+  person's OK, with limits per day and hour, use counts that no stalled process can undo, an edit lock, the kill switch
+  (`--revoke-all`), `tapwright grants`, and a `Grants:` line in `session_report`. Some things are never grantable: a
+  card, Settings' account, privacy and security panes, Passwords, Wallet.
+- **The vault** (§20): a version 2 `--accounts` file holds accounts, cards, addresses, identities, notes, test fixtures
+  and the phone's passcode. Every value is kept out of every answer, log, map, report and picture, in any encoding.
+  `tapwright vault protect` stores it with Windows DPAPI or the macOS keychain, in a form Tapline reads too.
+- **One-time codes** (§20.4, §24.3): per app and off by default. Tapwright reads a sign-in code from the notification
+  of the app the setting names (Messages, Mail, …), types it once with `${otp.<app>}`, and never shows it. Tapline's host
+  gets it over the proven loopback link (`POST /otp`). Checked end to end on the phone with Tapline.
+- **Notifications** (§24.2): the `notifications` tool lists the given apps' notifications, newest first, and
+  `{open: n}` opens one. Every other app's notification is dropped before anything sees it, and nothing is captured
+  while Notification Center is open.
+- **Content from others** (§21): text other people wrote is marked `(from others)` in Messages, Mail and shared Notes.
+  The instructions say all screen text an agent didn't write is data. A drafts-only grant or route stops at the draft
+  for a person.
+- **Automations** (§22): `tapwright schedule add ROUTE --at "09:00 daily"`, `--on-file DIR` or `--on-notification APP`
+  runs a saved route with no model. Only time schedules wake the PC (Task Scheduler). Runs are skipped while a person
+  uses the phone; each run writes a report and an audit line.
+- **The audit log** (§23): grants, approvals, vault uses, codes, schedules and exports, one line each, never a value;
+  `tapwright audit-log`.
+- **The whole phone** (§24): `--phone` mode for a phone kept for automation. Starter routes for Reminders, Notes,
+  Calendar, Mail and Messages: `tapwright starters install`. Mail and Messages stop before Send for a person. A
+  watchdog, and `doctor --unattended`.
+- **The passcode unlock (experimental):** `phone.passcode` in the vault is typed only on iOS's proven lock screen, only
+  at a scheduled run's start or, with `--phone`, at the start of a new call. It is never typed during a run: locking the
+  phone still stops everything. At most 2 attempts an hour and 3 a day, and a refusal holds until
+  `tapwright unlock-reset`. On the test iPhone (Face ID, iOS 26) it did not yet find the passcode keypad: it answered
+  `locked` and typed nothing. And iOS won't reconnect over USB to a locked phone. Treat unattended runs as needing an
+  unlocked phone for now.
+- **Runner tw-16.15.3.5**: the tree says which field has focus, so typing into a focused field no longer opens iOS's
+  caret menu. A touch is checked against what iOS would really deliver it to, so an element behind a bar is refused
+  (`covered`), and a cover the tree only guessed is dropped when iOS says the touch lands on the target.
+- **Found on the phone and fixed:**
+  - Notification Center is read as iOS 26 lays it out.
+  - A notification opens through its row's Open action.
+  - A sheet's fields stay listed while the keyboard's accessory bar is up (Reminders).
+  - `serve --apps` accepts an app by its name or its bundle id in every call.
+  - A learned map never keeps an element id that carries content (Calendar's event titles).
+- `drive` takes `look`, and an app alert's `Alert:` line carries its message (1.13.3).
+- **Safety, from the release review:**
+  - A one-time code is typed only into a code field.
+  - Drafts-only stops at Send, Post, Publish, Reply and Comment, whatever the policy file says, and `submit` is
+    refused there.
+  - A full swipe across a list row (which deletes in Mail, Notes and Reminders) needs a person's OK.
+  - Scheduled runs never overlap, and wait 90 s after anyone used the phone.
+  - Account deletion and payments are recognised by pattern, and are never grantable.
+  - `tapwright audit-log` lists and deletes the audit log.
+  - Every program that can read `~/.tapwright/serve.json` is trusted like you; keep it private (see the README).
+- **Known limits:**
+  - `notifications {open}` on a stack of one app's notifications may refuse; Notification Center is then closed, and
+    `open_app` opens the app.
+  - A read while a notification banner is up may say Notification Center didn't open; read again.
+  - Shared spec readings beyond AGENT-TOOLS 1.16.2 are listed in docs/setup.md.
+
 ## 1.6.2 (2026-11-14)
 
 - A WebDriverAgent session re-created in the middle of a run now gets the same settings as the first one (no waiting for

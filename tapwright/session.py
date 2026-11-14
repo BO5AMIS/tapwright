@@ -64,6 +64,14 @@ FAST_READ = os.environ.get("TAPWRIGHT_FAST_READ", "1")
 TREE_PATH = "/wda/tw/tree"  # (without a session, as SOURCE_PATH: the same app is read)
 FRONT_IN_TAP = os.environ.get("TAPWRIGHT_FRONT_IN_TAP", "1")
 FRONT_REFUSED = "tapwright front:"  # how the fork's tap starts its refusal: another app is in front, nothing touched
+# The fork's route version 5 (Tapwright 1.7 part 7) adds the keyboard focus to the compact read ("f": Element.focused)
+# and a hit test: GET HIT_PATH?x=&y= answers the element iOS finds at a portrait point, the one a touch there goes to
+# (QUALITY-BAR 2.5 R3: a target something the list doesn't show as a bar is drawn over is refused `covered`). One more
+# request before a touch on an element; any error, an older runner or landscape means no check (1.6's behaviour).
+# TAPWRIGHT_HIT_CHECK=0 turns the check off.
+HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
+HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
+HIT_WAIT = 3.0  # seconds: the runner waits at most 0.3 s for the element and 2 s for its values
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -132,6 +140,7 @@ class Session:
         self.tw_version = 0  # the fork's route version the runner answered with (0: Appium's build, or not asked yet)
         self.fast_read: bool | None = None  # whether the compact read works on this runner (None: not tried yet)
         self.last_compact: tuple[str, str] | None = None  # (token, XML) of the last compact read: "unchanged" reuses it
+        self.last_source: str | None = None  # the XML of the latest tree read, for placing a hit test's element in it
         # Set by the daemon for a personal-mode tap whose app-in-front check the fork's tap makes (see FRONT_IN_TAP):
         # the given bundle ids. While it is set, nothing else may act on the phone (FrontUnchecked); the tap that
         # passes the check clears it.
@@ -140,6 +149,9 @@ class Session:
         # re-created mid-run waits for animations (a blinking caret) on every read, 1 to 3 s each. The daemon sets
         # the stream's preset into it too (stream.PRESETS), so a re-created session has the current quality as well.
         self.session_settings: dict = dict(NO_IDLE_WAIT)
+        # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
+        # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
+        self.on_tree = None
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -206,6 +218,7 @@ class Session:
         self.typed_into = None
         self.last_point = None
         self.last_compact = None
+        self.last_source = None
 
     async def _call(self, method: str, path: str, payload: dict | None = None, timeout: float = 30,
                     again: bool | None = None) -> dict:
@@ -321,6 +334,7 @@ class Session:
                 still = " and it is still there" if await self._banner_over_an_app(source) else ""
                 getattr(self.device, "log", lambda *a: None)(
                     f"a notification banner was over the app: the read waited {waited:.1f} s{still}")
+            self.last_source = source if isinstance(source, str) else None
             return source
         except (PhoneLocked, AppNotAnswering):
             raise
@@ -372,6 +386,15 @@ class Session:
         self.fast_read = True
         self.last_compact = (token, source)
         return source
+
+    async def read_center(self, timeout: float = READ_CUT) -> str:
+        """Notification Center's tree (SpringBoard's) as XML, read once and kept nowhere: not as the last read, not as the
+        compact read's token, never traced but for its timing (notifications.py drops every other app's notification
+        from it at once). No banner wait: its notifications are what is read."""
+        try:
+            return str(await self._read_tree(timeout) or "")
+        finally:
+            self.last_compact = None
 
     async def foreground_bundle_id(self) -> str | None:
         try:
@@ -458,6 +481,7 @@ class Session:
         self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self._seen_tree(tree)
         return Snapshot(tree, self.app, self.scale)
 
     async def screenshot_png(self) -> bytes:
@@ -498,6 +522,18 @@ class Session:
         # (kept as XCTest says it, to be matched with the tree's elements: audit.rows_of redacts what it shows)
         return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
+    async def read_source(self, timeout: float = 60) -> str | None:
+        """The tree's XML now, kept as `last_source` only (the agent's list stays as it is): for placing a hit test's
+        element that the last read didn't have (Codex, PR #12 cycle 1, M1)."""
+        source = await self._source(timeout)
+        return source if isinstance(source, str) else None
+
+    async def peek_tree(self, timeout: float = 60) -> ui.Tree:
+        """Read the tree and keep nothing of it: `items` and the rest stay as the last read left them (one request). For a
+        check right before a touch that must see the screen as it is now without renumbering the agent's list (a draft's
+        digest: Codex, PR #12 cycle 1, H3)."""
+        return ui.read(await self._source(timeout), self.screen)
+
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = await self._source(timeout)
@@ -506,7 +542,15 @@ class Session:
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self._seen_tree(tree)
         return tree
+
+    def _seen_tree(self, tree: ui.Tree) -> None:
+        if self.on_tree is not None:
+            try:
+                self.on_tree(tree)
+            except Exception:  # a watcher's fault never fails a read
+                pass
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:
         """(x, y, what to say) for a target, on the elements of the last look."""
@@ -590,6 +634,33 @@ class Session:
         if checked:
             self.front_apps = None  # the app in front was one of them as the touch went out: the check is done
         return True
+
+    async def hit_at(self, x: float, y: float) -> ui.Hit | None:
+        """The element a touch at (x, y) would land on, as the fork's hit test says (HIT_PATH, route version 5). None
+        when it can't be asked or told: the check is off, the phone isn't upright (the route takes portrait points),
+        the runner is older, or any error but a dropped line (raised, as the touch would raise it)."""
+        if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
+            return None
+        await self.ensure()
+        await self._fast_routes()
+        if self.tw_version < 5:
+            return None
+        began = time.monotonic()
+        try:
+            # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again)
+            answer = await self._call("GET", f"{HIT_PATH}?x={x:.2f}&y={y:.2f}", timeout=HIT_WAIT, again=False)
+        except ConnectionLost:
+            raise
+        except Exception as e:  # noqa: BLE001 - whatever stopped the check, the touch goes unchecked
+            getattr(self.device, "log", lambda *a: None)(f"hit test refused ({e}): the touch goes unchecked")
+            trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
+            return None
+        trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
+        value = answer.get("value") if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("hit_wda_ms", {k: v for k, v in value["ms"].items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        return ui.hit_of(value)
 
     def front_by_touch(self) -> bool:
         """Can the next tap check the app in front itself (personal mode, FRONT_IN_TAP)? Only when it would go through
@@ -705,7 +776,17 @@ class Session:
             focused, self.typed_into = self.typed_into, None
             if key and focused and focused[0] == key and await self._active_element() == focused[1]:
                 element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
+            elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
+                  and (element := await self._active_element()) is not None and await self._is_field(element, hit)):
+                # the runner's read says this very field has the keyboard focus (its `f`, never a guess from frames or
+                # labels: 1.6.2): a tap on it would only open iOS's caret menu (Select, Paste). Where the caret is
+                # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype.
+                # The element focused NOW must be that field (its name, else its place in a fresh read): the app may
+                # have moved the focus since the read, and a clear and the keys would go to another field, a value
+                # of the vault with them (CodeRabbit, PR #12, session.py)
+                switched = False
             else:
+                element = None  # (a focused element that isn't the field is never typed into: focus it first)
                 # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
                 # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than
                 # WebDriverAgent's clear, measured on the phone 2026-11-11). Only where the field's middle shows

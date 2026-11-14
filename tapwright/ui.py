@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
-from . import accounts, trace
+from . import accounts, fromothers, trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -25,8 +25,10 @@ from .device import DeviceError
 USERS_EYES: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_users_eyes", default=False)
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
-# or focus attribute, so visibility comes from the rect and a focused input can't be known.
+# or focus attribute, so visibility comes from the rect. The fork's compact read (route version 5) says which element
+# has the keyboard focus: xml_of_tree writes it as FOCUSED_ATTR, which `read` turns into Element.focused.
 SOURCE_PATH = "/source?format=xml&excluded_attributes=visible,accessible"
+FOCUSED_ATTR = "focused"  # (only ever "true", and only from the compact read: /source on iOS never writes it)
 
 # Element types worth listing even without a label (things an agent can act on).
 INTERACTIVE = {"Button", "TextField", "SecureTextField", "TextView", "SearchField", "Switch", "Slider",
@@ -67,6 +69,8 @@ def _text(v) -> str:
     """The text, without the invisible direction marks iOS puts around numbers ("‎42")."""
     return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
+
+MARK_OTHERS = "(from others)"  # AGENT-TOOLS §21.1
 
 REDACT: ContextVar[Callable[[str], str] | None] = ContextVar("tapwright_redact", default=None)
 
@@ -147,13 +151,16 @@ class Element:
     actions: tuple[str, ...] = ()
     type: str = ""  # the XCUIElementType without its prefix
     in_alert: bool = False  # inside an OS alert
-    focused: bool = False  # the keyboard's target; this tree read can't tell, so always False
+    # the keyboard's target, as the runner's compact read says (route version 5: the node or, for an input, one inside
+    # it has XCTest's hasKeyboardFocus). False when the read can't tell (/source, an older runner)
+    focused: bool = False
     name: str = ""  # WebDriverAgent's raw name: what `id` matches, even when it only mirrors the label
     secure: bool = False  # a password field: its value is never shown
     covered_by: tuple[Bar, ...] = ()  # bars over this element's centre that aren't its ancestors
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
     no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
+    others: bool = False  # text the tool knows other people wrote (AGENT-TOOLS §21.1, fromothers.py); False claims nothing
 
     @property
     def x(self) -> float:
@@ -195,6 +202,8 @@ class Element:
         eyes = USERS_EYES.get()
         parts = [self.ref] if ref else []
         parts.append(self.role)
+        if self.others and self.text:
+            parts.append(MARK_OTHERS)  # between the role and the quoted text, never cut (§21.1)
         if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
             parts.append("(icon only)")
             parts.append(f"(VoiceOver: {clip(self.text)})")
@@ -235,6 +244,7 @@ class Alert:
     title: str
     buttons: tuple[str, ...]
     rect: tuple[float, float, float, float]
+    message: str = ""  # the body text under the title (AGENT-TOOLS 1.14 §3.2), "" when the alert has none
 
 
 @dataclass(frozen=True)
@@ -282,6 +292,7 @@ COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar", "Keyboard"}  # what a tou
 #   opaque content: no backdrop, and what it lists fills LAYER_FILL of the screen: what is inside those
 #     listed rects is hidden.
 LAYER_MAX_DEPTH = 6
+INPUT_VIEW = "inputView"  # UIKit's own name for the view that hosts the keyboard in the accessory bar's window
 LAYER_COVER = 0.95
 LAYER_FILL = 0.5
 BACKDROP_WIDTH = 0.95
@@ -453,6 +464,8 @@ def xml_of_tree(root: object) -> str:
             parts.append(f' processId="{pid}"')
         if "b" in node:
             parts.append(f' bundleId="{_attr(node["b"])}"')
+        if node.get("f") == 1 and not isinstance(node.get("f"), bool):
+            parts.append(f' {FOCUSED_ATTR}="true"')  # (version 5) the keyboard focus
         children = node.get("c")
         if children:
             if not isinstance(children, list):
@@ -465,6 +478,139 @@ def xml_of_tree(root: object) -> str:
             parts.append("/>")
             out.append("".join(parts))
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class Hit:
+    """What the fork's hit test (GET /wda/tw/hit, route version 5) says a touch at a point lands on: the element's
+    type (without the prefix), name, label and frame as the tree has them, and its app's bundle id ("" unknown)."""
+    type: str
+    name: str
+    label: str
+    rect: tuple[float, float, float, float]
+    bundle: str = ""
+
+
+def hit_of(value: object) -> Hit | None:
+    """The runner's hit test answer as a Hit; None when it isn't one (the touch then goes unchecked)."""
+    if not isinstance(value, dict):
+        return None
+    kind, rect = value.get("t"), value.get("r")
+    if not isinstance(kind, str) or not _TYPE_NAME.fullmatch(kind) or not isinstance(rect, list) or len(rect) != 4:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in rect):
+        return None
+    name, label, bundle = (value.get(k) for k in ("n", "l", "b"))
+    return Hit(kind.removeprefix(TYPE_PREFIX), _text(name) if isinstance(name, str) else "",
+               _text(label) if isinstance(label, str) else "", tuple(float(v) for v in rect),  # type: ignore[arg-type]
+               bundle if isinstance(bundle, str) else "")
+
+
+def _is_node(node: ET.Element, kind: str, rect: tuple[float, ...], name: str, label: str | None = None) -> bool:
+    """Is the node the element of this type, name and frame and, when `label` is given, with that label (XCTest's raw
+    one, or as `elements` words an RN radio's: rn_label)?"""
+    if not (_kind(node) == kind and _text(node.get("name")) == name and _same_rect(_rect(node), rect)):
+        return False
+    return label is None or _same_label(_text(node.get("label")), label)
+
+
+def _same_label(raw: str, label: str) -> bool:
+    """Is XCTest's raw label `raw` the label `label` (the tree's, or a hit's)? An RN radio's or checkbox's role and state
+    words count as left out, as the tree leaves them out (rn_label)."""
+    return raw == label or rn_label(raw) == label or raw == rn_label(label)
+
+
+HOLDER_KINDS = frozenset({"Window", "Application"})
+# the processes that draw the keyboard out of the app's own (a hit on the keys there is not something over the app)
+KEYBOARD_HOSTS = frozenset({"com.apple.InputUI", "com.apple.TextInput.kbd", "com.apple.KeyboardUI"})
+
+
+def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
+    """Where the element a touch at the target's point lands on (`hit`) stands to the target, by the tree `source`
+    (the latest read's XML): "same" (the target itself), "inside" (an element within it), "ancestor" (one that holds
+    it: iOS found nothing deeper there, so nothing else is over it), "holder" (what holds it is a Window, the
+    Application, the tree's root or a view of (nearly) the whole screen: a view with no accessibility node of its own,
+    a dimming view or an overlay, falls back to that, so it proves nothing either way), "other" (something else
+    takes the touch: the target is covered), or "unplaced" (the tree can't place both, and the hit lies within the
+    target's frame). Elements are told apart by type, name and frame (within a point), as both reads give them.
+    "unplaced" proves nothing: an overlay or another process's control drawn over the target after the read fits its
+    frame as well as a label inside it does, so only the tree makes a hit "inside" (Codex, PR #12 cycle 1, M1). Where the
+    tree can't place both and the hit isn't within the target's frame: "other".
+    An element is the same one only with the same label too: an app that reuses a control's identifier and frame for
+    another action (Terms became Delete account) is "changed", never "same", and a hit is placed in the tree only by a
+    node with its label (Codex, PR #12 cycle 2, M1): what the policy judged is what the touch lands on."""
+    if hit.type == target.type and hit.name == target.name and _same_rect(hit.rect, target.rect):
+        return "same" if _same_label(hit.label, target.label) else "changed"
+    root = None
+    if source:
+        try:
+            root = ET.fromstring(_clean(source))
+        except ET.ParseError:
+            root = None
+    if root is not None:
+        targets = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name, target.label)]
+        hits = [n for n in root.iter() if _is_node(n, hit.type, hit.rect, hit.name, hit.label)]
+        if targets and hits:
+            parents = {child: up for up in root.iter() for child in up}
+            for node in hits:
+                up: ET.Element | None = node
+                while up is not None:
+                    if any(up is t for t in targets):
+                        return "same" if up is node else "inside"
+                    up = parents.get(up)
+            sx, sy, sw, sh = _rect(next((n for n in root.iter() if _kind(n) == "Application"), root))
+            whole = sw * sh
+            for node in targets:
+                up = parents.get(node)
+                while up is not None:
+                    if any(up is h for h in hits):
+                        o = _overlap(_rect(up), (sx, sy, sw, sh)) if whole > 0 else (0.0, 0.0, 0.0, 0.0)
+                        if (up is root or _kind(up) in HOLDER_KINDS or parents.get(up) is None
+                                or (whole > 0 and o[2] * o[3] >= LAYER_COVER * whole)):
+                            return "holder"
+                        return "ancestor"
+                    up = parents.get(up)
+            return "other"
+    x, y, w, h = hit.rect
+    tx, ty, tw, th = target.rect
+    inside = x >= tx - 1 and y >= ty - 1 and x + w <= tx + tw + 1 and y + h <= ty + th + 1
+    return "unplaced" if inside else "other"
+
+
+def hit_line(hit: Hit, items: list[Element]) -> str:
+    """The hit element as an agent's list shows it: its line with its ref when the list has it (type, name and frame
+    agree), else a line without a ref."""
+    for e in items:
+        if _listed_as(e, hit):
+            return e.line(actions=False)
+    identifier = "" if hit.name == hit.label else hit.name
+    return Element("", ROLES.get(hit.type, hit.type.lower()), hit.label, identifier, rect=hit.rect,
+                   type=hit.type, name=hit.name).line(ref=False, actions=False)
+
+
+def _listed_as(e: Element, hit: Hit) -> bool:
+    return e.type == hit.type and e.name == hit.name and _same_rect(e.rect, hit.rect) and _same_label(hit.label, e.label)
+
+
+def listed(hit: Hit, items: list[Element]) -> bool:
+    """Is the hit an element of the agent's list (type, name, frame and label agree)?"""
+    return any(_listed_as(e, hit) for e in items)
+
+
+def foreign_hit_line(hit: Hit) -> str:
+    """What another app's element over the target is, without any of its words (Codex, PR #12 cycle 2, M2): a banner, a
+    sheet or a control of another app shown by its kind and frame only. Its label, value and identifier are that app's
+    content, and personal mode never passes them on."""
+    x, y, w, h = (round(v) for v in hit.rect)
+    return f"another app's {ROLES.get(hit.type, 'view')} @{x},{y} {w}x{h}"
+
+
+def _has_focus(node: ET.Element, role: str) -> bool:
+    """Does the runner's read say this element has the keyboard focus (FOCUSED_ATTR)? An input counts when the focus
+    is on a node inside it too, as XCTest's own typing check counts it (a text view's inner text)."""
+    if node.get(FOCUSED_ATTR) == "true":
+        return True
+    return role == "input" and any(n.get(FOCUSED_ATTR) == "true" for n in node.iter())
 
 
 def _kind(node: ET.Element) -> str:
@@ -580,7 +726,28 @@ def _upright_keyboard(root: ET.Element, screen: tuple[float, float]) -> None:
 
 def _alert(node: ET.Element) -> Alert:
     buttons = [_text(n.get("label")) or _text(n.get("name")) for n in node.iter() if _kind(n) == "Button"]
-    return Alert(_text(node.get("label")) or _text(node.get("name")), tuple(b for b in buttons if b), _rect(node))
+    title = _text(node.get("label")) or _text(node.get("name"))
+    return Alert(title, tuple(b for b in buttons if b), _rect(node), _alert_message(node, title))
+
+
+def _alert_message(node: ET.Element, title: str) -> str:
+    """The alert's body: the text of its StaticTexts that are neither the title nor inside a button, in reading order,
+    each once, joined by a space (AGENT-TOOLS §3.2). WDA gives an alert's title as its label and the title and the message as
+    StaticTexts, so the title's own StaticText is left out."""
+    parts: list[str] = []
+
+    def walk(n: ET.Element) -> None:
+        for child in n:
+            kind = _kind(child)
+            if kind == "Button":
+                continue
+            if kind == "StaticText":
+                text = _text(child.get("value")) or _text(child.get("label")) or _text(child.get("name"))
+                if text and text != title and text not in parts:
+                    parts.append(text)
+            walk(child)
+    walk(node)
+    return " ".join(parts)
 
 
 def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool = False) -> Tree:
@@ -712,13 +879,14 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             checked = loose.checked if loose else (value == "1") if role == "switch" else None
             candidate = Element("", role, label, identifier, value, rect, enabled,
                                 "Selected" in traits, checked, ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind,
-                                in_alert, False, name, kind == "SecureTextField",
+                                in_alert, _has_focus(node, role), name, kind == "SecureTextField",
                                 placeholder=_text(node.get("placeholderValue")),
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
-                # that takes an action; both or neither, the ancestor
+                # that takes an action; both or neither, the ancestor. The one listed has the focus either had
+                parent.focused = candidate.focused = parent.focused or candidate.focused
                 if candidate.actions and not parent.actions:
                     i = next(i for i, f in enumerate(found) if f[0] is parent)
                     found[i] = (candidate, found[i][1], found[i][2])  # in the parent's place and span
@@ -747,7 +915,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
             for k, child in enumerate(node):
                 if k and spans[k][1] > spans[k][0]:  # the earlier children, under what the layer hides
-                    rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends)
+                    rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends, kind)
                     hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
@@ -770,9 +938,20 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    if tree.app and tree.app[1] in fromothers.KNOWN_APPS:  # §21.1: only where the tool can know
+        theirs = fromothers.mark(root, tree.app[1], screen)
+        for e, number, _ in found:
+            if e.role in fromothers.MARKED_ROLES and numbered.get(number) in theirs:
+                e.others = True
     tree.structure = _structure(root, screen_rect)
     tree.back = _back_of(root, screen) if screen else None
 
+    # The field iOS says has the keyboard focus is in front: a layer that would hide it is no layer there (seen on the
+    # phone 2026-11-14: Calendar's search results, a full-screen container that starts with an empty full-screen view
+    # like a sheet's backdrop, hid the search bar whose field had the keyboard). Only the runner's focus says so.
+    # Only the focused element is exempt: the rest of what the layer covers stays hidden (a modal over a form whose
+    # field kept the focus still hides the form's buttons).
+    focused = {number for e, number, _ in found if e.focused}
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
     def over(number: int, point: tuple[float, float], barlike: bool) -> tuple[int, int] | None:
@@ -783,7 +962,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     shown: list[tuple[Element, int, tuple[int, ...]]] = []
     under: list[tuple[Element, tuple[int, int]]] = []  # what a layer hides, with that layer's range
     for e, number, inside in found:
-        layer = None if keyboards & set(inside) else over(number, e.center, bool(inside) or e.type in BARS)
+        layer = None if number in focused or keyboards & set(inside) else over(number, e.center,
+                                                                               bool(inside) or e.type in BARS)
         if layer is None:
             shown.append((e, number, inside))
         else:
@@ -853,6 +1033,22 @@ def _reaches(node: ET.Element, screen: tuple[float, float, float, float] | None)
     return screen is None or (x < screen[0] + screen[2] and x + w > screen[0] and y < screen[1] + screen[3] and y + h > screen[1])
 
 
+_CONTENT_ID = re.compile(r"[:@/\\]|\d{6}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+_ID_SHAPE = re.compile(r"[A-Za-z0-9._\- ]+")  # (an allow-list, review 1.7 B-L4: what developers write; iOS's own ids too)
+STRUCTURAL_ID_MAX = 64
+
+
+def structural_id(name: str) -> bool:
+    """Is this identifier one a developer wrote (kept in a place's key, and so in the map file), not one that carries
+    content? An id with a `:`, `@`, `/` or `\\` (a prefix and then content: seen on the phone 2026-11-14, Calendar's
+    `event-shown:<the event's title>`), six digits in a row, a UUID, a letter outside ASCII, or more than 64 characters is
+    left out, and so is any character but ASCII letters, digits, `.`, `_`, `-` and the space (an allow-list, review 1.7
+    B-L4: a name such as "O'Brien", or a title with a `,`, `?`, `!`, `#` or `&`, is content). Spaces are kept: iOS's own
+    ids have them ("Quick Entry Title Field")."""
+    return (0 < len(name) <= STRUCTURAL_ID_MAX and _ID_SHAPE.fullmatch(name) is not None
+            and _CONTENT_ID.search(name) is None)
+
+
 def _structure(root: ET.Element, screen: tuple[float, float, float, float] | None) -> Structure:
     """What the screen is made of (see Structure), from the parsed tree. Only what is on screen counts; the keyboard
     and an alert are not part of the app's screen. A list row is a Cell and everything inside it: its identifier and
@@ -869,8 +1065,9 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         if not centred and not _reaches(node, screen):
             return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        if centred and name and name != label and name not in IOS_NOISE and kind not in ("Application", "Window", "NavigationBar"):
-            ids.add(name)
+        if (centred and name and name != label and name not in IOS_NOISE
+                and kind not in ("Application", "Window", "NavigationBar") and structural_id(name)):
+            ids.add(name)  # (an id that carries content never goes into a key: structural_id)
         shown = STRUCTURE_KINDS.get(kind)
         if shown == "list" and kind == "ScrollView" and any(_kind(n) in INPUT_TYPES for n in node.iter()):
             shown = "form"
@@ -914,7 +1111,7 @@ def _plain(node: ET.Element) -> Element | None:
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
     return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
                    loose.checked if loose else (value == "1") if role == "switch" else None,
-                   ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, False, name,
+                   ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, _has_focus(node, role), name,
                    kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")), no_trait=loose is not None)
 
 
@@ -977,9 +1174,44 @@ def _backdrop(span: tuple[int, int], found: list[tuple[Element, int, tuple[int, 
     return None
 
 
+def _accessory_window(child: ET.Element, parent_kind: str, span: tuple[int, int],
+                      found: list[tuple[Element, int, tuple[int, ...]]], numbered: dict[int, ET.Element],
+                      screen: tuple[float, float, float, float]) -> bool:
+    """Is this layer UIKit's window for the keyboard's accessory bar, in the shape UIKit gives it: a Window (or a
+    full-screen view right inside one) holding plain views, one of which is the bar's container: a plain view, not
+    full-screen, whose children are its toolbar(s) and the plain view named `inputView`. Everything the layer lists
+    is inside that container. An app's own element named `inputView` (a React Native testID) inside a modal is not
+    that shape, so the modal stays a layer."""
+    if _kind(child) != "Window" and not (parent_kind == "Window" and _kind(child) == "Other"):
+        return False
+    area = screen[2] * screen[3]
+    holders = [n for n in child.iter() if _kind(n) == "Other" and n.get("name") == INPUT_VIEW and not len(n)]
+    parents = {c: up for up in child.iter() for c in up}
+    for view in holders:
+        container = parents.get(view)
+        if container is None or container is child or _kind(container) != "Other":
+            continue
+        if (o := _overlap(_rect(container), screen))[2] * o[3] >= LAYER_COVER * area:
+            continue
+        # its other children are toolbars, or plain views wrapping one (seen on the phone 2026-11-14: Reminders' bar is a
+        # labelled plain view holding the Toolbar)
+        if any(c is not view and not (_kind(c) == "Toolbar" or (_kind(c) == "Other" and any(
+                _kind(n) == "Toolbar" for n in c.iter()))) for c in container):
+            continue
+        up = parents.get(container)  # between the container and the layer: plain views only
+        while up is not None and up is not child and _kind(up) == "Other":
+            up = parents.get(up)
+        if up is not child:
+            continue
+        own = set(container.iter())
+        if all(numbered.get(number) in own for _, number, _ in found if span[0] <= number < span[1]):
+            return True
+    return False
+
+
 def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
-           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]
-           ) -> tuple[list[tuple[float, float, float, float]], bool]:
+           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int],
+           parent_kind: str = "") -> tuple[list[tuple[float, float, float, float]], bool]:
     """The places a later sibling hides in the earlier ones (empty when it is no layer; see LAYER_MAX_DEPTH, the
     caller checks the depth), and whether it is a presentation. With a backdrop and something to act on: its whole
     rect, and bars are hidden too (a sheet dims them). With no backdrop: the rects of what it lists, when they
@@ -992,6 +1224,11 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
         return [], False
     kinds = {_kind(n) for n in child.iter()}
     if "Keyboard" in kinds:
+        return [], False
+    if _accessory_window(child, parent_kind, span, found, numbered, screen):
+        # the window of the keyboard's accessory bar (UIKit hosts it in a full-screen window that starts with an empty
+        # full-screen view, like a sheet's backdrop): it hides nothing but its own bar (seen on the phone 2026-11-14:
+        # Reminders' bar over the keyboard hid the whole New Reminder sheet, its title field too)
         return [], False
     if "Popover" in kinds:  # a share sheet or popover: a touch outside it closes it, never reaches the app
         return [_rect(child)], True
@@ -1011,7 +1248,10 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
 
 
 def alert_line(alert: Alert) -> str:
-    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
+    """`Alert: "<title>" "<message>" [b1] [b2]`. The message is redacted, then cut like element text (`clip`), and left out
+    when empty. A policy word is never matched on it (policy matches buttons only)."""
+    message = f" {clip(alert.message)}" if alert.message.strip() else ""
+    return f"Alert: {quoted(alert.title)}{message} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
 
 
 ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon
