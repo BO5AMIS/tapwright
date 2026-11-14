@@ -145,8 +145,12 @@ def _pct(c: str, rng: random.Random) -> str:
 def one_char(c: str, rng: random.Random) -> str:
     """One character in one of the shapes the matcher decodes."""
     o = ord(c)
-    shapes = ["lit", "pct", "U"] + (["u"] if o < 0x10000 else ["pair"]) + (["x"] if o < 0x100 else [])
-    if c in "\"'/":
+    # (a backslash among escapes is written as an escape of its own family: `\\x73` is an escaped backslash then `x73`,
+    # as JSON and Python read it, and a `%5c` under a JSON layer is decoded with that layer's `\\`: no encoder writes
+    # either, as a percent encoder leaves no backslash and a JSON one no bare one. Codex, PR #10 cycle 15)
+    shapes = ["U"] if c == "\\" else ["lit", "pct", "U"]
+    shapes += (["u"] if o < 0x10000 else ["pair"]) + (["x"] if o < 0x100 else [])
+    if c in "\"'/\\":
         shapes.append("slash")
     if c in "\n\t\r":
         shapes.append("simple")

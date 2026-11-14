@@ -36,14 +36,14 @@ def test_a_route_is_checked():
         assert e.value.code == "bad_params" and why in str(e.value), bad
 
 
-def test_a_step_may_use_only_the_variables_the_route_declares():
+def test_an_account_placeholder_needs_account_declared_and_any_other_undeclared_name_is_literal():
     with pytest.raises(Refused) as e:
         routes.check(sign_in(variables=[]))
     assert "account" in str(e.value) and "variables" in str(e.value)
     routes.check(sign_in(steps=[{"tool": "type_text", "text": "${language}"}], variables=["language"]))
-    with pytest.raises(Refused) as e:
-        routes.check(sign_in(steps=[{"tool": "type_text", "text": "${other}"}], variables=["language"]))
-    assert "other" in str(e.value)
+    # (Codex, PR #10 cycle 15: an undeclared `${other}` is literal text in typed text too, as in every other field)
+    routes.check(sign_in(steps=[{"tool": "type_text", "text": "${other}"}], variables=["language"]))
+    assert routes.substitute([{"tool": "type_text", "text": "${other}"}], {"other": "x"}, ["language"])[0]["text"] == "${other}"
 
 
 def test_an_account_value_is_the_whole_text_of_a_step_never_part_of_one():

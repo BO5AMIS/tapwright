@@ -2546,9 +2546,10 @@ class Daemon(journey_tool.JourneyTools):
             self._refuse_unsaved(client_id, rec)
             if rec.get("route"):
                 # a route's every field is a template at the replay: a literal `${` recorded in a selector, an expectation or
-                # a link is written `$${`, so replay gives back the exact text (typed text was written so as it was typed)
-                rec["steps"] = [routes.escaped(step) for step in rec["steps"]]
-                return await self._save_route(client_id, rec, scope)
+                # a link is written `$${`, so replay gives back the exact text (typed text was written so as it was typed).
+                # The copy that is saved is escaped; the recording keeps its raw steps, so a stop that fails (no place to
+                # end at) can be tried again without escaping them twice (Codex, PR #10 cycle 15)
+                return await self._save_route(client_id, rec, scope, [routes.escaped(step) for step in rec["steps"]])
             path = args.get("path")
             if path is not None and (not isinstance(path, str) or not path):
                 raise Refused("bad_params", f"path must be a file path, not {path!r}")
@@ -2650,11 +2651,11 @@ class Daemon(journey_tool.JourneyTools):
         other = namelib.twin(name, self.maps.file(self._maps_root(), bundle).load()["routes"])
         return None if other is None else namelib.twin_message("route", name, other)
 
-    async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None") -> dict:
-        """`record` with `stop` for a route: the steps, from the place it started to the place it ends at, as a file in the
-        app's map folder (§18.5)."""
+    async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None", steps: list[dict]) -> dict:
+        """`record` with `stop` for a route: the steps (`steps`, as they are written), from the place it started to the
+        place it ends at, as a file in the app's map folder (§18.5)."""
         bundle, end = await self._route_place(scope)
-        route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], rec["steps"])
+        route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], steps)
         # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
         # checked as a script before it is saved)
         route = batch.saved_script(route, self._redact, f"route {rec['route']}")

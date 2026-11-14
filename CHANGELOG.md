@@ -40,16 +40,27 @@
   holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
   that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
   is redacted in that form too.
-  Every shape of a value is redacted, and `holds` knows each: the text is decoded level by level (percent escapes in
-  any case, nested; JSON and Python escapes behind any number of backslashes), direction marks and stray backslashes
-  are dropped and whitespace or `+` runs made one space, the value is decoded the same way, and every occurrence at
-  every level, overlapping ones included, is mapped back to the characters it came from. So any composition of those
-  encodings (a `%r` inside a JSON crash report, a URL that leaves an apostrophe as it is beside an encoded slash) is
-  found whole, even where an escape takes in the value's first or last characters with the text beside it (`%2` +
-  `abc`), and a log message, a traceback or a report shows none. A value too weak to redact (under 3 characters once
-  decoded and trimmed, such as three spaces) is refused when the file loads, naming the account and the field. A
-  route's variables are filled in every string field, and a literal `${` is written `$${` in every field the recorder
-  saves, so a replay taps the element that was recorded; the save reads every field's literal runs decoded. A value ever
+  Every shape of a value is redacted, and `holds` knows each. What is guaranteed: a value is found as it is; with
+  whitespace normalized (any run of whitespace or `+` is one space, the ends may be trimmed) and direction marks
+  anywhere; percent-encoded (`%HH` in either case, UTF-8); with JSON or Python escapes (`\uXXXX` and surrogate pairs,
+  `\UXXXXXXXX`, `\xHH`, `\\`, `\"`, `\'`, `\/`, `\b`, `\f`, `\n`, `\t`, `\r`); and any composition of those, each
+  layer a whole-text encoder (a `%r` inside a JSON crash report, a URL inside a JSON string) or a different escape per
+  character, decoded pass by pass to convergence. Only those escapes are decoded: any other backslash is a literal
+  character, so a password `pass\word` doesn't hide the word `password`. Every occurrence at every level, overlapping
+  ones included, is mapped back to the characters it came from and redacted whole, even where escapes take in the
+  value's first or last characters, or both, with the text beside it (`%2` + `a%62c%2` + `F`), and a log message, a
+  traceback or a report shows none. Decoding stops at a work limit of 16 passes; a whitespace-separated token that
+  would still change is redacted whole as `<a value encoded too deep to check>` and counts as holding a value, so
+  nothing is released unchecked. Searching is linear in the text and the values. A username or password is 3 to 256
+  characters (at most 256 as written, at least 3 once decoded and trimmed, so three spaces are refused) and must settle
+  within the limit; a file that breaks this is refused when it loads, naming the account and the field, never the
+  value. Not covered: other encodings (base64, HTML entities, a hash, a change of case, a value split by other text), and a
+  backslash left bare right before an escaped character (`\` + `\x73`), which JSON and Python, and the matcher, read
+  as an escaped backslash.
+  A route's declared variables are filled in every string field and an undeclared `${name}` is literal text in every
+  field, typed text included; a literal `${` is written `$${` in every field the recorder saves (in the copy it writes,
+  so a save that fails and is tried again escapes it once), so a replay taps the element that was recorded; the save
+  reads every field's literal runs decoded. A value ever
   loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
   current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
   sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so

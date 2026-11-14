@@ -4,7 +4,7 @@ account's `${account.username}` and `${account.password}`, which are left for th
 account's value is the whole text of a step, never part of one, so joining text can't get around the secure-field rule.
 Every string field of a step is a template, at the save and at the replay alike: a declared `${name}` is filled in (a
 target's text, a link, an expectation, the typed text) and a literal `${` is written `$${`; an undeclared `${...}` is
-literal text. The recorder writes a literal `${` as `$${` in every field it saves, so a recorded label replays the element it
+literal text, in every field, typed text included. The recorder writes a literal `${` as `$${` in every field it saves, so a recorded label replays the element it
 was recorded on, and the save-time privacy check reads every field's literal runs decoded (Codex, PR #10 cycle 14). An
 account's placeholder stands only as the whole text of a typed field. Pure functions: no phone, no files.
 """
@@ -125,9 +125,7 @@ def check(data: dict) -> None:
             if ACCOUNT not in variables:
                 raise Refused("bad_params", f"a route that types ${{{ref}}} lists account in its variables, so that "
                                             "drive is given an account")
-        elif ref not in variables:
-            raise Refused("bad_params", f"a step uses ${{{ref}}}, which the route doesn't list in its variables "
-                                        f"({', '.join(variables) or 'none'}); a literal ${{ is written $${{")
+        # (any other `${name}` the route doesn't declare is literal text, typed text included: Codex, PR #10 cycle 15)
 
 
 def need(data: dict, values: dict[str, str], account: str | None) -> None:

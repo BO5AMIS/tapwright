@@ -10,10 +10,10 @@ from tapwright import accounts as accountlib
 from tapwright import ui
 from tapwright.ui import TEXT_LIMIT
 
-LONG = "Lg" + "pw-abcdef0123" * 20
+LONG = "Lg" + "pw-abcdef0123" * 19  # (longer than a cut, within the 256 a value may have: Codex, PR #10 cycle 15)
 VALUES = {"quote": 'synth"password42', "backslash": "synth\\password42", "spaces": "synth  password  42",
           "newline": "synth\npassword42", "long": LONG, "both": 'a"b\\c  d'}
-assert len(LONG) > TEXT_LIMIT
+assert TEXT_LIMIT < len(LONG) <= 256
 
 
 def forms(value):

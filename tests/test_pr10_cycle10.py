@@ -98,7 +98,10 @@ def per_character(value: str, rng: random.Random) -> str:
         if n and rng.random() < 0.15:
             out.append(rng.choice(BIDI))
         o = ord(c)
-        choices = ["lit", "pct", "U"] + (["u"] if o < 0x10000 else ["pair"]) + (["x"] if o < 0x100 else [])
+        # (a backslash among escapes is written as an escape: JSON and Python read a bare `\\` or a `%5c` under a JSON
+        # layer, right before an escape, as an escaped backslash. Codex, PR #10 cycle 15: a literal backslash is kept)
+        choices = (["U"] if c == "\\" else ["lit", "pct", "U"]) + (["u"] if o < 0x10000 else ["pair"]) + \
+            (["x"] if o < 0x100 else [])
         if c.isspace():
             choices += ["plus", "spaces"]
         how = rng.choice(choices)
