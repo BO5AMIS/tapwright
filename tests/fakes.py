@@ -467,7 +467,10 @@ class FakeSession:
         self._record("refresh")
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        if getattr(self, "on_tree", None) is not None:  # (as the real Session's reads do)
+            self.on_tree(tree)
+        return tree
 
     async def snapshot_from(self, tree):
         """The foreground app for a tree that was already read: the one extra request a final answer needs."""

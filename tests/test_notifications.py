@@ -429,6 +429,8 @@ def handover_daemon(tmp_path, foreground=BUNDLE, setting=True):
     s = FakeSession()
     s.installed = [{"bundle_id": b, "name": n, "version": "1", "build": "1", "executable": n} for b, n in INSTALLED.items()]
     s.foreground, s.center_source = foreground, SCREEN
+    from tapwright.ui import Element
+    s.tree, s.tree_app = [Element("e1", "input", "Verification code", "otp-input")], ("Wayfare", BUNDLE)
     d = make(s, audit=AuditLog(tmp_path / "audit"))
     d._set_state("live")
     d.ceiling = type("C", (), {"accounts": str(path), "brief": False, "maps": None, "apps": None})()
@@ -446,6 +448,31 @@ def test_otp_hands_tapline_the_code_with_its_source_once(tmp_path):
     assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 404  # once
     assert [(x["kind"], x.get("app"), x.get("detail")) for x in audit_lines(tmp_path)] == [("otp", BUNDLE, f"from {SMS}")]
     assert d.scrub_everywhere(f"code {CODE}") == "code <one-time code>"
+
+
+def test_otp_for_tapline_counts_a_code_field_this_daemon_didnt_see_from_two_minutes_ago(tmp_path):
+    """The joint check, 2026-11-14: Tapline's host drove Wayfare to its code field, so this daemon never read it; the code
+    came a minute before Tapline asked. The daemon reads the app once: a code field showing counts from 2 minutes ago."""
+    app, d, s = handover_daemon(tmp_path)
+    s.center_source = center(cell("Messages", "1m ago", "+1 555 0100", f"Your Wayfare code is {CODE}"))
+    c = TestClient(app, client=A)
+    prove(c)
+    got = c.post("/otp", json={"app": BUNDLE}, headers=AUTH)
+    assert got.status_code == 200 and got.json()["code"] == CODE
+    # no code field on the screen: no code, and Notification Center isn't read
+    (tmp_path / "b").mkdir()
+    app, d, s = handover_daemon(tmp_path / "b")
+    s.tree = []
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 404 and s.center_reads == 0
+    # a code older than 2 minutes is still not taken
+    (tmp_path / "c").mkdir()
+    app, d, s = handover_daemon(tmp_path / "c")
+    s.center_source = center(cell("Messages", "3m ago", "+1 555 0100", f"Your Wayfare code is {CODE}"))
+    c = TestClient(app, client=A)
+    prove(c)
+    assert c.post("/otp", json={"app": BUNDLE}, headers=AUTH).status_code == 404
 
 
 def test_otp_reads_nothing_unless_the_app_is_in_front_and_its_setting_is_on(tmp_path):

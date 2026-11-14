@@ -30,6 +30,7 @@ CENTER_SWIPE_MS = 300
 CENTER_OPEN_WAIT = 0.6  # seconds for Notification Center to come down before its tree is read
 CENTER_CLOSE_WAIT = 0.4  # seconds for it to go up again before the app in front is asked
 OPEN_WAIT = 1.0  # seconds for an opened notification's app to come to the front
+FIELD_MARGIN = 5.0  # seconds: a code field this daemon didn't see counts from 2 minutes ago less this (the read's own time)
 NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a second while it was read (the live view "
                   "showed it too); only {whose} notifications were read out.")
 FROM_OTHERS_APPS = ("com.apple.MobileSMS", "com.apple.mobilemail")  # their notifications are others' words (§21.1)
@@ -172,13 +173,13 @@ class CenterTools:
                         self.accounts.remember_code(code)
 
     # ---- one-time codes (§20.4, §24.3, §18.11) ----
-    async def _code_from_center(self, app: str) -> "otplib.Code | None":
+    async def _code_from_center(self, app: str, field_at: float | None = None) -> "otplib.Code | None":
         """Read the setting's SOURCE apps' notifications only, and put the one code that counts for `app` (once, within 2
         minutes after its code field showed). The code joins the redactor at once. None when there is none."""
         setting = self._loaded().otp.get(app)
         if setting is None:
             return None
-        field_at = self.code_fields.shown_at(app) or time.time()
+        field_at = field_at if field_at is not None else (self.code_fields.shown_at(app) or time.time())
         try:
             found, _ = await self._on_phone(lambda: self._read_center(lambda b: b in setting.sources,
                                                                        caption="Read a one-time code"))
@@ -215,7 +216,16 @@ class CenterTools:
             try:
                 if await self.session.foreground_bundle_id() != app:
                     return None
-                found = await self._code_from_center(app)
+                field_at = self.code_fields.shown_at(app)
+                if field_at is None:
+                    # Tapline's host drove the app to its code field, so this daemon never read it (seen in the joint
+                    # check 2026-11-14): read the app once. A code field showing now counts from 2 minutes ago, so a
+                    # code that came at most 2 minutes ago is taken; none showing is no code.
+                    await self._on_phone(self.session.refresh)
+                    if self.code_fields.shown_at(app) is None:
+                        return None
+                    field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
+                found = await self._code_from_center(app, field_at)
             except Exception:  # busy, paused, a dropped line: there is no code to give
                 return None
         if found is not None and self.audit is not None:
