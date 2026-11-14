@@ -329,23 +329,30 @@ def state(path: str | os.PathLike, deps: Deps | None = None) -> tuple[str, int |
     """What the lock is now, for `doctor` and `grants unlock`: ("absent" | "live" | "old" | "empty" | "unreadable" |
     "dead", the holder's pid). "old": the holder's pid runs but its `started` is an older tool's text, so a reuse
     can't be proven: it counts as alive (never taken over), and only a person's `unlock` clears it (v1.16)."""
-    deps = deps or Deps()
+    kind, pid, _ = _snapshot(path, deps or Deps())
+    return kind, pid
+
+
+def _snapshot(path: str | os.PathLike, deps: Deps) -> tuple[str, int | None, str | None]:
+    """One read of the lock: (what state() says, the holder's pid, the text it was told from; None when it couldn't be
+    read). Whatever is done on a verdict is done on this very text (CodeRabbit, PR #12, pidlock.py: never a verdict on
+    one holder and a removal of the next)."""
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
-        return "absent", None
+        return "absent", None, None
     except (OSError, UnicodeDecodeError):
-        return "unreadable", None
+        return "unreadable", None, None
     if not text.strip():
-        return "empty", None
+        return "empty", None, text
     holder = _holder(text)
     pid = holder.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(holder.get("owner"), str):
-        return "unreadable", None
+        return "unreadable", None, text
     if _dead(deps, holder):
-        return "dead", pid
-    return ("old" if _legacy(holder) else "live"), pid
+        return "dead", pid, text
+    return ("old" if _legacy(holder) else "live"), pid, text
 
 
 # ---- the way out of a stuck lock (`tapwright grants unlock`, §19.5, 1.14.2) ---------------------------------------
@@ -375,28 +382,39 @@ def unlock(path: str | os.PathLike, deps: Deps | None = None) -> Unlocked:
     lock this process can't tell is stale) is never removed; one whose `started` is an older tool's text can't be
     proven alive, so `unlock` clears it (v1.16). A file is removed only while it still holds what was seen."""
     deps = deps or Deps()
-    paths = [str(path), f"{path}.takeover"]
-    seen: list[tuple[str, str, str, int | None]] = []
-    for p in paths:
-        kind, pid = state(p, deps)
-        if kind == "absent":
-            continue
+    lock, gate = str(path), f"{path}.takeover"
+    # each file is judged and removed on ONE read of it (CodeRabbit, PR #12, pidlock.py:386)
+    lock_seen, gate_seen = _snapshot(lock, deps), _snapshot(gate, deps)
+    for kind, pid, _ in (lock_seen, gate_seen):
         if kind == "live":
             return Unlocked("live", pid)
-        text = _read(p)
-        if text is None and kind != "unreadable":
-            continue
-        seen.append((p, text or "", kind, pid))
-    if not seen:
+    if lock_seen[0] == "absent" and gate_seen[0] == "absent":
         return Unlocked("none")
     done = Unlocked("removed")
-    for p, text, kind, pid in seen:
-        if not text.strip() or kind == "unreadable":
-            gone = _remove_if_unchanged(deps, p, text) if text else _remove(p)
-        else:
-            gone = _remove_if_unchanged(deps, p, text)
-        if not gone:
-            done.status, done.failed = "failed", p
-            break
-        done.removed.append((p, stuck_words(kind, pid)))
-    return done
+    kind, pid, text = gate_seen
+    if kind != "absent":  # a stuck `.takeover` first: removed only while it still holds what was judged
+        if not (_remove_if_unchanged(deps, gate, text) if text else _remove(gate)):
+            done.status, done.failed = "failed", gate
+            return done
+        done.removed.append((gate, stuck_words(kind, pid)))
+    kind, pid, text = lock_seen
+    if kind == "absent":
+        return done
+    # The lock itself is removed under a `.takeover` of our own, as a takeover is (§22.3), and never moved aside: while
+    # we hold it nobody else takes the lock over, so a dead holder's file can't change hands, and the lock's name is
+    # never empty while a live holder's file is somewhere else (CodeRabbit, PR #12, pidlock.py:259)
+    mine = json.dumps({"owner": f"{secrets.token_hex(8)}-{deps.pid}", "pid": deps.pid,
+                       "started": deps.own_start()}) + "\n"
+    if publish_new(deps, gate, mine) != "published":
+        done.status, done.failed = "failed", lock  # a takeover is under way: it changed
+        return done
+    try:
+        now = _read(lock) if text is not None else None
+        same = (now == text) if text is not None else (state(lock, deps)[0] == "unreadable")
+        if not same or not _remove(lock):
+            done.status, done.failed = "failed", lock
+            return done
+        done.removed.append((lock, stuck_words(kind, pid)))
+        return done
+    finally:
+        _remove_if_unchanged(deps, gate, mine)

@@ -3,6 +3,7 @@ draftsOnly stop comes before any grant), H3 (a draft approval is for the draft t
 import asyncio
 import datetime
 import json
+import os
 
 import pytest
 from fakes import button, el
@@ -627,3 +628,40 @@ def test_cr_a_version_1_entry_that_isnt_an_object_is_refused_and_the_file_stays(
     done, said = vault.protect(path, win_deps(), accounts.check_text)
     assert not done and "tester" in said and "stays plain" in said and "Synthetic-Pass-77" not in said
     assert open(path, encoding="utf-8").read() == before
+
+
+# ---- CodeRabbit, PR #12 (pidlock.py:259, :386): unlock judges and removes one snapshot, never moving a live lock away ----
+def test_cr_unlock_never_removes_or_moves_a_holder_that_came_after_its_verdict(tmp_path, monkeypatch):
+    from tapwright import pidlock
+    lock = tmp_path / "x.lock"
+    t1 = 1_763_013_612_481
+    dead_a = json.dumps({"owner": "aaaa-1", "pid": 1, "started": t1}) + "\n"
+    live_b = json.dumps({"owner": "bbbb-2", "pid": 2, "started": t1}) + "\n"
+    lock.write_text(dead_a, encoding="utf-8")
+    swapped = []
+
+    def alive(pid):
+        if pid == 1 and not swapped:  # right after A is judged dead, B takes the lock (A's file replaced by B's)
+            swapped.append(1)
+            lock.write_text(live_b, encoding="utf-8")
+        return pid != 1
+    renamed = []
+    real_rename = os.rename
+
+    def rename(src, dst):
+        renamed.append(str(src))
+        return real_rename(src, dst)
+    monkeypatch.setattr(os, "rename", rename)
+    person = pidlock.Deps(pid=4242, alive=alive, start_of=lambda pid: t1)
+    done = pidlock.unlock(lock, person)
+    assert done.status == "failed" and lock.read_text(encoding="utf-8") == live_b  # B's lock stays, in place
+    assert str(lock) not in renamed  # the lock's name was never empty while B's file was elsewhere
+    c = pidlock.Deps(pid=7, alive=lambda pid: pid != 1, start_of=lambda pid: t1)
+    assert pidlock.take(lock, c) is None  # so nobody else got it: B holds it alone
+    assert not (tmp_path / "x.lock.takeover").exists()  # unlock's own gate is gone again
+    # a lock that stays dead is removed, and the next taker gets it
+    lock.write_text(dead_a, encoding="utf-8")
+    swapped.append(1)
+    done = pidlock.unlock(lock, person)
+    assert done.status == "removed" and not lock.exists() and str(lock) not in renamed
+    assert pidlock.take(lock, c) is not None
