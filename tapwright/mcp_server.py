@@ -390,6 +390,12 @@ async def apps() -> CallToolResult:
     return await _tool("apps")
 
 
+@server.tool(description=describe("notifications"), structured_output=False)
+async def notifications(open: int | None = None) -> CallToolResult:
+    # (not read-only by hint: it pulls Notification Center down on the phone, and `open` opens an app)
+    return await _tool("notifications", **({"open": open} if open is not None else {}))
+
+
 @server.tool(annotations=READ_ONLY, description=describe("session_report"), structured_output=False)
 async def session_report(since: int | None = None) -> CallToolResult:
     return await _tool("session_report", **({"since": since} if since is not None else {}))

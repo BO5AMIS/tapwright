@@ -4,9 +4,10 @@ Tapwright reads a code from a notification of a source app the vault's `otp` set
 setting is on (off by default). A code is valid once, and only within 2 minutes after the app showed a code field. It
 is kept out of every sink of §20.3 (accounts.Store.remember_code) from the moment it is known.
 
-Tapwright 1.7 builds the plumbing only: reading codes from notifications needs the phone runner's update, so nothing
-puts a code here yet, and `${otp.<app>}` and `POST /otp` answer that there is none (404). The rules of the link are kept
-exactly (§18.11), and checked in `serve`:
+The code comes from Notification Center (notifications.py): when a step types `${otp.<app>}`, or Tapline's host asks
+`POST /otp` for that app, the daemon reads the notifications of the setting's SOURCE apps only, and takes the one code of
+the newest that matches, arrived within 2 minutes and not before the app showed its code field (FieldWatch). The rules of
+the link are kept exactly (§18.11), and checked in `serve`:
   - Tapline's host proves the daemon first, `POST /api/prove`, and only then, on that SAME keep-alive connection, sends
     `POST /otp {"app": "<app id>"}` with Tapwright's token. The daemon remembers which connections proved (the client's
     address and port: a new connection has another port), and answers `/otp` only on one of them.
@@ -15,6 +16,7 @@ exactly (§18.11), and checked in `serve`:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import time
 from typing import Callable
 
@@ -32,10 +34,12 @@ class Code:
 
 class Codes:
     """The codes read and not yet used, one per app: handed over once, then dropped. `remember` keeps each code out of
-    text (the daemon's redactor) from the moment it is put here."""
+    text (the daemon's redactor) from the moment it is put here. A code handed over is never handed over again (its
+    digest is kept for the daemon's life: a notification still in Notification Center would offer it again)."""
 
     def __init__(self, remember: Callable[[str], None] | None = None, clock: Callable[[], float] = time.time) -> None:
         self._held: dict[str, Code] = {}
+        self._used: set[str] = set()
         self._remember = remember
         self._clock = clock
 
@@ -48,9 +52,36 @@ class Codes:
     def take(self, app: str) -> Code | None:
         """The code for `app`, once: dropped as it is handed over, and None once its 2 minutes are over."""
         found = self._held.pop(app, None)
-        if found is None or self._clock() > found.expires:
+        if found is None or self._clock() > found.expires or self.used(found.code):
             return None
+        self._used.add(_digest(found.code))
         return found
+
+    def used(self, code: str) -> bool:
+        return _digest(code) in self._used
+
+
+def _digest(code: str) -> str:
+    return hashlib.sha256(("tapwright-otp\0" + code).encode()).hexdigest()
+
+
+class FieldWatch:
+    """When each app (with codes on) showed its code field (§20.4: a code counts only within 2 minutes after): the first
+    read that shows one starts the time, and a read of that app without one clears it, so a field shown again starts
+    again. Wall clock."""
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._at: dict[str, float] = {}
+        self._clock = clock
+
+    def seen(self, app: str, showing: bool) -> None:
+        if showing:
+            self._at.setdefault(app, self._clock())
+        else:
+            self._at.pop(app, None)
+
+    def shown_at(self, app: str) -> float | None:
+        return self._at.get(app)
 
 
 class Proved:

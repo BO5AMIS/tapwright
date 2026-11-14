@@ -290,6 +290,10 @@ EXTRA = {
     'open_url': 'opens it on the phone, so another app may take it. The answer says which app came up.',
     'wait_for': 'polls the screen, so it is slower; `network_idle` is `unsupported`.',
     'apps': 'the apps installed on the phone, with bundle ids.',
+    'notifications': (
+        "Your apps' notifications, newest first, at most 20 (`n1 Wayfare (id) 2m ago \"title\" \"body\"`). `open: n` "
+        'opens the n-th. Notification Center shows on screen for about a second.'
+    ),
     'open_app': (
         'launches the app or brings it to the front, and answers the first screen. `language` (`ar`), `region` '
         "(`QA`) and `text_size` (`xs`…`xxxl`, `ax1`–`ax5`; `l` is the phone's default; `system` the phone's own) "

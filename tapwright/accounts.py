@@ -120,9 +120,12 @@ class Entry:
 @dataclass(frozen=True)
 class OtpSetting:
     """Tapwright's one-time code setting for one app (§24.3): the bundle ids a code may come from, and a text the
-    notification must hold. An app without one has codes off."""
+    notification must hold (in its title, often the sender, or its body). An app without one has codes off. `pattern`
+    (optional, Tapwright's own key): a regular expression for the code itself (its first group, if it has one), for a
+    code that isn't 4 to 8 digits."""
     sources: tuple[str, ...]
     match: str
+    pattern: "re.Pattern[str] | None" = None
 
 
 @dataclass(frozen=True)
@@ -1182,8 +1185,20 @@ def _read_otp(raw: object) -> tuple[dict[str, OtpSetting], str | None]:
                 not all(isinstance(s, str) and s.strip() for s in sources) or not isinstance(match, str) or not match.strip():
             return {}, (f'its "otp" setting for {app} needs "from" (a list of bundle ids) and "match" (a text); one-time '
                         "codes are off")
-        found[app] = OtpSetting(tuple(s.strip() for s in sources), match)
+        pattern, compiled = setting.get("pattern"), None
+        if pattern is not None:
+            try:
+                if not isinstance(pattern, str) or not pattern or len(pattern) > OTP_PATTERN_MAX:
+                    raise re.error("not a pattern")
+                compiled = re.compile(pattern)
+            except (re.error, RecursionError, OverflowError):
+                return {}, (f'its "otp" setting for {app} has a "pattern" that isn\'t a regular expression of 1 to '
+                            f"{OTP_PATTERN_MAX} characters; one-time codes are off")
+        found[app] = OtpSetting(tuple(s.strip() for s in sources), match.strip(), compiled)
     return found, None
+
+
+OTP_PATTERN_MAX = 200  # characters of an `otp` setting's own code pattern
 
 
 def _read_v2(data: dict) -> "tuple[dict[str, Entry], str | None]":

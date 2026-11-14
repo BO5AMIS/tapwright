@@ -6,8 +6,9 @@ One file per schedule, `~/.tapwright/schedules/<name>.json`, in the format both 
 its last check). Neither ends in `.json`, so neither is taken for a schedule.
 
 On Windows a time schedule is a Task Scheduler task that wakes the PC (`WakeToRun`, which only an XML definition can
-set). A file trigger is polled by a task that does not wake the PC: it runs while the PC is awake (1.14.1). A
-notification trigger is stored and starts nothing yet: reading notifications comes in a later part. Other systems get the
+set). A file trigger is polled by a task that does not wake the PC: it runs while the PC is awake (1.14.1). So is
+a notification trigger: its poll asks the running daemon for the digests of that app's notifications, never their text
+(`new_notifications`), and `<name>.seen` keeps what its last check saw. Other systems get the
 launchd or cron entry to add, printed, since 1.14 doesn't say how a schedule starts there.
 """
 from __future__ import annotations
@@ -33,7 +34,7 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$")
 DEVICES = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}
 TIME = re.compile(r"^(\d{2}):(\d{2}) (daily|weekdays)$")
 VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-POLL_MINUTES = 2  # a file trigger's folder is looked at this often while the PC is awake
+POLL_MINUTES = 2  # a file trigger's folder, or a notification trigger's app, is looked at this often while the PC is awake
 TASK_FOLDER = "Tapwright"
 SETTLE_SECONDS = 2.0  # a file touched this recently may still be being written: it counts at the next check
 
@@ -253,6 +254,39 @@ def new_files(s: Schedule, where: Path | None = None, now_ns: int | None = None)
     return found
 
 
+def new_notifications(s: Schedule, keys: list[str], where: Path | None = None) -> bool:
+    """Has a notification from the trigger's app appeared since the last check (§22.1)? `keys` are the digests of its
+    notifications now (center_tool.notification_keys), newest first. The first check of a schedule with no record only
+    notes what is there. Each new notification fires ONE run: when several are new, the oldest of them is marked seen and
+    the rest wait for the next check (POLL_MINUTES later), so a burst never runs the route at once twice. A notification
+    the person cleared drops out of the record; one with the same words as one before counts again (by how many)."""
+    assert s.trigger and "notification" in s.trigger
+    now: dict[str, int] = {}
+    for k in keys:
+        now[k] = now.get(k, 0) + 1
+    try:
+        before = json.loads(seen_of(s.name, where).read_text(encoding="utf-8"))
+        if not isinstance(before, dict) or before.get("notification") is not True or not isinstance(before.get("seen"), dict):
+            before = None
+    except (OSError, ValueError):
+        before = None
+    if before is None:
+        _write_seen_keys(s.name, now, where)
+        return False
+    seen = {k: min(int(n), now[k]) for k, n in before["seen"].items() if k in now and isinstance(n, int)}
+    fresh = [k for k in reversed(keys) if now[k] > seen.get(k, 0)]  # oldest first
+    if fresh:
+        seen[fresh[0]] = seen.get(fresh[0], 0) + 1
+    _write_seen_keys(s.name, seen, where)
+    return bool(fresh)
+
+
+def _write_seen_keys(name: str, seen: dict[str, int], where: Path | None) -> None:
+    base = where or folder()
+    base.mkdir(parents=True, exist_ok=True)
+    seen_of(name, base).write_text(json.dumps({"notification": True, "seen": seen}), encoding="utf-8")
+
+
 # ---- the system's scheduler ---------------------------------------------------------------------------------------------
 class SchedulerError(RuntimeError):
     pass
@@ -299,7 +333,8 @@ class Scheduler:
 
     # -- the task's definition (Windows)
     def xml(self, s: Schedule) -> str:
-        """The Task Scheduler definition. `WakeToRun` only for a time schedule: a file trigger doesn't wake the PC."""
+        """The Task Scheduler definition. `WakeToRun` only for a time schedule: a file or notification trigger doesn't wake
+        the PC."""
         wake = s.at is not None
         start = self.now().replace(microsecond=0)
         if s.at is not None:
@@ -344,9 +379,6 @@ class Scheduler:
     # -- install and remove
     def install(self, s: Schedule) -> str:
         """Start the schedule's runs: a task on Windows, what to add elsewhere. Returns the words for the person."""
-        if s.trigger and "notification" in s.trigger:
-            return ("Stored. A notification trigger starts nothing yet: reading notifications comes in a later part of "
-                    "Tapwright 1.7, and this schedule will fire then.")
         if not self.windows:
             return self.instructions(s)
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,8 +389,9 @@ class Scheduler:
             raise SchedulerError(f"Task Scheduler refused the task ({out or f'schtasks exit {code}'})")
         if s.at is not None:
             return f'Task Scheduler task "{self.task_name(s.name)}" created: it wakes the PC and runs `tapwright run-schedule {s.name}`.'
-        return (f'Task Scheduler task "{self.task_name(s.name)}" created: it looks at the folder every {POLL_MINUTES} minutes '
-                "while the PC is awake (it doesn't wake the PC).")
+        what = "the folder" if "file" in (s.trigger or {}) else f"{(s.trigger or {}).get('notification')}'s notifications"
+        return (f'Task Scheduler task "{self.task_name(s.name)}" created: it looks at {what} every {POLL_MINUTES} minutes '
+                "while the PC is awake (it doesn't wake the PC), and never while the phone is in use.")
 
     def remove(self, name: str) -> str | None:
         """Remove the task. None when there was none (or no task system); a SchedulerError when it can't be removed."""
@@ -386,7 +419,8 @@ class Scheduler:
             check = f"{run} --if-triggered"
             if self.platform == "darwin":
                 return plist(s, exe, ["run-schedule", s.name, "--if-triggered"], None)
-            return f"Add this line to your crontab (crontab -e); it looks at the folder every {POLL_MINUTES} minutes:\n" \
+            what = "the folder" if "file" in s.trigger else "the app's notifications"
+            return f"Add this line to your crontab (crontab -e); it looks at {what} every {POLL_MINUTES} minutes:\n" \
                    f"*/{POLL_MINUTES} * * * * {check}"
         assert s.at is not None
         if self.platform == "darwin":
@@ -502,9 +536,7 @@ def listing_text(scheduler: Scheduler | None = None, where: Path | None = None, 
             lines.append(f"{n}: can't be used ({e})")
             continue
         task = scheduler.exists(n)
-        shown = "" if task is None else "; task installed" if task else (
-            "; no task (notification trigger: nothing starts it yet)" if s.trigger and "notification" in s.trigger
-            else "; NO TASK: add it again")
+        shown = "" if task is None else "; task installed" if task else "; NO TASK: add it again"
         last = last_run(n, runs)
         lines.append(f"{n}: route {s.route}, {s.when()}{shown}" + (f"; last: {last}" if last else ""))
     return "\n".join(lines), 0

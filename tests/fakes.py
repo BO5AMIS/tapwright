@@ -349,6 +349,21 @@ class FakeSession:
         self.hit_answer: ui.Hit | None = None
         self.hit_asks: list = []
         self.last_source: str | None = None
+        # Notification Center (center_tool.py): with `center_source` set (SpringBoard's XML), a swipe down from the top
+        # edge opens it (SpringBoard in front), a swipe up from the bottom edge or home closes it, and a tap while it is
+        # open opens `center_opens` (a bundle id). `read_center` answers its XML while it is open.
+        self.center_source: str | None = None
+        self.center_open = False
+        self.center_opens: str | None = None
+        self._center_before: str | None = None
+        self.center_reads = 0
+
+    async def read_center(self, timeout=10.0):
+        self._record("read_center")
+        self.center_reads += 1
+        if self.center_open and self.center_source is not None:
+            return self.center_source
+        return '<AppiumAUT><XCUIElementTypeApplication bundleId="com.example.app"/></AppiumAUT>'
 
     def front_by_touch(self) -> bool:
         return self.touch_checks_front
@@ -491,6 +506,11 @@ class FakeSession:
             await self.touch_hook(ms)
 
     async def tap(self, target, hold_ms=60):
+        if self.center_open and getattr(target, "x", None) is not None:
+            self._record("tap")
+            self.tap_points.append((target.x, target.y))
+            self.center_open, self.foreground = False, self.center_opens
+            return f"Tapped ({round(target.x)}, {round(target.y)})."
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
         await self._touching(hold_ms)
         if self.front_apps is not None:
@@ -531,6 +551,10 @@ class FakeSession:
     async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
         await self._touching(duration_ms + hold_ms)
         self._record("swipe")
+        if self.center_source is not None and y0 < 5 and y1 > y0 and not self.center_open:
+            self.center_open, self._center_before, self.foreground = True, self.foreground, "com.apple.springboard"
+        elif self.center_open and y0 > self.screen[1] - 10 and y1 < y0:
+            self.center_open, self.foreground = False, self._center_before
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -550,6 +574,8 @@ class FakeSession:
 
     async def press_button(self, name):
         self._record(f"button:{name}")
+        if name == "home" and self.center_open:
+            self.center_open, self.foreground = False, None
         return f"pressed {name}"
 
     def _maybe_taken(self, at) -> None:

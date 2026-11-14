@@ -163,7 +163,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
     async def otp_code(request):
         """`POST /otp {"app": "<app id>"}` (§18.11, §20.4): Tapline's host asks for a one-time code with Tapwright's own
         token, on the keep-alive connection it just proved this daemon on, never a new one. The answer is `{"code",
-        "expires", "source"}`, handed over once, or `404` when there is none (always, until notifications are read)."""
+        "expires", "source"}`, handed over once, or `404` when there is none. The code is read from the setting's source
+        apps' notifications (center_tool.py) and never logged: only the route's status is."""
         if not _host_ok(request, hosts):
             return _error("unauthorized", "unknown host", 403)
         if not _bearer_ok(request, token):  # (Tapwright's token; never the cookie)
@@ -177,7 +178,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
         if not isinstance(app, str) or not app.strip():
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
-        found = daemon.otp_code(app) if hasattr(daemon, "otp_code") else None
+        found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
         if found is None:
             return _error("not_found", "no one-time code", 404)
         return JSONResponse(otplib.answer(found), headers={"Cache-Control": "no-store"})
@@ -295,6 +296,29 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                 return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
         result = await daemon.unlock_phone(path)
         return JSONResponse({"ok": result.ok, "code": result.code, "message": result.message})
+
+    async def notification_check(request):
+        """`POST /api/notifications/new {"app": "<bundle id>"}` (§22.1): a notification trigger's check, from `tapwright
+        run-schedule NAME --if-triggered`. The answer is the digests of that app's notifications now, newest first
+        (`{"keys": [...]}`), never their text; the run compares them with what it saw before. Within serve's --apps
+        ceiling; `busy` while a person or an agent uses the phone, `paused` while the live view is paused."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        try:
+            given = json.loads(await request.body() or b"{}")
+            app = given["app"]
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
+        if not isinstance(app, str) or not app.strip() or len(app) > 200:
+            return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
+        if ceiling is not None and (why := ceiling.refuse_scope((app,), False, None)) is not None:
+            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        try:
+            keys = await daemon.notification_keys(app.strip())
+        except Refused as e:
+            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
+        return JSONResponse({"keys": keys}, headers={"Cache-Control": "no-store"})
 
     async def dialog_body(request) -> tuple[str, dict] | Response:
         """The agent's client id and the JSON body of one of the host-dialog calls, or the refusal (dialog.py)."""
@@ -521,6 +545,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
         Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
         Route("/api/phone/unlock", unlock, methods=["POST"]),
+        Route("/api/notifications/new", notification_check, methods=["POST"]),
         Route("/api/session/{what:str}", session, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/{name}", tool, methods=["POST"]),
     ])

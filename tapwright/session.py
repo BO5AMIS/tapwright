@@ -149,6 +149,9 @@ class Session:
         # re-created mid-run waits for animations (a blinking caret) on every read, 1 to 3 s each. The daemon sets
         # the stream's preset into it too (stream.PRESETS), so a re-created session has the current quality as well.
         self.session_settings: dict = dict(NO_IDLE_WAIT)
+        # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
+        # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
+        self.on_tree = None
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -384,6 +387,15 @@ class Session:
         self.last_compact = (token, source)
         return source
 
+    async def read_center(self, timeout: float = READ_CUT) -> str:
+        """Notification Center's tree (SpringBoard's) as XML, read once and kept nowhere: not as the last read, not as the
+        compact read's token, never traced but for its timing (notifications.py drops every other app's notification
+        from it at once). No banner wait: its notifications are what is read."""
+        try:
+            return str(await self._read_tree(timeout) or "")
+        finally:
+            self.last_compact = None
+
     async def foreground_bundle_id(self) -> str | None:
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
@@ -469,6 +481,7 @@ class Session:
         self.app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self._seen_tree(tree)
         return Snapshot(tree, self.app, self.scale)
 
     async def screenshot_png(self) -> bytes:
@@ -517,7 +530,15 @@ class Session:
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self._seen_tree(tree)
         return tree
+
+    def _seen_tree(self, tree: ui.Tree) -> None:
+        if self.on_tree is not None:
+            try:
+                self.on_tree(tree)
+            except Exception:  # a watcher's fault never fails a read
+                pass
 
     def _target(self, target: ui.Target) -> tuple[float, float, str]:
         """(x, y, what to say) for a target, on the elements of the last look."""

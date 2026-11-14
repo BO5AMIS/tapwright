@@ -113,10 +113,12 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
         audit.write("schedule", name=name, detail=f"failed: {e}"[:300])
         return finish(name, deps, "failed", f"failed: {e}", None, deps.now(), code=2)
     if if_triggered:
-        if not s.trigger or "file" not in s.trigger:
-            return Outcome("failed", "failed: --if-triggered is for a schedule with a file trigger", code=2,
-                           text=f'The schedule "{name}" has no file trigger.')
-        if not schedules.new_files(s, deps.where):
+        if not s.trigger:
+            return Outcome("failed", "failed: --if-triggered is for a schedule with a file or notification trigger",
+                           code=2, text=f'The schedule "{name}" has no trigger.')
+        if "file" in s.trigger and not schedules.new_files(s, deps.where):
+            return Outcome("idle", "nothing new")
+        if "notification" in s.trigger and not notification_arrived(s, deps):
             return Outcome("idle", "nothing new")
     began = deps.now()
     token = pidlock.take(schedules.lock_of(name, deps.where), deps.lock)
@@ -126,6 +128,33 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
         return attempt(s, deps, audit, began)
     finally:
         pidlock.release(schedules.lock_of(name, deps.where), token)
+
+
+def notification_arrived(s: schedules.Schedule, deps: Deps) -> bool:
+    """A notification trigger's check (§22.1): has a notification from its app appeared since the last check? Only while
+    the PC is awake (the poll's task doesn't wake it) and the phone is live; never while a person or an agent uses the
+    phone, or the live view is paused: it waits for that, up to the run's own wait, and else looks again at the next
+    poll. Nothing is written for a check that finds nothing (no report, no audit line)."""
+    api = deps.api()
+    waited = deps.monotonic()
+    while True:
+        try:
+            status = api.status()
+        except Exception:
+            return False
+        if not status or status.get("state") != "live":
+            return False  # (a locked or missing phone: the next poll looks again)
+        if not (status.get("driver") in ("person", "agent") or status.get("paused")):
+            try:
+                return schedules.new_notifications(s, api.notification_keys(s.trigger["notification"]), deps.where)
+            except api.DaemonError as e:
+                if e.code not in ("busy", "paused"):
+                    return False
+            except Exception:
+                return False
+        if deps.monotonic() - waited >= deps.wait:
+            return False
+        deps.sleep(deps.poll)
 
 
 def end(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, status: str, result: str, began: datetime.datetime,

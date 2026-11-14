@@ -270,6 +270,15 @@ def unlock_phone(accounts: str | None = None, timeout: float = 60.0) -> dict:
         SCOPE.update(headers_before)
 
 
+def notification_keys(app: str, timeout: float = 60.0) -> list[str]:
+    """A notification trigger's check (§22.1): the digests of `app`'s notifications in Notification Center now, newest
+    first, from the running daemon (never their text; never starts the daemon). DaemonError `busy` or `paused` when the
+    phone is in use."""
+    got = _request(store.read_serve_info(), "POST", "/api/notifications/new", {"app": app}, timeout, "schedule")
+    keys = got.get("keys") if isinstance(got, dict) else None
+    return [k for k in keys if isinstance(k, str)] if isinstance(keys, list) else []
+
+
 def tell_daemon(path: str, client_id: str, timeout: float = 3.0) -> bool:
     """A word from this agent's process to a daemon that is already running (never starting one): `/api/session/ping`
     (still here) or `/api/session/end` (gone). True when the daemon took it."""

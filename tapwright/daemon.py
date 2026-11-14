@@ -30,7 +30,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
-from . import auditlog, grants as grantlib, otp as otplib
+from . import auditlog, center_tool, grants as grantlib, otp as otplib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -57,7 +57,7 @@ FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
-READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map"})  # (compare_screen writes its own line: _log_compare)
+READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
@@ -833,7 +833,8 @@ MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told 
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
 MAY_MOVE_CONTENT = ("back", "open_app", "open_url", "press_button", "rotate")
-READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report", "map")
+READS = ("look", "apps", "audit", "ux_check", "filmstrip", "compare_screen", "logs", "crash", "session_report", "map",
+         "notifications")
 DIAG_TOOLS = ("logs", "crash")  # AGENT-TOOLS §15: the app's log and its crash reports; they read no screen
 NO_CRASH_CHECK = frozenset({"logs", "crash", "apps", "close_app"})  # calls after which the app's stopping is no news
 # seconds: between looks for the app's process; before the watcher gives up; a first `logs` waits for the stream
@@ -879,7 +880,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(journey_tool.JourneyTools):
+class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -998,6 +999,11 @@ class Daemon(journey_tool.JourneyTools):
         self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
         self.otp_codes = otplib.Codes(self.accounts.remember_code)  # one-time codes read, not yet used (§20.4)
+        self.code_fields = otplib.FieldWatch()  # when each app with codes on showed its code field (§20.4)
+        try:
+            self.session.on_tree = self._watch_code_field  # (each read the daemon builds says whether one shows)
+        except AttributeError:
+            pass
         # the passcode unlock (§18.6, §11.5; unlock.py): its rules and counts, and the lock screen it types on
         self.unlocker = unlocklib.Unlocker()
         self.lock_screen: "unlocklib.LockScreen | None" = None  # (made from the session when first needed; tests set one)
@@ -3384,6 +3390,18 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("not_allowed", NO_APPS)
         given = await self._given(scope)
         names = ", ".join(given.values())
+        if name == "notifications":
+            # §24.2: only the given apps' notifications come out, and only from one of them: a swipe from the top over
+            # another app would be a touch of it. The answer is that list, never a screen, so nothing is withheld after.
+            await self.wait_connected()
+            front = await self._front(given)
+            if front not in given:
+                raise Refused("not_allowed", _outside(front, self.session.app_names.get(front or ""), names))
+            given_token = _GIVEN.set(given)
+            try:
+                return await self._run_tool(client_id, name, args)
+            finally:
+                _GIVEN.reset(given_token)
         front = None
         by_read = not bounced and self._scope_by_read(client_id, name, args)
         by_touch = not bounced and not by_read and self._scope_by_touch(name, args)
@@ -3533,6 +3551,8 @@ class Daemon(journey_tool.JourneyTools):
             notes = [*notes, taken]
         if name == "apps":
             return await self._apps(notes)
+        if name == "notifications":  # §24.2: personal mode's apps only (_GIVEN), the whole phone otherwise
+            return await self._notifications_tool(client_id, args, notes, _GIVEN.get())
         if name == "map":
             return await self._map(view, args, notes)
         if name == "wait":
@@ -5150,7 +5170,7 @@ class Daemon(journey_tool.JourneyTools):
         if using is not None and using.kind == accountlib.CARD:
             await self._card_ok(a, field, using)  # a person's OK, every time; never a grant (§20.1, §19.2)
         if using is not None and using.otp_app is not None:
-            code = self.otp_codes.take(using.otp_app)
+            code = await self._code_for_typing(using.otp_app)  # (from the source apps' notifications only)
             if code is None:
                 raise Refused("not_found", f"no one-time code for {using.otp_app}: none arrived in the 2 minutes since "
                                            "the app showed its code field. Nothing was typed.")
@@ -5183,14 +5203,6 @@ class Daemon(journey_tool.JourneyTools):
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
         return tuple(n for n in self._loaded().entry_names if not n.endswith(" (account)"))
-
-    def otp_code(self, app: str) -> "otplib.Code | None":
-        """A one-time code for Tapline's host (`POST /otp`, §18.11): only for an app whose setting is on in the vault
-        file this daemon was started with (§24.3), handed over once. None (the route's 404) otherwise."""
-        path = getattr(getattr(self, "ceiling", None), "accounts", None)
-        if not path or app not in self.accounts.get(path).otp:
-            return None
-        return self.otp_codes.take(app)
 
     def _audit_typed(self, using: "accountlib.Typing", field: ui.Element) -> None:
         """§23: a vault value typed is a `vault` line (the entry; the field and where it went, never the value), a

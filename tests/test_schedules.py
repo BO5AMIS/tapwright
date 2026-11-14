@@ -150,12 +150,13 @@ def test_remove_keeps_the_file_when_the_task_cannot_be_removed(tmp_path):
     assert code == 1 and "the schedule file was kept" in text and (where / "r.json").exists()
 
 
-def test_a_notification_trigger_is_stored_and_starts_nothing(tmp_path):
+def test_a_notification_trigger_is_polled_by_a_task(tmp_path):
+    """(W134: the notification trigger fires now; tests/test_notifications.py has the check itself.)"""
     tasks, where = Tasks(), tmp_path / "s"
     text, code = schedules.add("r", on_notification=BUNDLE, scheduler=sched(tasks), where=where)
-    assert code == 0 and "starts nothing yet" in text and tasks.calls == []
+    assert code == 0 and f"{BUNDLE}'s notifications every 2 minutes" in text and "Tapwright\\r" in tasks.tasks
     assert schedules.load("r", where).trigger == {"notification": BUNDLE}
-    assert "no task" in schedules.listing_text(sched(tasks), where)[0]
+    assert "task installed" in schedules.listing_text(sched(tasks), where)[0]
 
 
 def test_the_cli_commands_call_through(tmp_path, monkeypatch, home, capsys):
