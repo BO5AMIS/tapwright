@@ -1902,7 +1902,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if top_level and client_id in self._watch_notes:
                     said = self._with_watch_notes(client_id, said)
                 if said != str(e):  # an account's value is never in an error either
-                    raise Refused(e.code, said) from None
+                    raise Refused(e.code, said, draft=e.draft) from None
                 raise
             if top_level:
                 answer = self._with_network(name, answer)
@@ -3048,6 +3048,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                            began: float, n: int, ident: str, traced: list[str], step_notes: list[str],
                            held: list[float], held_token) -> dict:
         failed: tuple[str, str] | None = None
+        stopped_at_draft = False
         done = 0
         marks: dict[str, int | None] = {}
         set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
@@ -3107,6 +3108,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
                 step_notes += crash
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {message}")
+                stopped_at_draft = e.draft  # (a scheduled run tells a draft stop by it: CodeRabbit, PR #12, trip.py)
                 break
             finally:
                 BATCH.reset(token)
@@ -3139,7 +3141,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         logs = await self._failure_logs(scope, i, marks) if failed else []
         answer["text"] = "\n".join([answer["text"], *logs, *step_notes])
         if failed:
-            raise Refused(failed[0], answer["text"])
+            raise Refused(failed[0], answer["text"], draft=stopped_at_draft)
         return await self._add_shot(answer, view, self._shot_args(args, default=False, custom=False))
 
     @staticmethod
@@ -3364,7 +3366,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if "\n" not in message:
                 raise
             kept = await self._withheld(client_id, name, {"text": message, "image": None}, given, names)
-            raise Refused(e.code, kept["text"]) from None
+            raise Refused(e.code, kept["text"], draft=e.draft) from None
         return await self._withheld(client_id, name, answer, given, names)
 
     # ---- personal mode: the agent stays in the apps it was given ----

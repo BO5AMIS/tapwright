@@ -537,3 +537,31 @@ def test_cr_otp_checks_the_app_and_reads_the_code_in_one_turn(tmp_path):
     got = c.post("/otp", json={"app": CODE_APP}, headers=AUTH)
     assert front_at_read in ([], [CODE_APP]), front_at_read  # never read while another app is in front
     assert got.status_code in (200, 404) and (got.status_code == 404) == (front_at_read == [])
+
+
+# ---- CodeRabbit, PR #12 (trip.py:510, :472): a scheduled run sees a draft stop through drive -----------------------------
+def test_cr_a_draft_stop_inside_a_driven_route_keeps_its_draft_flag(tmp_path):
+    async def go():
+        d, s = two_apps(tmp_path)
+        stop, task = await started(d)
+        await explore(d)
+        await record_sign_in(d)
+        await d.maps.flush()
+        route = tmp_path / "maps" / APP / "routes" / "sign_in.json"
+        data = json.loads(route.read_text("utf-8"))
+        data["draftsOnly"] = True
+        route.write_text(json.dumps(data), "utf-8")
+        # the route's last touch now sends: its button says Post
+        s.screens["login"] = screen("Login", ids=("sign-in-btn", "l1", "l2"), inputs=("email",),
+                                    labels={"sign-in-btn": "Post"})
+        d._call_at.clear()
+        in_front(s, APP)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("schedule-a", "drive", {"route": "sign_in", "with": {"email": "a@b.c"}},
+                             scope=Scope((APP,)))
+        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value)
+        assert e.value.draft is True  # what the scheduler reads to say `stopped at a draft`
+        state, _ = schedulerun.classify(e.value.code, str(e.value), e.value.draft)
+        assert state == "stopped"
+        await finish(stop, task)
+    run(go)

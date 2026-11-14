@@ -130,7 +130,8 @@ class Trip:
     def _stopped(self, e: Refused) -> Refused:
         """The error a move ended in, with what the drive had done (`Done: 1 move.`) at the end of its first line."""
         first, sep, rest = str(e).partition("\n")
-        return Refused(e.code, f"{first} {driving.done(self.moves + self.jumps)}{sep}{rest}")
+        # (the draft flag goes along: a scheduled run tells a draft stop by it; CodeRabbit, PR #12, trip.py)
+        return Refused(e.code, f"{first} {driving.done(self.moves + self.jumps)}{sep}{rest}", draft=e.draft)
 
     async def _read(self) -> ui.Tree:
         d = self.d
@@ -469,7 +470,8 @@ class Trip:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:
             first, sep, rest = str(e).partition("\n")
-            raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}") from None
+            raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}",
+                          draft=e.draft) from None
         finally:
             _ROUTES.reset(running)
             if drafting is not None:
@@ -507,7 +509,7 @@ class Trip:
             text = (await self.d._after(self.view, first, [], True, moves_content=None))["text"]
         except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
             return e
-        shown = Refused(e.code, "\n".join([text, rest]) if sep else text)
+        shown = Refused(e.code, "\n".join([text, rest]) if sep else text, draft=e.draft)
         shown.screened = True  # type: ignore[attr-defined]
         return shown
 
@@ -579,5 +581,5 @@ class Trip:
         try:
             answer = await d._batch(self.client_id, self.req.then, self.scope, batch_args, [f"Note: {n}" for n in self.notes])
         except Refused as e:
-            raise Refused(e.code, "\n".join([first, *self.lines, str(e)])) from None
+            raise Refused(e.code, "\n".join([first, *self.lines, str(e)]), draft=e.draft) from None
         return {**answer, "text": "\n".join([first, *self.lines, answer["text"]])}
