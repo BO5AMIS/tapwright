@@ -777,12 +777,16 @@ class Session:
             if key and focused and focused[0] == key and await self._active_element() == focused[1]:
                 element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
             elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
-                  and (element := await self._active_element()) is not None):
+                  and (element := await self._active_element()) is not None and await self._is_field(element, hit)):
                 # the runner's read says this very field has the keyboard focus (its `f`, never a guess from frames or
                 # labels: 1.6.2): a tap on it would only open iOS's caret menu (Select, Paste). Where the caret is
-                # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype
+                # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype.
+                # The element focused NOW must be that field (its name, else its place in a fresh read): the app may
+                # have moved the focus since the read, and a clear and the keys would go to another field, a value
+                # of the vault with them (CodeRabbit, PR #12, session.py)
                 switched = False
             else:
+                element = None  # (a focused element that isn't the field is never typed into: focus it first)
                 # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
                 # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than
                 # WebDriverAgent's clear, measured on the phone 2026-11-11). Only where the field's middle shows

@@ -565,3 +565,28 @@ def test_cr_a_draft_stop_inside_a_driven_route_keeps_its_draft_flag(tmp_path):
         assert state == "stopped"
         await finish(stop, task)
     run(go)
+
+
+# ---- CodeRabbit, PR #12 (session.py:768): the focused field is the one asked for, or it is tapped ------------------------
+def test_cr_focus_that_moved_after_the_read_is_never_typed_into(monkeypatch):
+    from test_runner_v5 import Runner, find, ready, touches
+    from tapwright import session as session_module
+    monkeypatch.setattr(session_module, "HIT_CHECK", "1")
+    monkeypatch.setattr(session_module, "FOCUS_WAIT", 0.05)
+    runner = Runner()
+    s = ready(runner)
+    email = find(s.items, "email")
+    assert email.focused  # the read said the email field has the focus...
+    runner.active, runner.active_name = "E2", "password"  # ...then the app moved it to the password field
+    with pytest.raises(Refused) as e:
+        asyncio.run(s.type_text("Synthetic-Pass-77", replace=True, target=ui.Target(ref=email.ref)))
+    assert e.value.code == "not_actionable" and "didn't take focus" in str(e.value)
+    sent = [(p, b) for _, p, b in runner.requests]
+    assert not any(p.endswith("/element/E2/clear") for p, _ in sent)  # the other field isn't cleared...
+    assert not any(p.endswith("/wda/keys") for p, _ in sent)  # ...nor typed into
+    assert len(touches(runner)) == 1  # the field asked for was tapped, as for one without focus
+    # focus where the read said: typed with no tap, as before
+    runner = Runner()
+    s = ready(runner)
+    asyncio.run(s.type_text("hi@example.com", target=ui.Target(ref=find(s.items, "email").ref)))
+    assert touches(runner) == []
