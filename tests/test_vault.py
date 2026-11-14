@@ -59,6 +59,8 @@ def test_a_version_2_file_loads_every_kind(tmp_path):
 def test_nothing_shows_a_value_in_a_repr(tmp_path):
     v = load(tmp_path)
     shown = repr(v) + repr(list(v.vault.values())) + repr(v.reference("${vault.home.street}", None, False, "e1", "x"))
+    for form in {str(tmp_path), tmp_path.as_posix(), repr(str(tmp_path))[1:-1]}:  # (pytest's folder, e.g. pytest-2737)
+        shown = shown.replace(form, "<tmp>")
     for entry in VAULT["vault"].values():
         for key, value in entry.items():
             if key not in ("kind", "apps") and len(value) >= 3:
