@@ -12,6 +12,7 @@ from .policy import Policy
 class Ceiling:
     apps: tuple[str, ...] = ()  # `serve --apps`: bundle ids or exact names; a call may name these or fewer
     dedicated: bool = False  # `serve --dedicated`: the phone is kept for testing, so a call may name any app
+    phone: bool = False  # `serve --phone` (1.7, §24.4): a phone dedicated to automation; every app, as --dedicated
     policy: Policy | None = None  # `serve --policy FILE`: the words a call's own policy may only add to
     no_dialog: bool = False  # `serve --no-dialog`: the host's dialog is never asked, whatever a call says (dialog.py)
     accounts: str | None = None  # `serve --accounts FILE`: the test accounts file (§18.6); a call can't name another
@@ -20,7 +21,7 @@ class Ceiling:
 
     @property
     def is_set(self) -> bool:
-        return bool(self.apps or self.dedicated or self.policy is not None or self.no_dialog or self.accounts
+        return bool(self.apps or self.dedicated or self.phone or self.policy is not None or self.no_dialog or self.accounts
                     or self.brief or self.maps)
 
     def check_maps(self, sent: str | None) -> tuple[str | None, str | None]:
@@ -48,15 +49,17 @@ class Ceiling:
         return None, ("not_allowed", f"over_ceiling: this daemon was started with --accounts {self.accounts}, so a call can't "
                                      f"use another file (it asked for {sent}). Restart tapwright serve to change it.")
 
-    def refuse_scope(self, apps: tuple[str, ...], dedicated: bool) -> str | None:
-        """Why a call's scope is wider than the daemon's, or None. Only an `--apps` ceiling limits scope: a dedicated
-        daemon has no limit, and one with no ceiling is as before."""
+    def refuse_scope(self, apps: tuple[str, ...], dedicated: bool, mode: str | None = None) -> str | None:
+        """Why a call's scope is wider than the daemon's, or None. Only an `--apps` ceiling limits scope: a dedicated or
+        `--phone` daemon has no limit (the two are the same width, so either takes a call of the other), and one with no
+        ceiling is as before. `mode`: the every-app mode the call asked for by name ("dedicated" or "phone")."""
         if not self.apps:
             return None
         listed = ",".join(self.apps)
         if dedicated:
-            return (f"over_ceiling: this daemon was started with --apps {listed}, so a call can't ask for dedicated mode "
-                    "(every app); a call may only narrow that list. Restart tapwright serve with --dedicated to change it.")
+            asked = "phone" if mode == "phone" else "dedicated"
+            return (f"over_ceiling: this daemon was started with --apps {listed}, so a call can't ask for {asked} mode "
+                    f"(every app); a call may only narrow that list. Restart tapwright serve with --{asked} to change it.")
         outside = [a for a in apps if a not in self.apps]
         if outside:
             return (f"over_ceiling: this daemon was started with --apps {listed}, so a call may only narrow that list "

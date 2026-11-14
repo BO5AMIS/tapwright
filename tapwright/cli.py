@@ -11,7 +11,7 @@
   tapwright probe [--host IP] [--watch]
                      does it work over the network? Learns the pairing port on the local
                      Wi-Fi; with --host (e.g. the phone's Tailscale IP) tries that address
-  tapwright serve [--phone ADDRESS] [--port N] [--keep-alive] [--new-token] [--stop]
+  tapwright serve [--apps ID[,ID] | --dedicated | --phone] [--address IP] [--port N] [--keep-alive] [--new-token] [--stop]
                      the background process that owns the phone: the live view in your
                      browser, the agent tools and an HTTP API. Agent tools start it by
                      themselves; it stops after 30 minutes unused (--keep-alive: never)
@@ -23,22 +23,24 @@
                      the grants of a policy file, today's counts and the last uses; --revoke-all revokes
                      every one and stops a running route; `grants unlock --policy FILE` removes a stuck edit lock
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
-  tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated] [--project DIR]
+  tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
                      connect an agent in one go: register the MCP server and install the skill
-  tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated) [--junit OUT] [--update-references]
+  tapwright replay FILE|NAME... (--apps ID[,ID] | --dedicated | --phone) [--junit OUT] [--update-references]
                      run scripts saved with the record tool, no agent; exit 0 all held, 1 one stopped,
                      2 one couldn't start
 
-Connection: USB when the phone is plugged in, else the local network; serve --phone dials an
+Connection: USB when the phone is plugged in, else the local network; serve --address dials an
 address such as the phone's Tailscale IP (experimental).
 """
 import argparse
 import asyncio
 import json
 import os
+import re
 import logging
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -359,11 +361,74 @@ def passcode_given(accounts: str | None) -> bool:
     return isinstance(passcode, str) and bool(passcode.strip())
 
 
-async def unattended_stops(usb: list[str], accounts: str | None, connect=None, status: dict | None = None) -> list:
-    """What would stop a run with nobody at the phone (needs.unattended), from what the computer can read: the phone on
-    USB, the running daemon's state (`status`, its health answer), and whether an accounts file gives the passcode."""
+def vault_problem(accounts: str | None) -> str | None:
+    """Why the vault file given to doctor can't be used (its own words, never a value), or None."""
+    if not accounts:
+        return None
+    from . import accounts as accountlib
+    return accountlib.load(str(Path(accounts).expanduser().resolve())).problem
+
+
+def runner_facts() -> dict:
+    """`runner` and `runner_why` for needs.Facts: whether the runner setup recorded is installed and current (its
+    build is this Tapwright's, its signature lasts beyond the re-sign margin), read from what setup recorded."""
+    from . import repair
+    state = store.load_state()
+    if not state.get("runner_id"):
+        return {"runner": "missing", "runner_why": "setup hasn't installed it"}
+    try:
+        facts = repair.WdaFacts(installed=True, installed_expiry=repair.recorded_install_expiry(),
+                                profile=repair.profile_expiry(), profile_has_phone=True,
+                                certificate=repair.certificate_expiry(), **repair.builds())
+        decision = repair.decide_wda(facts, repair.now_utc())
+    except Exception as e:  # (a profile that can't be read)
+        return {"runner": "setup", "runner_why": f"its signing can't be read: {type(e).__name__}"}
+    return {"runner": decision.verdict, "runner_why": decision.reason}
+
+
+def wake_timers(run=None, platform: str | None = None) -> bool | None:
+    """Windows: does the power plan let a scheduled task wake the PC (Sleep > Allow wake timers = Enable on mains
+    power)? Read only (`powercfg /query`). None elsewhere, or when it can't be read."""
+    if (platform or sys.platform) != "win32":
+        return None
+    if run is None:
+        def run(argv):
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+            return done.returncode, done.stdout
+    try:
+        code, out = run(["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "RTCWAKE"])
+    except Exception:
+        return None
+    values = re.findall(r"0x([0-9a-fA-F]+)", out or "") if code == 0 else []
+    if not values:
+        return None
+    return int(values[0], 16) == 1  # the AC index (the DC one follows): 0 Disable, 1 Enable, 2 important ones only
+
+
+def scheduled_tasks(module=None) -> dict:
+    """`tasks` and `tasks_missing` for needs.Facts: the schedules (§22) and whether each has its Task Scheduler task.
+    {} when this Tapwright has no schedules, or they can't be read."""
+    if module is None:
+        try:
+            from . import schedules as module  # type: ignore[no-redef]
+        except ImportError:
+            return {}
+    try:
+        names = list(module.names())
+        scheduler = module.Scheduler()
+        missing = tuple(n for n in names if scheduler.exists(n) is False)
+    except Exception:
+        return {}
+    return {"tasks": len(names), "tasks_missing": missing}
+
+
+async def unattended_facts(usb: list[str], accounts: str | None, connect=None, status: dict | None = None,
+                           machine: bool = False) -> dict:
+    """The fields of needs.Facts doctor could read: the phone on USB, the running daemon's state (`status`, its health
+    answer), the vault file (whether it gives the passcode; never the value), and with `machine` this computer's side
+    (the runner setup recorded, the wake timers, the scheduled tasks)."""
     from . import needs
-    facts: dict = {"passcode_given": passcode_given(accounts)}
+    facts: dict = {"passcode_given": passcode_given(accounts), "vault_problem": vault_problem(accounts)}
     if usb:
         facts.update(await lockdown_facts(configured_phone(usb), connect))
     if status is not None:
@@ -371,10 +436,26 @@ async def unattended_stops(usb: list[str], accounts: str | None, connect=None, s
             facts["locked"] = True
         if needs.phone_moment(status.get("state"), status.get("detail")) is needs.PASSCODE_PROMPT:
             facts["ui_automation"] = False  # iOS asked for the passcode before the automation started
-    return needs.unattended(needs.Facts(**facts))
+    if machine:
+        facts["reachable"] = bool(usb) or (status is not None and status.get("state") in ("live", "locked"))
+        facts.update(runner_facts())
+        facts["wake_timers"] = wake_timers()
+        facts.update(scheduled_tasks())
+    return facts
 
 
-def print_unattended(stops: list) -> None:
+async def unattended_stops(usb: list[str], accounts: str | None, connect=None, status: dict | None = None,
+                           machine: bool = False) -> list:
+    """What would stop a run with nobody at the phone (needs.unattended), from what the computer can read."""
+    from . import needs
+    return needs.unattended(needs.Facts(**await unattended_facts(usb, accounts, connect, status, machine)))
+
+
+def print_unattended(stops: list, ready: list[str] | None = None) -> None:
+    if ready:
+        print("\nReady for an unattended run:")
+        for line in ready:
+            print(f"  - {line}", flush=True)
     print("\nWhat would stop an unattended run:" if stops else "\nNothing doctor can see would stop an unattended run.")
     for stop in stops:
         print(f"  - {stop.what}\n    Fix: {stop.fix}", flush=True)
@@ -503,9 +584,11 @@ async def doctor(a) -> int:
     waiting = await needs_person(usb) if not a.fix else []
     print_needs(waiting)
     if a.unattended:  # each thing that would stop a run without a person counts as a problem
-        from . import client
-        stops = await unattended_stops(usb, a.accounts, status=client.healthy(store.read_serve_info()))
-        print_unattended(stops)
+        from . import client, needs
+        facts = needs.Facts(**await unattended_facts(usb, a.accounts, status=client.healthy(store.read_serve_info()),
+                                                     machine=True))
+        stops = needs.unattended(facts)
+        print_unattended(stops, needs.unattended_ready(facts))
         problems += len(stops)
     print(f"\n{problems} problem(s)." if problems else
           "\nSet up, but the phone needs a person (above)." if waiting else "\nAll set.")
@@ -662,7 +745,7 @@ def install(a) -> int:
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
     try:
         lines = connect.install(a.client, apps, a.dedicated, a.project, policy=a.policy, no_policy=a.no_policy,
-                                ux_rules=a.ux_rules, driver_model=a.driver_model)
+                                ux_rules=a.ux_rules, driver_model=a.driver_model, phone=a.phone)
     except connect.ConnectError as e:
         print(f"tapwright install: {e}")
         return 1
@@ -672,6 +755,21 @@ def install(a) -> int:
 
 
 START_CODES = ("bad_params", "not_connected", "reconnecting", "not_allowed", "unsupported", "internal")
+PHONE_MODE = "\x00phone-mode"  # what `serve --phone` with no value gives: the mode, not an address
+
+
+def serve_phone(given: str | None, address: str | None) -> tuple[bool, str | None]:
+    """(phone mode, the address to dial) from `serve --phone [ADDRESS]` and `--address ADDRESS`. `--phone` alone is the
+    1.7 mode (§24.4); `--phone ADDRESS` is the dial address of earlier versions, kept working (it says so)."""
+    if given is None:
+        return False, address
+    if given == PHONE_MODE:
+        return True, address
+    if address is not None:
+        raise SystemExit("tapwright serve: --phone ADDRESS and --address both name an address; use --address alone")
+    print(f"tapwright serve: --phone {given} is the address of earlier versions; it now means --address {given}. "
+          "(--phone alone is the 1.7 mode for a phone dedicated to automation.)", file=sys.stderr)
+    return False, given
 
 
 def report(a) -> int:
@@ -697,12 +795,13 @@ def replay(a) -> int:
     from . import batch, client
     from .control import Refused
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
-    if apps and a.dedicated:
-        print("tapwright replay: --apps and --dedicated can't be used together.")
+    whole = getattr(a, "phone", False)
+    if sum((bool(apps), a.dedicated, whole)) > 1:
+        print("tapwright replay: --apps, --dedicated and --phone can't be used together.")
         return 2
-    if not apps and not a.dedicated:
+    if not apps and not a.dedicated and not whole:
         # a script comes from anyone (a pull request, a download): its own `app` must not choose what it may drive
-        print("tapwright replay: pass --apps <bundle id> (the apps these scripts may use) or --dedicated")
+        print("tapwright replay: pass --apps <bundle id> (the apps these scripts may use), or --dedicated (or --phone)")
         return 2
     results: list[tuple[str, str, str, float]] = []  # (file, "ok" | "failed" | "error", message, seconds)
     for f in a.files:
@@ -714,7 +813,10 @@ def replay(a) -> int:
             print(f"{f}: Error {e.code}: {e}")
             results.append((f, "error", str(e), 0.0))
             continue
-        client.set_scope(apps, a.dedicated)
+        if whole:
+            client.set_scope(apps, a.dedicated, True)
+        else:
+            client.set_scope(apps, a.dedicated)
         try:
             # (a failed picture check writes its diff next to the script, and its message ends `(diff: <path>)`)
             answer = client.call("replay", {"path": path, **({"update_references": True} if getattr(a, "update_references", False) else {})},
@@ -836,7 +938,7 @@ def main() -> int:
     p.add_argument("--watch", action="store_true")
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, help="default 8417; a free port if that one is taken")
-    p.add_argument("--phone", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
+    p.add_argument("--address", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
     p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
@@ -849,6 +951,11 @@ def main() -> int:
                             "is no ceiling")
     scope.add_argument("--dedicated", action="store_true",
                        help="the phone is kept for testing: calls may use every app")
+    p.add_argument("--phone", nargs="?", const=PHONE_MODE, default=None, metavar="",
+                       help="the phone is dedicated to automation (1.7): calls may use every app, as with --dedicated; "
+                            "grants, the vault and the policy stay in force, and Settings' account, privacy and "
+                            "security panes, Passwords and Wallet are never granted. Never the default. (--phone ADDRESS, "
+                            "the address of earlier versions, still works and means --address ADDRESS)")
     p.add_argument("--policy", metavar="FILE",
                    help="the safety policy every call is held to: a call's own policy may add words that need an OK or "
                         "are blocked, never remove one (see tapwright mcp --policy for the file)")
@@ -886,6 +993,8 @@ def main() -> int:
                         "a script's own `app` doesn't widen this")
     p.add_argument("--dedicated", action="store_true",
                    help="the phone is kept for testing: let the scripts use any app (needed when --apps isn't given)")
+    p.add_argument("--phone", action="store_true",
+                   help="the phone is dedicated to automation (1.7): let the scripts use any app, as --dedicated")
     p.add_argument("--update-references", action="store_true",
                    help="picture checks (matches, compare_screen) save the screen into the script's "
                         "<name>.references folder instead of comparing; exit 0 when every step ran")
@@ -904,6 +1013,9 @@ def main() -> int:
                    help="the apps the agent may read and touch, as bundle ids or exact names (personal mode)")
     p.add_argument("--dedicated", action="store_true",
                    help="the phone is kept for testing: the agent may use every app on it")
+    p.add_argument("--phone", action="store_true",
+                   help="the phone is dedicated to automation (1.7): the agent may use every app on it, with the "
+                        "grants, the vault and the policy in force")
     p.add_argument("--project", metavar="DIR",
                    help="for this project only: its .mcp.json (Claude Code) or .cursor/mcp.json (Cursor), and its skill folders")
     rules = p.add_mutually_exclusive_group()
@@ -926,6 +1038,9 @@ def main() -> int:
                             "default: without this list the agent can do nothing)")
     scope.add_argument("--dedicated", action="store_true",
                        help="the phone is kept for testing: the agent may use every app on it")
+    scope.add_argument("--phone", action="store_true",
+                       help="the phone is dedicated to automation (1.7): the agent may use every app on it, as with "
+                            "--dedicated, with the grants, the vault and the policy in force. Never the default")
     rules = p.add_mutually_exclusive_group()
     rules.add_argument("--policy", metavar="FILE",
                        help="the safety policy as JSON: words on a button or switch that need a person's OK in the live "
@@ -958,7 +1073,7 @@ def main() -> int:
         except ValueError as e:
             raise SystemExit(f"tapwright mcp: {e}") from e
         mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
-                       brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts)
+                       brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts, phone=a.phone)
         return 0
     if a.cmd == "view":
         return view()
@@ -997,11 +1112,14 @@ def main() -> int:
             chosen = policy.load(a.policy) if a.policy else None
         except ValueError as e:
             raise SystemExit(f"tapwright serve: {e}") from e
+        whole, address = serve_phone(a.phone, a.address)
+        if whole and (a.apps or a.dedicated):
+            raise SystemExit("tapwright serve: --phone can't be used with --apps or --dedicated")
         ceiling = Ceiling(apps=tuple(x.strip() for x in (a.apps or "").split(",") if x.strip()), dedicated=a.dedicated,
-                          policy=chosen, no_dialog=a.no_dialog,
+                          phone=whole, policy=chosen, no_dialog=a.no_dialog,
                           accounts=str(Path(a.accounts).expanduser().resolve()) if a.accounts else None,
                           maps=str(Path(a.maps).expanduser().resolve()) if a.maps else None, brief=a.brief)
-        return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=a.phone,
+        return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=address,
                                         video=a.video, settle_on_video=a.settle_on_video, ceiling=ceiling))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)
 

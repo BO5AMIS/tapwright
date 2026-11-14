@@ -44,6 +44,7 @@ NO_KEY_PAGE = (
     "<p>An agent driving Tapwright through a script opens it with <code>tapwright.client</code>'s "
     "<code>viewer_url</code> and the browser, never by writing the link out.</p>"
 )
+WHOLE_PHONE = ("dedicated", "phone")  # the X-Tapwright-Mode values that mean every app (--dedicated, --phone)
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 DEFAULT_PORT = 8417
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
@@ -199,12 +200,14 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", "the body must be a JSON object", 400)
         # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
         client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client") or "anonymous"
-        # Personal mode unless the caller says the device is dedicated: a caller that names no apps gets none.
+        # Personal mode unless the caller says the device is dedicated (to testing, `dedicated`, or to automation,
+        # `phone`, §24.4; both are every app): a caller that names no apps gets none.
         apps = tuple(a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip())
-        dedicated = _hv(request, "x-tapwright-mode") == "dedicated"
+        mode = _hv(request, "x-tapwright-mode")
+        dedicated = mode in WHOLE_PHONE
         scope = None if dedicated else Scope(apps)
         # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
-        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated)) is not None:
+        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated, mode)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
         sent = _hv(request, "x-tapwright-policy")
@@ -271,6 +274,24 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("internal", "tapwright serve failed unexpectedly; see ~/.tapwright/serve.log", 500)
         finally:
             STILL_WANTED.reset(wanted)
+
+    async def unlock(request):
+        """`POST /api/phone/unlock` (§22.3, §18.6): a scheduled run found the phone locked and asks the daemon to unlock
+        it with the vault's `phone.passcode` (the accounts file the run names, within serve's --accounts ceiling). The
+        answer is fixed words: `{"ok", "code", "message"}`, never a value. Only the daemon types the passcode."""
+        problem = denied(request)
+        if problem is not None:
+            return problem
+        sent = _hv(request, "x-tapwright-accounts")
+        if sent is not None and (not os.path.isabs(sent) or "\x00" in sent):
+            return _error("bad_params", "--accounts must be an absolute file path", 400)
+        path = sent
+        if ceiling is not None:
+            path, refused = ceiling.check_accounts(sent, False)
+            if refused is not None:
+                return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
+        result = await daemon.unlock_phone(path)
+        return JSONResponse({"ok": result.ok, "code": result.code, "message": result.message})
 
     async def dialog_body(request) -> tuple[str, dict] | Response:
         """The agent's client id and the JSON body of one of the host-dialog calls, or the refusal (dialog.py)."""
@@ -496,6 +517,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
         Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
+        Route("/api/phone/unlock", unlock, methods=["POST"]),
         Route("/api/session/{what:str}", session, methods=["POST"]),  # (before /api/{name}: which is one word)
         Route("/api/{name}", tool, methods=["POST"]),
     ])

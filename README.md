@@ -233,7 +233,7 @@ live view protocol in [docs/VIEWER-PROTOCOL.md](https://github.com/bo5amis/tapwr
 ## Without the cable
 
 After setup, unplug: on the same Wi-Fi, Tapwright finds the phone by itself, or give its
-address with `tapwright serve --phone 192.168.x.y`. Over Wi-Fi every step is slower than
+address with `tapwright serve --address 192.168.x.y`. Over Wi-Fi every step is slower than
 over USB (see [Status](#status)); for long unattended runs, keep the cable in.
 
 Reaching the phone from another network (a VPN such as Tailscale, or cellular) is not part

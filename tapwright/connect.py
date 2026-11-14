@@ -28,10 +28,10 @@ class ConnectError(RuntimeError):
 
 
 def mcp_args(apps: list[str], dedicated: bool, policy: str | None = None, no_policy: bool = False,
-             screenshots: str | None = None, ux_rules: str | None = None) -> list[str]:
-    """The arguments after `tapwright`: `mcp --apps a,b` or `mcp --dedicated`, then the policy, screenshot and
-    ux-rules flags."""
-    args = ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
+             screenshots: str | None = None, ux_rules: str | None = None, phone: bool = False) -> list[str]:
+    """The arguments after `tapwright`: `mcp --apps a,b`, `mcp --dedicated` or `mcp --phone`, then the policy,
+    screenshot and ux-rules flags."""
+    args = ["mcp", "--phone"] if phone else ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
     if policy:
         args += ["--policy", policy]
     if no_policy:
@@ -70,7 +70,7 @@ def existing_flags(args: list[str]) -> tuple[str | None, bool, str | None]:
 
 
 def merge_flags(old: list[str] | None, apps: list[str], dedicated: bool, policy: str | None,
-                no_policy: bool, ux_rules: str | None = None) -> tuple[list[str], list[str]]:
+                no_policy: bool, ux_rules: str | None = None, phone: bool = False) -> tuple[list[str], list[str]]:
     """(new args, notes). Flags of the existing entry that this run doesn't set are kept. When this run's flag
     replaces an earlier policy, a note says what was replaced; a policy is never dropped without one."""
     old_policy, old_no_policy, old_shots = existing_flags(old or [])
@@ -88,7 +88,7 @@ def merge_flags(old: list[str] | None, apps: list[str], dedicated: bool, policy:
     old_rules = existing_ux_rules(old or [])
     if ux_rules and old_rules and old_rules != ux_rules:
         notes.append(f"replaced the earlier --ux-rules {old_rules}")
-    return mcp_args(apps, dedicated, policy, no_policy, old_shots, ux_rules or old_rules), notes
+    return mcp_args(apps, dedicated, policy, no_policy, old_shots, ux_rules or old_rules, phone), notes
 
 
 def _json_args(path: Path, *keys: str) -> list[str] | None:
@@ -141,11 +141,13 @@ def codex_existing_args(text: str) -> list[str] | None:
     return [a for a in args if isinstance(a, str)] if isinstance(args, list) else None
 
 
-def check_scope(apps: list[str], dedicated: bool) -> None:
-    """The rule of `tapwright mcp`: personal mode needs the apps the agent may use; without them it can do nothing."""
-    if apps and dedicated:
-        raise ConnectError("--apps and --dedicated can't be used together.")
-    if not apps and not dedicated:
+def check_scope(apps: list[str], dedicated: bool, phone: bool = False) -> None:
+    """The rule of `tapwright mcp`: personal mode needs the apps the agent may use; without them it can do nothing.
+    `--dedicated` and `--phone` are the every-app modes: one at a time, never with `--apps`."""
+    if sum((bool(apps), dedicated, phone)) > 1:
+        given = [flag for flag, on in (("--apps", bool(apps)), ("--dedicated", dedicated), ("--phone", phone)) if on]
+        raise ConnectError(f"{' and '.join(given)} can't be used together.")
+    if not apps and not dedicated and not phone:
         raise ConnectError(
             "say which apps the agent may use: --apps com.example.app (bundle ids or exact names, comma-separated). "
             "Without it the agent can do nothing, which is deliberate: the phone may be yours. On a phone kept "
@@ -303,12 +305,12 @@ def config_path(client: str, project: str | None, home: Path | None = None) -> P
 def install(client: str, apps: list[str], dedicated: bool, project: str | None = None, home: Path | None = None,
             runner: Runner = _run, which: Callable[[str], str | None] = shutil.which,
             policy: str | None = None, no_policy: bool = False, ux_rules: str | None = None,
-            driver_model: list[str] | None = None) -> list[str]:
+            driver_model: list[str] | None = None, phone: bool = False) -> list[str]:
     """Register the server with `client` and install the skill and the driver agent (Claude Code and Codex have
     agent files; Cursor gets the handbook in the skill). Returns the lines to print. A rerun keeps the `--policy`,
     `--no-policy`, `--ux-rules` and `--screenshots` of the existing entry that this run doesn't set."""
     from . import driver, skills
-    check_scope(apps, dedicated)
+    check_scope(apps, dedicated, phone)
     if policy and no_policy:
         raise ConnectError("--policy and --no-policy can't be used together.")
     if policy:
@@ -327,7 +329,7 @@ def install(client: str, apps: list[str], dedicated: bool, project: str | None =
     notes: list[str] = []
 
     def args_for(old: list[str] | None) -> list[str]:
-        args, notes[:] = merge_flags(old, apps, dedicated, policy, no_policy, ux_rules)
+        args, notes[:] = merge_flags(old, apps, dedicated, policy, no_policy, ux_rules, phone)
         chosen[:] = [args]
         return args
 

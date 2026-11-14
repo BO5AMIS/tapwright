@@ -34,11 +34,14 @@ def viewer_url(info: dict) -> str:
 SCOPE: dict[str, str] = {}  # the headers that say what this process's agent may use; none: no apps at all
 
 
-def set_scope(apps: list[str] | None = None, dedicated: bool = False) -> None:
+def set_scope(apps: list[str] | None = None, dedicated: bool = False, phone: bool = False) -> None:
     """Personal mode (the default): the agent may read and touch only `apps` (bundle ids or exact names).
-    `dedicated`: the phone is kept for testing, so there is no limit. The daemon enforces it on every call."""
+    `dedicated`: the phone is kept for testing, so there is no limit. `phone` (1.7, §24.4): the phone is dedicated to
+    automation; every app, as `dedicated`. The daemon enforces it on every call."""
     SCOPE.clear()
-    if dedicated:
+    if phone:
+        SCOPE["X-Tapwright-Mode"] = "phone"
+    elif dedicated:
         SCOPE["X-Tapwright-Mode"] = "dedicated"
     elif apps:
         SCOPE["X-Tapwright-Apps"] = ",".join(apps)
@@ -245,6 +248,19 @@ def dialog_answer(client_id: str, ask_id: str, answer: str) -> bool:
     done = _request(store.read_serve_info(), "POST", "/api/dialog_answer", {"id": ask_id, "answer": answer},
                     client_id=client_id)
     return bool(done.get("ok"))
+
+
+def unlock_phone(accounts: str | None = None, timeout: float = 60.0) -> dict:
+    """Ask the running daemon to unlock a locked phone with the vault's `phone.passcode` (§22.3: a scheduled run on a
+    locked phone). `accounts`: the vault file, as a path (only the path is sent; the daemon reads the value and types
+    it). `{"ok", "code", "message"}`; never starts the daemon."""
+    headers_before = dict(SCOPE)
+    try:
+        set_accounts(accounts)
+        return _request(store.read_serve_info(), "POST", "/api/phone/unlock", {}, timeout, "schedule")
+    finally:
+        SCOPE.clear()
+        SCOPE.update(headers_before)
 
 
 def tell_daemon(path: str, client_id: str, timeout: float = 3.0) -> bool:

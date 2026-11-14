@@ -136,12 +136,28 @@ class HostDialogs:
         if not isinstance(event, dict) or not isinstance(event.get("id"), str):
             return
         ask_id = event["id"]
+        if event.get("type") == "notice" and self._calls:  # the watchdog (§24.5): said in chat, nothing to answer
+            asyncio.create_task(self._notice(str(event.get("message") or ""), self._calls[0]),
+                                name=f"tapwright-notice-{ask_id}")
+            return
         if event.get("type") == "ask" and ask_id not in self._shown and self._calls:
             self._shown[ask_id] = asyncio.create_task(self._show(event, self._calls[0]), name=f"tapwright-ask-{ask_id}")
         elif event.get("type") == "close":
             task = self._shown.pop(ask_id, None)
             if task is not None:
                 task.cancel()
+
+    @staticmethod
+    async def _notice(message: str, ctx: object) -> None:
+        """A message for the person, with no answer: an MCP log message at warning level (the host shows it in chat
+        where it shows them). The daemon also puts it in the agent's next answer, so a host that shows none loses
+        nothing."""
+        if not message:
+            return
+        try:
+            await ctx.session.send_log_message(level="warning", data=message, logger="tapwright")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001  a host that takes no log messages: the answer's Note still says it
+            pass
 
     async def _show(self, event: dict, ctx: object) -> None:
         choices = event.get("choices")
