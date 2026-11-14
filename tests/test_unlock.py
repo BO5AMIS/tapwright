@@ -78,9 +78,11 @@ class Clock:
         self.t += s
 
 
-def unlocker(clock=None):
+def unlocker(clock=None, path=None):
+    """An Unlocker whose record of attempts (unlock.Ledger, on disk: the test's own, conftest.py) runs on the fake clock."""
     clock = clock or Clock()
-    return unlock.Unlocker(clock=clock, sleep=clock.sleep, confirm_wait=1.0, poll=0.2), clock
+    return unlock.Unlocker(clock=clock, sleep=clock.sleep, confirm_wait=1.0, poll=0.2,
+                           ledger=unlock.Ledger(path, wall=clock)), clock
 
 
 def run(coro):
@@ -162,10 +164,12 @@ def test_a_refused_passcode_stops_and_is_never_typed_again():
 
 
 def test_a_changed_passcode_in_the_file_may_be_tried_after_a_refusal():
+    """The refusal is tied to the vault file (path, modification time, size), never to the passcode: a changed file
+    may be tried once."""
     u, _ = unlocker()
     screen = Screen(right="135790")
-    assert run(u.unlock(screen, PASSCODE)).code == "refused"
-    assert run(u.unlock(screen, "135790")).code == "unlocked"
+    assert run(u.unlock(screen, PASSCODE, source=unlock.Source("v.json", 1, 10))).code == "refused"
+    assert run(u.unlock(screen, "135790", source=unlock.Source("v.json", 2, 10))).code == "unlocked"
 
 
 def test_at_most_two_attempts_an_hour():

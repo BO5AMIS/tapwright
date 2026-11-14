@@ -6,7 +6,7 @@ import json
 
 import pytest
 from test_daemon import finish, make, run, started
-from test_daemon_accounts import BUNDLE, TypingSession, screens, GOES
+from test_daemon_accounts import BUNDLE, TypingSession, code_screens, screens, GOES
 
 from tapwright import mapkeeper
 from tapwright.actionlog import ActionLog
@@ -22,11 +22,11 @@ VAULT = {"version": 2, "vault": {
     "otp": {BUNDLE: {"from": ["com.apple.MobileSMS"], "match": "Wayfare"}}}
 
 
-def vaulted(tmp_path, data=VAULT):
+def vaulted(tmp_path, data=VAULT, code_field=False):
     path = tmp_path / "private" / "vault.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(data), "utf-8")
-    d = make(TypingSession(screens(), "login", GOES), audit=AuditLog(tmp_path / "audit"))
+    d = make(TypingSession(code_screens() if code_field else screens(), "login", GOES), audit=AuditLog(tmp_path / "audit"))
     d.maps = mapkeeper.Maps(str(tmp_path / "maps"))
     d.actions = ActionLog(tmp_path / "log")
     d.ceiling = type("C", (), {"accounts": str(path), "brief": False, "maps": None})()
@@ -130,19 +130,19 @@ def test_without_a_dialog_a_card_asks_the_live_view_and_types_nothing(tmp_path):
 
 def test_a_one_time_code_is_typed_once_and_shown_nowhere(tmp_path):
     async def go():
-        d, _ = vaulted(tmp_path)
+        d, _ = vaulted(tmp_path, code_field=True)
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         with pytest.raises(Refused) as e:  # notifications aren't read yet: no code
-            await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+            await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
         assert e.value.code == "not_found" and "no one-time code" in str(e.value)
         d.otp_codes.put(BUNDLE, CODE, "com.apple.MobileSMS", __import__("time").time())
-        r = await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+        r = await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
         assert d.session.typed[-1][0] == CODE and CODE not in r["text"]
         look = await d.run_tool("a", "look", {"screenshot": False})
         assert CODE not in look["text"] and "<one-time code>" in look["text"]
         with pytest.raises(Refused):  # used once
-            await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+            await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
         assert [(x["kind"], x.get("app"), x.get("detail")) for x in audit_lines(tmp_path)] == [
             ("otp", BUNDLE, "from com.apple.MobileSMS")]
         await finish(stop, task)

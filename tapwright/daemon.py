@@ -31,7 +31,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
-from . import auditlog, center_tool, grants as grantlib, otp as otplib
+from . import auditlog, center_tool, grants as grantlib, notifications as notes_lib, otp as otplib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -61,6 +61,7 @@ LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back"
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
+UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
@@ -1513,20 +1514,31 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self.lock_screen = unlocklib.PhoneLockScreen(self.session)
         return self.lock_screen
 
-    def passcode_for(self, accounts: str | None = None) -> str | None:
-        """The vault's `phone.passcode` for this call (its accounts file, else the daemon's): only the tool uses it."""
+    def _passcode_file(self) -> str | None:
+        """The vault file the passcode may come from: the one `tapwright serve --accounts` names, never a file a request or
+        a call names (review 1.7, H2: a caller's own file would make every guess "a changed passcode")."""
+        path = getattr(getattr(self, "ceiling", None), "accounts", None)
+        return path if isinstance(path, str) and path else None
+
+    def passcode_for(self) -> str | None:
+        """The vault's `phone.passcode`, from serve's own `--accounts` file only: only the tool uses it."""
+        path = self._passcode_file()
+        if path is None:
+            return None
         try:
-            loaded = self.accounts.get(accounts) if accounts else self._loaded()
+            loaded = self.accounts.get(path)
         except Exception:
             return None
         if loaded.problem is not None:
             return None
         return loaded.passcode if isinstance(loaded.passcode, str) and loaded.passcode.strip() else None
 
-    async def unlock_phone(self, accounts: str | None = None) -> "unlocklib.Result":
-        """Unlock a locked phone with the vault's passcode (unlock.py has the rules). Never while paused or while a
-        person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode typed;
-        the log gets fixed words. On success the state is live at once."""
+    async def unlock_phone(self) -> "unlocklib.Result":
+        """Unlock a locked phone with the passcode of serve's own vault (unlock.py has the rules). Never while paused or
+        while a person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode
+        typed; the log gets fixed words. On success the state is live at once. Its callers are the two places unattended
+        running is meant to happen (§19.5, review 1.7 H1): a scheduled run's start (`/api/phone/unlock`), and a new
+        top-level call to `tapwright serve --phone` (_hold_for_phone)."""
         if self.control.paused:
             return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
         if self.control.person_active():
@@ -1534,14 +1546,15 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if self.state != "locked":
             return unlocklib.Result(self.state == "live", "not_locked" if self.state == "live" else "not_connected",
                                     "" if self.state == "live" else "the phone isn't connected")
-        passcode = self.passcode_for(accounts)
+        passcode = self.passcode_for()
+        source = unlocklib.Source.of(self._passcode_file())
 
         def audit(detail: str) -> None:
             if self.audit is not None:
                 self.audit.write("vault", name=unlocklib.AUDIT_NAME, detail=detail)
 
         async def attempt() -> "unlocklib.Result":
-            return await self.unlocker.unlock(self._lock_screen(), passcode, audit)
+            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source)
         try:
             result = await (attempt() if self.control.holds_turn() else self.control.read(attempt))
         except Exception as e:  # (a reconnect under way: no key was typed by this, or unlock.py said so itself)
@@ -1948,6 +1961,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _policed_other(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         """The tools whose log line is written by the caller (reads, and the batch tools)."""
         if name in BATCH_TOOLS:
+            if name in UNLOCK_AT_START:  # serve --phone: a locked phone is unlocked before the first step, never during
+                await self._hold_for_phone(client_id, name)
             if scope is None:
                 return await self._batch_tool(client_id, name, args, scope)
             return await self._batch_within(scope, client_id, name, args)
@@ -3167,7 +3182,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
-                await self._hold_for_phone(name)  # a locked phone, the passcode prompt: a person first (§11.5)
+                await self._hold_for_phone(client_id, name)  # a locked phone, the passcode prompt: a person first (§11.5)
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
                 try:
                     if scope is None:
@@ -5169,12 +5184,18 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                              f"{', '.join(active.apps)}; this is {front or 'no app'}. Nothing was typed.")
             # (a reference is checked against this field: a password only into a secure one, §18.6, §20.1)
             using = self._loaded().reference(a["text"], active, bool(field.secure), field.ref, front)
+            if using is not None and using.otp_app is not None and not notes_lib.otp_target(field):
+                # §20.4: a code goes only into a code field of the app; a chat's composer would send it (review 1.7, H3).
+                # Refused before any code is read and before the dry run's line: nothing typed, no code read.
+                raise Refused("not_allowed", f"a one-time code is typed only into the app's code field (a one-line "
+                                             f"field that says code, OTP or verification); {field.ref} isn't one. "
+                                             "Nothing was typed.")
         real = using.value if using is not None else a["text"]
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
         if using is not None and using.kind == accountlib.CARD:
             await self._card_ok(a, field, using)  # a person's OK, every time; never a grant (§20.1, §19.2)
         if using is not None and using.otp_app is not None:
-            code = await self._code_for_typing(using.otp_app)  # (from the source apps' notifications only)
+            code = await self._code_for_typing(using.otp_app, field)  # (from the source apps' notifications only)
             if code is None:
                 raise Refused("not_found", f"no one-time code for {using.otp_app}: none arrived in the 2 minutes since "
                                            "the app showed its code field. Nothing was typed.")
@@ -5810,9 +5831,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return ""
         held = _GRANT_CALL.get()
         stopped = held.draft if held is not None and grantlib.reaches_people(word) else None  # a draftsOnly grant's name
-        drafted: "tuple[str, str | None] | None" = None
+        drafted: "tuple[str, str | None, bool] | None" = None
         if route_draft or stopped is not None:  # §21.3: stop before the touch; a person sees the draft first
-            drafted = (stopped or "", await self._draft_text())
+            drafted = (stopped or "", *(await self._draft_text()))
         message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
             raise Refused("not_allowed", message, draft=drafted is not None)
@@ -5832,10 +5853,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if name and holder is not None:
             holder.draft = name
 
-    async def _draft_text(self) -> str | None:
+    async def _draft_text(self) -> "tuple[str | None, bool]":
         """The draft a touch would send (§21.3), read from the screen now: the text input the agent last typed into on this
         screen, else the focused one, else the only filled one. Redacted (accounts' and vault values) before the cut, cleaned
-        and cut at 500 characters. None when no field can be told (a password field never is)."""
+        and cut at 500 characters (None when no field can be told; a password field never is), and whether it holds a
+        one-time code."""
         try:
             items = (await self.session.snapshot()).tree.items
         except Exception:  # noqa: BLE001 - the last list will do
@@ -5853,8 +5875,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if field is None and len(filled := [e for e in inputs if e.value and not e.shows_placeholder]) == 1:
             field = filled[0]
         if field is None:
-            return None
-        return dialog.draft_text("" if field.shows_placeholder else field.value, self.scrub_everywhere)
+            return None, False
+        value = "" if field.shows_placeholder else field.value
+        # a one-time code shows as its placeholder: the person is told in plain words that the draft holds one (H3)
+        code = f"<{accountlib.CODE_LABEL}>"
+        return dialog.draft_text(value, self.scrub_everywhere), code in self.scrub_everywhere(value) and code not in value
 
     def _book(self) -> "grantlib.Book | None":
         """The grants of the policy in force (§19): None for a policy with no file (the built-in one, a version 1
@@ -5936,7 +5961,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     def _ask(self, tool: str, a: dict, key: tuple[str, ...], element: ui.Element, word: str, what: str,
              now: float, caption: str | None = None, why: str | None = None,
-             drafted: "tuple[str, str | None] | None" = None) -> tuple[str, Confirm | None]:
+             drafted: "tuple[str, str | None, bool] | None" = None) -> tuple[str, Confirm | None]:
         """The `needs_confirmation` message, after asking the live view (once for a request still open), and, for an
         agent whose host can show a dialog, the host too: then the request to wait for comes with it. An earlier
         request for this call that was declined, or ran out unanswered, is said at the message's end (when nobody
@@ -5973,7 +5998,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             app_name = (self.session.app or (None, None))[0]
             if drafted is not None:
                 request.draft = drafted[0]
-                shown = dialog.draft_caption(scrub(word), scrub(app_name) if app_name else None, drafted[1])
+                shown = dialog.draft_caption(scrub(word), scrub(app_name) if app_name else None, drafted[1], drafted[2])
             # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
                                "caption": scrub(shown) if shown else shown, "word": scrub(word),
@@ -6215,23 +6240,49 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return moment
         return None
 
-    async def _hold_for_phone(self, name: str) -> None:
-        """Before a call: if the phone is locked and the vault gives `phone.passcode`, the tool unlocks it itself
-        (§18.6, Tapwright 1.7; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
+    @staticmethod
+    def _top_level() -> bool:
+        """Is the call running now one of its own, not a step of a `run`, `drive`, `replay`, route or journey moment?"""
+        return BATCH.get() is None and not _NESTED.get() and not _JOURNEY_OWN.get() and SCRIPT.get() is None
+
+    def _unlocks_itself(self, client_id: str, name: str) -> bool:
+        """May this call unlock the locked phone with the vault's passcode (§18.6, §19.5; review 1.7, H1)? Only with
+        `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call that
+        needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a lock is the owner's
+        stop: `locked`, for a person to unlock (personal mode and `--dedicated` as in 1.6)."""
+        if not getattr(getattr(self, "ceiling", None), "phone", False) or client_id in self._journeys:
+            return False
+        if needs.phone_moment(self.state, self.detail) is not needs.UNLOCK:
+            return False
+        if not ((name in ACTIONS and name != "look") or name in UNLOCK_AT_START):
+            return False
+        return self.passcode_for() is not None
+
+    async def _hold_for_phone(self, client_id: str, name: str) -> None:
+        """Before a call. A step of a running `run`, `drive`, `replay`, route or journey moment never unlocks and never
+        waits out a lock: a lock there ends it with `locked` (the step's own refusal), because locking the phone is how
+        the owner stops the agent (AGENTS.md, §19.5). (iOS's XCTest prompt is no stop: a step still asks a person to
+        enter the passcode there, as in 1.6.) A top-level call to `serve --phone` unlocks a locked phone with the vault's
+        passcode (unlock.py; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
         locked or asking for its passcode, ask a person and wait for it to clear (the daemon looks at the phone again by
         itself). If it doesn't clear, the call answers `locked`: the unlock's own words when it was tried (`the
         passcode in the file was refused`), else its usual ones."""
-        moment = self._phone_moment(name)
-        if moment is None:
+        if not self._top_level():
+            moment = self._phone_moment(name)
+            if moment is needs.PASSCODE_PROMPT and _DIALOG.get() is not None:
+                async def prompt_gone() -> bool:
+                    return self._phone_moment(name) is None
+                await self._hold_for_person(moment, prompt_gone, nudge=self._asked_for)
             return
         tried: unlocklib.Result | None = None
-        if moment is needs.UNLOCK and self.passcode_for() is not None:
+        if self._unlocks_itself(client_id, name):
             tried = await self.unlock_phone()
-            if tried.ok or self._phone_moment(name) is None:
+            if tried.ok or needs.phone_moment(self.state, self.detail) is None:
                 return
             if tried.code in ("busy", "paused"):
                 raise Refused(tried.code, tried.message)
-        if _DIALOG.get() is not None:
+        moment = self._phone_moment(name)
+        if moment is not None and _DIALOG.get() is not None:
             async def cleared() -> bool:
                 return self._phone_moment(name) is None
             if await self._hold_for_person(moment, cleared, nudge=self._asked_for):

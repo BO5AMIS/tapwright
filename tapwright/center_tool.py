@@ -201,9 +201,12 @@ class CenterTools:
         self.otp_codes.put(app, got[0], got[1], field_at)
         return self.otp_codes.take(app)
 
-    async def _code_for_typing(self, app: str) -> "otplib.Code | None":
-        """`${otp.<app>}` in a step: a code already read for it, else one read now. The field being typed into is a code
-        field showing now (if no read noted it earlier)."""
+    async def _code_for_typing(self, app: str, field: "ui.Element") -> "otplib.Code | None":
+        """`${otp.<app>}` in a step: a code already read for it, else one read now. Only for a field that is a code field
+        by its own words (notes_lib.otp_target; the caller refused any other before this): that field showing now is
+        what the code's 2 minutes count from, if no read noted it earlier. Never because it is being typed into."""
+        if not notes_lib.otp_target(field):
+            return None
         held = self.otp_codes.take(app)
         if held is not None:
             return held
@@ -264,6 +267,11 @@ class CenterTools:
             raise Refused("paused", "paused by the user in the live view")
         if self.control.driver is not None:
             raise Refused("busy", "the phone is in use; the check waits")
+        from . import schedules
+        secret = schedules.trigger_secret()  # (the digests are HMACs under it: never a plain hash of a code, L5)
+        if secret is None:
+            raise Refused("internal", f"the notification trigger's key at {schedules.trigger_key_path()} can't be read or "
+                                      "made; nothing was read")
         await self.wait_connected()
         found, _ = await self._on_phone(lambda: self._read_center(lambda b: b == app, caption="Check for notifications"))
-        return [x.key() for x in found]
+        return [x.key(secret) for x in found]

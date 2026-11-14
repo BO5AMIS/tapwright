@@ -94,6 +94,7 @@ class Facts(NamedTuple):
     tasks_missing: tuple[str, ...] = ()  # schedules whose Task Scheduler task is gone
     tasks: int | None = None  # schedules found (None: not checked)
     vault_problem: str | None = None  # the vault file can't be used (its own words; never a value)
+    unlock_stopped: bool = False  # the passcode unlock stopped after a refused passcode (unlock.Ledger; review 1.7, H2)
 
 
 class Stop(NamedTuple):
@@ -131,6 +132,11 @@ def unattended(f: Facts) -> list[Stop]:
     elif not f.passcode_given:
         stops.append(Stop("No passcode is given: if the phone locks during a run (Auto-Lock), nothing can unlock it, "
                           "and a scheduled run that finds it locked is skipped.", PASSCODE_FIX))
+    if f.passcode_given and f.unlock_stopped:
+        stops.append(Stop("The passcode unlock stopped after the phone refused the vault's passcode (or its record of "
+                          "attempts can't be read): nothing is typed on the lock screen until a person clears it.",
+                          "Check that the vault's phone entry holds the phone's passcode, then run tapwright "
+                          "unlock-reset."))
     if f.battery is not None and f.battery < LOW_BATTERY:
         stops.append(Stop(f"The battery is at {f.battery}%: the phone may switch itself off in a long run.",
                           "Charge it, and keep it on a cable during the run."))
@@ -153,8 +159,10 @@ def unattended_ready(f: Facts) -> list[str]:
     if f.developer_mode is True:
         ready.append("Developer Mode is on.")
     if f.passcode_given and f.vault_problem is None:
-        ready.append("The vault gives phone.passcode (never shown): the tool unlocks a locked phone on its lock screen, "
-                     "at most twice an hour, and stops after a refusal.")
+        ready.append("The vault gives phone.passcode (never shown): the tool unlocks a locked phone on its lock screen "
+                     "at a scheduled run's start, and with tapwright serve --phone --accounts FILE at a new call (never "
+                     "in the middle of a run: a lock stops it); at most twice an hour and 3 times a day, and it stops "
+                     "after a refusal.")
     if f.battery is not None and f.battery >= LOW_BATTERY:
         ready.append(f"The battery is at {f.battery}%.")
     if f.wake_timers is True:

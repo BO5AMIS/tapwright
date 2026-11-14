@@ -24,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import hashlib
+import hmac
 import re
 from collections.abc import Callable, Mapping
 from xml.etree import ElementTree as ET
@@ -58,9 +59,14 @@ class Notification:
     body: str = dataclasses.field(repr=False)
     center: tuple[float, float]  # where a tap opens it, in points
 
-    def key(self) -> str:
-        """What tells one notification from another for the trigger (§22.1), as a digest: never its text."""
-        return hashlib.sha256("\0".join((self.bundle, self.title, self.body)).encode()).hexdigest()[:24]
+    def key(self, secret: bytes) -> str:
+        """What tells one notification from another for the trigger (§22.1), as a digest: never its text. An HMAC under
+        the trigger's own random key (schedules.trigger_secret), not a plain hash: a plain hash of "Your code is 123456"
+        is found again by trying the million codes (review 1.7, L5)."""
+        if not secret:
+            raise ValueError("a notification digest needs the trigger's key")
+        text = "\0".join((self.bundle, self.title, self.body)).encode()
+        return hmac.new(secret, text, hashlib.sha256).hexdigest()[:24]
 
 
 def is_time(piece: str) -> bool:
@@ -292,6 +298,22 @@ def code_like_field(element: object) -> bool:
     """Does this input look like a one-time code field (its id, label, value or placeholder says code, OTP,
     verification, one-time, 2FA, PIN)? What tells the daemon when the app showed its code field."""
     words = " ".join(str(getattr(element, k, "") or "") for k in ("identifier", "label", "value", "placeholder"))
+    return bool(CODE_FIELD.search(words))
+
+
+ONE_LINE_INPUTS = ("TextField", "SecureTextField")  # XCUIElementTypes of a one-line input (a TextView is many lines)
+
+
+def otp_target(element: object) -> bool:
+    """May `${otp.<app>}` be typed into this field (§20.4: "a code field of the app"; review 1.7, H3)? Only a one-line
+    input that says it takes a code by its id, label or placeholder (as code_like_field reads them). Its value counts
+    only while it is the placeholder: text typed into a chat's field ("code") never makes it a code field."""
+    if getattr(element, "role", "") != "input" or getattr(element, "type", "") not in ONE_LINE_INPUTS:
+        return False
+    keys = ["identifier", "name", "label", "placeholder"]
+    if getattr(element, "shows_placeholder", False):
+        keys.append("value")
+    words = " ".join(str(getattr(element, k, "") or "") for k in keys)
     return bool(CODE_FIELD.search(words))
 
 

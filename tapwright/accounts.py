@@ -8,7 +8,9 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - `apps` limits where an account may be used.
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
   - `phone.passcode` is exposed nowhere, and typed by the tool itself only on the lock screen's passcode entry (unlock.py,
-    Tapwright 1.7). It is redacted like any value, as `<phone's passcode>`.
+    Tapwright 1.7), where it shows as dots. It is not in the text redactor: a 4 to 6 digit passcode replaced in answers
+    would turn every date, year and price on screen into a test of it (review 1.7, M2). Only the entry named `phone`
+    holds it.
 
 What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20 and 21):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
@@ -190,14 +192,12 @@ class Loaded:
 
     def entries(self) -> tuple[tuple[str, str, str], ...]:
         """(entry name, field, value) of every value this file holds that is kept out of text: an account's username and
-        password, and in a vault every other kind's fields too. (1.7) The phone's passcode as well, shown as
-        `<phone's passcode>`: the tool types it on the lock screen now, so it is a value like any other (§20.3)."""
+        password, and in a vault every other kind's fields too. Never the phone's passcode (review 1.7, M2): it is
+        typed only on the lock screen's keypad, where it shows as dots, so it never reaches text, and replacing a 4 to 6
+        digit number in every answer would tell the agent the passcode the first time a date or a price showed it."""
         found = _entries(self.accounts)
         found += tuple((e.name, f, v) for e in self.vault.values() if e.kind not in ("account", "phone")
                        for f, v in e.values.items() if v and not weak(v))
-        if isinstance(self.passcode, str) and self.passcode and not weak(self.passcode):
-            name = next((n for n, e in self.vault.items() if e.kind == "phone"), PHONE)
-            found += ((name, "passcode", self.passcode),)
         return found
 
     def reference(self, text: str, active: Account | None, secure: bool, ref: str, bundle: str | None) -> Typing | None:
@@ -1294,8 +1294,9 @@ def _loaded(path: str, data: object, how: str | None) -> Loaded:
         otp, otp_why = _read_otp(data.get("otp"))
         accounts = {n: Account(n, e.values.get("username"), e.values.get("password"), e.apps)
                     for n, e in entries.items() if e.kind == "account"}
-        phone = entries.get(PHONE) if PHONE in entries and entries[PHONE].kind == "phone" else \
-            next((e for e in entries.values() if e.kind == "phone"), None)
+        # only the entry named `phone` is the phone's passcode (review 1.7, L3): another entry of kind phone (an
+        # account's app PIN that an older `vault protect` moved into `<name>_phone`) is never typed on the lock screen
+        phone = entries.get(PHONE) if PHONE in entries and entries[PHONE].kind == "phone" else None
         notes = " ".join(n for n in (note, f"Note: the vault file {path}: {otp_why}." if otp_why else None) if n)
         return Loaded(path, accounts, phone.values.get("passcode") if phone else None, None, entries, otp, how,
                       notes or None, VERSION2)

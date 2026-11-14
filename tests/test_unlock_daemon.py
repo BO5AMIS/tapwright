@@ -1,7 +1,7 @@
-"""The passcode unlock in the daemon (AGENT-TOOLS §18.6, §11.5, §20.3, §23; Tapwright 1.7): a locked phone and a vault
-with `phone.passcode` is unlocked by the tool itself before an action; never on the XCTest prompt, never while paused,
-and the passcode is in no output: answers, errors, the log, the audit log, the action log, the live view's messages,
-the trace. All values are synthetic."""
+"""The passcode unlock in the daemon (AGENT-TOOLS §18.6, §11.5, §19.5, §20.3, §23; Tapwright 1.7): with `tapwright serve
+--phone --accounts FILE`, a locked phone and a vault with `phone.passcode` is unlocked by the tool itself before an
+action; never on the XCTest prompt, never while paused, and the passcode is in no output: answers, errors, the log, the
+audit log, the action log, the live view's messages, the trace. All values are synthetic."""
 import asyncio
 import json
 
@@ -13,6 +13,7 @@ from test_unlock import PASSCODE, Screen
 from tapwright import trace, unlock
 from tapwright.actionlog import ActionLog
 from tapwright.auditlog import AuditLog
+from tapwright.ceiling import Ceiling
 from tapwright.control import Refused
 from tapwright.device import PASSCODE_WORDS
 
@@ -44,19 +45,24 @@ def vault(tmp_path, passcode=PASSCODE) -> str:
     return str(path)
 
 
-def locked_daemon(tmp_path, right=PASSCODE, said=None):
+def locked_daemon(tmp_path, right=PASSCODE, said=None, passcode=PASSCODE, phone=True):
+    """A daemon on a locked phone, as `tapwright serve --phone --accounts <vault>` (`phone=False`: --dedicated)."""
     s = FakeSession()
     s.is_locked = True
     audit = AuditLog(tmp_path / "audit")
     d = make(s, audit=audit, actions=ActionLog(tmp_path / "log"), log=(said.append if said is not None else lambda *a: None))
     d.lock_screen = SessionScreen(s, right=right)
+    d.ceiling = Ceiling(dedicated=not phone, phone=phone, accounts=vault(tmp_path, passcode=passcode))
     return d, s
 
 
 def everything(tmp_path, said, d, answers) -> str:
     """Every output this test can reach, joined: answers and errors, the daemon's log, the audit and action logs, the
     live view's messages and the trace file."""
-    files = [p.read_text("utf-8") for p in tmp_path.rglob("*") if p.is_file() and p.name != "vault.json"]
+    # (the unlock's record holds times and the vault file's size: digits by chance; test_review_17a checks it holds no
+    # passcode)
+    files = [p.read_text("utf-8") for p in tmp_path.rglob("*")
+             if p.is_file() and p.name != "vault.json" and "unlock-record" not in p.parts]
     return "\n".join([*answers, *map(str, said), *files])
 
 
@@ -123,10 +129,10 @@ def test_the_xctest_prompt_is_never_answered_with_the_passcode(tmp_path):
 
 def test_without_a_passcode_a_locked_phone_answers_as_before(tmp_path):
     async def go():
-        d, s = locked_daemon(tmp_path)
+        d, s = locked_daemon(tmp_path, passcode=None)
         stop, task = await started(d, until=("locked",))
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}}, accounts=vault(tmp_path, passcode=None))
+            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})
         assert e.value.code == "locked" and str(e.value) == "the phone is locked; ask the user to unlock it"
         assert d.lock_screen.pressed == [] and d.lock_screen.calls == []
         await finish(stop, task)
@@ -149,11 +155,11 @@ def test_never_while_paused_or_while_a_person_drives(tmp_path):
         accounts = vault(tmp_path)
         stop, task = await started(d, until=("locked",))
         d.control.set_paused(True)
-        r = await d.unlock_phone(accounts)
+        r = await d.unlock_phone()
         assert r.code == "paused" and d.lock_screen.pressed == []
         d.control.set_paused(False)
         d.control._person_at = d.control.clock()
-        r = await d.unlock_phone(accounts)
+        r = await d.unlock_phone()
         assert r.code == "busy" and d.lock_screen.pressed == []
         await finish(stop, task)
     run(go)
@@ -168,23 +174,25 @@ def test_the_schedules_unlock_endpoint_answers_fixed_words(tmp_path):
         def __init__(self):
             self.asked = []
 
-        async def unlock_phone(self, accounts=None):
-            self.asked.append(accounts)
+        async def unlock_phone(self):
+            self.asked.append(True)
             return unlock.Result(False, "refused", unlock.REFUSED)
 
         def status(self):
             return {"protocol": 1}
     fake = Fake()
     token = "t" * 43
-    app = create_app(fake, token, hosts={"testserver"})
     path = vault(tmp_path)
+    app = create_app(fake, token, hosts={"testserver"}, ceiling=Ceiling(accounts=path))
     with TestClient(app) as c:
         r = c.post("/api/phone/unlock", headers={"Authorization": f"Bearer {token}", "X-Tapwright-Accounts": path}, json={})
         assert r.status_code == 200 and r.json() == {"ok": False, "code": "refused", "message": unlock.REFUSED}
+        r = c.post("/api/phone/unlock", headers={"Authorization": f"Bearer {token}"}, json={})  # serve's own file
+        assert r.status_code == 200
         assert c.post("/api/phone/unlock", json={}).status_code == 401  # the token, as every /api route
         assert c.post("/api/phone/unlock", headers={"Authorization": f"Bearer {token}",
                                                     "X-Tapwright-Accounts": "relative.json"}, json={}).status_code == 400
-    assert fake.asked == [path]
+    assert fake.asked == [True, True]
 
 
 def test_the_schedule_hook_says_whether_the_phone_is_unlocked(monkeypatch):
@@ -202,14 +210,3 @@ def test_the_schedule_hook_says_whether_the_phone_is_unlocked(monkeypatch):
         raise OSError("no daemon")
     monkeypatch.setattr(client, "unlock_phone", boom)
     assert unlock.schedule_hook(S()) is False
-
-
-def test_the_passcode_is_redacted_as_a_value(tmp_path):
-    from tapwright import accounts
-    loaded = accounts.load(vault(tmp_path))
-    assert ("phone", "passcode", PASSCODE) in loaded.entries()
-    d = make()
-    d.accounts.remember(loaded)
-    said = d.scrub_everywhere(f"code {PASSCODE} and \"{PASSCODE}\"")
-    assert PASSCODE not in said and said.startswith("code <phone's passcode> and ")
-    assert PASSCODE not in d.scrub_everywhere(" ".join(PASSCODE))  # whitespace-spread too (§20.3)

@@ -298,20 +298,24 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
 
     async def unlock(request):
         """`POST /api/phone/unlock` (§22.3, §18.6): a scheduled run found the phone locked and asks the daemon to unlock
-        it with the vault's `phone.passcode` (the accounts file the run names, within serve's --accounts ceiling). The
-        answer is fixed words: `{"ok", "code", "message"}`, never a value. Only the daemon types the passcode."""
+        it with `phone.passcode`. The passcode comes only from the vault file `tapwright serve --accounts` names: a
+        request that names another file is refused and nothing is typed (review 1.7, H2: a caller's own file would be a
+        way to guess). The answer is fixed words: `{"ok", "code", "message"}`, never a value."""
         problem = denied(request)
         if problem is not None:
             return problem
         sent = _hv(request, "x-tapwright-accounts")
         if sent is not None and (not os.path.isabs(sent) or "\x00" in sent):
             return _error("bad_params", "--accounts must be an absolute file path", 400)
-        path = sent
         if ceiling is not None:
-            path, refused = ceiling.check_accounts(sent, False)
+            _, refused = ceiling.check_accounts(sent, False)
             if refused is not None:
                 return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
-        result = await daemon.unlock_phone(path)
+        elif sent is not None:
+            return _error("not_allowed", "the phone's passcode is typed only from the vault file tapwright serve was "
+                                         "started with (--accounts), and this one was started with none; nothing was "
+                                         "typed", HTTP_STATUS["not_allowed"])
+        result = await daemon.unlock_phone()
         return JSONResponse({"ok": result.ok, "code": result.code, "message": result.message})
 
     async def notification_check(request):

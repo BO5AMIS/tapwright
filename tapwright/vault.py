@@ -332,27 +332,28 @@ def protected_file(how: str, text: str, deps: Deps, path: str) -> str:
     return json.dumps({"version": 2, "protected": KEYCHAIN})
 
 
-def _as_version2(top: dict) -> dict | None:
+PHONE_ENTRY = "phone"  # the only entry whose passcode is the phone's (accounts.PHONE)
+
+
+def _as_version2(top: dict, dropped: list[str] | None = None) -> dict | None:
     """A plain file's content as a version 2 vault (a version 1 file's accounts become account entries, its `phone`
-    a phone entry; other top-level keys, such as `otp`, travel along). None when it is neither."""
+    a phone entry; other top-level keys, such as `otp`, travel along). None when it is neither. A `passcode` on any
+    other entry (an app's PIN, which version 1 never used) is left out, and its entry's name is added to `dropped`: it
+    never becomes a phone entry, so it can never be typed on the lock screen (review 1.7, L3)."""
     if top.get("version") == 2 and isinstance(top.get("vault"), dict):
         return top
     if top.get("version") != 1 or not isinstance(top.get("accounts"), dict):
         return None
     rest = {k: v for k, v in top.items() if k not in ("version", "accounts")}
     vault: dict[str, object] = {}
-    accounts = top["accounts"]
-    for name, entry in accounts.items():
+    for name, entry in top["accounts"].items():
         fields = entry if isinstance(entry, dict) else {}
-        if "passcode" in fields and "username" not in fields and "password" not in fields:
+        if name == PHONE_ENTRY and "passcode" in fields and "username" not in fields and "password" not in fields:
             vault[name] = {"kind": "phone", **fields}
             continue
         vault[name] = {"kind": "account", **{k: v for k, v in fields.items() if k != "passcode"}}
-        if "passcode" in fields:  # (a version 2 account has no passcode: it moves into a phone entry of its own)
-            phone, n = f"{name[:52]}_phone", 2
-            while phone in accounts or phone in vault:
-                phone, n = f"{name[:50]}_phone{n}", n + 1
-            vault[phone] = {"kind": "phone", "passcode": fields["passcode"]}
+        if "passcode" in fields and dropped is not None:
+            dropped.append(str(name))
     return {"version": 2, "vault": vault, **rest}
 
 
@@ -382,7 +383,8 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         return False, f"the vault file {file} isn't a vault."
     if protection(top) is not None:
         return False, f"the vault file {file} is already protected."
-    payload = _as_version2(top)
+    dropped: list[str] = []
+    payload = _as_version2(top, dropped)
     if payload is None:
         return False, f"the vault file {file} isn't a version 1 or 2 vault."
     plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -409,7 +411,11 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         except OSError:
             pass
         return False, f"couldn't write {file} ({e.strerror or 'an error'}); the file stays plain."
+    # (names only, never a value: `dropped` holds entry names)
+    left_out = ("" if not dropped else
+                f"\nNote: the passcode of {', '.join(dropped)} was left out: only the entry named \"{PHONE_ENTRY}\" holds "
+                "the phone's passcode, and an account's passcode is never typed anywhere.")
     if how == DPAPI:
-        return True, f"Protected {file} with Windows DPAPI (current user). Tapline reads it too."
+        return True, f"Protected {file} with Windows DPAPI (current user). Tapline reads it too.{left_out}"
     return True, (f"Protected {file} in the macOS keychain (service {KEYCHAIN_SERVICE}; the entry belongs to this path, "
-                  "so a moved file needs protecting again).")
+                  f"so a moved file needs protecting again).{left_out}")

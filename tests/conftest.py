@@ -56,3 +56,12 @@ def _no_journey_left_running():
     journey.running.clear()
     yield
     journey.running.clear()
+
+
+@pytest.fixture(autouse=True)
+def _unlock_record_in_tmp(monkeypatch, tmp_path):
+    """The passcode unlock's record of attempts (unlock.py) and the notification trigger's key (schedules.py) live in the
+    real ~/.tapwright: never in a test."""
+    from tapwright import schedules, unlock
+    monkeypatch.setattr(unlock, "STATE_FILE", tmp_path / "unlock-record" / "unlock-state.json")
+    monkeypatch.setattr(schedules, "TRIGGER_KEY_FILE", tmp_path / "trigger-key" / "notification-trigger.key")

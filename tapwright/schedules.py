@@ -8,7 +8,8 @@ its last check). Neither ends in `.json`, so neither is taken for a schedule.
 On Windows a time schedule is a Task Scheduler task that wakes the PC (`WakeToRun`, which only an XML definition can
 set). A file trigger is polled by a task that does not wake the PC: it runs while the PC is awake (1.14.1). So is
 a notification trigger: its poll asks the running daemon for the digests of that app's notifications, never their text
-(`new_notifications`), and `<name>.seen` keeps what its last check saw. Other systems get the
+(`new_notifications`), and `<name>.seen` keeps what its last check saw. The digests are HMACs under a random key kept
+beside the schedules (`notification-trigger.key`), so one can't be tried against every one-time code. Other systems get the
 launchd or cron entry to add, printed, since 1.14 doesn't say how a schedule starts there.
 """
 from __future__ import annotations
@@ -18,6 +19,7 @@ import datetime
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -268,6 +270,8 @@ def new_notifications(s: Schedule, keys: list[str], where: Path | None = None) -
         before = json.loads(seen_of(s.name, where).read_text(encoding="utf-8"))
         if not isinstance(before, dict) or before.get("notification") is not True or not isinstance(before.get("seen"), dict):
             before = None
+        elif before.get("keyed") != KEYED:  # (digests of an older version, unkeyed: noted again, never a run)
+            before = None
     except (OSError, ValueError):
         before = None
     if before is None:
@@ -284,7 +288,45 @@ def new_notifications(s: Schedule, keys: list[str], where: Path | None = None) -
 def _write_seen_keys(name: str, seen: dict[str, int], where: Path | None) -> None:
     base = where or folder()
     base.mkdir(parents=True, exist_ok=True)
-    seen_of(name, base).write_text(json.dumps({"notification": True, "seen": seen}), encoding="utf-8")
+    seen_of(name, base).write_text(json.dumps({"notification": True, "keyed": KEYED, "seen": seen}), encoding="utf-8")
+
+
+# ---- the notification trigger's key (review 1.7, L5) ----
+KEYED = 1  # the seen record's digests are HMACs under the trigger's key (an older record's aren't: it is noted again)
+TRIGGER_KEY_FILE: Path | None = None  # None: <schedules folder>/notification-trigger.key (the tests set their own)
+
+
+def trigger_key_path() -> Path:
+    return TRIGGER_KEY_FILE if TRIGGER_KEY_FILE is not None else folder() / "notification-trigger.key"
+
+
+def trigger_secret() -> bytes | None:
+    """The notification trigger's random key, kept beside the schedules (made once, readable by this user only): its
+    digests (Notification.key) are HMACs under it, so a digest can't be tried against every code. Made by publishing it
+    whole (pidlock.publish_new), so two processes making it at once agree on one. None when it can't be read or made:
+    the check then reads nothing."""
+    path = trigger_key_path()
+    for _ in range(2):
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeDecodeError):
+            return None
+        if text is not None:
+            # (a key file that isn't one is never replaced here: a person removes it, and the trigger notes anew)
+            return bytes.fromhex(text) if re.fullmatch(r"[0-9a-f]{64}", text) else None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        key = secrets.token_hex(32)
+        made = pidlock.publish_new(pidlock.Deps(), str(path), key + "\n")
+        if made == "published":
+            return bytes.fromhex(key)
+        if made == "error":
+            return None
+    return None
 
 
 # ---- the system's scheduler ---------------------------------------------------------------------------------------------

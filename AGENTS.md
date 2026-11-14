@@ -122,4 +122,7 @@ ID). Note slow screens if they took more than a few seconds.
   then refuses to read or touch any other app (`not_allowed: outside_apps`), and never shows
   another app's screen, except a permission prompt raised by one of the given apps. Without `--apps` nothing runs (`not_allowed: no_apps`). Only on a phone
   kept for testing, start it with `tapwright mcp --dedicated`: then every app can be used.
-- The owner stops you by pausing in the live view, or by locking the phone.
+- The owner stops you by pausing in the live view, or by locking the phone. A lock ends a running `run`, `drive`,
+  `replay`, route or `journey` with `locked`; Tapwright never types the passcode in the middle of one. It unlocks by
+  itself only at a scheduled run's start, and with `tapwright serve --phone` at your next call. Never try to unlock
+  the phone another way.

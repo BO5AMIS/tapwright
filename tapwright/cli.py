@@ -26,6 +26,9 @@
                      [--name NAME] [--policy FILE] [--accounts FILE] [--maps DIR]; schedule list; schedule remove NAME;
                      schedule unlock NAME (a stuck run lock); tapwright run-schedule NAME: one scheduled run, now, with
                      no agent (Windows: a time schedule is a Task Scheduler task that wakes the PC)
+  tapwright unlock-reset
+                     after the phone refused the vault's passcode, the passcode unlock types nothing until you check
+                     phone.passcode and run this (at most 2 attempts an hour and 3 a day in any case)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -436,6 +439,9 @@ async def unattended_facts(usb: list[str], accounts: str | None, connect=None, s
     (the runner setup recorded, the wake timers, the scheduled tasks)."""
     from . import needs
     facts: dict = {"passcode_given": passcode_given(accounts), "vault_problem": vault_problem(accounts)}
+    if facts["passcode_given"]:
+        from . import unlock
+        facts["unlock_stopped"] = unlock.Ledger().stopped()
     if usb:
         facts.update(await lockdown_facts(configured_phone(usb), connect))
     if status is not None:
@@ -969,6 +975,8 @@ def main() -> int:
     q = p.add_mutually_exclusive_group()
     q.add_argument("--since", metavar="DATE|TIME", help="only the lines since then: 2026-11-14 or 2026-11-14T09:30")
     q.add_argument("--delete", action="store_true", help="delete the audit log")
+    sub.add_parser("unlock-reset", help="after a refused passcode, let the passcode unlock try the vault's "
+                                        "phone.passcode again (check it first); the limits of 2 an hour and 3 a day stay")
     p = sub.add_parser("vault", help="the vault file (--accounts): protect a plain one with this system's protection")
     p.add_argument("action", choices=["protect"],
                    help="protect: write FILE in this system's protected form (Windows DPAPI, the macOS keychain); "
@@ -1173,6 +1181,11 @@ def main() -> int:
         lines = auditlog.read_lines(since=since)
         print("\n".join(lines) if lines else "No audit lines" + (" since then." if since else "."))
         return 0
+    if a.cmd == "unlock-reset":
+        from . import unlock
+        done, text = asyncio.run(unlock.Ledger().reset())
+        print(text if done else f"Error: {text}")
+        return 0 if done else 1
     if a.cmd == "vault":
         from . import accounts, vault
         done, text = vault.protect(str(Path(a.file).expanduser()), check=accounts.check_text)

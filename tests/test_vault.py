@@ -185,9 +185,10 @@ def test_a_short_plain_value_is_typed_but_cant_be_kept_out(tmp_path):
     assert v.scrub("UK 2") == "UK 2"  # (too short: it would eat ordinary words)
 
 
-def test_the_passcode_is_a_redaction_entry_now_that_the_tool_types_it(tmp_path):
-    """1.7 (§18.6, §20.3): the passcode is typed on the lock screen, so it is redacted like any value."""
-    assert [field for _, field, _ in load(tmp_path).entries()].count("passcode") == 1
+def test_the_passcode_is_no_redaction_entry(tmp_path):
+    """Review 1.7, M2: the passcode is typed only on the lock screen (dots), so it is kept out of the text redactor:
+    replacing it would tell the agent the passcode the first time a date or a price on screen held it."""
+    assert [field for _, field, _ in load(tmp_path).entries()].count("passcode") == 0
 
 
 def test_the_store_redacts_vault_values_and_codes_in_one_pass(tmp_path):
@@ -311,10 +312,10 @@ def test_protect_refuses_what_wouldnt_load_and_converts_version_1(tmp_path):
     assert not done and "fix it first" in said and "ab" not in said.split("(")[0]
     old = write(tmp_path, {"version": 1, "accounts": {"t1": {"username": "user@example.com", "passcode": "1234"}}},
                 "old.json")
-    assert vault.protect(old, win_deps(), accounts.check_text)[0]
+    done, said = vault.protect(old, win_deps(), accounts.check_text)
+    assert done and "the passcode of t1 was left out" in said and "1234" not in said
     inner = json.loads(vault.open_protected(old, json.loads(open(old, encoding="utf-8").read()), win_deps()))
-    assert inner == {"version": 2, "vault": {"t1": {"kind": "account", "username": "user@example.com"},
-                                             "t1_phone": {"kind": "phone", "passcode": "1234"}}}
+    assert inner == {"version": 2, "vault": {"t1": {"kind": "account", "username": "user@example.com"}}}
     again = vault.protect(old, win_deps(), accounts.check_text)
     assert not again[0] and "already protected" in again[1]
     assert not vault.protect(write(tmp_path, VAULT, "v.json"), vault.Deps("linux"))[0]

@@ -13,7 +13,7 @@ import pytest
 from fakes import FakeSession
 from starlette.testclient import TestClient
 from test_daemon import finish, make, run, started
-from test_daemon_accounts import BUNDLE, TypingSession, screens, GOES
+from test_daemon_accounts import BUNDLE, TypingSession, code_screens, GOES
 from test_otp import AUTH, TOKEN, A, prove
 
 from tapwright import center_tool, mapkeeper, notifications as nl, otp, schedulerun, schedules, trace
@@ -319,7 +319,7 @@ def otp_daemon(tmp_path, data=OTP_VAULT, source=SCREEN):
     path = tmp_path / "private" / "vault.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(data), "utf-8")
-    s = TypingSession(screens(), "login", GOES)
+    s = TypingSession(code_screens(), "login", GOES)
     s.installed = [{"bundle_id": b, "name": n, "version": "1", "build": "1", "executable": n} for b, n in INSTALLED.items()]
     s.center_source = source
     said: list = []
@@ -343,11 +343,11 @@ def test_a_code_is_read_from_the_source_app_only_typed_once_and_shown_nowhere(tm
         try:
             stop, task = await started(d)
             answers.append((await d.run_tool("a", "look", {"screenshot": False}))["text"])
-            r = await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+            r = await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
             answers.append(r["text"])
             assert s.typed[-1][0] == CODE and s.foreground == BUNDLE and not s.center_open
             with pytest.raises(Refused) as e:  # once: the same notification is still there, and gives nothing now
-                await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+                await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
             answers.append(str(e.value))
             assert e.value.code == "not_found" and len([t for t in s.typed if t[0] == CODE]) == 1
             look = await d.run_tool("a", "look", {"screenshot": False})
@@ -374,7 +374,7 @@ def test_an_old_code_or_one_from_another_app_is_not_taken(tmp_path):
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+            await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
         assert e.value.code == "not_found" and s.typed == [] and s.center_reads == 1
         assert audit_lines(tmp_path) == []
         await finish(stop, task)
@@ -387,7 +387,7 @@ def test_codes_are_off_unless_the_setting_turns_them_on(tmp_path):
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
         with pytest.raises(Refused) as e:
-            await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}"})
+            await d.run_tool("a", "type_text", {"target": {"id": "otp-code"}, "text": "${otp." + BUNDLE + "}"})
         assert e.value.code == "bad_params" and "one-time codes are off" in str(e.value) and s.center_reads == 0
         await finish(stop, task)
     run(go)

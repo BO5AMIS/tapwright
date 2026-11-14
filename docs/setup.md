@@ -100,8 +100,12 @@ ones as the daemon's own settings.
   An agent says `account: "tester2"` in `drive`, and the tool types the values: a password only into a secure
   field, a username only into a text field. They are never in an answer, the action log, a map, a script or a
   report. The file may not sit inside a git work tree unless git ignores it. `tapwright doctor --accounts FILE`
-  checks it. An entry named `phone` with a `passcode` is accepted and kept for unlocking the phone, which this
-  release doesn't do yet.
+  checks it. An entry named `phone` with a `passcode` (only that name) unlocks a locked phone on its lock screen, and
+  only where nobody is meant to be at the phone: at the start of a scheduled run, and with `tapwright serve --phone
+  --accounts FILE` at the start of a new call. The passcode comes only from the file `tapwright serve --accounts`
+  names. A lock in the middle of a run stops it (`locked`): locking the phone is how you stop the agent. At most 2
+  attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
+  passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
 - **`--maps DIR`**: where each app's map is kept (`<DIR>/<bundle id>/map.json`, and its `routes/`). The default is
   `~/.tapwright/maps`. Point it at a folder in your project and a team, CI and Tapline share what was learned.
 - **`--brief`**: answer every action in brief (the first line, at most 12 lines of changes, then `...N more:
