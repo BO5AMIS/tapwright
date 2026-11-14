@@ -151,16 +151,21 @@ ones as the daemon's own settings.
   mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes.
 - **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
   touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
-  with `--no-policy`. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
+  with `--no-policy`. A draftsOnly grant holds in any grants file the daemon knows (its own `--policy`, a call's), so
+  a call that sends another policy, a stricter one or none, doesn't lift it. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
   refused there, and so is text with a line break in it (a vault value too, named, never shown): a line break is
   Return, which sends in many apps. Type without it, then tap the send button. Your OK is for the draft you saw, as
-  one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, a
-  recipient) changed before the send, nothing is sent and you are asked again.
+  one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, the
+  navigation title, a recipient, a picker's chosen value, a checked option) changed before the send, nothing is sent
+  and you are asked again. When the Send button is below the screen, the tool scrolls to it first and shows you the
+  draft as it is after the scroll; a grant is counted on that screen too.
 - **Deleting an account or paying always asks you**, whatever the policy file says (also with `--no-policy`). On a
   screen or in an alert that says it deletes the account ("Delete your account?"), and on a payment screen (titled
   Send money, Checkout, Transfer and the like, or with a text such as "Transfer $25 to Alice", or an amount on its own
-  beside a Send), every button but Cancel, Back, Not now and the like asks you each time: Confirm and OK too. No grant
-  covers those, and none is offered. A price among other words ("The latte was $4") doesn't make a payment screen.
+  beside a Send), every button but Cancel, Back, Not now and the like asks you each time: Confirm and OK too, and text
+  that takes a tap. A navigation bar's title counts as the screen's title. A button that says it itself ("Delete
+  account", "Buy now", "Send $25") asks you whatever the policy file says too. No grant covers those, and none is
+  offered. A price among other words ("The latte was $4") doesn't make a payment screen.
 - **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
   of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
   draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
@@ -172,7 +177,10 @@ ones as the daemon's own settings.
 - **A route a grant names stays as it is**, whatever policy a call sends: a stricter call policy turns off the grants
   for its own touches, never the protection of a route the daemon's grants name, so `record` refuses that name.
 - **A control that changed is not touched.** If the element at the target's place has the target's id and frame but
-  other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Another
+  other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Every touch
+  on an element goes through the same checks right before it goes out: `tap`, `long_press`, `toggle`, `type_text`'s tap
+  that focuses the field, and a target scrolled into view first. A point, `force`, an alert's button and a short swipe
+  are raw touches: they skip the runner's hit test, never the policy. Another
   app's banner or sheet over the target is named by its kind and place only, never by its words.
 - **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
   app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
@@ -193,9 +201,12 @@ ones as the daemon's own settings.
   wait too.
 - **Notification Center is closed, or the answer says it may not be.** If closing it fails, the app that was in front
   is opened again anyway; if Notification Center can't be shown closed, the call answers `internal` and says to look
-  at the screen first, instead of answering as if nothing were wrong.
+  at the screen first, instead of answering as if nothing were wrong. Tapline's `/otp` answers the same `internal`
+  error (HTTP 500), with no code.
 - **A run's errors are redacted.** A scheduled run's audit line and report go through its vault's redactor before
-  anything is cut or written, so a vault value in a file name or an error never reaches either.
+  anything is cut or written, so a vault value in a file name or an error never reaches either. That holds when the
+  schedule file itself is wrong too: the vault it names is read first. When that vault can't be read, the error only
+  says the schedule isn't valid, without its details.
 - **A run opens its app.** A scheduled run opens its route's app first, so it doesn't matter which app (or the home
   screen) is in front when it falls due.
 - **A locked phone.** `run-schedule` starts `tapwright serve` with the schedule's own `--accounts` when no daemon is
