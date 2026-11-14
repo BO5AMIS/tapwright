@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.1 (unreleased)
+## 1.6.1 (2026-11-14)
 
 - A place is `place_<n>` until a person names it. Tapwright no longer names a place after a repeated navigation title
   (a private title such as "Chat with Sara" would have become a stored place name). Maps that already hold
