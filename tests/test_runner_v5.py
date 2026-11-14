@@ -381,3 +381,27 @@ def test_a_cover_the_tree_only_guesses_is_dropped_when_the_hit_lands_on_the_targ
             await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
         await finish(stop, task)
     run(go)
+
+
+def test_an_element_behind_a_guessed_layer_is_lifted_when_the_hit_lands_on_it():
+    """Seen on the phone 2026-11-14 (Calendar's search): the results container read as a sheet over the search bar, so
+    Close was 'behind' it; the runner's hit test says a touch there lands on Close."""
+    async def go():
+        close = button("", "Close", "", rect=(24, 83, 36, 36), name="Cancel")
+        close.type, close.name = "Button", "Cancel"
+        front = button("e1", "Today", "", rect=(176, 861, 78, 38), name="Today")
+        for answer, tapped in ((hit(CANCEL), True), (hit(SHEET_TABLE), False), (None, False)):
+            d = armed_daemon(answer)
+            d.session.last_source = source(SHEET)
+            stop, task = await started(d)
+            await looked(d, [front])
+            d.session.behind = [(close, front)]
+            if tapped:
+                r = await d.run_tool("a", "tap", {"target": {"text": "Close"}})
+                assert r["text"].startswith("Tapped") and "tap" in d.session.calls
+            else:
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": {"text": "Close"}})
+                assert e.value.code == "not_actionable" and "behind" in str(e.value) and "tap" not in d.session.calls
+            await finish(stop, task)
+    run(go)

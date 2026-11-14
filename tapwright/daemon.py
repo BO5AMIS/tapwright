@@ -3767,7 +3767,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                     # out of range the alert's own elements matched, and that miss is the answer.)
                     self._refuse_behind_alert(view, force=False)
                 eyes = ui.USERS_EYES.get()  # a user doesn't know what lies behind a sheet or past an edge (§17.1)
-                if not eyes:
+                if not eyes and not await self._lift_from_behind(target):
                     self._refuse_behind_sheet(target)  # before off_screen: scrolling can't help until the sheet is closed
                 if not eyes and not (name == "scroll" and args.get("to") == "target"):  # that scroll is how it comes on screen
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
@@ -5738,6 +5738,32 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
+
+    async def _lift_from_behind(self, target: ui.Target) -> bool:
+        """A target the tree put behind a layer, which the runner's hit test (route version 5) says a touch at its centre
+        lands on, itself or inside it: the layer was the tree's guess (seen on the phone 2026-11-14: Calendar's search
+        results, a full-screen container that starts like a sheet's backdrop, put the search bar's Close behind it). It is
+        listed again, with a ref of its own, and the touch goes through every check as any listed element's does. An
+        ancestor, another app's element or no answer leaves it behind."""
+        behind = getattr(self.session, "behind", [])
+        try:
+            hit_element = ui.resolve([e for e, _ in behind], dataclasses.replace(target, index=0))
+        except Refused:
+            return False
+        if not isinstance(hit_element, ui.Element):
+            return False
+        hit = await self.session.hit_at(*hit_element.center)
+        app = self._app_bundle()
+        if hit is None or (hit.bundle and app and hit.bundle != app):
+            return False
+        if ui.hit_relation(getattr(self.session, "last_source", None), hit_element, hit) not in ("same", "inside"):
+            return False
+        trace.note("hit", "lifts an element from behind a guessed layer")
+        lifted = copy.copy(hit_element)
+        lifted.ref = f"e{len(self.session.items) + 1}"
+        self.session.items = [*self.session.items, lifted]
+        self.session.behind = [(e, f) for e, f in behind if e is not hit_element]
+        return True
 
     def _refuse_behind_sheet(self, target: ui.Target) -> None:
         """A target on no listed element but on one an open sheet (or another layer) hides: `covered`, naming what
