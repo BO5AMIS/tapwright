@@ -127,117 +127,280 @@ def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
                  if value and len(value) >= MIN_SCRUBBED)
 
 
-# ---- the matcher (Codex, PR #10 cycle 10) ----
-# A value is found in a text by one regular expression that follows it character by character, each character in any of
-# the shapes the ways out give it: as itself (case kept), percent-encoded (each UTF-8 byte as %HH, hex in either case, up
-# to twice encoded again: %25HH, %2525HH), JSON- or Python-escaped (\uXXXX, \xHH, \UXXXXXXXX, \n, \", \', \/, \\, behind
-# the backslashes of up to ESCAPE_DEPTH escapings, themselves possibly percent-encoded), a run of whitespace as any run of whitespace, `+` or
-# their encodings, and an invisible direction mark (as itself, encoded or escaped) allowed between any two characters.
-# Each encoder works character by character, so a composition of them (a repr in a JSON document, a JSON string in a
-# URL, an encodeURIComponent that leaves an apostrophe as it is) is still the value one character at a time: no list of
-# whole forms, no token to cut out and decode. Every alternative for a value's first character starts with a literal
-# character, so the regex engine skips ahead to where one could start (its first-character set) instead of trying the
-# whole expression at every position of a log line.
+# ---- the matcher (Codex, PR #10 cycle 14) ----
+# A value is found by decoding, not by a regular expression of its shapes. A text is read at several levels: as it is
+# (level 0), then decoded once, twice, ... until a pass changes nothing (at most MAX_DECODES passes). A pass decodes
+# percent escapes (%HH in either case, consecutive bytes read as UTF-8 where they are valid, else kept as they are) and
+# JSON or Python escapes (\uXXXX, a surrogate pair, \UXXXXXXXX, \xHH, \" \' \/ \n \t \r) behind a run of backslashes of
+# any length, so an escape escaped again (`\\\\u00e9`) is undone in one pass and `%2525...` over passes. Each level is
+# then normalized for matching: direction marks and backslashes dropped (a backslash that escapes nothing is noise
+# whichever way a text was escaped), and every run of whitespace or `+` made one space (`+` is a space on both sides,
+# so a form-encoded value is found and a value with a `+` matches its spaces). A value's forms are its own levels,
+# normalized the same way. Every form is looked for in every level with `str.find`, overlapping occurrences included,
+# and each occurrence maps back to the original text through each level's position map: canonical character i came from
+# text[starts[i]:ends[i]]. So the value as it is, decoded or encoded any number of times, by any composition of those
+# encoders, is found, and the redaction covers every character of its shape in the original text.
+# Decoding reads a text without knowing where a value starts, so an escape can take in characters of the value with
+# characters of the text around it: `%2` + `abc` reads `%2a` + `bc`, `\` + `tab` a tab + `ab`, `ab%2` + `F` reads `ab/`.
+# So in a decoded level each character an escape made is checked too: when the escape's text ends with a value's first
+# characters and the level goes on with the rest (or the mirror, at the value's end), the value is there, and the
+# escape is redacted with it. Each such check is a dictionary lookup by the escape's last or first character, then
+# exact comparisons: linear in the escapes, never a search. Matching is case-sensitive but for the hex of an escape.
 
-_PCT = "%(?:25){0,2}"  # a percent sign, as itself or encoded once or twice again
-ESCAPE_DEPTH = 4  # how many times an escape may have been escaped again (each doubles its backslashes)
-# more backslashes, as themselves or percent-encoded: bounded, so a long run of backslashes in a text is never taken whole
-# and given back one at a time at each of its positions (that was quadratic: 5,000 backslashes took half a second)
-_BACKSLASHES = r"(?:\\|" + _PCT + "5[cC])" + f"{{0,{2 ** ESCAPE_DEPTH - 1}}}"
-_LEADS = (r"\\", _PCT + "5[cC]")  # an escape's first backslash, as itself or percent-encoded
-_SIMPLE = {"\n": "n", "\r": "r", "\t": "t", "\b": "b", "\f": "f", "\v": "v", "\a": "a", "\0": "0"}
-_MARK_ESCAPES = "(?:u|U0000)20(?:0[eEfF]|2[a-eA-E]|6[6-9])"
-_MARKS = "|".join(["[‎‏‪-‮⁦-⁩]",  # the direction marks ui._text drops, as themselves,
-                   f"{_PCT}[eE]2{_PCT}80{_PCT}(?:8[eEfF]|[aA][a-eA-E])|{_PCT}[eE]2{_PCT}81{_PCT}[aA][6-9]",  # encoded
-                   *(lead + _BACKSLASHES + _MARK_ESCAPES for lead in _LEADS)])  # or escaped
-_BETWEEN = f"(?:{_MARKS})*"
-
-
-def _hex(number: int, width: int) -> str:
-    return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in f"{number:0{width}x}")
-
-
-def _escaped(escapes: list[str]) -> list[str]:
-    """An escape (one of `escapes`, after its backslashes), each way its first backslash can be written."""
-    tail = _BACKSLASHES + "(?:" + "|".join(escapes) + ")"
-    return [lead + tail for lead in _LEADS]
+MAX_DECODES = 6
+_MARK_CLASS = "".join(map(chr, BIDI_MARKS))  # (the direction marks, as ui._text drops them)
+_ESCAPE = re.compile(
+    r"(?:%[0-9A-Fa-f]{2})+"
+    r"|(?<!\\)\\+(?:u([dD][89abAB][0-9A-Fa-f]{2})\\+u([dD][c-fC-F][0-9A-Fa-f]{2})"  # (a run of backslashes is tried
+    r"|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|([\"'/ntr]))")         # from its start only: linear)
+_SIMPLE = {'"': '"', "'": "'", "/": "/", "n": "\n", "t": "\t", "r": "\r"}
+_LOOSE = re.compile(r"[\s+\\" + _MARK_CLASS + "]+")  # what normalizing changes: whitespace, `+`, backslashes, marks
+_SPACE = re.compile(r"[\s+]")
 
 
-def _encoded(c: str) -> list[str]:
-    """Every shape of one character but itself (percent-encoded, escaped), each starting with a literal character."""
-    o = ord(c)
-    shapes = ["".join(_PCT + _hex(b, 2) for b in c.encode("utf-8", "surrogatepass"))]
-    escapes = [f"U{_hex(o, 8)}"]
-    if o < 0x10000:
-        escapes.append(f"u{_hex(o, 4)}")
-    if o < 0x100:
-        escapes.append(f"x{_hex(o, 2)}")
-    if c in _SIMPLE:
-        escapes.append(_SIMPLE[c])
-    if c in "\"'/":
-        escapes.append(f"{re.escape(c)}|{_PCT}{_hex(o, 2)}")  # \" \' \/ (the character itself perhaps encoded)
-    if o > 0xFFFF:  # JSON's surrogate pair
-        high, low = 0xD800 + ((o - 0x10000) >> 10), 0xDC00 + ((o - 0x10000) & 0x3FF)
-        escapes.append(f"u{_hex(high, 4)}" + "(?:" + "|".join(_escaped([f"u{_hex(low, 4)}"])) + ")")
-    return shapes + _escaped(escapes)
+class _Layer:
+    """One step from a text `source` to `out`: pieces of (source start, source end, kind), kind 0 for a run copied as it
+    is, 1 for one character made from the whole piece, 2 for a piece dropped. The position map is built only when an
+    occurrence has to be mapped."""
+
+    __slots__ = ("source", "out", "_pieces", "_maps", "_kept", "_slots")
+
+    def __init__(self, source: str, out: str, pieces: list[tuple[int, int, int]]) -> None:
+        self.source = source
+        self.out = out
+        self._pieces = pieces
+        self._maps: tuple[list[int], list[int], list[int], list[int]] | None = None
+        self._kept: list[int] | None = None
+        self._slots: list[int] | None = None
+
+    def slots(self) -> list[int]:
+        """For each source character, where its piece is in the output: 2 * position, plus 1 when the piece is an output
+        character (copied, or a whitespace run made one space), 0 when it is dropped (a mark, a backslash)."""
+        if self._slots is None:
+            slots = [0] * len(self.source)
+            at = 0
+            for a, b, kind in self._pieces:
+                if kind == 0:
+                    slots[a:b] = range(2 * at + 1, 2 * (at + b - a) + 1, 2)
+                    at += b - a
+                elif kind == 1:
+                    slots[a:b] = [2 * at + 1] * (b - a)
+                    at += 1
+                else:
+                    slots[a:b] = [2 * at] * (b - a)
+            self._slots = slots
+        return self._slots
+
+    def kept(self) -> list[int]:
+        """For each source character, the output character it was copied to as it is, or -1 (made into another, or
+        dropped)."""
+        if self._kept is None:
+            where = [-1] * len(self.source)
+            at = 0
+            for a, b, kind in self._pieces:
+                if kind == 0:
+                    where[a:b] = range(at, at + b - a)
+                    at += b - a
+                elif kind == 1:
+                    at += 1
+            self._kept = where
+        return self._kept
+
+    def carried(self, made: "list[tuple[int, str]]") -> "list[tuple[int, str]]":
+        """The characters an escape made, as (output index, the escape's text without backslashes): those of the source
+        (`made`, in order) this layer copies as they are, then the ones it makes itself, in order of output."""
+        out: list[tuple[int, str]] = []
+        where = self.kept()
+        for x, raw in made:
+            if where[x] >= 0:
+                out.append((where[x], raw))
+        at = 0
+        for a, b, kind in self._pieces:
+            if kind == 1:
+                out.append((at, self.source[a:b].replace("\\", "")))
+                at += 1
+            elif kind == 0:
+                at += b - a
+        out.sort()
+        return out
+
+    def maps(self) -> tuple[list[int], list[int], list[int], list[int]]:
+        """(starts, ends, wide starts, wide ends): output character i came from source[starts[i]:ends[i]]; the wide ones
+        reach over a dropped piece just before or after it (a value that starts or ends with a backslash)."""
+        if self._maps is None:
+            starts: list[int] = []
+            ends: list[int] = []
+            wide_starts: list[int] = []
+            wide_ends: list[int] = []
+            pending = -1
+            for a, b, kind in self._pieces:
+                if kind == 2:
+                    if wide_ends:
+                        wide_ends[-1] = b
+                    if pending < 0:
+                        pending = a
+                    continue
+                first = len(starts)
+                if kind == 0:
+                    starts.extend(range(a, b))
+                    ends.extend(range(a + 1, b + 1))
+                    wide_starts.extend(range(a, b))
+                    wide_ends.extend(range(a + 1, b + 1))
+                else:
+                    starts.append(a)
+                    ends.append(b)
+                    wide_starts.append(a)
+                    wide_ends.append(b)
+                if pending >= 0 and len(starts) > first:
+                    wide_starts[first] = pending
+                pending = -1
+            self._maps = (starts, ends, wide_starts, wide_ends)
+        return self._maps
 
 
-def _char(c: str) -> str:
-    return "(?:" + "|".join([re.escape(c), *_encoded(c)]) + ")"
+def _build(source: str, changes: "list[tuple[int, int, str]]") -> _Layer:
+    """The layer that makes each source[a:b] of `changes` (in order, apart) into its text: one character, or none."""
+    out: list[str] = []
+    pieces: list[tuple[int, int, int]] = []
+    at = 0
+    for a, b, made in changes:
+        if a > at:
+            out.append(source[at:a])
+            pieces.append((at, a, 0))
+        out.append(made)
+        pieces.append((a, b, 1 if made else 2))
+        at = b
+    if at < len(source):
+        out.append(source[at:])
+        pieces.append((at, len(source), 0))
+    return _Layer(source, "".join(out), pieces)
 
 
-_ONE_BACKSLASH = "(?:u005[cC]|x5[cC]|U0000005[cC])?"  # (after a backslash, u005c or x5c makes it one escaped)
+def _percent(run: str, at: int, changes: "list[tuple[int, int, str]]") -> None:
+    """A run of %HH starting at `at`: each valid UTF-8 character it encodes, from the bytes that encode it."""
+    raw = bytes.fromhex(run.replace("%", ""))
+    for c in raw.decode("utf-8", "surrogateescape"):
+        if "\udc80" <= c <= "\udcff":
+            at += 3  # (a byte that isn't UTF-8 here is kept as it is)
+            continue
+        width = 3 * len(c.encode("utf-8"))
+        changes.append((at, at + width, c))
+        at += width
 
 
-def _backslashes(count: int, first: bool = False) -> str:
-    """A run of `count` backslashes in a value: as many in the text, or up to 2 ** ESCAPE_DEPTH times as many (each
-    escaping doubles them), each as itself, percent-encoded or escaped, a direction mark allowed between two. One bounded
-    repeat for the whole run, never one per backslash of the value (a long run in a text split among them every way
-    there is). A run the value starts with is found only from the start of a run in the text (`_RUN_START`), with no
-    upper bound: tried once per run, not at each of its backslashes (that was quadratic: a second for 20,000)."""
-    unit = f"(?:\\\\{_ONE_BACKSLASH}|{_PCT}5[cC]{_ONE_BACKSLASH})"
-    if first:
-        return _RUN_START + unit + f"(?:{_BETWEEN}{unit}){{{count - 1},}}"
-    return unit + f"(?:{_BETWEEN}{unit}){{{count - 1},{count * 2 ** ESCAPE_DEPTH - 1}}}"
+def _decoded(text: str) -> _Layer | None:
+    """One decoding pass, or None when it changes nothing."""
+    changes: list[tuple[int, int, str]] = []
+    for m in _ESCAPE.finditer(text):
+        if m.group(0)[0] == "%":
+            _percent(m.group(0), m.start(), changes)
+            continue
+        high, low, u, big, x, simple = m.groups()
+        if high is not None:
+            o = 0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00)
+        elif simple is not None:
+            changes.append((m.start(), m.end(), _SIMPLE[simple]))
+            continue
+        else:
+            o = int(u or big or x, 16)
+            if o > 0x10FFFF:
+                continue
+        changes.append((m.start(), m.end(), chr(o)))
+    return _build(text, changes) if changes else None
 
 
-# not just after a backslash, as itself, percent-encoded or escaped (the start of a run of them)
-_RUN_START = "".join(f"(?<!{before})" for before in (
-    r"\\", "%5[cC]", "%255[cC]", "%25255[cC]", r"\\u005[cC]", r"\\x5[cC]", r"\\U0000005[cC]"))
+def _normalized(text: str) -> _Layer:
+    """Direction marks and backslashes dropped, each run of whitespace or `+` one space."""
+    changes = []
+    for m in _LOOSE.finditer(text):
+        run = m.group(0)
+        if run != " ":
+            changes.append((m.start(), m.end(), " " if _SPACE.search(run) else ""))
+    return _build(text, changes)
 
 
-_WHITESPACE = " \t\n\r\f\v+"  # (a run collapsed or reflowed can hold any of them, each escaped or encoded later)
+def _levels(text: str) -> "Iterator[tuple[_Layer, list[_Layer]]]":
+    """Each level of `text` as (its normalized layer, the decoding layers that led to it, outermost last), level 0 first."""
+    chain: list[_Layer] = []
+    current = text
+    for _ in range(MAX_DECODES + 1):
+        yield _normalized(current), chain
+        step = _decoded(current)
+        if step is None:
+            return
+        chain = [*chain, step]
+        current = step.out
 
 
-def _space(run: str) -> str:
-    """A run of whitespace in a value: any run of whitespace, a `+`, or their encodings (a line collapsed, a form encoded)."""
-    shapes = {s for c in {*run, *_WHITESPACE} for s in _encoded(c)}
-    unit = r"(?:\s|\+|" + "|".join(sorted(shapes)) + ")"
-    return unit + f"(?:{_BETWEEN}{unit})*"  # (a direction mark may sit anywhere inside the run too, Codex, PR #10 cycle 11)
+def _made(chain: "list[_Layer]", known: "list[list[tuple[int, str]]]") -> "list[tuple[int, str]]":
+    """The characters escapes made in the last text of `chain` (`known` caches each level's)."""
+    while len(known) <= len(chain):
+        n = len(known)
+        known.append(chain[n - 1].carried(known[n - 1]) if n else [])
+    return known[len(chain)]
 
 
-@functools.lru_cache(maxsize=512)
-def pattern(value: str) -> str | None:
-    """The regular expression that finds `value` in any of its shapes (see above), or None when nothing of it is left to
-    find. Its direction marks are dropped first (the value is found with or without them), and whitespace at its ends
-    when what is between is long enough to be scrubbed alone."""
-    core = value.translate(BIDI_MARKS)
-    if len(core.strip()) >= MIN_SCRUBBED:
-        core = core.strip()
-    if not core:
-        return None
-    parts = [_space(run) if run[0].isspace() else _backslashes(len(run), n == 0) if run[0] == "\\" else _char(run)
-             for n, run in enumerate(re.findall(r"\s+|\\+|\S", core))]
-    return _BETWEEN.join(parts)
+def canon(text: str) -> tuple[str, list[int], list[int]]:
+    """The text fully decoded and normalized, and where each of its characters came from: canonical character i is
+    text[starts[i]:ends[i]]."""
+    *_, (last, chain) = _levels(text)
+    starts, ends, _, _ = last.maps()
+    for step in reversed(chain):
+        s, e, _, _ = step.maps()
+        starts, ends = [s[a] for a in starts], [e[b - 1] for b in ends]
+    return last.out, starts, ends
 
 
-_QUOTE = re.compile(r"(?:\\|" + _PCT + "5[cC])*(?:['\"]|" + _PCT + "2[27])")  # a quote, escaped or encoded or not
+def weak(value: str) -> bool:
+    """Is the value too weak to redact safely: under MIN_SCRUBBED characters once decoded, normalized and stripped?"""
+    return len(canon(value)[0].strip()) < MIN_SCRUBBED
+
+
+def _forms(value: str) -> "list[tuple[str, bool, bool]]":
+    """The value's forms to look for, as (form, starts with a dropped piece, ends with one): each level of it normalized,
+    and that stripped when it is still long enough (a screen trims a value's ends)."""
+    found: list[tuple[str, bool, bool]] = []
+    for layer, _ in _levels(value):
+        form = layer.out
+        if not form:
+            continue
+        starts, ends, wide_starts, wide_ends = layer.maps()
+        lead, trail = wide_starts[0] != starts[0], wide_ends[-1] != ends[-1]
+        stripped = form.strip()
+        if len(stripped) >= MIN_SCRUBBED:
+            found.append((form, lead, trail))
+            if stripped != form:
+                found.append((stripped, lead and form[0] != " ", trail and form[-1] != " "))
+    return found
+
+
+SEAM = 8  # how many of a value's characters an escape around it can take in (\\U and 8 hex digits)
+
+
+def _occurrences(hay: str, needle: str, merge: bool) -> "Iterator[tuple[int, int]]":
+    """Every occurrence of `needle` in `hay`, overlapping ones too, as (start, end); with `merge` a chain of overlapping
+    ones is one (linear in the occurrences: `aaaa` in 20,000 `a`s is one span, found in one pass)."""
+    size = len(needle)
+    at = hay.find(needle)
+    while at != -1:
+        end = at + size
+        after = hay.find(needle, at + 1)
+        while merge and after != -1 and after < end:
+            end = after + size
+            after = hay.find(needle, after + 1)
+        yield at, end
+        at = after
+
+
+_QUOTE = re.compile(r"(?:\\|%(?:25){0,2}5[cC])*(?:['\"]|%(?:25){0,2}2[27])")  # a quote, escaped or encoded or not
 _QUOTE_LONGEST = 16
 
 
 def _quoted(text: str, start: int, end: int) -> tuple[int, int]:
     """The span of a value found at text[start:end], with the quotes around it when it is quoted whole (`'v'`, `\\"v\\"`,
-    `%22v%22`): what repr or JSON writes of the value alone is replaced quotes and all, as before cycle 10."""
+    `%22v%22`): what repr or JSON writes of the value alone is replaced quotes and all."""
+    if start == 0 or text[start - 1] not in "'\"27":
+        return start, end
     for k in range(min(start, _QUOTE_LONGEST), 0, -1):  # (the longest quote first: `\\"` rather than `"`)
         quote = text[start - k:start]
         if text.startswith(quote, end) and _QUOTE.fullmatch(quote):
@@ -245,60 +408,64 @@ def _quoted(text: str, start: int, end: int) -> tuple[int, int]:
     return start, end
 
 
-@functools.lru_cache(maxsize=512)
-def _compiled(made: str) -> "re.Pattern[str]":
-    return re.compile(made)
-
-
-def _every(each: "re.Pattern[str]", text: str) -> "Iterator[re.Match[str]]":
-    """Every match of `each` in `text`, overlapping ones too (`abcabc` at 0 and 3 in `abcabcabc`: `finditer` gives only the
-    first, and the merge never sees the second, Codex, PR #10 cycle 13). Each search resumes one character after the last
-    match's start, so the engine's skip to a first character still works, and the work is linear in the matches."""
-    at = 0
-    while (m := each.search(text, at)) is not None:
-        yield m
-        at = m.start() + 1
-
-
 class Redaction:
-    """A set of account values, as (name, kind, value), and what redacts them: each value in any of its shapes (`pattern`)
-    becomes `<name's username>` / `<name's password>`, the longest value first, so a value that holds another is replaced
-    whole. One compiled expression per value: each keeps the engine's skip to its first-character set, which one
-    alternation of them all loses."""
+    """A set of account values, as (name, kind, value), and what redacts them: each value, in any of its shapes, becomes
+    `<name's username>` / `<name's password>`. Overlapping occurrences are merged into one span, the earliest and then the
+    longest first (a value that holds another is replaced whole)."""
 
     def __init__(self, entries: "tuple[tuple[str, str, str], ...]" = ()) -> None:
-        found: dict[str, str] = {}
+        forms: dict[str, tuple[int, str, bool, bool]] = {}
+        labels: list[str] = []
         for name, kind, value in sorted(entries, key=lambda e: -len(e[2])):
-            if (made := pattern(value)) is not None:
-                found.setdefault(made, f"<{name}'s {kind}>")
-        self._each = [(_compiled(made), label) for made, label in found.items()]
-        shown = sorted(set(found.values()), key=len, reverse=True)
+            label = f"<{name}'s {kind}>"
+            for form, lead, trail in _forms(value):
+                if form not in forms:
+                    forms[form] = (len(forms), label, lead, trail)
+                    labels.append(label)
+        self._forms = [(form, rank, label, lead, trail) for form, (rank, label, lead, trail) in forms.items()]
+        # (a value's first characters taken into an escape of the text before it, `%2` + `abc` read as `%2a` + `bc`, or
+        # its last ones into an escape with the text after it, `ab%2` + `F`: by the character the escape ends or starts
+        # with, each (form, how many characters of it the escape holds, rank, label))
+        self._heads: dict[str, list[tuple[str, int, int, str]]] = {}
+        self._tails: dict[str, list[tuple[str, int, int, str]]] = {}
+        for form, rank, label, _, _ in self._forms:
+            for k in range(1, min(SEAM, len(form) - 1) + 1):
+                self._heads.setdefault(form[k - 1], []).append((form, k, rank, label))
+                self._tails.setdefault(form[len(form) - k], []).append((form, k, rank, label))
+        shown = sorted(set(labels), key=len, reverse=True)
         self.placeholders = re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
 
     @property
     def redacts(self) -> bool:
-        return bool(self._each)
+        return bool(self._forms)
 
-    def _spans(self, text: str) -> list[tuple[int, int, str]]:
-        """Where the values are in `text`, as (start, end, placeholder), in the text's order. Overlapping matches are
-        merged into one span (the first one's placeholder), so no piece of either value is left out of it: a username
-        `abcdef` and a password `cdefgh` in `abcdefgh` leave no `gh` behind. The values are found on the text as it is,
-        placeholder-shaped parts included (a password `a<tester2's username>b` is one span); only a match that lies
-        wholly inside a placeholder is passed over, so a placeholder already there stays as it is (Codex, PR #10 cycle 12)."""
+    def _spans(self, text: str, first: bool = False) -> list[tuple[int, int, str]]:
+        """Where the values are in `text`, as (start, end, placeholder), in the text's order (with `first`, as soon as one
+        is found, that one alone). Overlapping occurrences are merged into one span (the first one's placeholder), so no
+        piece of either value is left out of it. Only an occurrence that lies wholly inside a placeholder is passed over,
+        so a placeholder already there stays as it is."""
         shown = [(m.start(), m.end()) for m in self.placeholders.finditer(text)] if self.placeholders is not None else []
-        starts = [a for a, _ in shown]
-        found: list[tuple[int, int, int, int, str]] = []  # (start, -length, precedence, end, label)
-        for rank, (each, label) in enumerate(self._each):
-            for m in _every(each, text):
+        shown_starts = [a for a, _ in shown]
+        found: list[tuple[int, int, int, int, str]] = []  # (start, -length, rank, end, label)
+        known: list[list[tuple[int, str]]] = []
+        for level, chain in _levels(text):
+            for i, j, rank, label, lead, trail in self._found(level, chain, known, merge=not shown):
+                starts, ends, wide_starts, wide_ends = level.maps()
+                a, b = (wide_starts if lead else starts)[i], (wide_ends if trail else ends)[j - 1]
+                for step in reversed(chain):
+                    s, e, _, _ = step.maps()
+                    a, b = s[a], e[b - 1]
                 if shown:
-                    k = bisect.bisect_right(starts, m.start()) - 1
-                    if k >= 0 and m.end() <= shown[k][1]:
+                    k = bisect.bisect_right(shown_starts, a) - 1
+                    if k >= 0 and b <= shown[k][1]:
                         continue  # a piece of a placeholder (`test` in `<tester's password>`), not a value
-                start, end = _quoted(text, m.start(), m.end())
-                found.append((start, start - end, rank, end, label))
+                a, b = _quoted(text, a, b)
+                if first:
+                    return [(a, b, label)]
+                found.append((a, a - b, rank, b, label))
         found.sort()
         taken: list[tuple[int, int, str]] = []
-        reached = 0  # one ordered sweep with a running end: linear in the matches, not one scan of the taken for each
+        reached = 0  # one ordered sweep with a running end: linear in the occurrences
         for start, _, _, end, label in found:
             if start >= reached:
                 taken.append((start, end, label))
@@ -308,25 +475,50 @@ class Redaction:
                 reached = end
         return taken
 
-    def _scrubbed(self, part: str) -> str:
-        out, at = [], 0
-        for start, end, label in self._spans(part):
-            out += [part[at:start], label]
-            at = end
-        return "".join(out) + part[at:]
+    def _found(self, level: _Layer, chain: "list[_Layer]", known: "list[list[tuple[int, str]]]",
+               merge: bool) -> "Iterator[tuple[int, int, int, str, bool, bool]]":
+        """The occurrences of the values in one level, as (start, end, rank, label, lead, trail) in its canonical text:
+        each form where it is whole, then (in a decoded level) where an escape took in its first or last characters
+        with characters of the text around it. Such an occurrence takes the whole escape: a couple of characters too
+        many rather than one of the value too few."""
+        hay = level.out
+        for form, rank, label, lead, trail in self._forms:
+            for i, j in _occurrences(hay, form, merge):
+                yield i, j, rank, label, lead, trail
+        if not chain:
+            return
+        slots = level.slots()
+        for x, raw in _made(chain, known):
+            if not raw:
+                continue
+            i, own = divmod(slots[x], 2)  # (own 0: what the escape made was dropped, a direction mark: it has no place)
+            for form, k, rank, label in self._heads.get(raw[-1], ()):
+                if raw.endswith(form[:k]) and hay.startswith(form[k:], i + own):
+                    yield (i, i + own + len(form) - k, rank, label, False, False) if own else \
+                        (i, i + len(form) - k, rank, label, True, False)
+            for form, k, rank, label in self._tails.get(raw[0], ()):
+                rest = len(form) - k
+                if i >= rest and raw.startswith(form[rest:]) and hay.startswith(form[:rest], i - rest):
+                    yield (i - rest, i + 1, rank, label, False, False) if own else \
+                        (i - rest, i, rank, label, False, True)
 
     def scrub(self, text: str) -> str:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
-        if not text or not any(each.search(text) for each, _ in self._each):
+        if not text or not self._forms:
             return text
-        return self._scrubbed(text)
+        out, at = [], 0
+        for start, end, label in self._spans(text):
+            out += [text[at:start], label]
+            at = end
+        return "".join(out) + text[at:] if out else text
 
     def holds(self, text: str) -> bool:
-        if not text:
+        if not text or not self._forms:
             return False
-        return any(each.search(text) for each, _ in self._each) or bool(
-            self.placeholders is not None and self.placeholders.search(text))
+        if self.placeholders is not None and self.placeholders.search(text):
+            return True
+        return bool(self._spans(text, first=True))
 
 
 def mentions(text: str) -> bool:
@@ -405,6 +597,10 @@ def _read(data: object) -> tuple[dict[str, Account], str | None, str | None]:
         for key in ("username", "password"):
             if key in entry and len(entry[key]) < MIN_SCRUBBED:  # too short to be scrubbed out of text, so not accepted
                 return {}, None, f"{name}'s {key} must be at least {MIN_SCRUBBED} characters: a shorter one can't be kept out of answers and maps"
+            if key in entry and weak(entry[key]):  # (Codex, PR #10 cycle 14: `"   "` or `%41%42` is as weak as `ab`)
+                return {}, None, (f"{name}'s {key} must have at least {MIN_SCRUBBED} characters once decoded, without "
+                                  "direction marks, backslashes or whitespace at its ends: a weaker one can't be kept out "
+                                  "of answers and maps")
         apps = entry.get("apps")
         if apps is not None and (not isinstance(apps, list) or not all(isinstance(a, str) and a for a in apps)):
             return {}, None, f"{name}'s apps must be a list of bundle ids"

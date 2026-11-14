@@ -40,11 +40,16 @@
   holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
   that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
   is redacted in that form too.
-  Every shape of a value is redacted, and `holds` knows each: one matcher follows the value character by character, each
-  character as itself or percent-encoded (hex in any case, up to three times), JSON- or Python-escaped, a whitespace run
-  as any whitespace or `+`, and direction marks between, so any composition of them (a `%r` inside a JSON crash report, a
-  URL that leaves an apostrophe as it is beside an encoded slash) is found, and a log message, a
-  traceback or a report shows none. A value ever
+  Every shape of a value is redacted, and `holds` knows each: the text is decoded level by level (percent escapes in
+  any case, nested; JSON and Python escapes behind any number of backslashes), direction marks and stray backslashes
+  are dropped and whitespace or `+` runs made one space, the value is decoded the same way, and every occurrence at
+  every level, overlapping ones included, is mapped back to the characters it came from. So any composition of those
+  encodings (a `%r` inside a JSON crash report, a URL that leaves an apostrophe as it is beside an encoded slash) is
+  found whole, even where an escape takes in the value's first or last characters with the text beside it (`%2` +
+  `abc`), and a log message, a traceback or a report shows none. A value too weak to redact (under 3 characters once
+  decoded and trimmed, such as three spaces) is refused when the file loads, naming the account and the field. A
+  route's fields other than the text a `type_text` types are literal at the replay as at the save: a `$${` in a
+  selector is never decoded, so a replay taps the element that was recorded. A value ever
   loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
   current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
   sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so

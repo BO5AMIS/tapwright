@@ -57,12 +57,14 @@ def test_an_account_value_is_the_whole_text_of_a_step_never_part_of_one():
         routes.check(sign_in(steps=[{"tool": "type_text", "text": "${account.token}"}]))
 
 
-def test_variables_are_filled_in_everywhere_a_step_has_text():
+def test_variables_are_filled_in_only_in_typed_text_and_every_other_field_is_literal():
+    # (Codex, PR #10 cycle 14: a selector, a link or an expectation is literal at the save and at the replay alike)
     steps = [{"tool": "tap", "target": {"text": "${language}"}}, {"tool": "type_text", "text": "to ${language}!"},
-             {"tool": "open_url", "url": "wayfare://trips/${id}"}, {"tool": "tap", "target": {"id": "x"}, "expect": {"text": "${language}"}}]
+             {"tool": "open_url", "url": "wayfare://trips/${id}"}, {"tool": "tap", "target": {"id": "x"}, "expect": {"text": "$${language}"}}]
     got = routes.substitute(steps, {"language": "Arabic", "id": "42"})
-    assert got[0]["target"] == {"text": "Arabic"} and got[1]["text"] == "to Arabic!" and got[2]["url"] == "wayfare://trips/42"
-    assert got[3]["expect"] == {"text": "Arabic"} and steps[0]["target"] == {"text": "${language}"}  # the route itself is untouched
+    assert got[1]["text"] == "to Arabic!"
+    assert got[0]["target"] == {"text": "${language}"} and got[2]["url"] == "wayfare://trips/${id}"
+    assert got[3]["expect"] == {"text": "$${language}"} and steps[1]["text"] == "to ${language}!"  # the route itself is untouched
 
 
 def test_an_account_placeholder_is_left_for_the_typing_to_fill():

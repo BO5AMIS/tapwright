@@ -51,14 +51,16 @@ def test_a_composed_form_is_redacted_and_held(shown, value):
 
 
 def test_the_matcher_of_one_value_is_quick_to_build_and_cached():
-    # (cycle 10: one per-character expression per value replaced the list of whole forms)
+    # (cycle 10: one per-character expression per value replaced the list of whole forms; cycle 14: the value's decoded
+    # forms replaced the expression, and the Loaded keeps its Redaction)
     worst = f"secret'\"account-42 é{chr(0x200e)}/x\\y\tz"
     began = time.perf_counter()
-    made = accountlib.pattern(worst)
+    made = accountlib.canon(worst)[0]
     accountlib.Redaction((("t", "password", worst),))
     took = time.perf_counter() - began
-    assert made is not None and took < 0.5
-    assert accountlib.pattern(worst) is made  # (cached)
+    assert made and took < 0.5
+    held = loaded(worst)
+    assert held._redaction is held._redaction  # (cached)
 
 
 def test_the_daemon_log_redacts_a_repr_inside_a_json_line(tmp_path):
