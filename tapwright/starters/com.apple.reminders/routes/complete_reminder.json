@@ -1,0 +1,42 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "complete_reminder",
+  "app": "com.apple.reminders",
+  "start": "reminders_lists",
+  "end": "reminders_lists",
+  "variables": [
+    "title"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "label": "Search"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${title}",
+      "target": {
+        "label": "Search"
+      }
+    },
+    {
+      "tool": "wait_for",
+      "label": "circle"
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "label": "circle"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "label": "Close"
+      }
+    }
+  ]
+}

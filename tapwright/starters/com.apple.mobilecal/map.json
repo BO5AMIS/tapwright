@@ -1,0 +1,80 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.apple.mobilecal",
+  "places": {
+    "calendar_day": {
+      "key": {
+        "signature": "529e59a41dd81a8c",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "_contentView",
+            "_eventBackgroundView",
+            "add-plus-button",
+            "calendars-button",
+            "current-day",
+            "inbox-button",
+            "searchbar-button",
+            "today-button",
+            "toggle-day-list-view"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    },
+    "new_event": {
+      "key": {
+        "signature": "08667c29fa18e7a1",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "_contentView",
+            "_eventBackgroundView",
+            "add-button",
+            "add-plus-button",
+            "calendars-button",
+            "cancel-button",
+            "current-day",
+            "dictation",
+            "event-reminder-control",
+            "inbox-button",
+            "inputView",
+            "searchbar-button",
+            "today-button",
+            "toggle-day-list-view"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar",
+            "nav",
+            "list"
+          ],
+          "tab": null,
+          "layer": "sheet"
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    }
+  },
+  "roads": [],
+  "routes": {
+    "add_event": "routes/add_event.json",
+    "today": "routes/today.json"
+  },
+  "reflexes": []
+}

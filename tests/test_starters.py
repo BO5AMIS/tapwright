@@ -121,3 +121,17 @@ def test_shipped_files_hold_no_titles_and_nothing_personal():
 def test_package_data_lists_the_starters():
     pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text("utf-8")
     assert '"starters/*/map.json"' in pyproject and '"starters/*/routes/*.json"' in pyproject
+
+
+def test_reminders_and_calendar_starters_ship_their_routes_and_places(tmp_path):
+    starters.install(str(tmp_path))
+    expect = {"com.apple.reminders": ({"add_reminder", "complete_reminder"}, {"reminders_lists", "new_reminder"}, "title"),
+              "com.apple.mobilecal": ({"add_event", "today"}, {"calendar_day", "new_event"}, None)}
+    for app, (routes, places, variable) in expect.items():
+        data, found = starters.load(app)
+        assert set(found) == routes and places <= set(data["places"])
+        for route in found.values():
+            assert route["start"] == route["end"] and route["start"] in places
+        assert (variable is None) == (found.get("today") is not None and found["today"]["variables"] == [])
+    assert starters.load("com.apple.reminders")[1]["add_reminder"]["variables"] == ["title"]
+    assert starters.load("com.apple.mobilecal")[1]["add_event"]["variables"] == ["title"]

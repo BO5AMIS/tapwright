@@ -1,0 +1,32 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "add_event",
+  "app": "com.apple.mobilecal",
+  "start": "calendar_day",
+  "end": "calendar_day",
+  "variables": [
+    "title"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "id": "add-plus-button"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${title}",
+      "target": {
+        "id": "title-field"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "id": "add-button"
+      }
+    }
+  ]
+}
