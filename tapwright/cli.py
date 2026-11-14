@@ -854,6 +854,59 @@ def replay(a) -> int:
     return 2 if "error" in kinds else 1 if "failed" in kinds else 0
 
 
+EXPLORE_WAIT = 600.0  # seconds `explore` waits for a phone in use before it starts (AGENT-TOOLS §22.3, §25.2)
+EXPLORE_RETRY = 15.0
+
+
+def explore(a, sleep=time.sleep) -> int:
+    """`tapwright explore`: the same search as the `explore` tool (AGENT-TOOLS §25.2), from the command line, with the same
+    report. Exit 0: it ended and found nothing. 1: it ended with findings, a crash included. 2: it couldn't start (no phone,
+    no app, a bad flag), or a person or a pause stopped it before the end (the report is still written). When the phone is
+    busy before the run starts it waits up to 10 minutes, then says `skipped: the phone was in use` and exits 2."""
+    import re
+    from . import client, exploretool, policy as policies
+    apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
+    whole = getattr(a, "phone", False)
+    if sum((bool(apps), a.dedicated, whole)) > 1:
+        print("tapwright explore: --apps, --dedicated and --phone can't be used together.")
+        return 2
+    if not apps and not a.dedicated and not whole:
+        print("tapwright explore: pass --apps <bundle id> (the app to search), or --dedicated (or --phone)")
+        return 2
+    try:
+        rules = policies.load(a.policy) if getattr(a, "policy", None) else None
+    except (OSError, ValueError) as e:
+        print(f"tapwright explore: the policy file can't be used: {e}")
+        return 2
+    args: dict = {k: v for k, v in (("minutes", a.minutes), ("steps", a.steps), ("depth", a.depth), ("from", a.start),
+                                    ("focus", a.focus), ("fill", a.fill), ("account", a.account)) if v is not None}
+    if a.keep_going:
+        args["continue"] = True
+    client.set_scope(apps, a.dedicated, True) if whole else client.set_scope(apps, a.dedicated)
+    client.set_policy(rules)
+    client.set_maps(getattr(a, "maps", None))
+    client.set_accounts(getattr(a, "accounts", None))
+    waited = 0.0
+    while True:
+        try:
+            answer = client.call("explore", args, "cli-explore", timeout=exploretool.timeout_for(args))
+            break
+        except client.DaemonError as e:
+            if e.code == "busy" and "Done: " not in str(e) and waited < EXPLORE_WAIT:  # the phone was in use before it began
+                sleep(EXPLORE_RETRY)
+                waited += EXPLORE_RETRY
+                continue
+            if e.code == "busy" and "Done: " not in str(e):
+                print("skipped: the phone was in use")
+                return 2
+            print(f"Error {e.code}: {e}")
+            return 2
+    text = answer.get("text", "")
+    print(text)
+    found = re.search(r"(\d+) findings?\.", text.splitlines()[0] if text else "")
+    return 1 if found and int(found.group(1)) > 0 else 0
+
+
 def pull_crash_beside(script: str) -> str | None:
     """The app's newest crash report (the daemon's `crash` with pull), copied to
     `<script dir>/<script name>.diff/<script name>.crash.ips`; its path, or None when there is none to copy."""
@@ -1036,6 +1089,22 @@ def main() -> int:
     p.add_argument("--update-references", action="store_true",
                    help="picture checks (matches, compare_screen) save the screen into the script's "
                         "<name>.references folder instead of comparing; exit 0 when every step ran")
+    p = sub.add_parser("explore", help="search an app for what breaks, with no agent: the same search and report as the explore tool")
+    p.add_argument("--minutes", type=float, metavar="N", help="time budget, 1 to 60 (default 10)")
+    p.add_argument("--steps", type=int, metavar="N", help="move budget, 1 to 5000 (default 500)")
+    p.add_argument("--depth", type=int, metavar="N", help="how deep from the start place it expands, 1 to 20 (default 8)")
+    p.add_argument("--from", dest="start", metavar="PLACE", help="a place's name to start at")
+    p.add_argument("--focus", metavar="PLACE", help="expand only places below this one")
+    p.add_argument("--fill", metavar="MODE", help='"test-data" (a fake value into fields whose id ends -test-safe) or '
+                                                  '"fixture:<name>.<field>"; default: type nothing')
+    p.add_argument("--continue", dest="keep_going", action="store_true", help="go on after a crash")
+    p.add_argument("--account", metavar="NAME", help='a vault account marked "explore": true, for the way back after a reset')
+    p.add_argument("--apps", metavar="APP", help="the one app to search, as a bundle id or exact name (personal mode)")
+    p.add_argument("--dedicated", action="store_true", help="the phone is kept for testing")
+    p.add_argument("--phone", action="store_true", help="the phone is dedicated to automation (1.7)")
+    p.add_argument("--policy", metavar="FILE", help="the safety policy file (its confirm and block words are part of the skip floor)")
+    p.add_argument("--accounts", metavar="FILE", help="the vault file")
+    p.add_argument("--maps", metavar="DIR", help="where the app's map is kept")
     p = sub.add_parser("skill", help="the agent skill: how to test with Tapwright, for Claude Code, Codex and others")
     p.add_argument("action", choices=("install", "path"),
                    help="install: copy it to .claude/skills and .agents/skills; path: print where it ships")
@@ -1151,6 +1220,8 @@ def main() -> int:
         return 0 if done else 1
     if a.cmd == "replay":
         return replay(a)
+    if a.cmd == "explore":
+        return explore(a)
     if a.cmd == "skill":
         return skill(a)
     if a.cmd == "install":
