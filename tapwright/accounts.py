@@ -7,7 +7,8 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - A password goes only into a secure field, a username only into a text field that isn't secure.
   - `apps` limits where an account may be used.
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
-  - `phone.passcode` is stored and exposed nowhere. (Typing it on the lock screen is a later task.)
+  - `phone.passcode` is exposed nowhere, and typed by the tool itself only on the lock screen's passcode entry (unlock.py,
+    Tapwright 1.7). It is redacted like any value, as `<phone's passcode>`.
 
 What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20 and 21):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
@@ -186,10 +187,15 @@ class Loaded:
 
     def entries(self) -> tuple[tuple[str, str, str], ...]:
         """(entry name, field, value) of every value this file holds that is kept out of text: an account's username and
-        password, and in a vault every other kind's fields too (never the phone's passcode)."""
+        password, and in a vault every other kind's fields too. (1.7) The phone's passcode as well, shown as
+        `<phone's passcode>`: the tool types it on the lock screen now, so it is a value like any other (§20.3)."""
         found = _entries(self.accounts)
-        return found + tuple((e.name, f, v) for e in self.vault.values() if e.kind not in ("account", "phone")
-                             for f, v in e.values.items() if v and not weak(v))
+        found += tuple((e.name, f, v) for e in self.vault.values() if e.kind not in ("account", "phone")
+                       for f, v in e.values.items() if v and not weak(v))
+        if isinstance(self.passcode, str) and self.passcode and not weak(self.passcode):
+            name = next((n for n, e in self.vault.items() if e.kind == "phone"), PHONE)
+            found += ((name, "passcode", self.passcode),)
+        return found
 
     def reference(self, text: str, active: Account | None, secure: bool, ref: str, bundle: str | None) -> Typing | None:
         """What a step's text types when it is a reference (`${account.…}`, `${vault.…}`, `${otp.…}`), checked against
