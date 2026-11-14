@@ -506,8 +506,18 @@ def hit_of(value: object) -> Hit | None:
                bundle if isinstance(bundle, str) else "")
 
 
-def _is_node(node: ET.Element, kind: str, rect: tuple[float, ...], name: str) -> bool:
-    return _kind(node) == kind and _text(node.get("name")) == name and _same_rect(_rect(node), rect)
+def _is_node(node: ET.Element, kind: str, rect: tuple[float, ...], name: str, label: str | None = None) -> bool:
+    """Is the node the element of this type, name and frame and, when `label` is given, with that label (XCTest's raw
+    one, or as `elements` words an RN radio's: rn_label)?"""
+    if not (_kind(node) == kind and _text(node.get("name")) == name and _same_rect(_rect(node), rect)):
+        return False
+    return label is None or _same_label(_text(node.get("label")), label)
+
+
+def _same_label(raw: str, label: str) -> bool:
+    """Is XCTest's raw label `raw` the label `label` (the tree's, or a hit's)? An RN radio's or checkbox's role and state
+    words count as left out, as the tree leaves them out (rn_label)."""
+    return raw == label or rn_label(raw) == label or raw == rn_label(label)
 
 
 HOLDER_KINDS = frozenset({"Window", "Application"})
@@ -525,9 +535,12 @@ def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
     target's frame). Elements are told apart by type, name and frame (within a point), as both reads give them.
     "unplaced" proves nothing: an overlay or another process's control drawn over the target after the read fits its
     frame as well as a label inside it does, so only the tree makes a hit "inside" (Codex, PR #12 cycle 1, M1). Where the
-    tree can't place both and the hit isn't within the target's frame: "other"."""
+    tree can't place both and the hit isn't within the target's frame: "other".
+    An element is the same one only with the same label too: an app that reuses a control's identifier and frame for
+    another action (Terms became Delete account) is "changed", never "same", and a hit is placed in the tree only by a
+    node with its label (Codex, PR #12 cycle 2, M1): what the policy judged is what the touch lands on."""
     if hit.type == target.type and hit.name == target.name and _same_rect(hit.rect, target.rect):
-        return "same"
+        return "same" if _same_label(hit.label, target.label) else "changed"
     root = None
     if source:
         try:
@@ -535,8 +548,8 @@ def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
         except ET.ParseError:
             root = None
     if root is not None:
-        targets = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name)]
-        hits = [n for n in root.iter() if _is_node(n, hit.type, hit.rect, hit.name)]
+        targets = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name, target.label)]
+        hits = [n for n in root.iter() if _is_node(n, hit.type, hit.rect, hit.name, hit.label)]
         if targets and hits:
             parents = {child: up for up in root.iter() for child in up}
             for node in hits:
@@ -568,11 +581,28 @@ def hit_line(hit: Hit, items: list[Element]) -> str:
     """The hit element as an agent's list shows it: its line with its ref when the list has it (type, name and frame
     agree), else a line without a ref."""
     for e in items:
-        if e.type == hit.type and e.name == hit.name and _same_rect(e.rect, hit.rect):
+        if _listed_as(e, hit):
             return e.line(actions=False)
     identifier = "" if hit.name == hit.label else hit.name
     return Element("", ROLES.get(hit.type, hit.type.lower()), hit.label, identifier, rect=hit.rect,
                    type=hit.type, name=hit.name).line(ref=False, actions=False)
+
+
+def _listed_as(e: Element, hit: Hit) -> bool:
+    return e.type == hit.type and e.name == hit.name and _same_rect(e.rect, hit.rect) and _same_label(hit.label, e.label)
+
+
+def listed(hit: Hit, items: list[Element]) -> bool:
+    """Is the hit an element of the agent's list (type, name, frame and label agree)?"""
+    return any(_listed_as(e, hit) for e in items)
+
+
+def foreign_hit_line(hit: Hit) -> str:
+    """What another app's element over the target is, without any of its words (Codex, PR #12 cycle 2, M2): a banner, a
+    sheet or a control of another app shown by its kind and frame only. Its label, value and identifier are that app's
+    content, and personal mode never passes them on."""
+    x, y, w, h = (round(v) for v in hit.rect)
+    return f"another app's {ROLES.get(hit.type, 'view')} @{x},{y} {w}x{h}"
 
 
 def _has_focus(node: ET.Element, role: str) -> bool:

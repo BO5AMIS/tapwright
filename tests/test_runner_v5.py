@@ -390,7 +390,8 @@ def test_an_element_behind_a_guessed_layer_is_lifted_when_the_hit_lands_on_it():
         close = button("", "Close", "", rect=(24, 83, 36, 36), name="Cancel")
         close.type, close.name = "Button", "Cancel"
         front = button("e1", "Today", "", rect=(176, 861, 78, 38), name="Today")
-        for answer, tapped in ((hit(CANCEL), True), (hit(SHEET_TABLE), False), (None, False)):
+        # (the hit's label is the element's own: both come from one XCTest snapshot of the same button)
+        for answer, tapped in ((hit({**CANCEL, "l": "Close"}), True), (hit(SHEET_TABLE), False), (None, False)):
             d = armed_daemon(answer)
             d.session.last_source = source(SHEET)
             stop, task = await started(d)

@@ -107,19 +107,76 @@ def never_reason(word: str, block: tuple[str, ...]) -> str | None:
     return None
 
 
-def touch_never(app: str | None, name: str | None, alert: tuple[str, ...] = (), screen: tuple[str, ...] = ()) -> bool:
+def touch_never(app: str | None, name: str | None, alert: tuple[str, ...] = (), screen: tuple[str, ...] = (),
+                titles: tuple[str, ...] = ()) -> bool:
     """Is this touch in §19.2, whatever the grants say? A payment or an account deletion on the element (by word, phrase
-    or pattern), or an app where the account, privacy and security settings, the passwords and the cards live. What
-    surrounds the touch counts too (Codex, PR #12 cycle 1, H1): a `Delete` or `Confirm` in an alert titled "Delete your
-    account?" deletes the account, so `alert` (the alert's title, message and texts, for a touch on its button) is read
-    for an account deletion or a payment, and `screen` (the texts and headers on screen) for an account deletion."""
+    or pattern), an app where the account, privacy and security settings, the passwords and the cards live, or a touch
+    whose surroundings make it one (never_context)."""
     if app in NEVER_APPS:
         return True
     if name and (payment(name) is not None or account_deletion(name) is not None):
         return True
-    if any(t and (payment(t) is not None or account_deletion(t) is not None) for t in alert):
-        return True
-    return any(t and account_deletion(t) is not None for t in screen)
+    return never_context(name, alert, screen, titles) is not None
+
+
+# §19.2 by what surrounds a touch: the words that title a payment screen ("Send money", "Checkout"), and the answers that
+# leave such a screen or alert without doing anything (a tap on them asks nobody)
+PAYMENT_TITLES = (*PAYMENT_WORDS, "Send money", "Transfer", "Payment", "Confirm order", "Confirm payment")
+LEAVE_WORDS = frozenset({"cancel", "back", "go back", "close", "not now", "no", "later", "dismiss", "keep",
+                         "keep account", "keep my account", "never mind", "don't allow", "ask app not to track"})
+
+
+def _amount(text: str) -> str | None:
+    """A currency amount in `text` ($25, 25 €, QAR 25, 25 USD), or None: a currency sign next to a digit, or a code."""
+    for i, c in enumerate(text):
+        if unicodedata.category(c) == "Sc":
+            near = text[max(0, i - 2):i] + text[i + 1:i + 3]
+            if any(ch.isdigit() for ch in near):
+                return c
+    found = _AMOUNT.search(text)
+    return found.group(0) if found is not None else None
+
+
+def _bare_amount(text: str) -> bool:
+    """Is `text` only an amount ("$25.00", "QAR 25", "25,00 €"): a screen's prominent sum, not a word with a price."""
+    rest = re.sub(rf"(?i)(?:{_CODES})", "", text)
+    rest = "".join(c for c in rest if unicodedata.category(c) != "Sc")
+    return _amount(text) is not None and re.fullmatch(r"[\s\d.,'+-]*\d[\s\d.,']*", rest) is not None
+
+
+def never_context(name: str | None, alert: tuple[str, ...] = (), screen: tuple[str, ...] = (),
+                  titles: tuple[str, ...] = ()) -> str | None:
+    """What around a touch puts it in §19.2 (Codex, PR #12 cycles 1 and 2, H1, H4, H5), as the words that say so; None when
+    nothing does. `alert`: the alert's title, message and texts, for a touch on its button. `screen`: the texts and
+    headers on screen (never other people's words, §21.1). `titles`: the headers among them.
+    - an account deletion said in the alert or on the screen ("Delete your account?");
+    - a payment said in the alert (a payment word or an amount);
+    - a payment screen: a title with a payment word ("Send money", "Checkout", "Transfer"), or a text with a payment word
+      and an amount ("Transfer $25 to Alice", "Order total $49"); a price alone beside other words ("Latte $4") is not one;
+    - an amount alone on the screen ("$25.00") when the touch is one that reaches people (Send, Post…): money sent.
+    The touch's own name decides nothing here except the last line: a generic Confirm or OK is judged by its screen."""
+    for t in alert:
+        if t and (found := account_deletion(t) or payment(t)) is not None:
+            return found
+    for t in screen:
+        if t and (found := account_deletion(t)) is not None:
+            return found
+    for t in titles:
+        if t and (found := _any(PAYMENT_TITLES, t)) is not None:
+            return found
+    for t in screen:
+        if t and _any(PAYMENT_WORDS + PAYMENT_MORE + PAYMENT_TITLES, t) is not None and _amount(t) is not None:
+            return t
+    if name and reach_word(name) is not None:
+        for t in screen:
+            if t and _bare_amount(t):
+                return t
+    return None
+
+
+def leaves(name: str | None) -> bool:
+    """Does a touch on `name` only leave (Cancel, Back, Not now…), so it needs nobody's OK on a §19.2 screen?"""
+    return bool(name) and " ".join((name or "").split()).strip(" .!?").casefold() in LEAVE_WORDS
 
 
 def reaches_people(word: str) -> bool:
@@ -332,6 +389,7 @@ class Touch:
     tool: str = "tap"
     alert: tuple[str, ...] = ()  # the alert's words around a touch on its button (touch_never)
     screen: tuple[str, ...] = ()  # the texts and headers on screen (touch_never)
+    titles: tuple[str, ...] = ()  # the headers among them (never_context)
 
 
 @dataclasses.dataclass
@@ -613,7 +671,7 @@ class Book:
     def holds(self, grant: Grant, touch: Touch, at: datetime.datetime) -> bool:
         """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)? `draft`: for the use a
         person's Send of a draft counts (§21.3), which a draftsOnly grant holds too."""
-        return (grant.app == touch.app and not touch_never(touch.app, touch.name, touch.alert, touch.screen)
+        return (grant.app == touch.app and not touch_never(touch.app, touch.name, touch.alert, touch.screen, touch.titles)
                 and _any(grant.words, touch.name or "") is not None
                 and (grant.route is None or grant.route in touch.routes)
                 and grant.revoked is None and not grant.drafts_only and at.date() <= grant.until
@@ -665,7 +723,7 @@ class Book:
         words, such as `tap "Post"`. `line` False: the caller writes the line itself (write_line) once still_covers
         held, so the log never names a use that then asked a person (review 1.7 A-L1)."""
         loaded = self.load()
-        if not loaded.ok or touch_never(touch.app, touch.name, touch.alert, touch.screen):
+        if not loaded.ok or touch_never(touch.app, touch.name, touch.alert, touch.screen, touch.titles):
             return Decision("ask")
         at = self.now()
         notes: list[str] = []
