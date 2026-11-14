@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
-from . import accounts, trace
+from . import accounts, fromothers, trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -67,6 +67,8 @@ def _text(v) -> str:
     """The text, without the invisible direction marks iOS puts around numbers ("‎42")."""
     return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
+
+MARK_OTHERS = "(from others)"  # AGENT-TOOLS §21.1
 
 REDACT: ContextVar[Callable[[str], str] | None] = ContextVar("tapwright_redact", default=None)
 
@@ -154,6 +156,7 @@ class Element:
     placeholder: str = ""  # an input's placeholder: its value while it's empty, as WebDriverAgent reports it
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
     no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
+    others: bool = False  # text the tool knows other people wrote (AGENT-TOOLS §21.1, fromothers.py); False claims nothing
 
     @property
     def x(self) -> float:
@@ -195,6 +198,8 @@ class Element:
         eyes = USERS_EYES.get()
         parts = [self.ref] if ref else []
         parts.append(self.role)
+        if self.others and self.text:
+            parts.append(MARK_OTHERS)  # between the role and the quoted text, never cut (§21.1)
         if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
             parts.append("(icon only)")
             parts.append(f"(VoiceOver: {clip(self.text)})")
@@ -792,6 +797,11 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
+    if tree.app and tree.app[1] in fromothers.KNOWN_APPS:  # §21.1: only where the tool can know
+        theirs = fromothers.mark(root, tree.app[1], screen)
+        for e, number, _ in found:
+            if e.role in fromothers.MARKED_ROLES and numbered.get(number) in theirs:
+                e.others = True
     tree.structure = _structure(root, screen_rect)
     tree.back = _back_of(root, screen) if screen else None
 
