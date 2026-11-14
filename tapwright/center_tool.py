@@ -190,7 +190,9 @@ class CenterTools:
         self._hide_codes(found)
         got = notes_lib.find_code(found, setting.sources, setting.match, setting.pattern, field_at, time.time(),
                                   self.otp_codes.used)
-        if got is None:
+        if got is None:  # (why, never what: counts and ages only)
+            self.log(f"one-time code for {app}: none taken from {len(found)} notification(s) of its source apps "
+                     f"(ages {[x.when for x in found][:5]}, the field {int(time.time() - field_at)} s ago)")
             return None
         self.otp_codes.put(app, got[0], got[1], field_at)
         return self.otp_codes.take(app)
@@ -214,19 +216,25 @@ class CenterTools:
         found = self.otp_codes.take(app)
         if found is None:
             try:
-                if await self.session.foreground_bundle_id() != app:
+                # One read of the screen, which waits out a notification banner over the app (the code's own banner,
+                # seen in the joint check 2026-11-14: while it shows, iOS says SpringBoard is in front), tells both
+                # which app is in front and whether its code field shows (the read notes it, _watch_code_field).
+                seen_before = self.code_fields.shown_at(app)
+                tree = await self._on_phone(self.session.refresh)
+                if not tree.app or tree.app[1] != app:
+                    self.log(f"one-time code for {app}: none handed over, the app isn't in front")
                     return None
                 field_at = self.code_fields.shown_at(app)
                 if field_at is None:
-                    # Tapline's host drove the app to its code field, so this daemon never read it (seen in the joint
-                    # check 2026-11-14): read the app once. A code field showing now counts from 2 minutes ago, so a
-                    # code that came at most 2 minutes ago is taken; none showing is no code.
-                    await self._on_phone(self.session.refresh)
-                    if self.code_fields.shown_at(app) is None:
-                        return None
+                    self.log(f"one-time code for {app}: none handed over, no code field shows")
+                    return None
+                if seen_before is None:
+                    # Tapline's host drove the app to its code field, so this daemon never saw it before: a code field
+                    # showing now counts from 2 minutes ago, so a code that came at most 2 minutes ago is taken
                     field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
                 found = await self._code_from_center(app, field_at)
-            except Exception:  # busy, paused, a dropped line: there is no code to give
+            except Exception as e:  # busy, paused, a dropped line: there is no code to give
+                self.log(f"one-time code for {app}: none handed over ({type(e).__name__}: {getattr(e, 'code', '')})")
                 return None
         if found is not None and self.audit is not None:
             self.audit.write("otp", app=app, detail=f"from {found.source}")
