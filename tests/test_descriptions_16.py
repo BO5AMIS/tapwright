@@ -81,7 +81,7 @@ BASE_TOKENS = 4632
 # are now written in: the `not_actionable` row says `off_screen` means no scroll can reach the element (about 60, since the
 # four touches scroll for themselves), the §3 no-change note (about 45), and the `compare_screen` match that names a
 # change under the threshold (about 70). Each is a thing an agent would otherwise get wrong and pay a call for.
-ALLOWED_GROWTH = 1030  # + the test-account line (66) and the host dialog sentence (36), both agreed 2026-11-13
+ALLOWED_GROWTH = 1130  # + the test-account line (66) and the host dialog sentence (36), both agreed 2026-11-13; + the two lines about text from others and platform terms (about 90 tokens, AGENT-TOOLS 1.16 §21.2)
 
 
 def test_the_tool_list_stays_within_its_budget():
