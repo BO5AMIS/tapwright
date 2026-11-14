@@ -65,6 +65,7 @@ OCR_REF = re.compile(r"o[1-9][0-9]*")
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
+ALERT_ACTIONS = ("accept", "dismiss", "text")  # what `alert` takes (AGENT-TOOLS §4)
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
 NO_APP_TO_MEASURE = "no app is in front to measure; open_app the app first."
 FRESH_WAIT = 30.0  # seconds a replay waits after a fresh start for what its first step aims at
@@ -469,6 +470,9 @@ def _checked(name: str, args: dict) -> dict:
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
     if name == "rotate" and args.get("to") not in ("portrait", "landscape_left", "landscape_right"):
         raise Refused("bad_params", f"to must be portrait, landscape_left or landscape_right, not {args.get('to')!r}")
+    if name == "alert" and args.get("action") not in ALERT_ACTIONS:
+        # never a part of the runner's URL (`/alert/<action>`): only these words reach it
+        raise Refused("bad_params", f"action must be one of {', '.join(ALERT_ACTIONS)}, not {args.get('action')!r}")
     if name == "wait_for":
         if args.get("network_idle"):  # AGENT-TOOLS §5.1: Tapline's; Tapwright can't see the app's requests
             raise Refused("unsupported", "Tapwright can't see the app's network requests, so it can't wait for "
@@ -1360,7 +1364,8 @@ class Daemon(journey_tool.JourneyTools):
                     await s.ensure()
             else:
                 await s.ensure()
-            await s.settings({**PRESETS[self.preset], **NO_IDLE_WAIT})
+            s.session_settings = {**PRESETS[self.preset], **NO_IDLE_WAIT}  # (a session re-created later gets them in ensure)
+            await s.settings(s.session_settings)
             self._fps = self._preset_fps()
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
@@ -3746,7 +3751,7 @@ class Daemon(journey_tool.JourneyTools):
     async def _typed_landed(self, view, result: "Typed", text: str) -> tuple[Snapshot, float] | None:
         """As _toggle_landed, for typing: the field holds the typed text as soon as the keys call returns, and the
         screen's wait after it (0.2 to 0.4 s on the phone) only saw the caret blink. The first read that shows the
-        field with exactly that text is the answer, unless anything else appeared or went away in it."""
+        field with exactly that text is the answer, unless an alert showed in it."""
         loop = asyncio.get_running_loop()
         began = loop.time()
         old = result.field
@@ -3759,9 +3764,8 @@ class Daemon(journey_tool.JourneyTools):
             same = [e for e in snap.tree.items if e.role == old.role and (
                 e.identifier == old.identifier if old.identifier else e.label == old.label)]
             if len(same) == 1 and not same[0].secure and same[0].value == text:
-                if len(snap.tree.items) != len(view.items):
-                    why = f"the list changed size ({len(view.items)} -> {len(snap.tree.items)})"
-                    break
+                # landed is the field's word alone: a list that changed size (a search field filtering its results)
+                # is the change list's to report
                 return snap, loop.time() - began
             why = (f"{len(same)} matching fields" if len(same) != 1 else "the field is secure" if same[0].secure
                    else f"the field reads {self._redact(same[0].value)!r}, not the typed text")
@@ -6582,7 +6586,8 @@ class Daemon(journey_tool.JourneyTools):
         if preset not in PRESETS:
             raise ValueError(f"preset must be one of {', '.join(PRESETS)}")
         if self.state in ("live", "locked"):
-            await self._read(lambda: self.session.settings({**PRESETS[preset], **NO_IDLE_WAIT}))
+            self.session.session_settings = {**PRESETS[preset], **NO_IDLE_WAIT}
+            await self._read(lambda: self.session.settings(self.session.session_settings))
             self._fps = int(PRESETS[preset]["mjpegServerFramerate"])  # full rate; the pace slows it again when still
         self.preset = preset
         if self.video is not None:

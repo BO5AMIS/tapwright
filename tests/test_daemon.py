@@ -3044,6 +3044,31 @@ def test_typing_answers_as_soon_as_the_field_reads_the_text():
     run(go)
 
 
+def test_typing_lands_when_the_list_changes_size_as_a_search_field_filters_it():
+    """1.6.2: landed is the field's word alone; a filtered list is the change list's to report."""
+    async def go():
+        d = make(settle_still=5.0, settle_quiet=5.0)  # a still-screen wait would take seconds here
+        stop, task = await started(d)
+        field = el("e1", "input", "Search", "search", rect=(10, 100, 300, 40))
+        rows = [el(f"e{i}", "button", f"Row {i}", rect=(10, 150 + 50 * i, 300, 44)) for i in range(2, 8)]
+        await looked(d, [field, *rows])
+        real = d.session.type_text
+
+        async def type_text(text, **kw):
+            d.session.tree = [el("e1", "input", "Search", "search", rect=(10, 100, 300, 40), value=text), rows[0]]
+            return await real(text, **kw)
+        d.session.type_text = type_text
+        feeder = FrameFeeder(d.hub).start(then=b"B")
+        began = asyncio.get_running_loop().time()
+        r = await d.run_tool("a", "type_text", {"target": {"id": "search"}, "text": "Kyoto"})
+        assert asyncio.get_running_loop().time() - began < 1.0
+        assert "retype" not in d.session.calls
+        assert 'Value is now "Kyoto"' in r["text"].splitlines()[0]
+        await feeder.stop()
+        await finish(stop, task)
+    run(go)
+
+
 def test_toggle_followed_by_a_confirm_alert_is_not_refused():
     async def go():
         d = make()
@@ -6183,5 +6208,20 @@ def test_a_dry_run_and_a_dedicated_device_never_hand_the_check_to_the_runner():
         await d.run_tool("a", "look", {"screenshot": False})
         await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})  # dedicated: no scope
         assert s.checked_taps == []
+        await finish(stop, task)
+    run(go)
+
+
+def test_alert_with_another_action_is_bad_params_and_reaches_nothing():
+    """1.6.2: `alert {"action": "Connect"}` went into the runner's URL (/alert/Connect) and came back as an internal
+    error. Only accept, dismiss and text are taken; nothing else is ever a part of a URL."""
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        for bad in ("Connect", "../x", "", None, 3):
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "alert", {"action": bad})
+            assert e.value.code == "bad_params" and ("accept, dismiss, text" in str(e.value) or "needs action" in str(e.value))
+        assert "alert" not in d.session.calls
         await finish(stop, task)
     run(go)

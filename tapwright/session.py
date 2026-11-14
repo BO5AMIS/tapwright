@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from . import store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
+from .stream import NO_IDLE_WAIT
 
 FOCUS_POLL, FOCUS_WAIT = 0.1, 1.5  # seconds: how often, and for how long, typing waits for focus to arrive
 AUDIT_TIMEOUT = 60.0  # seconds: XCTest's audit walks the whole screen, element by element
@@ -135,6 +136,10 @@ class Session:
         # the given bundle ids. While it is set, nothing else may act on the phone (FrontUnchecked); the tap that
         # passes the check clears it.
         self.front_apps: tuple[str, ...] | None = None
+        # WebDriverAgent settings every new session gets right after POST /session (ensure): without them a session
+        # re-created mid-run waits for animations (a blinking caret) on every read, 1 to 3 s each. The daemon sets
+        # the stream's preset into it too (stream.PRESETS), so a re-created session has the current quality as well.
+        self.session_settings: dict = dict(NO_IDLE_WAIT)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -156,6 +161,8 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
         self.screen = (float(size["width"]), float(size["height"]))
+        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": dict(self.session_settings)},
+                               timeout=READ_CUT)  # (before sid is committed: no read can run without them)
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
         self.fast_read, self.last_compact = None, None
@@ -884,6 +891,8 @@ class Session:
 
     async def alert(self, action: str) -> str:
         """accept, dismiss, or text: the system alert on screen (permission prompts and the like)."""
+        if action not in ("accept", "dismiss", "text"):
+            raise Refused("bad_params", f"action must be one of accept, dismiss, text, not {action!r}")
         if action != "text":
             self.typed_into = None
         try:
