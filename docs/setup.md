@@ -139,7 +139,7 @@ ones as the daemon's own settings.
   Keep the file private, and run agents you don't trust where they can't read your home folder.
 - **Locking the phone stops a run.** A lock in the middle of a `run`, `drive`, `replay`, route or journey ends it with
   `locked`; the passcode is never typed there. The tool unlocks a locked phone only at the start of a scheduled run,
-  and with `tapwright serve --phone --accounts FILE` at the start of a new call.
+  and with `tapwright serve --phone --accounts FILE` at the start of a new call. A dry run never unlocks it.
 - **Unlock limits.** At most 2 passcode attempts an hour and 3 a day, counted across restarts in
   `~/.tapwright/unlock-state.json`. Once the phone refuses the passcode, nothing more is typed until you check the
   vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
@@ -148,7 +148,8 @@ ones as the daemon's own settings.
   draft that holds a code says so. Tapline's `/otp` gets a code only for an app within `serve --apps` (or with
   `--dedicated`, `--phone`), only while the tool's own read shows the app in front with such a field, and each code
   goes out once, also across a restart of the daemon: a handed-over code leaves a
-  mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes.
+  mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes. A handover counts as phone use:
+  a scheduled run waits while it is in progress and for the following 90 seconds.
 - **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
   touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
   with `--no-policy`. A draftsOnly grant holds in any grants file the daemon knows (its own `--policy`, a call's), so
@@ -158,7 +159,9 @@ ones as the daemon's own settings.
   one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, the
   navigation title, a recipient, a picker's chosen value, a checked option) changed before the send, nothing is sent
   and you are asked again. When the Send button is below the screen, the tool scrolls to it first and shows you the
-  draft as it is after the scroll; a grant is counted on that screen too.
+  draft as it is after the scroll; a grant is counted on that screen too. The known Send identifiers in Mail and
+  Messages retain the draft stop when their labels are translated. If a known grants file becomes unreadable,
+  Return is refused and Send still stops at a draft until the file can be read again.
 - **Deleting an account or paying always asks you**, whatever the policy file says (also with `--no-policy`). On a
   screen or in an alert that says it deletes the account ("Delete your account?"), and on a payment screen (titled
   Send money, Checkout, Transfer and the like, or with a text such as "Transfer $25 to Alice", or an amount on its own
@@ -176,12 +179,21 @@ ones as the daemon's own settings.
   large vault, so `vault protect` refuses such a file name; rename it first.
 - **A route a grant names stays as it is**, whatever policy a call sends: a stricter call policy turns off the grants
   for its own touches, never the protection of a route the daemon's grants name, so `record` refuses that name.
+  Schedule creation and route replacement share a lock too: a newly scheduled route cannot be replaced between
+  the final check and the write.
+- **Grant counts survive a restart.** For an active grant, pruning removes only usage folders from before today;
+  today's daily and hourly counts remain. This corrects the frozen shared spec's §19.4 wording about pruning by
+  the future expiry date, which would otherwise reset a live allowance.
+- **Scheduled reports redact metadata too.** Schedule and route names, picture references, error details and printed
+  report paths pass through the run's vault redactor. The files retain their actual paths on disk.
 - **A control that changed is not touched.** If the element at the target's place has the target's id and frame but
   other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Every touch
   on an element goes through the same checks right before it goes out: `tap`, `long_press`, `toggle`, `type_text`'s tap
   that focuses the field, and a target scrolled into view first. A point, `force`, an alert's button and a short swipe
   are raw touches: they skip the runner's hit test, never the policy. Another
-  app's banner or sheet over the target is named by its kind and place only, never by its words.
+  app's banner or sheet over the target is named by its kind and place only, never by its words. If the actual
+  recipient is a different actionable parent or child, target that control explicitly. Immediately before input is
+  delivered, after banner waits and runner setup, the checked point, draft approval and grant are checked again.
 - **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
   app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
 

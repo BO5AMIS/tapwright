@@ -523,10 +523,11 @@ class Book:
         return lines
 
     def _active(self) -> list[Grant]:
-        """The grants loaded now that are neither revoked nor ended."""
+        """The grants loaded now that are neither revoked nor ended. An unreadable file is unknown, not an empty
+        list: callers enforcing restrictions must fail closed until it can be read again."""
         loaded = self.load()
         if not loaded.ok:
-            return []
+            raise OSError("the grants file can't be read now")
         today = self.now().date()
         return [g for g in loaded.grants if g.revoked is None and today <= g.until]
 

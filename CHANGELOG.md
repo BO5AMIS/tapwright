@@ -48,9 +48,17 @@ AGENT-TOOLS 1.16.2 (sha256 ef8e7b63), frozen with Tapline.
 - **Safety, from the release review:**
   - A one-time code is typed only into a code field.
   - Drafts-only stops at Send, Post, Publish, Reply and Comment, whatever the policy file says, and `submit` is
-    refused there.
+    refused there. Known Mail and Messages Send identifiers work with translated labels too; an unreadable grants
+    file never lifts the restriction.
+  - Final input checks run after banner waits and runner setup. A changed draft, revoked grant, changed touch point,
+    or different actionable recipient stops delivery. Typing focuses at the point that was checked.
   - A full swipe across a list row (which deletes in Mail, Notes and Reminders) needs a person's OK.
-  - Scheduled runs never overlap, and wait 90 s after anyone used the phone.
+  - Scheduled runs never overlap, and wait 90 s after anyone used the phone, including an external one-time-code
+    handover. Their report metadata and displayed paths are redacted; failed folder scans keep the previous baseline.
+  - Dry runs never unlock the phone. Unlock attempts have ownership tokens, and an unknown XCTest prompt stops typing.
+  - Audit pruning cannot overwrite a concurrent append. Vault protection serializes writes, preserves a changed
+    source file, and refuses line breaks in macOS keychain paths.
+  - Schedule creation and route replacement share a lock; both grants and schedules protect the route they name.
   - Account deletion and payments are recognised by pattern, and are never grantable.
   - `tapwright audit-log` lists and deletes the audit log.
   - Every program that can read `~/.tapwright/serve.json` is trusted like you; keep it private (see the README).

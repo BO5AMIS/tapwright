@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -202,14 +203,29 @@ def names(where: Path | None = None) -> list[str]:
     return sorted(p.stem for p in base.glob("*.json")) if base.is_dir() else []
 
 
-def write(s: Schedule, where: Path | None = None) -> Path:
+@contextmanager
+def edit_lock(where: Path | None = None):
+    """Schedule creation and route replacement share this lock, so a new hold cannot race a route write."""
     base = where or folder()
     base.mkdir(parents=True, exist_ok=True)
-    path = file_of(s.name, base)
-    tmp = base / f"{s.name}.json.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(s.to_json(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    lock = base / ".edit.lock"
+    token = pidlock.take(lock)
+    if token is None:
+        raise ScheduleError("schedules or their routes are being changed; try again in a moment")
+    try:
+        yield
+    finally:
+        pidlock.release(lock, token)
+
+
+def write(s: Schedule, where: Path | None = None) -> Path:
+    with edit_lock(where):
+        base = where or folder()
+        path = file_of(s.name, base)
+        tmp = base / f"{s.name}.json.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(s.to_json(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return path
 
 
 def read_values(s: Schedule) -> dict[str, str]:
@@ -230,12 +246,13 @@ def read_values(s: Schedule) -> dict[str, str]:
 
 
 # ---- a file trigger -----------------------------------------------------------------------------------------------------
-def listing(directory: str) -> dict[str, int]:
-    """The files in a trigger's folder, name to modification time (ns); folders aren't files."""
+def listing(directory: str) -> dict[str, int] | None:
+    """The files in a trigger's folder, name to modification time (ns); None when the scan fails, not an empty folder."""
     try:
-        return {e.name: e.stat().st_mtime_ns for e in os.scandir(directory) if e.is_file()}
+        with os.scandir(directory) as entries:
+            return {e.name: e.stat().st_mtime_ns for e in entries if e.is_file()}
     except OSError:
-        return {}
+        return None
 
 
 def write_seen(name: str, held: dict[str, int], where: Path | None = None) -> None:
@@ -252,6 +269,8 @@ def new_files(s: Schedule, where: Path | None = None, now_ns: int | None = None)
     assert s.trigger and "file" in s.trigger
     now_ns = time.time_ns() if now_ns is None else now_ns
     now_held = listing(s.trigger["file"])
+    if now_held is None:
+        return []  # Keep the last successful snapshot; recovery must not make old files appear new.
     try:
         before = json.loads(seen_of(s.name, where).read_text(encoding="utf-8"))
         if not isinstance(before, dict):
@@ -466,18 +485,20 @@ class Scheduler:
 
     # -- other systems: what to add
     def instructions(self, s: Schedule) -> str:
-        exe = shutil.which("tapwright") or " ".join(self.command)
-        run = f"{exe} run-schedule {s.name}"
+        found = shutil.which("tapwright")
+        command = [found] if found else self.command
+        exe, *lead = command
+        run = f"{' '.join(command)} run-schedule {s.name}"
         if s.trigger is not None:
             check = f"{run} --if-triggered"
             if self.platform == "darwin":
-                return plist(s, exe, ["run-schedule", s.name, "--if-triggered"], None)
+                return plist(s, exe, [*lead, "run-schedule", s.name, "--if-triggered"], None)
             what = "the folder" if "file" in s.trigger else "the app's notifications"
             return f"Add this line to your crontab (crontab -e); it looks at {what} every {POLL_MINUTES} minutes:\n" \
                    f"*/{POLL_MINUTES} * * * * {check}"
         assert s.at is not None
         if self.platform == "darwin":
-            return plist(s, exe, ["run-schedule", s.name], s.at)
+            return plist(s, exe, [*lead, "run-schedule", s.name], s.at)
         if m := TIME.match(s.at):
             days = "*" if m.group(3) == "daily" else "1-5"
             return f"Add this line to your crontab (crontab -e):\n{int(m.group(2))} {int(m.group(1))} * * {days} {run}"
@@ -562,11 +583,17 @@ def add(route: str, *, at: str | None = None, on_file: str | None = None, on_not
         return f"Error: {e}", 1
     notes: list[str] = []
     if s.trigger and "file" in s.trigger and not Path(s.trigger["file"]).is_dir():
-        notes.append(f"Note: the folder {s.trigger['file']} doesn't exist yet; the trigger fires when files appear in it.")
-    path = write(s, where)
+        notes.append(f"Note: the folder {s.trigger['file']} isn't available yet; the first successful check records "
+                     "existing files, then newly appearing files trigger the route.")
+    try:
+        path = write(s, where)
+    except (OSError, ScheduleError) as e:
+        return f"Error: {e}", 1
     s = dataclasses.replace(s, file=str(path))
     if s.trigger and "file" in s.trigger:
-        write_seen(s.name, listing(s.trigger["file"]), where)  # what is there now isn't new
+        held = listing(s.trigger["file"])
+        if held is not None:
+            write_seen(s.name, held, where)  # what is there now isn't new; a failed scan waits for the first success
     try:
         said = scheduler.install(s)
     except SchedulerError as e:

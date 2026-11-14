@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from . import pidlock
+
 DPAPI_ENTROPY = b"tapline-tapwright-vault-v2"
 KEYCHAIN_SERVICE = "tapline-tapwright-vault"
 DPAPI = "dpapi-user"
@@ -117,6 +119,8 @@ def run_security(args: list[str], stdin: str) -> "tuple[int | None, str, str]":
 
 def _quote(text: str) -> str:
     """An argument of one `security -i` line."""
+    if "\n" in text or "\r" in text:
+        raise VaultOpenError("a path with a line break can't be kept in the keychain")
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -386,6 +390,21 @@ def _as_version2(top: dict, dropped: list[str] | None = None) -> dict | None:
 
 
 def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | None] | None = None) -> tuple[bool, str]:
+    """Serialize protection of one real vault path, including its keychain writes and readback."""
+    if not os.path.isfile(path):
+        return False, f"the vault file {os.path.abspath(path)} doesn't exist."
+    real = real_path(path)
+    lock = f"{real}.protect.lock"
+    token = pidlock.take(lock)
+    if token is None:
+        return False, "couldn't lock the vault for protection; another protection may be running."
+    try:
+        return _protect_locked(path, deps, check)
+    finally:
+        pidlock.release(lock, token)
+
+
+def _protect_locked(path: str, deps: Deps | None, check: Callable[[str], str | None] | None) -> tuple[bool, str]:
     """`tapwright vault protect FILE`: a plain vault file written in this system's protected form (a version 1 file
     becomes version 2). The plain file stays until the protected copy reads back and its sha256 matches; then it is
     replaced through a temporary file and a rename. `check(text)` says why a vault JSON wouldn't load (accounts.py), so a
@@ -400,7 +419,9 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
                        "stays plain, for test data only.")
     real = real_path(file)
     try:
-        text = Path(real).read_text("utf-8-sig")
+        original = Path(real).read_bytes()
+        text = original.decode("utf-8-sig")
+        source_stat = os.stat(real)
     except (OSError, UnicodeDecodeError):
         return False, f"couldn't read {file}."
     try:
@@ -441,6 +462,12 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(out + "\n")
+        current = os.stat(real)
+        if ((current.st_dev, current.st_ino, current.st_mtime_ns, current.st_size) !=
+                (source_stat.st_dev, source_stat.st_ino, source_stat.st_mtime_ns, source_stat.st_size)
+                or Path(real).read_bytes() != original):
+            os.unlink(temp)
+            return False, "the vault file changed during protection; its newer contents were left in place."
         os.replace(temp, real)
     except OSError as e:
         try:

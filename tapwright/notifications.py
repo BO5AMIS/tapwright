@@ -141,7 +141,7 @@ def _parts(node: ET.Element) -> tuple[list[str], str, str, str] | None:
     title = _said(title_node) if title_node is not None else ""
     body = ", ".join(t for t in (_said(n) for n in node.iter()
                                  if n is not node and (n.get("name") or "").startswith("TextContent")) if t)
-    return [before, before.split(", ")[0].strip()], when, title, body
+    return [before], when, title, body
 
 
 def _pieces(node: ET.Element) -> list[str]:
@@ -186,6 +186,16 @@ def names_to_bundles(installed: Mapping[str, str]) -> dict[str, str | None]:
     return found
 
 
+def _stack_app(prefix: str, names: Mapping[str, str | None]) -> str:
+    """A complete registered name, optionally followed by a known stack count. Never guess the first word."""
+    if prefix.casefold() in names:
+        return prefix
+    match = re.fullmatch(r"(.+), [0-9]+ more", prefix, flags=re.IGNORECASE)
+    if match is not None and match[1].casefold() in names:
+        return match[1]
+    return ""
+
+
 def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool],
           now: datetime.datetime | None = None) -> list[Notification]:
     """The notifications in Notification Center's tree (SpringBoard's), of the apps `keep` says yes to ONLY, newest
@@ -205,13 +215,22 @@ def parse(source: str, installed: Mapping[str, str], keep: Callable[[str], bool]
                 parts = _parts(child)
                 if parts is not None:
                     tried, when, title, body = parts
-                    app = next((a for a in tried if a and names.get(a.casefold()) is not None), tried[-1])
+                    app = _stack_app(tried[0], names)
                 else:
-                    # the app only from the label's first piece (review 1.7 B-L1): a banner's static texts are its
+                    # The app comes only from the label's header (review 1.7 B-L1): a banner's static texts are its
                     # title and body, so a third party's notification titled "Messages" is never Messages' own
                     label = (child.get("label") or "").strip()
-                    app = label.split(", ")[0].strip() if label else ""
+                    # Choose a complete name before parsing the rest: app names can themselves contain commas.
+                    candidates = [name for name in names if label.casefold() == name
+                                  or label.casefold().startswith(name + ", ")]
+                    key = max(candidates, key=len, default="")
+                    app = label[:len(key)]
+                    suffix = label[len(key):].removeprefix(", ") if key else ""
+                    if suffix and not is_time(suffix.split(", ")[0]):
+                        app = ""  # an unknown comma-containing name must not become the shorter known app
                     pieces = _pieces(child)
+                    if app and not any((n.get("type") or n.tag).endswith("StaticText") for n in child):
+                        pieces = [app, *suffix.split(", ")] if suffix else [app]
                     rest = pieces[1:] if pieces and pieces[0].casefold() == app.casefold() else list(pieces)
                     when = next((p for p in rest if is_time(p)), "")
                     if when:

@@ -141,7 +141,8 @@ def test_the_record_keeps_nothing_of_the_passcode_and_an_unreadable_one_types_no
     assert asyncio.run(u.unlock(Screen(right="000000"), PASSCODE, source=unlock.Source("v.json", 5, 40))).code == "refused"
     text = unlock.state_file().read_text("utf-8")
     record = json.loads(text)
-    assert set(record) == {"version", "tries", "refused", "retried", "pending"}
+    assert set(record) == {"version", "tries", "refused", "retried", "pending", "attempt"}
+    assert record["attempt"] is None  # a completed attempt retains no ownership token or passcode-derived data
     assert record["refused"] == {"path": "v.json", "mtime_ns": 5, "size": 40}
     assert PASSCODE not in text and hashlib.sha256(PASSCODE.encode()).hexdigest() not in text
     unlock.state_file().write_text("{not json", "utf-8")

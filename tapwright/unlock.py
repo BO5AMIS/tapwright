@@ -152,7 +152,7 @@ def _number(x: object) -> bool:
 class Ledger:
     """The record of passcode attempts, on disk and shared by every process of this user (review 1.7, H2):
     `{"version": 1, "tries": [unix times], "refused": {"path", "mtime_ns", "size"} or null, "retried": bool,
-    "pending": unix time or null}`. Read whole (a reader never sees half a write: it is written to a temporary file and
+    "pending": unix time or null, "attempt": random ownership token or null}`. Read whole (a reader never sees half a write: it is written to a temporary file and
     renamed), and changed only under `<file>.lock` (pidlock, as the policy edit lock). A record that can't be read stops
     the unlock (`no_record`) until a person runs `tapwright unlock-reset`."""
 
@@ -192,7 +192,8 @@ class Ledger:
         return {"version": 1, "tries": [float(t) for t in tries],
                 "refused": None if refused is None else
                 {"path": refused["path"], "mtime_ns": refused["mtime_ns"], "size": refused["size"]},
-                "retried": data.get("retried") is True, "pending": None if pending is None else float(pending)}
+                "retried": data.get("retried") is True, "pending": None if pending is None else float(pending),
+                "attempt": data.get("attempt") if isinstance(data.get("attempt"), str) else None}
 
     def _write(self, data: dict) -> bool:
         path = self.path
@@ -279,10 +280,11 @@ class Ledger:
         return max(0, min(LIMIT - self._counted(data["tries"], now, WINDOW),
                           DAY_LIMIT - self._counted(data["tries"], now, DAY)))
 
-    async def begin(self, source: Source) -> Result | None:
+    async def begin(self, source: Source) -> Result | str:
         """Right before the first key: decide again under the lock and, when it may go on, write down the attempt AND
         the refusal it may turn out to be, so a process that dies while typing leaves the latch set (the keys may have
-        counted on the phone). None: type now; else why not (nothing is typed)."""
+        counted on the phone). A token: type now and give that token to end; a Result: nothing is typed."""
+        attempt = secrets.token_hex(16)
         def change(data: dict | None) -> "tuple[dict | None, Result | None]":
             why = self._verdict(data, source)
             if why is not None or data is None:
@@ -290,18 +292,19 @@ class Ledger:
             now = self.wall()
             tries = [t for t in data["tries"] if now - t < DAY] + [now]
             return {"version": 1, "tries": tries, "refused": source.as_json(),
-                    "retried": data.get("refused") is not None, "pending": now}, None
-        return await self._change(change)
+                    "retried": data.get("refused") is not None, "pending": now, "attempt": attempt}, None
+        result = await self._change(change)
+        return attempt if result is None else result
 
-    async def end(self, unlocked: bool) -> None:
+    async def end(self, attempt: str, unlocked: bool) -> None:
         """After the attempt: unlocked clears the refusal (the file's passcode is the phone's); else the latch `begin`
-        set stays."""
+        set stays. A late completion cannot change a newer attempt's record."""
         def change(data: dict | None) -> "tuple[dict | None, Result | None]":
-            if data is None:
+            if data is None or data.get("attempt") != attempt:
                 return None, None
             if unlocked:
-                return {**data, "refused": None, "retried": False, "pending": None}, None
-            return {**data, "pending": None}, None
+                return {**data, "refused": None, "retried": False, "pending": None, "attempt": None}, None
+            return {**data, "pending": None, "attempt": None}, None
         await self._change(change)
 
     async def reset(self) -> tuple[bool, str]:
@@ -311,7 +314,7 @@ class Ledger:
             if data is None:
                 return _fresh(), Result(True, "new")
             was = data.get("refused") is not None or data.get("pending") is not None
-            return {**data, "refused": None, "retried": False, "pending": None}, Result(True, "cleared" if was else "none")
+            return {**data, "refused": None, "retried": False, "pending": None, "attempt": None}, Result(True, "cleared" if was else "none")
         result = await self._change(change)
         if result is None or not result.ok:
             why = f" ({result.message})" if result is not None and result.message else ""
@@ -422,8 +425,9 @@ class Unlocker:
             return Result(False, "no_passcode", NO_PASSCODE)
         if (why := self.ledger.peek(source)) is not None:
             return why
-        if await phone.xctest_prompt():
-            return Result(False, "xctest_prompt", XCTEST)
+        prompt = await phone.xctest_prompt()
+        if prompt is not False:
+            return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
         try:
             await phone.wake()
         except Exception:
@@ -447,10 +451,12 @@ class Unlocker:
         # the last checks, right before the keys: still locked, and still no XCTest prompt
         if not await phone.locked():
             return Result(True, "not_locked")
-        if await phone.xctest_prompt():
-            return Result(False, "xctest_prompt", XCTEST)
-        if (why := await self.ledger.begin(source)) is not None:  # counted, and latched, before the first key
-            return why
+        prompt = await phone.xctest_prompt()
+        if prompt is not False:
+            return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
+        attempt = await self.ledger.begin(source)  # counted, and latched, before the first key
+        if isinstance(attempt, Result):
+            return attempt
         try:
             if digits and entry.keys:
                 points = [entry.keys[c] for c in passcode]
@@ -458,11 +464,11 @@ class Unlocker:
             else:
                 await phone.type_secret(passcode)
         except Exception:  # its message may hold what was sent: never passed on
-            await self.ledger.end(False)  # it may have counted as a wrong one on the phone: no second try
+            await self.ledger.end(attempt, False)  # it may have counted as a wrong one on the phone: no second try
             self._audit(audit, "typed on the lock screen; it didn't finish")
             return Result(False, "failed", FAILED)
         unlocked = await self._unlocked(phone)
-        await self.ledger.end(unlocked)
+        await self.ledger.end(attempt, unlocked)
         if unlocked:
             self._audit(audit, "typed on the lock screen; unlocked")
             return Result(True, "unlocked")

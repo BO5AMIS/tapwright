@@ -278,13 +278,15 @@ class CenterTools:
         self.code_fields.seen(app, True)
         return await self._code_from_center(app)
 
-    async def otp_handover(self, app: str) -> "otplib.Code | None":
+    async def otp_handover(self, app: str, caller: str = "external") -> "otplib.Code | None":
         """`POST /otp` (§18.11): a code for Tapline's host, only for an app whose setting is on in the vault file this
         daemon was started with, only while that app is in front (its code field is up), handed over once. The audit
         gets an `otp` line with the app and the source, never the code. None (the route's 404) otherwise."""
         path = getattr(getattr(self, "ceiling", None), "accounts", None)
         if not path or app not in self.accounts.get(path).otp:
             return None
+        if self.scheduled_running():
+            raise Refused("busy", "a scheduled run is using the phone; try the one-time code again when it ends")
 
         async def in_one_turn() -> "otplib.Code | None":
             # One read of the screen, which waits out a notification banner over the app (the code's own banner, seen in
@@ -309,7 +311,11 @@ class CenterTools:
                 field_at = time.time() - notes_lib.WINDOW + FIELD_MARGIN
             return await self._code_from_center(app, field_at)
         try:
-            found = await self._on_phone(in_one_turn)
+            # Admission and counting have no await between them. This external caller's read must prevent a
+            # schedule admitted from stale idle status, and its quiet period covers the host typing the code next.
+            # The scheduler's own notification trigger deliberately does not use this external-call accounting.
+            with self._phone_use(f"otp:{caller}"):
+                found = await self._on_phone(in_one_turn)
         except Refused as e:
             if e.code == "internal":
                 # Notification Center couldn't be shown closed (NOT_CLOSED): never swallowed as "no code". /otp answers

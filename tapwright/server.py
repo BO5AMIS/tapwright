@@ -237,8 +237,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if (why := await over_ceiling((app,), False, None)) is not None:
             return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         try:
-            found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
-        except Refused as e:  # (only `internal`: Notification Center may still be open. No code goes with it: M1)
+            caller = repr(request.scope.get("client"))  # the proved connection, never a body-supplied client id
+            found = await daemon.otp_handover(app, caller=caller) if hasattr(daemon, "otp_handover") else None
+        except Refused as e:  # internal cleanup failure or a scheduled run already owns the phone; no code goes out
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
         if found is None:
             return _error("not_found", "no one-time code", 404)

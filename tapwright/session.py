@@ -131,6 +131,10 @@ class Session:
         # Awaited with a touch's length in ms just before each touch while it is set: the daemon sets it for the
         # agent's actions (Tapline is told the touch is the agent's), never for a person's input from the live view
         self.touch_hook = None
+        # A one-use authorization check installed by the daemon. It runs at HTTP dispatch, after banner waits,
+        # touch_hook, session setup and runner probing, and is retained across a refused fast-route fallback.
+        self.before_input = None
+        self.input_point: tuple[float, float] | None = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
         # banner landing between the check and the touch takes it (Daemon._taken_away)
@@ -266,15 +270,23 @@ class Session:
 
     async def _timed(self, method: str, path: str, full: str, payload: dict | None, timeout: float) -> dict:
         """device.http, with the timing trace (trace.py) noting a touch's or a tree read's request and answer."""
+        input_request = method == "POST" and (path in (FAST_TAP_PATH, FAST_DRAG_PATH,
+            "/session/{sid}/actions", "/session/{sid}/wda/keys", "/session/{sid}/alert/accept",
+            "/session/{sid}/alert/dismiss") or path.endswith("/clear"))
+        validate = getattr(self, "before_input", None) if input_request else None
+        if validate is not None:
+            await validate(self.input_point)
         pending = trace.request(method, path)
-        if pending is None:
-            return await self.device.http(method, full, payload, timeout)
         try:
             answer = await self.device.http(method, full, payload, timeout)
         except BaseException:
-            trace.response(pending, ok=False)
+            if pending is not None:
+                trace.response(pending, ok=False)
             raise
-        trace.response(pending, answer)
+        if validate is not None and self.before_input is validate:
+            self.before_input = None
+        if pending is not None:
+            trace.response(pending, answer)
         return answer
 
     async def _follow_orientation(self, source: str | None) -> None:
@@ -564,6 +576,7 @@ class Session:
     async def _touching(self, ms: float, at: tuple[float, float] | None = None) -> None:
         """Just before a touch that starts at `at`: wait out a notification banner over the top of the screen (for
         the agent's touches), then tell Tapline the touch is the agent's."""
+        self.input_point = at
         if self.banner_guard and at is not None:
             await self._clear_of_banner(at)
             self.top_touch = self.top_touch or at[1] < BANNER_ZONE

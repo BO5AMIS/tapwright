@@ -3,6 +3,7 @@ Element.focused), the hit test before a touch on an element (GET /wda/tw/hit; QU
 and typing into a field the runner says has focus without tapping it again (part 10: no caret menu)."""
 import asyncio
 import dataclasses
+from unittest.mock import patch
 
 import pytest
 from fakes import button
@@ -172,7 +173,9 @@ def checks_on(monkeypatch):
 def ready(runner) -> Session:
     s = Session(runner)
     s.screen = SCREEN
-    asyncio.run(s.refresh())
+    # This helper is also imported by other modules, whose fixtures do not include runner_state.
+    with patch.object(store, "load_state", return_value={"runner_id": "synthetic-runner"}):
+        asyncio.run(s.refresh())
     return s
 
 

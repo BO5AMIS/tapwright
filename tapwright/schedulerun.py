@@ -45,7 +45,7 @@ class Outcome:
     result: str  # the words: `done`, `failed at step 3 (expect)`, `skipped: the phone was in use`, ...
     text: str = ""  # what the run printed
     code: int = 0  # the exit code: 0 done or idle, 1 failed or stopped, 2 couldn't start, 3 skipped
-    report: str | None = None  # the report's .json path
+    report: str | None = None  # the operational .json path; only the redacted path in text is safe to display
 
 
 @dataclasses.dataclass
@@ -114,27 +114,34 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
     nobody)."""
     deps = deps or Deps()
     began = deps.now()
+    # Retain this redactor through every exit, including unexpected failures after the vault changes or disappears.
+    # If establishing it fails unexpectedly, even the schedule name could be a value: show only the generic failure.
+    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=lambda text: INTERNAL)
     try:
-        return _run(name, if_triggered, deps)
+        early, sure = early_scrubber(name, deps.where)
+        audit.scrub = early
+        return _run(name, if_triggered, deps, audit, sure)
     except Exception as e:
         detail = f"{INTERNAL} ({type(e).__name__})"
         try:
-            auditlog.AuditLog(deps.audit_folder, now=deps.now).write("schedule", name=name, detail=detail)
+            audit.write("schedule", name=name, detail=detail)
         except Exception:
             pass
         try:
-            return finish(name, deps, "failed", detail, None, began, code=1, used=False)
+            return finish(name, deps, "failed", detail, None, began, code=1, used=False, scrub=audit.scrub)
         except Exception:
-            return Outcome("failed", detail, f"{name}: {detail}", 1)
+            try:
+                return Outcome("failed", audit.scrub(detail), audit.scrub(f"{name}: {detail}"), 1)
+            except Exception:
+                return Outcome("failed", INTERNAL, INTERNAL, 1)
 
 
-def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
+def _run(name: str, if_triggered: bool, deps: Deps, audit: auditlog.AuditLog, sure: bool) -> Outcome:
     # the redactor comes first, from the vault the file names, before the schedule is validated: an error that quotes a
     # value or a path ("with's caption must be a text, not ['@<email>.txt']") is redacted whole, then cut, in the audit
     # line, the report and what is printed (§20.3; Codex, PR #12 cycle 3, H6). Where it can't be made, the error's own
     # words are never shown
-    early, sure = early_scrubber(name, deps.where)
-    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=early)
+    early = audit.scrub
     try:
         s = schedules.load(name, deps.where)
     except schedules.ScheduleError as e:
@@ -143,7 +150,8 @@ def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
         return finish(name, deps, "failed", result, None, deps.now(), code=2, scrub=early)
     # the run's redactor, from its own vault, before anything is written: every audit line and the report go through it,
     # whole and before any cut (§20.3, §23; Codex, PR #12 cycle 2, H7)
-    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=scrubber(s))
+    loaded_scrub = scrubber(s)
+    audit.scrub = lambda text: loaded_scrub(early(text))
     # a serve this run starts is started with the schedule's own vault file, so a scheduled unlock can type the
     # passcode (the daemon types it only from its own --accounts); a serve already running keeps what it has
     serve_args = getattr(deps.api(), "set_serve_args", None)
@@ -152,7 +160,7 @@ def _run(name: str, if_triggered: bool, deps: Deps) -> Outcome:
     if if_triggered:
         if not s.trigger:
             return Outcome("failed", "failed: --if-triggered is for a schedule with a file or notification trigger",
-                           code=2, text=f'The schedule "{name}" has no trigger.')
+                           code=2, text=audit.scrub(f'The schedule "{name}" has no trigger.'))
         if "file" in s.trigger and not schedules.new_files(s, deps.where):
             return Outcome("idle", "nothing new")
         if "notification" in s.trigger and not notification_arrived(s, deps):
@@ -295,7 +303,10 @@ def used_since(deps: Deps, began: datetime.datetime) -> tuple[dict[str, int], li
     only: an audit line never holds a value."""
     grants: dict[str, int] = {}
     vault: list[str] = []
-    for line in auditlog.read_lines(deps.audit_folder, since=began):
+    # Audit timestamps have millisecond precision. Comparing them with a finer start time drops valid uses written
+    # later in that same millisecond. Use their precision at the boundary; older milliseconds still stay out.
+    since = began.replace(microsecond=began.microsecond // 1000 * 1000)
+    for line in auditlog.read_lines(deps.audit_folder, since=since):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -313,19 +324,37 @@ def used_since(deps: Deps, began: datetime.datetime) -> tuple[dict[str, int], li
 def finish(name: str, deps: Deps, status: str, result: str, s: schedules.Schedule | None, began: datetime.datetime, *,
            text: str = "", code: int = 1, picture: bytes | None = None, used: bool = True,
            scrub: Callable[[str], str] | None = None) -> Outcome:
-    """Write the report (`.json` and `.md`) and return what to print."""
+    """Write the report (`.json` and `.md`) and return what to print. Every content value is redacted at this boundary;
+    filesystem paths remain operational, with separate redacted representations in reports and printed output."""
     scrub = scrub or (lambda t: t)
     ended = deps.now()
     grants, vault = used_since(deps, began) if used else ({}, [])
+    # Grant names are content even though the report uses them as dictionary keys. Combine names that redact alike.
+    safe_grants: dict[str, int] = {}
+    for grant, count in grants.items():
+        safe_name = scrub(grant)
+        safe_grants[safe_name] = safe_grants.get(safe_name, 0) + count
+    grants = safe_grants
+    vault = [scrub(n) for n in vault]
     base = (deps.runs or store.HOME / "runs")
     stem = f"{name}-{stamp(began)}"
     grants_line = "Grants used: " + (", ".join(f"{n} ({c})" for n, c in grants.items()) or "none")
     vault_line = "Vault names used: " + (", ".join(vault) or "none")
-    body = scrub(text).strip()
+    body = text.strip()
     data = {"version": 1, "tool": "tapwright", "schedule": name, "route": s.route if s else None, "status": status,
-            "result": scrub(result), "started": iso(began), "finished": iso(ended), "report": body,
+            "result": result, "started": iso(began), "finished": iso(ended), "report": body,
             "grants_used": grants, "vault_names_used": vault, "picture": f"{stem}.png" if picture else None}
-    lines = [f"# Scheduled run: {name}", "", f"Result: {scrub(result)}", f"Route: {s.route if s else '-'}",
+    # Schema keys stay fixed; all strings in the report's values pass through the same redactor, including metadata.
+    def redacted(value):
+        if isinstance(value, str):
+            return scrub(value)
+        if isinstance(value, list):
+            return [redacted(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redacted(item) for key, item in value.items()}
+        return value
+    data = redacted(data)
+    lines = [f"# Scheduled run: {name}", "", f"Result: {result}", f"Route: {s.route if s else '-'}",
              f"Started: {iso(began)}   Finished: {iso(ended)}", "", *([body, ""] if body else []), grants_line, vault_line,
              *([f"Picture: {stem}.png"] if picture else [])]
     path = base / f"{stem}.json"
@@ -333,13 +362,13 @@ def finish(name: str, deps: Deps, status: str, result: str, s: schedules.Schedul
         base.mkdir(parents=True, exist_ok=True)
         if picture:
             (base / f"{stem}.png").write_bytes(picture)
-        (base / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (base / f"{stem}.md").write_text(scrub("\n".join(lines)) + "\n", encoding="utf-8")
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         where = str(path)
     except OSError:
         where = None
-    shown = [f"{name}: {scrub(result)}", *([body] if body else []), grants_line, vault_line] + ([f"Report: {where}"] if where else [])
-    return Outcome(status, result, "\n".join(shown), code, where)
+    shown = [f"{name}: {result}", *([body] if body else []), grants_line, vault_line] + ([f"Report: {where}"] if where else [])
+    return Outcome(status, scrub(result), scrub("\n".join(shown)), code, where)
 
 
 def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: datetime.datetime) -> Outcome:
