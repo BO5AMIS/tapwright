@@ -254,3 +254,23 @@ def test_serve_refuses_apps_with_dedicated_and_a_policy_it_cannot_read(monkeypat
     with pytest.raises(SystemExit) as e:
         run_cli(monkeypatch, "--policy", str(tmp_path / "missing.json"))
     assert "policy" in str(e.value)
+
+
+# ---- grants (AGENT-TOOLS §19.6: only a person makes a grant) ----
+
+def test_a_thin_call_never_brings_a_grants_file_but_the_mcp_server_does():
+    """The model writes a thin call's command line, so a policy file it names (even one that says `file`) brings no
+    grants; the MCP server's own --policy, started by the person's host config, does."""
+    rules = policy.Policy(confirm=("Post",), file="C:/someone/policy.json")
+    for ceiling in (None, Ceiling(policy=policy.Policy(confirm=("Post",), file="C:/owner/policy.json"))):
+        app, seen = app_for(ceiling)
+        with TestClient(app) as c:
+            post(c, {"X-Tapwright-Mode": "dedicated", "X-Tapwright-Via": "call", **sent(rules)})
+            post(c, {"X-Tapwright-Mode": "dedicated", **sent(rules)})
+        files = [s["policy"].file for s in seen.calls]
+        assert files == [None, None if ceiling is not None else rules.file]
+    owner = policy.Policy(confirm=("Post",), file="C:/owner/policy.json")
+    app, seen = app_for(Ceiling(policy=owner))
+    with TestClient(app) as c:
+        post(c, {"X-Tapwright-Mode": "dedicated", "X-Tapwright-Via": "call"})  # none sent: serve's own, grants and all
+    assert seen.calls[0]["policy"].file == owner.file

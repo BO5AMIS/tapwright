@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, replace
 
-from .ui import USERS_EYES, Element, clip, shown
+from .ui import MARK_OTHERS, USERS_EYES, Element, clip, shown
 
 NO_CHANGE = "No visible change."
 SAME_SCREEN = "Same screen. Changes:"
@@ -167,7 +167,7 @@ def _was(old: Element, new: Element) -> list[str]:
 def _gone(e: Element) -> str:
     """`- <role> "<text>"`, else `<role> id=<id>`, else the role alone: no ref, no position."""
     if e.text:
-        return f"- {e.role} {clip(e.text)}"
+        return f"- {e.role} {MARK_OTHERS + ' ' if e.others else ''}{clip(e.text)}"
     return f"- {e.role} id={shown(e.identifier)}" if e.identifier and not USERS_EYES.get() else f"- {e.role}"
 
 

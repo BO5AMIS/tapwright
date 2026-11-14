@@ -21,8 +21,8 @@ def test_a_phone_that_is_ready_has_nothing_in_the_way():
 
 def test_a_locked_phone_stops_a_run_and_says_how_to_fix_it():
     (stop,) = needs.unattended(OK._replace(locked=True, passcode_given=False))
-    assert stop.what.startswith("The phone is locked")
-    assert stop.fix == needs.LOCKED
+    assert stop.what.startswith("The phone is locked, and no passcode is given")
+    assert stop.fix.startswith(needs.LOCKED) and "phone.passcode" not in stop.fix and "--accounts" in stop.fix
 
 
 def test_an_unlocked_phone_with_no_passcode_given_is_still_a_risk_for_a_long_run():
@@ -30,11 +30,14 @@ def test_an_unlocked_phone_with_no_passcode_given_is_still_a_risk_for_a_long_run
     assert stop.what.startswith("No passcode is given: if the phone locks during a run")
 
 
-def test_a_passcode_given_does_not_hide_a_lock_because_nothing_types_it():
-    (stop,) = needs.unattended(OK._replace(locked=True, passcode_given=True))
-    assert stop.what.startswith("The phone is locked") and "phone.passcode" not in needs.PASSCODE_FIX
+def test_a_passcode_given_lifts_the_lock_because_the_tool_types_it_on_the_lock_screen():
+    """1.7 (§18.6, §24.5): with `phone.passcode` in the vault the tool unlocks the phone itself, so a locked phone is no
+    longer a stop; without it, the fix says how to give one (never the value)."""
+    assert needs.unattended(OK._replace(locked=True, passcode_given=True)) == []
     (stop,) = needs.unattended(OK._replace(passcode_given=False))
-    assert "--accounts" not in stop.fix
+    assert "--accounts" in stop.fix and "skipped" in stop.what
+    ready = needs.unattended_ready(OK)
+    assert any(line.startswith("The vault gives phone.passcode (never shown)") for line in ready)
 
 
 def test_enable_ui_automation_unknown_is_listed_and_off_is_listed_harder():

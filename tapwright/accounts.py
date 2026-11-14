@@ -7,7 +7,10 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - A password goes only into a secure field, a username only into a text field that isn't secure.
   - `apps` limits where an account may be used.
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
-  - `phone.passcode` is stored and exposed nowhere. (Typing it on the lock screen is a later task.)
+  - `phone.passcode` is exposed nowhere, and typed by the tool itself only on the lock screen's passcode entry (unlock.py,
+    Tapwright 1.7), where it shows as dots. It is not in the text redactor: a 4 to 6 digit passcode replaced in answers
+    would turn every date, year and price on screen into a test of it (review 1.7, M2). Only the entry named `phone`
+    holds it.
 
 What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20 and 21):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
@@ -34,7 +37,17 @@ What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20
       this as a best effort, without a guarantee. No encoder writes an escape cut short next to a value (Codex, PR #10
       cycle 21).
 
-Pure but for reading the file and asking git: no phone.
+The vault (§20, Tapwright 1.7): a version 2 file is `{"version": 2, "vault": {...}}`, kept plain or protected (vault.py:
+Windows DPAPI, the macOS keychain). Its kinds are account, card, address, identity, note, fixture and phone. Every value
+of every kind (but the phone's passcode, typed nowhere but the lock screen) joins the same redactor as an account's, under
+the same limits, shown as `<entry's field>`. A step types one by reference, `${vault.<name>.<field>}`, as the whole text
+(`${account.<field>}` stays, for drive's account): a password only into a secure field, a username only into one that
+isn't, a fixture never into a secure field, a card only with a person's OK each time (the daemon asks), `apps` limiting
+any field. A plain field (an address's, an identity's name, a fixture's) may be shorter than MIN_SCRUBBED; such a value
+can't be kept out of text, and is typed all the same (as Tapline does). The top-level `otp` key is Tapwright's one-time
+code setting (§24.3), read here and used by otp.py.
+
+Pure but for reading the file, asking git and (for a protected file) the system's protection: no phone.
 """
 from __future__ import annotations
 
@@ -54,7 +67,7 @@ VERSION = 1
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 FIELDS = ("username", "password", "passcode", "apps")
 PLACEHOLDER = re.compile(r"\$\{account\.(username|password)\}")
-MENTION = re.compile(r"\$\{account\.")
+MENTION = re.compile(r"\$\{(?:account|vault|otp)\.")
 MIN_SCRUBBED = 3  # a value shorter than this isn't scrubbed out of text (it would eat ordinary words)
 MAX_VALUE = 256  # a username or password longer than this is refused when the file loads (no real credential is longer)
 MAX_ACCOUNTS = 32  # a file with more accounts than this is refused when it loads (a test-account file holds a handful)
@@ -63,6 +76,28 @@ PHONE = "phone"  # the entry that holds the phone's passcode, not an account to 
 NO_FILE = ("no test accounts: start tapwright serve or mcp with --accounts FILE (a JSON file kept outside any git repo, "
            "or ignored by it)")
 GitRunner = Callable[[list[str], str], "subprocess.CompletedProcess[str] | None"]
+
+# ---- the vault's kinds (§20.1) ----
+VERSION2 = 2
+KIND_FIELDS: dict[str, tuple[str, ...]] = {
+    "account": ("username", "password"),
+    "card": ("number", "expiry", "cvc"),
+    "address": ("street", "city", "postcode", "country"),
+    "identity": ("name", "phone", "email", "birthday"),
+    "note": ("text",),
+    "phone": ("passcode",),
+}
+FIXTURE = "fixture"  # (v1.16) plain test data: any fields, string values
+# fields that may be shorter than MIN_SCRUBBED (Tapline's `plain`): typed, but too short to be kept out of text
+PLAIN_FIELDS = frozenset({("address", f) for f in KIND_FIELDS["address"]} | {("identity", "name"), ("phone", "passcode")})
+ENTRY_NAME = re.compile(r"^[A-Za-z0-9_]{1,64}$")  # an entry's (and a fixture field's) name: ASCII letters, digits, _
+ENTRY_KEYS = frozenset({"kind", "apps", "explore"})  # (`explore`, 1.15 §25.6, is the explorer's: read, not used here)
+MAX_VALUES = 2 * MAX_ACCOUNTS  # the values a version 2 file holds at most (the matcher's cost grows with them)
+CARD = "card"
+# a reference, as the whole text of a step: `${account.<field>}`, `${vault.<name>.<field>}`, `${otp.<app>}`
+REFERENCE = re.compile(r"\$\{(?:account\.(username|password)|vault\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)"
+                       r"|otp\.([^{}\s]+))\}")
+CODE_LABEL = "one-time code"  # what a one-time code is shown as: `<one-time code>`
 
 
 @dataclass(frozen=True)
@@ -74,13 +109,53 @@ class Account:
 
 
 @dataclass(frozen=True)
+class Entry:
+    """One vault entry (§20.1): its kind (a kind this tool doesn't know makes it unusable: `known` False), its values by
+    field (never in the repr), and the apps any of them may be typed into (None: any given app)."""
+    name: str
+    kind: str
+    values: dict[str, str] = field(default_factory=dict, repr=False)
+    apps: tuple[str, ...] | None = None
+    known: bool = True
+
+
+@dataclass(frozen=True)
+class OtpSetting:
+    """Tapwright's one-time code setting for one app (§24.3): the bundle ids a code may come from, and a text the
+    notification must hold (in its title, often the sender, or its body). An app without one has codes off. `pattern`
+    (optional, Tapwright's own key): a regular expression for the code itself (its first group, if it has one), for a
+    code that isn't 4 to 8 digits."""
+    sources: tuple[str, ...]
+    match: str
+    pattern: "re.Pattern[str] | None" = None
+
+
+@dataclass(frozen=True)
+class Typing:
+    """What a reference types: the value (never in the repr), and what it is: the entry, its kind and field (for the
+    audit's `vault` line and the card's OK), or the app of a one-time code."""
+    value: str = field(repr=False)
+    entry: str | None = None
+    kind: str | None = None
+    field: str | None = None
+    otp_app: str | None = None
+
+
+@dataclass(frozen=True)
 class Loaded:
     """What a file holds: the accounts (by name, in the file's order), the passcode, and why none can be used (None when
-    all is well). Nothing here shows a value in its repr."""
+    all is well). Nothing here shows a value in its repr. A version 2 file (the vault) also has every entry by name
+    (its accounts are in `accounts` too), the `otp` settings, how it is kept (`protection`: "dpapi-user", "keychain" or
+    None for plain) and the note a plain file gets at every start."""
     path: str = ""
     accounts: dict[str, Account] = field(default_factory=dict, repr=False)
     passcode: str | None = field(default=None, repr=False)
     problem: str | None = None
+    vault: dict[str, Entry] = field(default_factory=dict, repr=False)
+    otp: dict[str, OtpSetting] = field(default_factory=dict)
+    protection: str | None = None
+    note: str | None = None
+    version: int = VERSION
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -89,6 +164,13 @@ class Loaded:
             return ()
         return tuple(n for n, a in self.accounts.items() if a.username or a.password)
 
+    @property
+    def entry_names(self) -> tuple[str, ...]:
+        """Every vault entry's name, with its kind (`tester2 (account)`), for `map` and `session_report`: names only."""
+        if self.problem is not None:
+            return ()
+        return tuple(f"{n} ({e.kind})" for n, e in self.vault.items() if e.kind != "phone")
+
     def account(self, name: str, bundle: str | None) -> Account:
         """The account called `name`, for use in app `bundle`. `bad_params` when no file is given or the file can't be used,
         `not_found` for a name it hasn't, `not_allowed` for an app the account isn't for."""
@@ -96,6 +178,11 @@ class Loaded:
             raise Refused("bad_params", NO_FILE)
         if self.problem is not None:
             raise Refused("bad_params", self.problem)
+        other = self.vault.get(name)
+        if other is not None and other.kind not in ("account", "phone"):  # (the phone entry is no account: not_found)
+            article = "an" if other.kind[:1] in "aeiou" else "a"
+            raise Refused("bad_params", f'"account": "{name}" names {article} {other.kind} entry; "account" names account '
+                                        f"entries only (use ${{vault.{name}.<field>}}).")
         if name not in self.names:
             raise Refused("not_found", f"no account called {name}; the accounts are: {', '.join(self.names) or 'none'}")
         found = self.accounts[name]
@@ -104,8 +191,75 @@ class Loaded:
         return found
 
     def entries(self) -> tuple[tuple[str, str, str], ...]:
-        """(account name, "username" or "password", value) of every value this file holds."""
-        return _entries(self.accounts)
+        """(entry name, field, value) of every value this file holds that is kept out of text: an account's username and
+        password, and in a vault every other kind's fields too. Never the phone's passcode (review 1.7, M2): it is
+        typed only on the lock screen's keypad, where it shows as dots, so it never reaches text, and replacing a 4 to 6
+        digit number in every answer would tell the agent the passcode the first time a date or a price showed it."""
+        found = _entries(self.accounts)
+        found += tuple((e.name, f, v) for e in self.vault.values() if e.kind not in ("account", "phone")
+                       for f, v in e.values.items() if v and not weak(v))
+        return found
+
+    def reference(self, text: str, active: Account | None, secure: bool, ref: str, bundle: str | None) -> Typing | None:
+        """What a step's text types when it is a reference (`${account.…}`, `${vault.…}`, `${otp.…}`), checked against
+        the field it goes into (`secure`, its `ref`) and the app in front (`bundle`); None for ordinary text. A card's
+        value comes back like any other: the daemon asks a person before it types it (§20.1). `${otp.…}` comes back with
+        `otp_app` set and no value: the daemon gets the code (otp.py)."""
+        if not mentions(text):
+            return None
+        whole = REFERENCE.fullmatch(text)
+        if whole is None:
+            if text.count("${") == 1 and "${otp." in text:
+                raise Refused("bad_params", "a one-time code is the whole text of a step, never part of one: "
+                                            "\"text\": \"${otp.<app id>}\"")
+            raise Refused("bad_params", "an account's value is the whole text of a step, never part of one: "
+                                        "\"text\": \"${account.username}\" works, \"hi ${account.password}\" doesn't")
+        account_field, name, wanted, otp_app = whole.groups()
+        if account_field is not None:
+            return Typing(typed(text, active, secure, ref), active.name if active else None, "account", account_field)
+        if otp_app is not None:
+            if otp_app != bundle:
+                raise Refused("not_allowed", f"${{otp.{otp_app}}} is typed only into {otp_app}; this is {bundle or 'no app'}. "
+                                             "Nothing was typed.")
+            if otp_app not in self.otp:
+                raise Refused("bad_params", f"one-time codes are off for {otp_app}: the vault file's \"otp\" setting turns "
+                                            "them on for an app (Tapwright §24).")
+            return Typing("", otp_app=otp_app)
+        return self._vault_value(name, wanted, secure, ref, bundle)
+
+    def _vault_value(self, name: str, wanted: str, secure: bool, ref: str, bundle: str | None) -> Typing:
+        if not self.path:
+            raise Refused("bad_params", NO_FILE)
+        if self.problem is not None:
+            raise Refused("bad_params", self.problem)
+        entry = self.vault.get(name)
+        if entry is None:
+            names = ", ".join(n for n, e in self.vault.items() if e.kind != "phone") or "none"
+            raise Refused("not_found", f'no vault entry "{name}"; the entries are: {names}')
+        if entry.kind == "phone":
+            raise Refused("bad_params", "the phone's passcode is typed by the tool itself, only on the lock screen's keypad; "
+                                        "no step types it.")
+        if not entry.known:
+            raise Refused("bad_params", f'vault entry "{name}" is of a kind this Tapwright doesn\'t know ({entry.kind}); '
+                                        "it can't be used.")
+        fields = KIND_FIELDS.get(entry.kind)
+        if fields is not None and wanted not in fields:
+            article = "an" if entry.kind[:1] in "aeiou" else "a"
+            raise Refused("bad_params", f'vault entry "{name}" is {article} {entry.kind}; its fields are {", ".join(fields)}.')
+        value = entry.values.get(wanted)
+        if not value:
+            raise Refused("bad_params", f'vault entry "{name}" has no {wanted}.')
+        if entry.apps is not None and bundle not in entry.apps:
+            raise Refused("not_allowed", f'vault entry "{name}" may be typed only in {", ".join(entry.apps)}; this is '
+                                         f"{bundle or 'no app'}. Nothing was typed.")
+        if entry.kind == "account" and wanted == "password" and not secure:
+            raise Refused("bad_params", f"an account's password goes only into a password field; {ref} is a text field.")
+        if entry.kind == "account" and wanted == "username" and secure:
+            raise Refused("bad_params", f"an account's username goes only into a text field that isn't secure; {ref} is a "
+                                        "password field.")
+        if entry.kind == FIXTURE and secure:
+            raise Refused("bad_params", f"a fixture is plain test data and never goes into a password field; {ref} is one.")
+        return Typing(value, name, entry.kind, wanted)
 
     @functools.cached_property
     def _redaction(self) -> "Redaction":
@@ -678,7 +832,7 @@ class Redaction:
         forms: dict[str, tuple[int, str, bool, bool]] = {}
         labels: list[str] = []
         for name, kind, value in sorted(entries, key=lambda e: -len(e[2])):
-            label = f"<{name}'s {kind}>"
+            label = f"<{name}'s {kind}>" if name else f"<{kind}>"
             for form, lead, trail in _forms(value):
                 if form not in forms:
                     forms[form] = (len(forms), label, lead, trail)
@@ -939,6 +1093,8 @@ def _git(args: list[str], cwd: str) -> "subprocess.CompletedProcess[str] | None"
 def git_problem(path: str, git: GitRunner = _git) -> str | None:
     """Why the file may not be used: it is inside a git work tree that doesn't ignore it (a tracked file isn't ignored)."""
     folder = str(Path(path).resolve().parent)
+    if ".git" in Path(path).resolve().parts:  # a repo's own folder: no .gitignore covers it, and git won't say (Tapline's rule)
+        return f"accounts file is inside a git repo's .git folder at {folder}; move it."
     top = git(["rev-parse", "--show-toplevel"], folder)
     if top is None or top.returncode != 0 or not top.stdout.strip():
         return None
@@ -999,22 +1155,172 @@ def _read(data: object) -> tuple[dict[str, Account], str | None, str | None]:
     return found, passcode, None
 
 
-def load(path: str, git: GitRunner = _git) -> Loaded:
-    """The accounts file at `path`. It never raises: a file that can't be used is a `problem`, said at the first use."""
+def _value_problem(name: str, key: str, value: object, plain: bool) -> str | None:
+    """Why a vault value is refused at load (the 1.6.1 limits; a plain field may be short), naming the entry and
+    field, never the value."""
+    if not isinstance(value, str) or not value:
+        return f"{name}'s {key} must be a non-empty text"
+    if len(value) > MAX_VALUE:
+        return f"{name}'s {key} is longer than {MAX_VALUE} characters; a vault value is at most {MAX_VALUE}"
+    if unsettled(value):
+        return f"{name}'s {key} is still escaped after {MAX_PASSES} rounds of decoding; write it decoded, as it is typed"
+    if not plain and (len(value) < MIN_SCRUBBED or weak(value)):
+        return (f"{name}'s {key} must have at least {MIN_SCRUBBED} characters once decoded, without direction marks, "
+                "backslashes or whitespace at its ends: a weaker one can't be kept out of answers and maps")
+    return None
+
+
+def _read_otp(raw: object) -> tuple[dict[str, OtpSetting], str | None]:
+    """Tapwright's `otp` setting (§24.3): `{"<app id>": {"from": ["<bundle id>", ...], "match": "<text>"}}`. Off by
+    default: an app not named has codes off. A setting that isn't this shape turns codes off for every app, and says so."""
+    if raw is None:
+        return {}, None
+    if not isinstance(raw, dict):
+        return {}, 'its "otp" setting isn\'t an object; one-time codes are off'
+    found: dict[str, OtpSetting] = {}
+    for app, setting in raw.items():
+        sources = setting.get("from") if isinstance(setting, dict) else None
+        match = setting.get("match") if isinstance(setting, dict) else None
+        if not app or not isinstance(sources, list) or not sources or \
+                not all(isinstance(s, str) and s.strip() for s in sources) or not isinstance(match, str) or not match.strip():
+            return {}, (f'its "otp" setting for {app} needs "from" (a list of bundle ids) and "match" (a text); one-time '
+                        "codes are off")
+        pattern, compiled = setting.get("pattern"), None
+        if pattern is not None:
+            try:
+                if not isinstance(pattern, str) or not pattern or len(pattern) > OTP_PATTERN_MAX:
+                    raise re.error("not a pattern")
+                compiled = re.compile(pattern)
+            except (re.error, RecursionError, OverflowError):
+                return {}, (f'its "otp" setting for {app} has a "pattern" that isn\'t a regular expression of 1 to '
+                            f"{OTP_PATTERN_MAX} characters; one-time codes are off")
+        found[app] = OtpSetting(tuple(s.strip() for s in sources), match.strip(), compiled)
+    return found, None
+
+
+OTP_PATTERN_MAX = 200  # characters of an `otp` setting's own code pattern
+
+
+def _read_v2(data: dict) -> "tuple[dict[str, Entry], str | None]":
+    """(entries, problem) of a parsed version 2 file (§20.1). An entry of a kind this tool doesn't know is unusable, and
+    its text values are still kept out of text."""
+    raw = data.get("vault")
+    if not isinstance(raw, dict):
+        return {}, 'it has no "vault" object'
+    found: dict[str, Entry] = {}
+    count = 0
+    for name, entry in raw.items():
+        if not isinstance(name, str) or not ENTRY_NAME.match(name):
+            return {}, "an entry's name is ASCII letters, digits and _ (one of them isn't)"
+        if not isinstance(entry, dict):
+            return {}, f"{name} isn't an object"
+        kind = entry.get("kind")
+        if not isinstance(kind, str) or not kind:
+            return {}, f"{name} has no kind; the kinds are {', '.join([*KIND_FIELDS, FIXTURE])}"
+        apps = entry.get("apps")
+        if apps is not None and (not isinstance(apps, list) or not all(isinstance(a, str) and a for a in apps)):
+            return {}, f"{name}'s apps must be a list of bundle ids"
+        known = kind in KIND_FIELDS or kind == FIXTURE
+        values: dict[str, str] = {}
+        for key, value in entry.items():
+            if key in ENTRY_KEYS:
+                continue
+            if kind in KIND_FIELDS and key not in KIND_FIELDS[kind]:
+                return {}, f"{name} has {key}; {'an' if kind[0] in 'aeiou' else 'a'} {kind} has {', '.join(KIND_FIELDS[kind])}"
+            if not ENTRY_NAME.match(key):
+                return {}, f"{name} has a field whose name isn't ASCII letters, digits and _"
+            if not known and not isinstance(value, str):
+                continue  # (an unknown kind's other values: nothing to type or keep out)
+            plain = (kind, key) in PLAIN_FIELDS or kind == FIXTURE or not known
+            if (why := _value_problem(name, key, value, plain)) is not None:
+                return {}, why
+            values[key] = value
+            if kind != "phone" and not weak(value):
+                count += 1
+        if count > MAX_VALUES:
+            return {}, f"it holds more than {MAX_VALUES} values; a vault file holds at most {MAX_VALUES} (split it)"
+        found[name] = Entry(name, kind, values, tuple(apps) if apps is not None else None, known)
+    return found, None
+
+
+def plain_note(path: str) -> str:
+    """What every start says of a plain vault file (§20.2)."""
+    return f"Note: the vault file {path} is not encrypted; keep test data in it only."
+
+
+def load(path: str, git: GitRunner = _git, protection: "vault.Deps | None" = None) -> Loaded:
+    """The accounts file (the vault) at `path`. It never raises: a file that can't be used is a `problem`, said at the
+    first use. A protected file is opened with the system's protection (vault.py) and the git rule doesn't apply to it
+    (it holds no value); a plain one inside a git work tree that doesn't ignore it loads nothing, and is never parsed
+    past what tells it from a protected one."""
+    from . import vault
     try:
-        text = Path(path).read_text("utf-8-sig")
+        text = Path(vault.real_path(path)).read_text("utf-8-sig")
     except (OSError, UnicodeDecodeError) as e:
         return Loaded(path, problem=f"the accounts file {path} can't be read ({getattr(e, 'strerror', None) or e})")
-    if (why := git_problem(path, git)) is not None:
-        return Loaded(path, problem=why)  # the file is not even parsed: nothing of it is loaded
     try:
         data = json.loads(text)
-    except (ValueError, RecursionError) as e:
-        return Loaded(path, problem=f"the accounts file {path} isn't JSON ({e})")
+    except (ValueError, RecursionError):
+        data = None
+    how = vault.protection(data)
+    if how is not None:
+        try:
+            text = vault.open_protected(path, data, protection)
+        except vault.VaultOpenError as e:
+            return Loaded(path, problem=f"the vault file can't be opened: {str(e).rstrip('. ')}.", protection=how)
+        except Exception as e:  # (a stalled or broken protection call: nothing loads, and it says why in words)
+            return Loaded(path, problem=f"the vault file can't be opened: {type(e).__name__}.", protection=how)
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            return Loaded(path, problem=f"the vault file {path} was opened, but what it holds isn't valid JSON",
+                          protection=how)
+    else:
+        if (why := git_problem(path, git)) is not None:
+            return Loaded(path, problem=why)  # nothing of it is loaded
+        if data is None:
+            return Loaded(path, problem=f"the accounts file {path} isn't JSON")  # (json's message would quote the text)
+    return _loaded(path, data, how)
+
+
+def _loaded(path: str, data: object, how: str | None) -> Loaded:
+    """A parsed file (version 1 or 2) as what it holds."""
+    note = None if how is not None else plain_note(path)
+    if isinstance(data, dict) and data.get("version") == VERSION2:
+        entries, why = _read_v2(data)
+        if why is not None:
+            return Loaded(path, problem=f"the vault file {path} can't be used: {why}", protection=how, note=note,
+                          version=VERSION2)
+        otp, otp_why = _read_otp(data.get("otp"))
+        accounts = {n: Account(n, e.values.get("username"), e.values.get("password"), e.apps)
+                    for n, e in entries.items() if e.kind == "account"}
+        # only the entry named `phone` is the phone's passcode (review 1.7, L3): another entry of kind phone (an
+        # account's app PIN that an older `vault protect` moved into `<name>_phone`) is never typed on the lock screen
+        phone = entries.get(PHONE) if PHONE in entries and entries[PHONE].kind == "phone" else None
+        notes = " ".join(n for n in (note, f"Note: the vault file {path}: {otp_why}." if otp_why else None) if n)
+        return Loaded(path, accounts, phone.values.get("passcode") if phone else None, None, entries, otp, how,
+                      notes or None, VERSION2)
     found, passcode, why = _read(data)
     if why is not None:
-        return Loaded(path, problem=f"the accounts file {path} can't be used: {why}")
-    return Loaded(path, found, passcode)
+        if isinstance(data, dict) and data.get("version") not in (VERSION, VERSION2):
+            why = f"its version is {data.get('version')!r}; this tool reads version {VERSION} or {VERSION2}"
+        return Loaded(path, problem=f"the accounts file {path} can't be used: {why}", protection=how, note=note)
+    vault_entries = {n: Entry(n, "phone" if n == PHONE and not (a.username or a.password) else "account",
+                              {k: v for k, v in (("username", a.username), ("password", a.password)) if v}, a.apps)
+                     for n, a in found.items()}
+    return Loaded(path, found, passcode, None, vault_entries, {}, how, note)
+
+
+def check_text(text: str) -> str | None:
+    """Why a vault JSON wouldn't load (for `vault protect`: never protect what wouldn't open), or None."""
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError):
+        return "it isn't JSON"
+    loaded = _loaded("", data, "check")
+    if loaded.problem is None:
+        return None
+    return loaded.problem.split(" can't be used: ", 1)[-1]
 
 
 class Store:
@@ -1045,7 +1351,18 @@ class Store:
 
     def remember(self, loaded: Loaded) -> None:
         """Keep the values of a file that loaded (a deduplicated set, for the daemon's life)."""
-        fresh = [e for e in loaded.entries() if e not in self._ever]
+        self._keep(loaded.entries())
+
+    def remember_code(self, code: str) -> None:
+        """A one-time code handed over or typed (§20.4): kept out of text from now on, as `<one-time code>`, in the same
+        single pass as every vault value."""
+        if code and not weak(code):
+            # every form a notification writes it in: `123 456` and `123-456` as well as `123456` (Codex, PR #12 c1, H4)
+            from .notifications import code_forms
+            self._keep(tuple(("", CODE_LABEL, form) for form in code_forms(code)))
+
+    def _keep(self, entries: "tuple[tuple[str, str, str], ...]") -> None:
+        fresh = [e for e in entries if e not in self._ever]
         if fresh:
             self._ever.update(dict.fromkeys(fresh))
             self._redaction = Redaction(tuple(self._ever))

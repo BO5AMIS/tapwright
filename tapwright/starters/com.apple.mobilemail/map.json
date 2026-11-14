@@ -1,0 +1,62 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.apple.mobilemail",
+  "places": {
+    "inbox": {
+      "key": {
+        "signature": "8064dfff1dceed25",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "Mail.messageList",
+            "Mail.messageList.searchBar.searchTextField",
+            "MailStatusBar",
+            "OverflowBarButtonItem",
+            "magnifyingglass"
+          ],
+          "kinds": [
+            "nav",
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    },
+    "mailboxes": {
+      "key": {
+        "signature": "587ca67615e306a7",
+        "parts": {
+          "ids": [
+            "Mail.filterCard.MailboxPicker",
+            "Mail.mailboxList",
+            "MailStatusBar",
+            "kAXApplicationSceneViewIdentifier"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    }
+  },
+  "roads": [],
+  "routes": {
+    "compose_mail": "routes/compose_mail.json",
+    "inbox": "routes/inbox.json"
+  },
+  "reflexes": []
+}

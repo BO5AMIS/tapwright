@@ -18,9 +18,10 @@ from . import policy, store, uxcheck
 class DaemonError(RuntimeError):
     """A refusal or error from the daemon, with its code (docs/VIEWER-PROTOCOL.md)."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, draft: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.draft = draft  # internal: the daemon said the touch stopped at a draft (a schedule run reads it)
 
 
 def base_url(info: dict) -> str:
@@ -34,11 +35,14 @@ def viewer_url(info: dict) -> str:
 SCOPE: dict[str, str] = {}  # the headers that say what this process's agent may use; none: no apps at all
 
 
-def set_scope(apps: list[str] | None = None, dedicated: bool = False) -> None:
+def set_scope(apps: list[str] | None = None, dedicated: bool = False, phone: bool = False) -> None:
     """Personal mode (the default): the agent may read and touch only `apps` (bundle ids or exact names).
-    `dedicated`: the phone is kept for testing, so there is no limit. The daemon enforces it on every call."""
+    `dedicated`: the phone is kept for testing, so there is no limit. `phone` (1.7, §24.4): the phone is dedicated to
+    automation; every app, as `dedicated`. The daemon enforces it on every call."""
     SCOPE.clear()
-    if dedicated:
+    if phone:
+        SCOPE["X-Tapwright-Mode"] = "phone"
+    elif dedicated:
         SCOPE["X-Tapwright-Mode"] = "dedicated"
     elif apps:
         SCOPE["X-Tapwright-Apps"] = ",".join(apps)
@@ -146,7 +150,8 @@ def _request(info: dict, method: str, path: str, body: dict | None = None, timeo
             err = {}
         if not isinstance(err, dict):
             err = {}
-        raise DaemonError(err.get("code", f"http-{reply.status}"), err.get("message", f"HTTP {reply.status}"))
+        raise DaemonError(err.get("code", f"http-{reply.status}"), err.get("message", f"HTTP {reply.status}"),
+                          draft=err.get("draft") is True)
     return json.loads(raw or b"{}")
 
 
@@ -161,10 +166,24 @@ def healthy(info: dict, timeout: float = 2.0) -> dict | None:
     return status if isinstance(status, dict) and "protocol" in status else None
 
 
+def status() -> dict | None:
+    """The daemon's status (state, driver, paused), starting it if needed; None when it doesn't answer."""
+    return healthy(find_or_start())
+
+
+_SERVE_ARGS: list[str] = []  # what a serve this process starts is given (a scheduled run: its own --accounts)
+
+
+def set_serve_args(args: list[str]) -> None:
+    """The arguments a `tapwright serve` this process starts gets (`run-schedule`: the schedule's `--accounts`, so its
+    unlock can type the passcode). A serve already running is used as it is."""
+    _SERVE_ARGS[:] = [str(a) for a in args]
+
+
 def start_daemon() -> subprocess.Popen:
     """`tapwright serve` in the background: no console window, and it outlives the agent that
     started it (on Windows it leaves the agent host's job object when Windows allows that)."""
-    cmd = [sys.executable, "-m", "tapwright", "serve"]
+    cmd = [sys.executable, "-m", "tapwright", "serve", *_SERVE_ARGS]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True}
     if os.name != "nt":
@@ -245,6 +264,28 @@ def dialog_answer(client_id: str, ask_id: str, answer: str) -> bool:
     done = _request(store.read_serve_info(), "POST", "/api/dialog_answer", {"id": ask_id, "answer": answer},
                     client_id=client_id)
     return bool(done.get("ok"))
+
+
+def unlock_phone(accounts: str | None = None, timeout: float = 60.0) -> dict:
+    """Ask the running daemon to unlock a locked phone with the vault's `phone.passcode` (§22.3: a scheduled run on a
+    locked phone). `accounts`: the vault file, as a path (only the path is sent; the daemon reads the value and types
+    it). `{"ok", "code", "message"}`; never starts the daemon."""
+    headers_before = dict(SCOPE)
+    try:
+        set_accounts(accounts)
+        return _request(store.read_serve_info(), "POST", "/api/phone/unlock", {}, timeout, "schedule")
+    finally:
+        SCOPE.clear()
+        SCOPE.update(headers_before)
+
+
+def notification_keys(app: str, timeout: float = 60.0) -> list[str]:
+    """A notification trigger's check (§22.1): the digests of `app`'s notifications in Notification Center now, newest
+    first, from the running daemon (never their text; never starts the daemon). DaemonError `busy` or `paused` when the
+    phone is in use."""
+    got = _request(store.read_serve_info(), "POST", "/api/notifications/new", {"app": app}, timeout, "schedule")
+    keys = got.get("keys") if isinstance(got, dict) else None
+    return [k for k in keys if isinstance(k, str)] if isinstance(keys, list) else []
 
 
 def tell_daemon(path: str, client_id: str, timeout: float = 3.0) -> bool:

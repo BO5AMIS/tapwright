@@ -66,6 +66,9 @@ def _parser() -> argparse.ArgumentParser:
                             "$TAPWRIGHT_APPS; without any, the call is refused). Never more than serve's --apps")
     scope.add_argument("--dedicated", action="store_true",
                        help="the phone is kept for testing: any app (refused when serve was started with --apps)")
+    scope.add_argument("--phone", action="store_true",
+                       help="the phone is dedicated to automation (1.7): any app, as --dedicated (refused when serve "
+                            "was started with --apps)")
     ap.add_argument("--policy", metavar="FILE", help="a safety policy for this call; it may only add words that need an "
                                                       "OK or are blocked to the one serve was started with")
     ap.add_argument("--ux-rules", metavar="FILE", help="the user's house rules for ux_check and journeys")
@@ -86,7 +89,9 @@ def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
          "X-Agent-Client": client, "X-Tapwright-Client": client,  # the shared name; the old one for an older daemon
          "X-Tapwright-Via": "call"}  # session_report counts these: each is a new process
-    if a.dedicated:
+    if getattr(a, "phone", False):
+        h["X-Tapwright-Mode"] = "phone"
+    elif a.dedicated:
         h["X-Tapwright-Mode"] = "dedicated"
     else:
         apps = a.apps if a.apps is not None else os.environ.get("TAPWRIGHT_APPS", "")

@@ -58,6 +58,12 @@ def screens():
             "home": screen("Home", ids=("settings-btn", "h1", "h2"), tab="home")}
 
 
+def code_screens():
+    """screens(), with a one-time code field on the login screen (`otp-code`: a one-line field that says code)."""
+    return {**screens(), "login": screen("Login", ids=("sign-in-btn", "l1", "l2"), inputs=("email", "otp-code"),
+                                         secure=("password",))}
+
+
 def write_accounts(tmp_path, data=ACCOUNTS, name="accounts.json"):
     path = tmp_path / "private" / name
     path.parent.mkdir(exist_ok=True)

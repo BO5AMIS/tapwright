@@ -344,9 +344,39 @@ class FakeSession:
         # as Session._touching does; a hook that raises touches nothing. Off: the hook is never called (as before)
         self.calls_touch_hook = False
         self.touch_hook = None
+        # the runner's hit test (route version 5, Session.hit_at): what it answers (None: no check, as an older runner)
+        # and each point it was asked at; `last_source` is the XML the relation is judged in
+        self.hit_answer: ui.Hit | None = None
+        self.hit_asks: list = []
+        self.last_source: str | None = None
+        # Notification Center (center_tool.py): with `center_source` set (SpringBoard's XML), a swipe down from the top
+        # edge opens it (SpringBoard in front), a swipe up from the bottom edge or home closes it, and a tap while it is
+        # open opens `center_opens` (a bundle id). `read_center` answers its XML while it is open.
+        self.center_source: str | None = None
+        self.center_open = False
+        self.center_opens: str | None = None
+        self._center_before: str | None = None
+        self.center_reads = 0
+
+    async def read_center(self, timeout=10.0):
+        self._record("read_center")
+        self.center_reads += 1
+        if self.center_open and self.center_source is not None:
+            return self.center_source
+        return '<AppiumAUT><XCUIElementTypeApplication bundleId="com.example.app"/></AppiumAUT>'
 
     def front_by_touch(self) -> bool:
         return self.touch_checks_front
+
+    async def hit_at(self, x, y):
+        self.hit_asks.append((x, y))
+        return self.hit_answer
+
+    async def read_source(self, timeout=None):
+        """The tree's XML now (Session.read_source): `source_now` when a test set one, else the last read's."""
+        self._record("read_source")
+        self.last_source = getattr(self, "source_now", None) or self.last_source
+        return self.last_source
 
     def _record(self, name: str) -> None:
         self.calls.append(name)
@@ -439,11 +469,19 @@ class FakeSession:
         self._record(("audit", tuple(types)))
         return list(self.audit_issues)
 
+    async def peek_tree(self, timeout=None):
+        """A read that keeps nothing: `items` stay as they are (Session.peek_tree)."""
+        self._record("peek_tree")
+        return ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+
     async def refresh(self, timeout=None):
         self._record("refresh")
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        if getattr(self, "on_tree", None) is not None:  # (as the real Session's reads do)
+            self.on_tree(tree)
+        return tree
 
     async def snapshot_from(self, tree):
         """The foreground app for a tree that was already read: the one extra request a final answer needs."""
@@ -482,6 +520,18 @@ class FakeSession:
             await self.touch_hook(ms)
 
     async def tap(self, target, hold_ms=60):
+        if self.center_open and getattr(target, "x", None) is not None:
+            self._record("tap")
+            self.tap_points.append((target.x, target.y))
+            if getattr(self, "center_tap_stays", False):  # the tap opened nothing: Notification Center is still down
+                spot = getattr(self, "center_open_spot", None)  # iOS 26: the row's Open action, shown after a first tap
+                if spot is not None and (target.x, target.y) == spot:
+                    self.center_open, self.foreground = False, self.center_opens
+                elif getattr(self, "center_after_tap", None) is not None:
+                    self.center_source = self.center_after_tap
+                return f"Tapped ({round(target.x)}, {round(target.y)})."
+            self.center_open, self.foreground = False, self.center_opens
+            return f"Tapped ({round(target.x)}, {round(target.y)})."
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
         await self._touching(hold_ms)
         if self.front_apps is not None:
@@ -522,6 +572,10 @@ class FakeSession:
     async def swipe(self, x0, y0, x1, y1, duration_ms=350, hold_ms=0):
         await self._touching(duration_ms + hold_ms)
         self._record("swipe")
+        if self.center_source is not None and y0 < 5 and y1 > y0 and not self.center_open:
+            self.center_open, self._center_before, self.foreground = True, self.foreground, "com.apple.springboard"
+        elif self.center_open and y0 > self.screen[1] - 10 and y1 < y0:
+            self.center_open, self.foreground = False, self._center_before
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -541,6 +595,8 @@ class FakeSession:
 
     async def press_button(self, name):
         self._record(f"button:{name}")
+        if name == "home" and self.center_open:
+            self.center_open, self.foreground = False, None
         return f"pressed {name}"
 
     def _maybe_taken(self, at) -> None:

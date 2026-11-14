@@ -29,10 +29,12 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # tw-16.15.3.3 adds the photo routes for `media` (tw version 3: GET /wda/tw/photos/access, POST add and delete).
 # tw-16.15.3.4 (tw version 4, 1.6 E2 and E3) adds a compact tree read (GET /wda/tw/tree, with "unchanged" since a token)
 # and the fast tap's `apps`: it touches only while one of them is in front. Every v3 route is kept.
+# tw-16.15.3.5 (tw version 5, 1.7 part 7) adds the keyboard focus to the compact tree (`f`) and a hit test (GET
+# /wda/tw/hit: the element a touch at a point goes to), so a covered target is refused. Every v4 route is kept.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.4", "04876b5385b9e99b1eebabdef27d02afa63306c035f6f9a7136793b5086e59d2", "fork-tw-16.15.3.4"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.5", "a0e266dd1c6d8cb6b4dc0b1d0419fc56af39a2e8a75935732611442fa7092ce9", "fork-tw-16.15.3.5"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]

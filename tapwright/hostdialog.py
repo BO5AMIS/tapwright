@@ -36,8 +36,25 @@ class Needs(BaseModel):
     answer: Literal["Done", "Can't now"] = Field(title="Your answer")
 
 
-MODELS: dict[str, type[BaseModel]] = {dialog.CONFIRM: Confirm, dialog.NEEDS: Needs}
-REFUSAL = {dialog.CONFIRM: "decline", dialog.NEEDS: "cant"}
+class GrantAsk(BaseModel):
+    """§19.6, the grant's question: one required field, the choices Allow and Don't allow, no default."""
+    answer: Literal["Allow", "Don't allow"] = Field(title="Your answer")
+
+
+class DraftsAsk(BaseModel):
+    """§19.6, the separate second question for a word that reaches other people: it defaults to No."""
+    answer: Literal["No", "Yes"] = Field(default="No", title="Send without showing drafts?")
+
+
+def draft_model(choices: list[str]) -> type[BaseModel]:
+    """§21.3, a draft's question: one required field with the two words the daemon sent (`Send`, `Don't send`), no default."""
+    from pydantic import create_model
+    return create_model("DraftAsk", answer=(Literal[tuple(choices)], Field(title="Your answer")))  # type: ignore[valid-type]
+
+
+MODELS: dict[str, type[BaseModel]] = {dialog.CONFIRM: Confirm, dialog.NEEDS: Needs, dialog.GRANT: GrantAsk,
+                                      dialog.DRAFTS: DraftsAsk}
+REFUSAL = {dialog.CONFIRM: "decline", dialog.NEEDS: "cant", dialog.GRANT: "decline", dialog.DRAFTS: "no"}
 FORM = ClientCapabilities(elicitation=ElicitationCapability(form=FormElicitationCapability()))
 
 
@@ -119,6 +136,10 @@ class HostDialogs:
         if not isinstance(event, dict) or not isinstance(event.get("id"), str):
             return
         ask_id = event["id"]
+        if event.get("type") == "notice" and self._calls:  # the watchdog (§24.5): said in chat, nothing to answer
+            asyncio.create_task(self._notice(str(event.get("message") or ""), self._calls[0]),
+                                name=f"tapwright-notice-{ask_id}")
+            return
         if event.get("type") == "ask" and ask_id not in self._shown and self._calls:
             self._shown[ask_id] = asyncio.create_task(self._show(event, self._calls[0]), name=f"tapwright-ask-{ask_id}")
         elif event.get("type") == "close":
@@ -126,13 +147,28 @@ class HostDialogs:
             if task is not None:
                 task.cancel()
 
+    @staticmethod
+    async def _notice(message: str, ctx: object) -> None:
+        """A message for the person, with no answer: an MCP log message at warning level (the host shows it in chat
+        where it shows them). The daemon also puts it in the agent's next answer, so a host that shows none loses
+        nothing."""
+        if not message:
+            return
+        try:
+            await ctx.session.send_log_message(level="warning", data=message, logger="tapwright")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001  a host that takes no log messages: the answer's Note still says it
+            pass
+
     async def _show(self, event: dict, ctx: object) -> None:
-        kind = event.get("kind") if event.get("kind") in MODELS else dialog.CONFIRM
+        choices = event.get("choices")
+        drafting = (event.get("kind") == dialog.DRAFT and isinstance(choices, list) and len(choices) == 2
+                    and all(isinstance(c, str) and c for c in choices))
+        kind = dialog.DRAFT if drafting else event.get("kind") if event.get("kind") in MODELS else dialog.CONFIRM
         if self._lock is None:
             self._lock = asyncio.Lock()
         try:
             async with self._lock:  # one dialog at a time: the next waits behind this one
-                value = await self._ask(kind, str(event.get("message") or ""), ctx)
+                value = await self._ask(kind, str(event.get("message") or ""), ctx, choices if drafting else None)
             await asyncio.to_thread(self._answer, event["id"], value)
         except asyncio.CancelledError:  # the live view answered first, or the moment cleared: nothing to say
             raise
@@ -142,8 +178,18 @@ class HostDialogs:
             self._shown.pop(event["id"], None)
 
     @staticmethod
-    async def _ask(kind: str, message: str, ctx: object) -> str:
-        """What the person said, as the daemon's word for it. The refusal for anything but the plain yes."""
+    async def _ask(kind: str, message: str, ctx: object, choices: list[str] | None = None) -> str:
+        """What the person said, as the daemon's word for it. The refusal for anything but the plain yes. A draft's
+        question (§21.3) has the daemon's own two words: the first (`Send`) is the yes."""
+        if kind == dialog.DRAFT and choices:
+            try:
+                result = await ctx.elicit(message, draft_model(choices))  # type: ignore[attr-defined]
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                return "decline"
+            said = getattr(result, "data", None)
+            return "allow" if isinstance(result, AcceptedElicitation) and getattr(said, "answer", "") == choices[0] else "decline"
         try:
             result = await ctx.elicit(message, MODELS[kind])  # type: ignore[attr-defined]
         except asyncio.CancelledError:

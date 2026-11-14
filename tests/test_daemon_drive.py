@@ -335,6 +335,61 @@ def test_a_flagged_move_stops_the_drive_with_the_usual_error_and_what_was_done(t
     run(go)
 
 
+def _flagged(d):
+    d.session.screens["settings"] = screen("Settings", ids=("Delete", "about-row", "s1", "s2", "s3"))
+    for road in d.maps.data(None, BUNDLE)["roads"]:
+        if road["move"]["target"].get("id") == "general-row":
+            road["names"] = {"id": "general-row", "label": "Label of Delete"}
+
+
+def test_look_false_wins_over_brief_and_the_next_answer_covers_both(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await learn(d)
+        r = await drive(d, to="language", look=False, brief=True)
+        assert len(r["text"].splitlines()) == 1 and r["text"].startswith("Arrived at language")
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["text"].startswith("Screen ")
+        d.session.at = "home"
+        await drive(d, to="language", look=False)
+        r = await d.run_tool("a", "tap", {"target": {"id": "english"}})
+        assert "Same screen. Changes:" in r["text"] or "Screen " in r["text"]
+        assert "2 actions" in r["text"] or "actions ago" in r["text"] or "covers" in r["text"], r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_stop_always_carries_the_screen_whatever_look_says(tmp_path):
+    async def go():
+        for look in (False, True):
+            d = mapped(tmp_path)
+            stop, task = await started(d)
+            await learn(d)
+            _flagged(d)
+            with pytest.raises(Refused) as e:
+                await drive(d, to="language", look=look, brief=True)
+            lines = str(e.value).splitlines()
+            assert e.value.code == "not_allowed" and "needs_confirmation" in lines[0] and "Done: 1 move." in lines[0]
+            assert any(line.startswith("Screen ") for line in lines[1:]), (look, lines)
+            await finish(stop, task)
+    run(go)
+
+
+def test_an_off_route_stop_carries_the_screen_with_look_false(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await learn(d)
+        d.session.at = "home"
+        d.session.screens["settings"] = screen("Settings", ids=("general-row2", "about-row", "s1", "s2", "s3"))
+        with pytest.raises(Refused) as e:
+            await drive(d, to="language", look=False)
+        assert e.value.code == "off_route" and any(line.startswith("Screen ") for line in str(e.value).splitlines())
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_pause_between_moves_stops_the_drive(tmp_path):
     async def go():
         d = mapped(tmp_path)

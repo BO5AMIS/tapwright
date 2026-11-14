@@ -1,0 +1,32 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "add_reminder",
+  "app": "com.apple.reminders",
+  "start": "reminders_lists",
+  "end": "reminders_lists",
+  "variables": [
+    "title"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "label": "New Reminder"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${title}",
+      "target": {
+        "id": "Quick Entry Title Field"
+      }
+    },
+    {
+      "tool": "tap",
+      "target": {
+        "label": "Done"
+      }
+    }
+  ]
+}

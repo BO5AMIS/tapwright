@@ -8,6 +8,7 @@ The daemon owns the phone: a Trip reaches it through the daemon's own reads and 
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -115,6 +116,9 @@ class Trip:
             raise self._stopped(Refused("paused", "paused by the user in the live view; ask them to resume"))
         if d.state == "locked":
             raise self._stopped(Refused("locked", "the phone is locked; ask the user to unlock it"))
+        if gone := d._grants_revoked():  # the kill switch: revoked, not only stopped (§19.5)
+            from .daemon import REVOKED_STOP
+            raise self._stopped(Refused("not_allowed", REVOKED_STOP.format(names=", ".join(json.dumps(g) for g in gone))))
         waited = self.clock()
         while d.control.person_active():
             if self.clock() - waited >= PERSON_WAIT:
@@ -126,7 +130,8 @@ class Trip:
     def _stopped(self, e: Refused) -> Refused:
         """The error a move ended in, with what the drive had done (`Done: 1 move.`) at the end of its first line."""
         first, sep, rest = str(e).partition("\n")
-        return Refused(e.code, f"{first} {driving.done(self.moves + self.jumps)}{sep}{rest}")
+        # (the draft flag goes along: a scheduled run tells a draft stop by it; CodeRabbit, PR #12, trip.py)
+        return Refused(e.code, f"{first} {driving.done(self.moves + self.jumps)}{sep}{rest}", draft=e.draft)
 
     async def _read(self) -> ui.Tree:
         d = self.d
@@ -284,10 +289,13 @@ class Trip:
             return self.dry(way, here)
         if way.kind == "none":
             await self.no_way(here)
-        await self.travel([] if way.kind == "here" else self.hops(way, here), here)
-        if self.route is not None:
-            await self.run_route(self.route["name"], self.route)
-            await self.check_end(self.route)
+        try:
+            await self.travel([] if way.kind == "here" else self.hops(way, here), here)
+            if self.route is not None:
+                await self.run_route(self.route["name"], self.route)
+                await self.check_end(self.route)
+        except Refused as e:
+            raise await self.with_screen(e) from None
         return await self.arrive()
 
     async def reach(self) -> None:
@@ -454,11 +462,20 @@ class Trip:
         """Run a saved route's steps, with its variables filled in, through `run`'s own executor: every step passes the
         same checks as a single call, `if` and `optional` work, and a step that fails stops the drive (§18.5)."""
         steps = routes.substitute(route["steps"], self.req.values, route.get("variables"))
+        from .daemon import _ROUTES
+        running = _ROUTES.set((*_ROUTES.get(), name))  # a grant naming this route covers its touches (§19.1)
+        from .daemon import _DRAFTS_ROUTE
+        drafting = _DRAFTS_ROUTE.set(True) if route.get("draftsOnly") is True else None  # §21.3: stop at drafts
         try:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:
             first, sep, rest = str(e).partition("\n")
-            raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}") from None
+            raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}",
+                          draft=e.draft) from None
+        finally:
+            _ROUTES.reset(running)
+            if drafting is not None:
+                _DRAFTS_ROUTE.reset(drafting)
         for line in answer["text"].splitlines():
             found = re.match(r"Note(?: \(step (\d+)\))?: (.*)", line)
             if found:
@@ -482,6 +499,20 @@ class Trip:
         self.notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in gone)
 
     # ---- the end ----
+    async def with_screen(self, e: Refused) -> Refused:
+        """A stop (a refusal, a needs-a-person stop, a pause) carries the screen as an action's answer shows it, whatever
+        `look` said (AGENT-TOOLS 1.13.3 §18.4): the error's text, then the screen. An `off_route` has it already."""
+        if getattr(e, "screened", False):
+            return e
+        first, sep, rest = str(e).partition("\n")
+        try:
+            text = (await self.d._after(self.view, first, [], True, moves_content=None))["text"]
+        except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
+            return e
+        shown = Refused(e.code, "\n".join([text, rest]) if sep else text, draft=e.draft)
+        shown.screened = True  # type: ignore[attr-defined]
+        return shown
+
     async def off_route(self, step: int, total: int, move: dict | None, why: str, here: str | None) -> None:
         """Stop where the screen isn't where the road leads, with nothing else touched (§4, §18.4)."""
         d = self.d
@@ -495,7 +526,9 @@ class Trip:
             text = answer["text"]
         except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
             text = "\n".join([head, *(f"Note: {n}" for n in notes)])
-        raise Refused("off_route", text)
+        stop = Refused("off_route", text)
+        stop.screened = True  # type: ignore[attr-defined]
+        raise stop
 
     async def arrive(self) -> dict:
         from .daemon import _answer
@@ -548,5 +581,5 @@ class Trip:
         try:
             answer = await d._batch(self.client_id, self.req.then, self.scope, batch_args, [f"Note: {n}" for n in self.notes])
         except Refused as e:
-            raise Refused(e.code, "\n".join([first, *self.lines, str(e)])) from None
+            raise Refused(e.code, "\n".join([first, *self.lines, str(e)]), draft=e.draft) from None
         return {**answer, "text": "\n".join([first, *self.lines, answer["text"]])}

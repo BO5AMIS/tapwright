@@ -82,7 +82,7 @@ def test_the_policy_round_trips_through_json():
 @pytest.mark.parametrize("bad, message", [
     ([], "must be a JSON object"), ({"confirm": "Delete"}, "confirm must be a list"),
     ({"confirm": ["Delete", 3]}, "only non-empty strings"), ({"block": [" "]}, "only non-empty strings"),
-    ({"version": 2}, "version must be 1"), ({"colour": []}, "unknown key 'colour'"),
+    ({"version": 3}, "version must be 1 or 2"), ({"grants": []}, "grants need version 2"), ({"colour": []}, "unknown key 'colour'"),
     ({"apps": []}, "apps must be an object"), ({"apps": {"a.b": []}}, "must be an object"),
     ({"apps": {"a.b": {"confirmm": []}}}, "unknown key 'confirmm'")])
 def test_a_bad_policy_is_refused_with_a_clear_message(bad, message):

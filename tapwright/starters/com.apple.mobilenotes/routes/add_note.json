@@ -1,0 +1,29 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "add_note",
+  "app": "com.apple.mobilenotes",
+  "start": "notes_list",
+  "end": "notes_list",
+  "variables": [
+    "text"
+  ],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "label": "New note"
+      }
+    },
+    {
+      "tool": "type_text",
+      "text": "${text}",
+      "target": {
+        "label": "Note"
+      }
+    },
+    {
+      "tool": "back"
+    }
+  ]
+}

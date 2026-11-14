@@ -260,7 +260,8 @@ CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url"})
 # what a step's text keeps as it is: an account's `${account.username}` / `${account.password}`, and in a version 2 route
 # its declared variables (`${name}`) and a literal `$${`. In a version 1 script any other `${...}` is ordinary text (Codex,
 # PR #10 cycle 11): it is checked and redacted like anything typed.
-_ACCOUNT_VARIABLES = r"account\.(?:username|password)"
+# (1.7: a vault reference `${vault.<name>.<field>}` and a one-time code `${otp.<app>}` too, §20.1, §20.4)
+_ACCOUNT_VARIABLES = r"(?:account\.(?:username|password)|vault\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+|otp\.[^{}\s]+)"
 
 
 def kept(variables: "list[str] | None" = None) -> "re.Pattern[str]":
