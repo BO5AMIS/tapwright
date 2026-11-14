@@ -20,7 +20,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import policy, store, trace, uxcheck
+from . import otp as otplib, policy, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
 from .daemon import Scope
@@ -109,6 +109,7 @@ def _hv(request, name: str, default: str | None = None) -> str | None:
 
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
+    proved = otplib.Proved()  # the connections that proved this daemon a moment ago: only they may ask /otp (§18.11)
 
     def denied(conn, cookie: bool = False) -> Response | None:
         """/api takes only the Authorization header; the page and its stream may use the cookie."""
@@ -155,7 +156,30 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if not isinstance(server[1], int):
             return _error("internal", "can't tell which port this daemon listens on", 500)
         # the address and port this connection really arrived on (the socket's: a relay elsewhere signs its own)
+        proved.mark(request.scope.get("client"))
         return JSONResponse({"proof": proof_of(token, challenge, server[1], str(server[0]))})
+
+    async def otp_code(request):
+        """`POST /otp {"app": "<app id>"}` (§18.11, §20.4): Tapline's host asks for a one-time code with Tapwright's own
+        token, on the keep-alive connection it just proved this daemon on, never a new one. The answer is `{"code",
+        "expires", "source"}`, handed over once, or `404` when there is none (always, until notifications are read)."""
+        if not _host_ok(request, hosts):
+            return _error("unauthorized", "unknown host", 403)
+        if not _bearer_ok(request, token):  # (Tapwright's token; never the cookie)
+            return _error("unauthorized", "missing or wrong token", 401)
+        if not proved.holds(request.scope.get("client")):
+            return _error("unauthorized", "prove this daemon first, on this same connection (POST /api/prove)", 403)
+        try:
+            given = json.loads(await request.body())
+            app = given["app"]
+        except (ValueError, KeyError, TypeError, RecursionError):
+            return _error("bad_params", 'send {"app": "<app id>"}', 400)
+        if not isinstance(app, str) or not app.strip():
+            return _error("bad_params", 'send {"app": "<app id>"}', 400)
+        found = daemon.otp_code(app) if hasattr(daemon, "otp_code") else None
+        if found is None:
+            return _error("not_found", "no one-time code", 404)
+        return JSONResponse(otplib.answer(found), headers={"Cache-Control": "no-store"})
 
     async def health(request):
         # `pages`: live-view pages connected now, so an agent's `viewer` can leave an open one be instead of opening
@@ -468,6 +492,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         WebSocketRoute("/video", video),
         Route("/api/health", health),
         Route("/api/prove", prove, methods=["POST"]),  # (before /api/{name}: which is one word)
+        Route("/otp", otp_code, methods=["POST"]),
         Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/dialog_poll", dialog_poll, methods=["POST"]),
         Route("/api/dialog_answer", dialog_answer, methods=["POST"]),
