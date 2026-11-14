@@ -73,6 +73,8 @@ def _same(element: ui.Element, other: ui.Element | None) -> bool:
 def _target_for(element: ui.Element, items: list[ui.Element]) -> dict | None:
     """The element as a target a later read can resolve to it again: id, else label, else text, with an `index` only
     where several elements answer to it. Checked by resolving it against `items`, the way a call would."""
+    if content_id(element):
+        return None  # an id that carries content: its id, label and text are all content (B-L3)
     for kind, value in (("id", element.identifier), ("label", element.label), ("text", element.value or element.text)):
         if not value or (kind != "id" and element.role == "cell"):  # a row's label and text are content: its id or nothing
             continue
@@ -92,9 +94,20 @@ def _target_for(element: ui.Element, items: list[ui.Element]) -> dict | None:
     return None
 
 
+def content_id(element: ui.Element) -> bool:
+    """Has the element an id that carries content (ui.structural_id: Calendar's `event-shown:<the event's title>`)? Its
+    id is never saved in a road or a route, nor its label or text, which say the same content (review 1.7 B-L3). An id
+    that is a test account's value is the vault's to drop (ui.private, `Loaded.clean`): its label stays a name."""
+    return (bool(element.identifier) and not ui.structural_id(element.identifier)
+            and not ui.private(element.identifier))
+
+
 def names_of(element: ui.Element) -> dict:
-    """Every name an element had, for repair (§18.4): `id`, `label`, `text`. A list row keeps only its id."""
+    """Every name an element had, for repair (§18.4): `id`, `label`, `text`. A list row keeps only its id; an element
+    whose id carries content keeps nothing."""
     names = {}
+    if content_id(element):
+        return names
     if element.identifier:
         names["id"] = element.identifier
     if element.role == "cell":
@@ -124,7 +137,7 @@ def move_of(tool: str, target: ui.Target | None, element: ui.Element | None, ite
         link = args.get("link")
         return {"tool": "open_url", "link": link} if isinstance(link, str) and link else None
     if element is not None:
-        if element.role == "cell" and not element.identifier:
+        if (element.role == "cell" and not element.identifier) or content_id(element):
             return {"tool": tool, "target": {"row": True}}  # a row's text is content: the road exists, drive can't replay it
         found = _target_for(element, items)
         if found is not None:

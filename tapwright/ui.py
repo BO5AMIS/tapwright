@@ -1002,6 +1002,7 @@ def _reaches(node: ET.Element, screen: tuple[float, float, float, float] | None)
 
 
 _CONTENT_ID = re.compile(r"[:@/\\]|\d{6}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+_ID_SHAPE = re.compile(r"[A-Za-z0-9._\- ]+")  # (an allow-list, review 1.7 B-L4: what developers write; iOS's own ids too)
 STRUCTURAL_ID_MAX = 64
 
 
@@ -1009,8 +1010,10 @@ def structural_id(name: str) -> bool:
     """Is this identifier one a developer wrote (kept in a place's key, and so in the map file), not one that carries
     content? An id with a `:`, `@`, `/` or `\\` (a prefix and then content: seen on the phone 2026-11-14, Calendar's
     `event-shown:<the event's title>`), six digits in a row, a UUID, a letter outside ASCII, or more than 64 characters is
-    left out. Spaces are kept: iOS's own ids have them ("Quick Entry Title Field")."""
-    return (0 < len(name) <= STRUCTURAL_ID_MAX and name.isascii() and name.isprintable()
+    left out, and so is any character but ASCII letters, digits, `.`, `_`, `-` and the space (an allow-list, review 1.7
+    B-L4: a name such as "O'Brien", or a title with a `,`, `?`, `!`, `#` or `&`, is content). Spaces are kept: iOS's own
+    ids have them ("Quick Entry Title Field")."""
+    return (0 < len(name) <= STRUCTURAL_ID_MAX and _ID_SHAPE.fullmatch(name) is not None
             and _CONTENT_ID.search(name) is None)
 
 

@@ -2552,6 +2552,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if isinstance(args[kind], str) and ui.private(args[kind]):
             rec.setdefault("unsaved", []).append(len(rec["steps"]))  # (the step it would be the expectation of)
             return
+        if "route" in rec and kind == "id" and isinstance(args[kind], str) and not ui.structural_id(args[kind]):
+            return  # (an id that carries content is never written to a route: the step is kept without this check)
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
             expect["gone"] = True
@@ -2670,6 +2672,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if aimed is None and batch.holds_value(given) and resolved:
             found, items = resolved[0]  # the element the touch really went to, in the list it was aimed from
             aimed = batch.recorded_element(found, items, name)
+        if "route" in rec and isinstance(aimed, dict) and "x" not in aimed:
+            # a route is part of the map: an id that carries content (an event's title), and the label or text of the
+            # element that has one, are never written; the point stands for it (review 1.7 B-L3)
+            found = resolved[0][0] if resolved and isinstance(resolved[0][0], ui.Element) else None
+            if (isinstance(aimed.get("id"), str) and not ui.structural_id(aimed["id"])) or (
+                    found is not None and roads.content_id(found)):
+                if found is None:
+                    rec.setdefault("content_steps", []).append(len(rec["steps"]) + 1)
+                    return
+                aimed = {"x": round(found.center[0], 1), "y": round(found.center[1], 1)}
         if aimed is not None:
             step[key] = aimed
         elif batch.holds_value(given):
@@ -2932,6 +2944,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                         "is saved, as ${account.username} or ${account.password}). Nothing was saved and the "
                                         "recording has ended: record it again, typing the account's value as the whole text "
                                         "of a step.")
+        content = sorted(set(rec.get("content_steps") or ()))
+        if content:
+            del self._recording[client_id]
+            raise Refused("bad_params", f"can't save the route: step{'s' if len(content) > 1 else ''} "
+                                        f"{', '.join(map(str, content))} aimed by an id that carries content (a title, a "
+                                        "name, a number), which a route never keeps, and there is nothing else to save it "
+                                        "by. Nothing was saved and the recording has ended: record it again, aiming at "
+                                        "that element by a ref or a point.")
         unsaved = sorted(set(rec.get("unsaved") or ()))
         if not unsaved:
             return
