@@ -60,6 +60,7 @@ class FakePhone:
         self.uxes: dict[str, tuple[str, ...]] = {}
         self.drives: list[tuple[str, str]] = []
         self.drive_to: str | None = None
+        self.relaunch_at: str | None = None  # where open_app lands (default: the start screen)
 
     def _tick(self) -> None:
         self.clock.t += self.per_move
@@ -119,7 +120,7 @@ class FakePhone:
     async def open_app(self) -> Moved:
         self.opens += 1
         self._tick()
-        self.at = self.start
+        self.at = self.relaunch_at or self.start
         return Moved(settled=1.0)
 
     async def open_url(self, link: str) -> Moved:

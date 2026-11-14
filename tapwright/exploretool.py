@@ -114,6 +114,8 @@ class DaemonPhone:
         self.d, self.cid, self.scope, self.bundle = daemon, client_id, scope, bundle
         self.screen = tuple(daemon.session.screen)
         self._waited = 0.0
+        self._began = daemon._wall()  # a crash report of the app counts from the run's start
+        self.crashes: list = []  # the reports the daemon's own crash checks found while the search ran (daemon._CRASHES)
 
     # ---- reading ----
     async def read(self) -> ui.Tree:
@@ -205,7 +207,7 @@ class DaemonPhone:
         elif tool == "toggle":
             args["value"] = True
         try:
-            await self.d.run_tool(self.cid, tool, {**args, "look": False}, self.scope)
+            answer = await self.d.run_tool(self.cid, tool, {**args, "look": False}, self.scope)  # (a dry run answers `Would …`)
         except Refused as e:
             said = str(e)
             word = POLICY_WORD.search(said)
@@ -213,10 +215,13 @@ class DaemonPhone:
                 return Check("blocked", word.group(1) if word else None)
             if e.code == "not_allowed" and "needs_confirmation" in said:
                 return Check("needs_person", word.group(1) if word else None)
-            if e.code == "dry_run" and "needs a person's OK" in said:
-                return Check("needs_person", word.group(1) if word else None)
             if e.code in ("paused", "busy", "locked"):
                 raise PhoneStop(e.code) from None
+            return Check()
+        said = answer["text"]
+        if "needs a person's OK" in said:
+            word = POLICY_WORD.search(said)
+            return Check("needs_person", word.group(1) if word else None)
         return Check()
 
     # ---- what the app did ----
@@ -238,11 +243,15 @@ class DaemonPhone:
         except Exception:  # noqa: BLE001 - no log is no finding
             errors = ()
         crash = None
+        if self.crashes:  # a call's own crash check found the report first: it is the finding's
+            info = self.crashes.pop(0)
+            self.crashes.clear()
+            return Watch(errors, CrashFacts(info.reason or info.kind, tuple(info.frames)))
         app = self.d.control.client(self.cid).app
         if app is None or app[1] != self.bundle:  # the app isn't in front: did it stop?
             try:
                 if not await asyncio.wait_for(d.session.device.app_pids(self.bundle), 5):
-                    info = await d._find_crash(self.bundle, d.crash_polls)
+                    info = await d._find_crash(self.bundle, d.crash_polls, self._began)
                     if info is not None:
                         crash = CrashFacts(info.reason, tuple(info.frames))
             except Exception:  # noqa: BLE001 - the phone can't say: no crash is claimed
@@ -408,11 +417,13 @@ class ExploreTools:
         explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), d._POLICY.get(), who, budget=parsed.budget,
                                     start_place=parsed.start, focus=parsed.focus, continue_after_crash=parsed.keep_going,
                                     clock=self.control.clock, progress=progress, fill=fill, account=account)
-        tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None))  # nobody is asked; each move is the tool's own
+        tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
+                  d._CRASHES.set(phone.crashes))
         began = datetime.datetime.now(datetime.timezone.utc)
         try:
             result = await explorer.run()
         finally:
+            d._CRASHES.reset(tokens[3])
             d._DIALOG.reset(tokens[2])
             d._EXPLORING.reset(tokens[1])
             d._NESTED.reset(tokens[0])

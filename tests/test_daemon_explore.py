@@ -53,6 +53,10 @@ class ExploreSession(MapSession):
             back = self.screens[self.at].back
             if back and back.point and abs(hit[0] - back.point[0]) < 1 and abs(hit[1] - back.point[1]) < 1 and self.at in self.back_to:
                 self.at = self.back_to[self.at]
+            under = next((e for e in reversed(self.items) if e.x <= hit[0] < e.x + e.width and e.y <= hit[1] < e.y + e.height), None)
+            if under is not None and under.role == "switch":  # the daemon's toggle touches the switch's point
+                self.tapped.append((self.at, under.identifier or under.label))
+                under.checked = not under.checked
             return await super().tap(target, hold_ms)
         self.tapped.append((self.at, hit.identifier or hit.label))
         if hit.role == "switch":

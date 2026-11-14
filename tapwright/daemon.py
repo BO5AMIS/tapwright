@@ -102,6 +102,9 @@ _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwrig
 # True while `explore` makes its own moves (AGENT-TOOLS §25.5): a touch the policy holds is never asked of a person (no dialog, no
 # live-view request) and no grant is looked at: the touch is refused as `needs_confirmation`, and a dry run says so.
 _EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exploring", default=False)
+# The crash reports `explore` has seen found while it runs (any call's crash check finds them first, and tells each once):
+# `_find_crash` adds each it returns, so the search can make a `crash` finding of it with its frames (§25.10).
+_CRASHES: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_explore_crashes", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
 # True while the call being run answers in brief (§13.4): set by run_tool for that call only, so a batch's own answer is
@@ -2366,6 +2369,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 info = diagnostics.describe_crash(crash, exe, self.scrub_everywhere)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
+                    if (seen := _CRASHES.get()) is not None:
+                        seen.append(info)
                     return info
             if n + 1 < polls:
                 await asyncio.sleep(self.crash_poll)
