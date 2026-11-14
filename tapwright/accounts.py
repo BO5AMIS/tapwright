@@ -52,7 +52,7 @@ PLACEHOLDER = re.compile(r"\$\{account\.(username|password)\}")
 MENTION = re.compile(r"\$\{account\.")
 MIN_SCRUBBED = 3  # a value shorter than this isn't scrubbed out of text (it would eat ordinary words)
 MAX_VALUE = 256  # a username or password longer than this is refused when the file loads (no real credential is longer)
-BIDI_MARKS = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))  # the invisible direction marks ui._text drops from screen text
+BIDI_MARKS = dict.fromkeys(map(ord, "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"))  # the invisible direction marks ui._text drops from screen text
 PHONE = "phone"  # the entry that holds the phone's passcode, not an account to sign in with
 NO_FILE = ("no test accounts: start tapwright serve or mcp with --accounts FILE (a JSON file kept outside any git repo, "
            "or ignored by it)")
@@ -374,7 +374,17 @@ def _decoded(text: str) -> _Layer | None:
             if o > 0x10FFFF:
                 continue
         changes.append((m.start(), m.end(), chr(o)))
+    # a surrogate pair whose halves were decoded in different passes (`\ud83d%5Cude00`): two characters now, one again
+    taken = [(a, b) for a, b, _ in changes]
+    for m in _HALVES.finditer(text):
+        if not any(a < m.end() and m.start() < b for a, b in taken):
+            high, low = map(ord, m.group(0))
+            changes.append((m.start(), m.end(), chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))))
+    changes.sort()
     return _build(text, changes) if changes else None
+
+
+_HALVES = re.compile("[\ud800-\udbff][\udc00-\udfff]")
 
 
 _MARKS = re.compile("[" + _MARK_CLASS + "]+")
