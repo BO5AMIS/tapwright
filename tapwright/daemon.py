@@ -6722,6 +6722,18 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if hit is None:
             return
         relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
+        if relation == "unplaced":
+            # the hit isn't in the read the list came from: something drawn after it, or a part of the target the read
+            # left out. Only the tree proves which (Codex, PR #12 cycle 1, M1): it is read again, and a hit it still can't
+            # place under the target counts as covering it
+            reread = getattr(self.session, "read_source", None)
+            try:
+                source = await reread() if reread is not None else None
+            except Exception:  # noqa: BLE001 - no read: nothing proves the hit is the target's
+                source = None
+            relation = ui.hit_relation(source, element, hit) if source else "other"
+            if relation == "unplaced":
+                relation = "other"
         app = self._app_bundle()
         if hit.bundle and app and hit.bundle != app:
             trace.note("hit", "other app")

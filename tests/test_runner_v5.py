@@ -96,9 +96,9 @@ def test_the_hit_on_the_target_inside_it_or_holding_it_passes_and_a_bar_over_it_
     assert ui.hit_relation(xml, row, hit(BAR)) == "other"
 
 
-def test_without_the_tree_the_frames_decide():
+def test_without_the_tree_the_frames_prove_nothing_inside():
     row = find(listed(), "terms-row")
-    assert ui.hit_relation(None, row, hit(ROW_TEXT)) == "inside"
+    assert ui.hit_relation(None, row, hit(ROW_TEXT)) == "unplaced"  # (proves nothing: Codex, PR #12 c1, M1)
     assert ui.hit_relation(None, row, hit(BAR_BUTTON)) == "other"
     assert ui.hit_relation("<not xml", row, hit(ROW)) == "same"
 

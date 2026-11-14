@@ -522,6 +522,12 @@ class Session:
         # (kept as XCTest says it, to be matched with the tree's elements: audit.rows_of redacts what it shows)
         return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
+    async def read_source(self, timeout: float = 60) -> str | None:
+        """The tree's XML now, kept as `last_source` only (the agent's list stays as it is): for placing a hit test's
+        element that the last read didn't have (Codex, PR #12 cycle 1, M1)."""
+        source = await self._source(timeout)
+        return source if isinstance(source, str) else None
+
     async def peek_tree(self, timeout: float = 60) -> ui.Tree:
         """Read the tree and keep nothing of it: `items` and the rest stay as the last read left them (one request). For a
         check right before a touch that must see the screen as it is now without renumbering the agent's list (a draft's

@@ -520,10 +520,12 @@ def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
     (the latest read's XML): "same" (the target itself), "inside" (an element within it), "ancestor" (one that holds
     it: iOS found nothing deeper there, so nothing else is over it), "holder" (what holds it is a Window, the
     Application, the tree's root or a view of (nearly) the whole screen: a view with no accessibility node of its own,
-    a dimming view or an overlay, falls back to that, so it proves nothing either way), or "other" (something else
-    takes the touch: the target is covered). Elements are told apart by type, name and frame (within a point), as both
-    reads give them. Where the tree can't place both, the frames decide: within the target's frame is "inside", else
-    "other"."""
+    a dimming view or an overlay, falls back to that, so it proves nothing either way), "other" (something else
+    takes the touch: the target is covered), or "unplaced" (the tree can't place both, and the hit lies within the
+    target's frame). Elements are told apart by type, name and frame (within a point), as both reads give them.
+    "unplaced" proves nothing: an overlay or another process's control drawn over the target after the read fits its
+    frame as well as a label inside it does, so only the tree makes a hit "inside" (Codex, PR #12 cycle 1, M1). Where the
+    tree can't place both and the hit isn't within the target's frame: "other"."""
     if hit.type == target.type and hit.name == target.name and _same_rect(hit.rect, target.rect):
         return "same"
     root = None
@@ -559,7 +561,7 @@ def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
     x, y, w, h = hit.rect
     tx, ty, tw, th = target.rect
     inside = x >= tx - 1 and y >= ty - 1 and x + w <= tx + tw + 1 and y + h <= ty + th + 1
-    return "inside" if inside else "other"
+    return "unplaced" if inside else "other"
 
 
 def hit_line(hit: Hit, items: list[Element]) -> str:

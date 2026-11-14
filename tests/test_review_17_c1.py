@@ -246,3 +246,36 @@ def test_h5_a_vault_value_across_the_cut_is_redacted_before_it(tmp_path, where):
         for i in range(len(SECRET_NOTE) - 11):  # no 12-character piece of it (§20.3's test)
             assert SECRET_NOTE[i:i + 12] not in text, (SECRET_NOTE[i:i + 12], text)
     run(go)
+
+
+# ---- M1: a hit the tree can't place is never "inside" by its frame alone -----------------------------------------------
+from test_runner_v5 import ROW, ROW_TEXT, armed_daemon, hit, lab_items, looked, node  # noqa: E402
+
+# drawn over the Terms row after the read, within its frame: SpringBoard's or the app's own, in no tree the daemon read
+OVERLAY_DELETE = node("Button", (50, 772, 200, 40), n="delete", l="Delete")
+
+
+@pytest.mark.parametrize("bundle", ["com.apple.springboard", "com.example.lab"])
+def test_m1_an_unplaced_hit_within_the_targets_frame_is_covered(bundle):
+    async def go():
+        d = armed_daemon(hit(OVERLAY_DELETE, bundle))
+        stop, task = await started(d)
+        await looked(d, lab_items())
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("covered:")
+        assert "tap" not in d.session.calls and "read_source" in d.session.calls  # (the tree was read again first)
+        await finish(stop, task)
+    run(go)
+
+
+def test_m1_a_hit_the_tree_places_inside_the_target_still_taps():
+    async def go():
+        for answer in (hit(ROW), hit(ROW_TEXT)):
+            d = armed_daemon(answer)
+            stop, task = await started(d)
+            await looked(d, lab_items())
+            r = await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
+            assert r["text"].startswith("Tapped") and "tap" in d.session.calls
+            await finish(stop, task)
+    run(go)

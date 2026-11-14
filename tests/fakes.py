@@ -372,6 +372,12 @@ class FakeSession:
         self.hit_asks.append((x, y))
         return self.hit_answer
 
+    async def read_source(self, timeout=None):
+        """The tree's XML now (Session.read_source): `source_now` when a test set one, else the last read's."""
+        self._record("read_source")
+        self.last_source = getattr(self, "source_now", None) or self.last_source
+        return self.last_source
+
     def _record(self, name: str) -> None:
         self.calls.append(name)
         if name in self.fail:
