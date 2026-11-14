@@ -37,16 +37,16 @@ def test_the_review_trace_is_what_it_says():
     "synth%2Fsecret%3F42", "synth%2fsecret%3F42", "synth%252Fsecret%253f42",  # mixed-case escapes
     quote(quote("synth%2fsecret%3F42", safe=""), safe=""),
 ])
-def test_a_token_whose_decoding_holds_the_value_is_replaced_whole(token):
+def test_a_token_whose_decoding_holds_the_value_is_replaced(token):
     assert loaded().holds(token)
     assert loaded().scrub(f"a {token} b") == "a <t's password> b"
 
 
 def test_a_url_with_the_value_in_a_query_parameter_keeps_the_text_around_it():
     text = f"GET https://example.invalid/cb?redirect={COMPOSED}&x=1 done"
-    assert loaded().scrub(text) == "GET <t's password> done"
+    assert loaded().scrub(text) == "GET https://example.invalid/cb?redirect=<t's password>&x=1 done"
     wrapped = f'{{"url":"https://example.invalid/?r={COMPOSED}&x=1","n":1}}'
-    assert loaded().scrub(wrapped) == '{"url":"<t\'s password>","n":1}'
+    assert loaded().scrub(wrapped) == '{"url":"https://example.invalid/?r=<t\'s password>&x=1","n":1}'
 
 
 def test_a_token_with_a_percent_and_no_value_is_left_alone():

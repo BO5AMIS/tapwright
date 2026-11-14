@@ -2542,6 +2542,7 @@ class Daemon(journey_tool.JourneyTools):
             rec = self._recording.get(client_id)
             if rec is None:
                 raise Refused("bad_params", "nothing is being recorded; start with record start: true")
+            self._recheck_typed(rec)
             self._refuse_unsaved(client_id, rec)
             if rec.get("route"):
                 return await self._save_route(client_id, rec, scope)
@@ -2579,6 +2580,32 @@ class Daemon(journey_tool.JourneyTools):
             return _answer([f"Saved {len(rec['steps'])} steps to {path}{pictures}."], note)
         raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
                                     "path)")
+
+    def _recheck_typed(self, rec: dict) -> None:
+        """The typed text of every step checked again at the save, against the accounts as they are now and every value of
+        the daemon's life (Codex, PR #10 cycle 10): a file reloaded after the typing can make a typed literal an account's
+        value. Text that is exactly a current value, of the kind the field takes, becomes its variable; text that holds
+        any value, or a placeholder, makes the save refused naming the step (`unsaved_text`), never written as the
+        placeholder an answer shows. A variable the step already has (`${account.username}`, a route's `${name}`) is
+        kept; only the literal text around it is checked."""
+        loaded = self._loaded()
+        for n, step in enumerate(rec["steps"], 1):
+            text = step.get("text")
+            if step.get("tool") != "type_text" or not isinstance(text, str) or not text:
+                continue
+            literal = [part for k, part in enumerate(batch.KEPT.split(text)) if not k % 2]
+            kinds = {kind for _, kind, value in loaded.entries() if value == text}
+            if kinds:
+                kind = "password" if step.get("secure") else "username"
+                if kind in kinds:
+                    step["text"] = "${account." + kind + "}"
+                    if "route" in rec and routes.ACCOUNT not in rec["variables"]:
+                        rec["variables"].append(routes.ACCOUNT)
+                    continue
+            elif not any(part and (loaded.holds(part) or self.accounts.holds(part)) for part in literal):
+                continue
+            rec.setdefault("unsaved_text", []).append(n)
+            step["text"] = ""
 
     def _refuse_unsaved(self, client_id: str, rec: dict) -> None:
         """A step that aimed by, or waited for, a test account's value and has nothing else to be saved by makes the save

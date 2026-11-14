@@ -235,4 +235,5 @@ def test_a_password_with_a_direction_mark_is_redacted_in_the_form_the_screen_tex
 
 
 def test_the_marked_and_plain_forms_are_both_the_accounts_values():
-    assert {"pw-abc‎def-4567", "pw-abcdef-4567"} <= accountlib._forms("pw-abc‎def-4567")
+    redaction = accountlib.Redaction((("t", "password", "pw-abc‎def-4567"),))
+    assert all(redaction.scrub(f"a {shown} b") == "a <t's password> b" for shown in ("pw-abc‎def-4567", "pw-abcdef-4567"))

@@ -40,17 +40,19 @@
   holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
   that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
   is redacted in that form too.
-  Every shape of a value is redacted, and `holds` knows each (one generator: collapsed, without direction marks,
-  JSON-escaped with and without ASCII escapes, Python `repr`/`ascii`, URL-encoded with `quote` and `quote_plus`, and
-  these composed up to three deep in any order, such as a `%r` inside a JSON crash report), so a log message, a
+  Every shape of a value is redacted, and `holds` knows each: one matcher follows the value character by character, each
+  character as itself or percent-encoded (hex in any case, up to three times), JSON- or Python-escaped, a whitespace run
+  as any whitespace or `+`, and direction marks between, so any composition of them (a `%r` inside a JSON crash report, a
+  URL that leaves an apostrophe as it is beside an encoded slash) is found, and a log message, a
   traceback or a report shows none. A value ever
   loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
   current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
   sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so
   a value its bytes hold only escaped is caught too. The map writer redacts only content fields (never the format, a hash, a key or a
   name), and a redacted map that wouldn't read never replaces the file.
-  Percent escapes match in any case of their hex digits (`%2f` is `%2F`) without making the rest of a value case-insensitive.
-  A token with a percent escape (a URL, a query string) is decoded up to three times; if any version holds a value, the whole token is replaced. A recording refuses to save typed text that holds a value from before an accounts-file reload, as it does for a current one.
+  Only escapes are case-insensitive; the value's own letters keep their case.
+  A recording refuses to save typed text that holds a value from before an accounts-file reload, as it does for a current
+  one, and checks typed text again at the save against the file as it is then.
   Typed account values are recorded as `${account.username}` / `${account.password}` (text that is exactly the value, a
   username in a text field, a password in a secure one); text that only holds a value is refused naming the step. A
   recorded selector is counted and checked the way the replaying tool resolves it (a toggle counts switches first), and a

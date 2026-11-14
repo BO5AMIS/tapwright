@@ -257,7 +257,7 @@ def check_script(data: object, path: str) -> dict:
 # these, and nothing else (a key, a tool, a format, a script's or a picture's name, an app is never the screen's)
 CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url"})
 # what a step's text keeps as it is: a variable (`${name}`, an account's `${account.username}`) and a literal `$${`
-_KEPT = re.compile(r"(\$\$\{|\$\{(?:account\.(?:username|password)|[A-Za-z_][A-Za-z0-9_]*)\})")
+KEPT = re.compile(r"(\$\$\{|\$\{(?:account\.(?:username|password)|[A-Za-z_][A-Za-z0-9_]*)\})")
 
 
 def redacted_content(data: object, redact: Callable[[str], str]) -> object:
@@ -266,7 +266,7 @@ def redacted_content(data: object, redact: Callable[[str], str]) -> object:
     `${…}` syntax (Codex, PR #10 cycle 3: an account whose username is `tap` had made the saved step's tool
     `<tester2's username>`)."""
     def text(value: str) -> str:
-        parts = _KEPT.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
+        parts = KEPT.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
         return "".join(p if n % 2 else redact(p) for n, p in enumerate(parts))
 
     def walk(value: object, content: bool) -> object:

@@ -18,7 +18,6 @@ import json
 import os
 import re
 import subprocess
-import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -85,10 +84,6 @@ class Loaded:
         return Redaction(self.entries())
 
     @property
-    def _values(self) -> list[tuple[str, str]]:
-        return self._redaction.values
-
-    @property
     def _placeholders(self) -> "re.Pattern[str] | None":
         return self._redaction.placeholders
 
@@ -131,167 +126,179 @@ def _entries(found: dict[str, Account]) -> tuple[tuple[str, str, str], ...]:
                  if value and len(value) >= MIN_SCRUBBED)
 
 
-def _repr_inner(text: str, quote: str) -> str:
-    """What Python's repr puts between its quotes, as it is inside a longer string's repr too: each character escaped as
-    repr escapes it alone (a backslash, a control, an unprintable one), and `quote` (the quote that string's repr chose:
-    `'` when it holds both kinds) escaped as well."""
-    out = "".join(repr(c)[1:-1] if c not in "'\"" else c for c in text)
-    return out.replace(quote, "\\" + quote) if quote else out
+# ---- the matcher (Codex, PR #10 cycle 10) ----
+# A value is found in a text by one regular expression that follows it character by character, each character in any of
+# the shapes the ways out give it: as itself (case kept), percent-encoded (each UTF-8 byte as %HH, hex in either case, up
+# to twice encoded again: %25HH, %2525HH), JSON- or Python-escaped (\uXXXX, \xHH, \UXXXXXXXX, \n, \", \', \/, \\, behind
+# the backslashes of up to ESCAPE_DEPTH escapings, themselves possibly percent-encoded), a run of whitespace as any run of whitespace, `+` or
+# their encodings, and an invisible direction mark (as itself, encoded or escaped) allowed between any two characters.
+# Each encoder works character by character, so a composition of them (a repr in a JSON document, a JSON string in a
+# URL, an encodeURIComponent that leaves an apostrophe as it is) is still the value one character at a time: no list of
+# whole forms, no token to cut out and decode. Every alternative for a value's first character starts with a literal
+# character, so the regex engine skips ahead to where one could start (its first-character set) instead of trying the
+# whole expression at every position of a log line.
+
+_PCT = "%(?:25){0,2}"  # a percent sign, as itself or encoded once or twice again
+ESCAPE_DEPTH = 4  # how many times an escape may have been escaped again (each doubles its backslashes)
+# more backslashes, as themselves or percent-encoded: bounded, so a long run of backslashes in a text is never taken whole
+# and given back one at a time at each of its positions (that was quadratic: 5,000 backslashes took half a second)
+_BACKSLASHES = r"(?:\\|" + _PCT + "5[cC])" + f"{{0,{2 ** ESCAPE_DEPTH - 1}}}"
+_LEADS = (r"\\", _PCT + "5[cC]")  # an escape's first backslash, as itself or percent-encoded
+_SIMPLE = {"\n": "n", "\r": "r", "\t": "t", "\b": "b", "\f": "f", "\v": "v", "\a": "a", "\0": "0"}
+_MARK_ESCAPES = "(?:u|U0000)20(?:0[eEfF]|2[a-eA-E]|6[6-9])"
+_MARKS = "|".join(["[‎‏‪-‮⁦-⁩]",  # the direction marks ui._text drops, as themselves,
+                   f"{_PCT}[eE]2{_PCT}80{_PCT}(?:8[eEfF]|[aA][a-eA-E])|{_PCT}[eE]2{_PCT}81{_PCT}[aA][6-9]",  # encoded
+                   *(lead + _BACKSLASHES + _MARK_ESCAPES for lead in _LEADS)])  # or escaped
+_BETWEEN = f"(?:{_MARKS})*"
 
 
-def _ascii_inner(text: str, quote: str) -> str:
-    """The same for ascii(): a non-ASCII character escaped too (backslash x, u or U)."""
-    out = "".join(ascii(c)[1:-1] if c not in "'\"" else c for c in text)
-    return out.replace(quote, "\\" + quote) if quote else out
+def _hex(number: int, width: int) -> str:
+    return "".join(f"[{d}{d.upper()}]" if d.isalpha() else d for d in f"{number:0{width}x}")
 
 
-# The ways a value is changed on its way out, each as it shows INSIDE a longer string (a log line, a JSON document, a
-# URL): a form found anywhere in a text is replaced, so a quoted shape needs no form of its own. Each works character by
-# character (or, collapsing, on whitespace runs), so what one makes of a value is part of what it makes of a longer string
-# that holds it, and the shapes compose: a repr inside a JSON document, a JSON string URL-encoded (Codex, PR #10 cycle 6).
-_STEPS: tuple[Callable[[str], str], ...] = (
-    lambda t: " ".join(t.split()),  # a text line's whitespace collapsed
-    lambda t: t.translate(BIDI_MARKS),  # the direction marks ui._text drops
-    lambda t: json.dumps(t, ensure_ascii=False)[1:-1],
-    lambda t: json.dumps(t, ensure_ascii=True)[1:-1],
-    lambda t: _repr_inner(t, ""),
-    lambda t: _repr_inner(t, "'"),
-    lambda t: _ascii_inner(t, ""),
-    lambda t: _ascii_inner(t, "'"),
-    lambda t: urllib.parse.quote(t),
-    lambda t: urllib.parse.quote(t, safe=""),
-    lambda t: urllib.parse.quote_plus(t),
-)
-FORM_DEPTH = 3  # how many of the steps are composed at most
+def _escaped(escapes: list[str]) -> list[str]:
+    """An escape (one of `escapes`, after its backslashes), each way its first backslash can be written."""
+    tail = _BACKSLASHES + "(?:" + "|".join(escapes) + ")"
+    return [lead + tail for lead in _LEADS]
+
+
+def _encoded(c: str) -> list[str]:
+    """Every shape of one character but itself (percent-encoded, escaped), each starting with a literal character."""
+    o = ord(c)
+    shapes = ["".join(_PCT + _hex(b, 2) for b in c.encode("utf-8", "surrogatepass"))]
+    escapes = [f"U{_hex(o, 8)}"]
+    if o < 0x10000:
+        escapes.append(f"u{_hex(o, 4)}")
+    if o < 0x100:
+        escapes.append(f"x{_hex(o, 2)}")
+    if c in _SIMPLE:
+        escapes.append(_SIMPLE[c])
+    if c in "\"'/":
+        escapes.append(f"{re.escape(c)}|{_PCT}{_hex(o, 2)}")  # \" \' \/ (the character itself perhaps encoded)
+    if o > 0xFFFF:  # JSON's surrogate pair
+        high, low = 0xD800 + ((o - 0x10000) >> 10), 0xDC00 + ((o - 0x10000) & 0x3FF)
+        escapes.append(f"u{_hex(high, 4)}" + "(?:" + "|".join(_escaped([f"u{_hex(low, 4)}"])) + ")")
+    return shapes + _escaped(escapes)
+
+
+def _char(c: str) -> str:
+    return "(?:" + "|".join([re.escape(c), *_encoded(c)]) + ")"
+
+
+_ONE_BACKSLASH = "(?:u005[cC]|x5[cC]|U0000005[cC])?"  # (after a backslash, u005c or x5c makes it one escaped)
+
+
+def _backslashes(count: int, first: bool = False) -> str:
+    """A run of `count` backslashes in a value: as many in the text, or up to 2 ** ESCAPE_DEPTH times as many (each
+    escaping doubles them), each as itself, percent-encoded or escaped, a direction mark allowed between two. One bounded
+    repeat for the whole run, never one per backslash of the value (a long run in a text split among them every way
+    there is). A run the value starts with is found only from the start of a run in the text (`_RUN_START`), with no
+    upper bound: tried once per run, not at each of its backslashes (that was quadratic: a second for 20,000)."""
+    unit = f"(?:\\\\{_ONE_BACKSLASH}|{_PCT}5[cC]{_ONE_BACKSLASH})"
+    if first:
+        return _RUN_START + unit + f"(?:{_BETWEEN}{unit}){{{count - 1},}}"
+    return unit + f"(?:{_BETWEEN}{unit}){{{count - 1},{count * 2 ** ESCAPE_DEPTH - 1}}}"
+
+
+# not just after a backslash, as itself, percent-encoded or escaped (the start of a run of them)
+_RUN_START = "".join(f"(?<!{before})" for before in (
+    r"\\", "%5[cC]", "%255[cC]", "%25255[cC]", r"\\u005[cC]", r"\\x5[cC]", r"\\U0000005[cC]"))
+
+
+_WHITESPACE = " \t\n\r\f\v+"  # (a run collapsed or reflowed can hold any of them, each escaped or encoded later)
+
+
+def _space(run: str) -> str:
+    """A run of whitespace in a value: any run of whitespace, a `+`, or their encodings (a line collapsed, a form encoded)."""
+    shapes = {s for c in {*run, *_WHITESPACE} for s in _encoded(c)}
+    return r"(?:\s|\+|" + "|".join(sorted(shapes)) + ")+"
 
 
 @functools.lru_cache(maxsize=512)
-def forms(value: str) -> frozenset[str]:
-    """Every shape a value can take on its way out (Codex, PR #10 cycles 5 and 6): the value with up to FORM_DEPTH of the
-    `_STEPS` applied, in every order, each one that changes the string (collapsed, without direction marks, JSON-escaped
-    with and without escapes of non-ASCII, as Python's `repr` and `ascii` write it, URL-encoded with `quote` and
-    `quote_plus`): a `%r` in a log line written into a JSON crash report is one of them. A value written whole with its
-    quotes (`repr`, `ascii`, JSON) is a form too, so a quoted one is replaced quotes and all. Deduplicated and cached."""
-    out = {value}
-    level = {value}
-    for _ in range(FORM_DEPTH):
-        level = {made for text in level for step in _STEPS if (made := step(text)) != text} - out
-        out |= level
-    bases = {value, " ".join(value.split()), value.translate(BIDI_MARKS), " ".join(value.translate(BIDI_MARKS).split())}
-    out.update(shown for b in bases for shown in (json.dumps(b, ensure_ascii=False), json.dumps(b, ensure_ascii=True),
-                                                  repr(b), ascii(b)))
-    return frozenset(f for f in out if f)
+def pattern(value: str) -> str | None:
+    """The regular expression that finds `value` in any of its shapes (see above), or None when nothing of it is left to
+    find. Its direction marks are dropped first (the value is found with or without them), and whitespace at its ends
+    when what is between is long enough to be scrubbed alone."""
+    core = value.translate(BIDI_MARKS)
+    if len(core.strip()) >= MIN_SCRUBBED:
+        core = core.strip()
+    if not core:
+        return None
+    parts = [_space(run) if run[0].isspace() else _backslashes(len(run), n == 0) if run[0] == "\\" else _char(run)
+             for n, run in enumerate(re.findall(r"\s+|\\+|\S", core))]
+    return _BETWEEN.join(parts)
 
 
-_forms = forms  # (the old name)
-
-_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
-
-
-def upper_escapes(text: str) -> str:
-    """The text with the hex digits of every percent escape uppercased (`%2f` is `%2F`: hex digits are case-insensitive in a
-    URL, `quote` writes them in capitals). The same length, so a span found in it is the same span of the text; the rest
-    of the text keeps its case (Codex, PR #10 cycle 8)."""
-    return _ESCAPE.sub(lambda m: m.group(0).upper(), text) if "%" in text else text
+_QUOTE = re.compile(r"(?:\\|" + _PCT + "5[cC])*(?:['\"]|" + _PCT + "2[27])")  # a quote, escaped or encoded or not
+_QUOTE_LONGEST = 16
 
 
-# A token is a maximal run without whitespace, quotes, angle brackets, braces, brackets or a backslash, so a URL or a query
-# string stays whole. One that holds a percent escape is decoded (Codex, PR #10 cycle 9).
-_TOKEN = re.compile(r"[^\s'\"`<>{}\[\]\\]*%[^\s'\"`<>{}\[\]\\]*")
-DECODE_DEPTH = 3
+def _quoted(text: str, start: int, end: int) -> tuple[int, int]:
+    """The span of a value found at text[start:end], with the quotes around it when it is quoted whole (`'v'`, `\\"v\\"`,
+    `%22v%22`): what repr or JSON writes of the value alone is replaced quotes and all, as before cycle 10."""
+    for k in range(min(start, _QUOTE_LONGEST), 0, -1):  # (the longest quote first: `\\"` rather than `"`)
+        quote = text[start - k:start]
+        if text.startswith(quote, end) and _QUOTE.fullmatch(quote):
+            return start - k, end + k
+    return start, end
 
 
-def _decoded(token: str) -> list[str]:
-    """The token decoded up to DECODE_DEPTH times with `unquote` and with `unquote_plus` (each stage kept)."""
-    out = []
-    for step in (urllib.parse.unquote, urllib.parse.unquote_plus):
-        text = token
-        for _ in range(DECODE_DEPTH):
-            made = step(text)
-            if made == text:
-                break
-            out.append(made)
-            text = made
-    return out
-
-
-def _swap(text: str, norm: str, value: str, label: str) -> tuple[str, str]:
-    """`text` and its `norm` (upper_escapes of it) with every `value` found in `norm` replaced by `label` in both."""
-    out, out_norm, at = [], [], 0
-    while (i := norm.find(value, at)) >= 0:
-        out += [text[at:i], label]
-        out_norm += [norm[at:i], label]
-        at = i + len(value)
-    return "".join(out) + text[at:], "".join(out_norm) + norm[at:]
+@functools.lru_cache(maxsize=512)
+def _compiled(made: str) -> "re.Pattern[str]":
+    return re.compile(made)
 
 
 class Redaction:
-    """A set of account values, as (name, kind, value), and what redacts them: every form of each (`forms`) becomes
-    `<name's username>` / `<name's password>`, the longest form first, so a value that holds another is replaced whole."""
+    """A set of account values, as (name, kind, value), and what redacts them: each value in any of its shapes (`pattern`)
+    becomes `<name's username>` / `<name's password>`, the longest value first, so a value that holds another is replaced
+    whole. One compiled expression per value: each keeps the engine's skip to its first-character set, which one
+    alternation of them all loses."""
 
     def __init__(self, entries: "tuple[tuple[str, str, str], ...]" = ()) -> None:
-        # (forms and the text they are looked for in both have the hex digits of each %XX uppercased: Codex, PR #10 cycle 8)
-        pairs = [(upper_escapes(form), f"<{name}'s {kind}>") for name, kind, value in entries for form in forms(value)]
-        pairs.sort(key=lambda pair: -len(pair[0]))
-        self.values: list[tuple[str, str]] = pairs
-        bases: dict[str, str] = {}
-        for name, kind, value in entries:
-            for base in (value, value.translate(BIDI_MARKS), " ".join(value.split()), " ".join(value.translate(BIDI_MARKS).split())):
-                if base:
-                    bases.setdefault(base, f"<{name}'s {kind}>")
-        self._bases = sorted(bases.items(), key=lambda pair: -len(pair[0]))
-        shown = sorted({label for _, label in pairs}, key=len, reverse=True)
+        found: dict[str, str] = {}
+        for name, kind, value in sorted(entries, key=lambda e: -len(e[2])):
+            if (made := pattern(value)) is not None:
+                found.setdefault(made, f"<{name}'s {kind}>")
+        self._each = [(_compiled(made), label) for made, label in found.items()]
+        shown = sorted(set(found.values()), key=len, reverse=True)
         self.placeholders = re.compile("(" + "|".join(map(re.escape, shown)) + ")") if shown else None
 
     @property
     def redacts(self) -> bool:
-        return bool(self.values)
+        return bool(self._each)
 
-    @functools.cached_property
-    def _any(self) -> "re.Pattern[str] | None":
-        """One search for every form at once (a value has up to a few hundred: a loop over them was 3 times slower)."""
-        return re.compile("|".join(re.escape(value) for value, _ in self.values)) if self.values else None
+    def _spans(self, text: str) -> list[tuple[int, int, str]]:
+        """Where the values are in `text`, as (start, end, placeholder): the longest value's first, a shorter one's only
+        where it overlaps none of them; in the text's order."""
+        taken: list[tuple[int, int, str]] = []
+        for each, label in self._each:
+            for m in each.finditer(text):
+                start, end = _quoted(text, m.start(), m.end())
+                if not any(start < e and s < end for s, e, _ in taken):
+                    taken.append((start, end, label))
+        return sorted(taken)
 
-    def _token_label(self, token: str) -> str | None:
-        """The placeholder for a token whose decoded versions hold a value, else None."""
-        for decoded in _decoded(token):
-            for base, label in self._bases:
-                if base in decoded:
-                    return label
-        return None
-
-    def _tokens_scrubbed(self, text: str) -> str:
-        """Every token with a percent escape whose decoded versions hold a value, replaced whole."""
-        def swap(m: "re.Match[str]") -> str:
-            return self._token_label(m.group(0)) or m.group(0)
-        return _TOKEN.sub(swap, text)
+    def _scrubbed(self, part: str) -> str:
+        out, at = [], 0
+        for start, end, label in self._spans(part):
+            out += [part[at:start], label]
+            at = end
+        return "".join(out) + part[at:]
 
     def scrub(self, text: str) -> str:
         """Idempotent: a placeholder already there is left alone, so text redacted where it came in can be redacted again
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
-        values = self.values
-        if not text or self._any is None:
-            return text
-        if "%" in text:
-            text = self._tokens_scrubbed(text)
-        if self._any.search(upper_escapes(text)) is None:
+        if not text or not any(each.search(text) for each, _ in self._each):
             return text
         parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
         for n in range(0, len(parts), 2):
-            part = parts[n]
-            norm = upper_escapes(part)  # (same length, so a match in it is the same span of the part)
-            for value, label in values:
-                if value in norm:
-                    part, norm = _swap(part, norm, value, label)
-            parts[n] = part
+            parts[n] = self._scrubbed(parts[n])
         return "".join(parts)
 
     def holds(self, text: str) -> bool:
         if not text:
             return False
-        if "%" in text and any(self._token_label(m.group(0)) for m in _TOKEN.finditer(text)):
-            return True
-        return bool(self._any is not None and self._any.search(upper_escapes(text))) or bool(
+        return any(each.search(text) for each, _ in self._each) or bool(
             self.placeholders is not None and self.placeholders.search(text))
 
 

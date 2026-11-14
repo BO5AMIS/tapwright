@@ -50,15 +50,15 @@ def test_a_composed_form_is_redacted_and_held(shown, value):
         assert core not in out
 
 
-def test_the_forms_of_one_value_stay_a_few_hundred_and_are_cached():
+def test_the_matcher_of_one_value_is_quick_to_build_and_cached():
+    # (cycle 10: one per-character expression per value replaced the list of whole forms)
     worst = f"secret'\"account-42 é{chr(0x200e)}/x\\y\tz"
     began = time.perf_counter()
-    many = accountlib.forms(worst)
+    made = accountlib.pattern(worst)
+    accountlib.Redaction((("t", "password", worst),))
     took = time.perf_counter() - began
-    assert len(accountlib.forms("hunter2-PW-9x")) < 10
-    assert len(accountlib.forms(PW)) < 60
-    assert len(many) < 500 and took < 0.5
-    assert accountlib.forms(worst) is many  # (cached)
+    assert made is not None and took < 0.5
+    assert accountlib.pattern(worst) is made  # (cached)
 
 
 def test_the_daemon_log_redacts_a_repr_inside_a_json_line(tmp_path):

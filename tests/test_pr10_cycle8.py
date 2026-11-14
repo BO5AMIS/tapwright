@@ -24,13 +24,13 @@ def test_a_percent_encoded_value_is_scrubbed_whatever_the_case_of_its_escapes(es
     loaded = accountlib.Loaded(path="x", accounts={"t": accountlib.Account("t", None, SECRET)})
     assert loaded.holds(f"https://example.invalid/?token={escaped}&x=1")
     scrubbed = loaded.scrub(f"https://example.invalid/?token={escaped}&x=1")
-    assert scrubbed == "<t's password>"  # (the whole token: cycle 9)
+    assert scrubbed == "https://example.invalid/?token=<t's password>&x=1"  # (the value alone: cycle 10)
 
 
 def test_only_the_escapes_are_case_insensitive():
     loaded = accountlib.Loaded(path="x", accounts={"t": accountlib.Account("t", None, "Abc-Secret")})
     assert loaded.scrub("abc-secret ABC-SECRET Abc-Secret") == "abc-secret ABC-SECRET <t's password>"
-    assert loaded.scrub("Abc%2dSecret") == "<t's password>"  # (a token that decodes to the value goes whole: cycle 9)
+    assert loaded.scrub("Abc%2dSecret") == "<t's password>"
     assert loaded.scrub("abc%2dsecret") == "abc%2dsecret"
 
 
