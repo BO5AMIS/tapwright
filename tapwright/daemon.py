@@ -27,7 +27,7 @@ from PIL import Image, ImageChops, UnidentifiedImageError
 from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
                diagnostics, dialog, driving, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
-               places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
+               places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib
@@ -886,7 +886,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools):
+class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -1919,6 +1919,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
             aimed = self._aim_for_recording(client_id, name, args)
+            # the place the move starts on, for the step a recording saves (§26.6): worked out before the call, which moves it
+            ran_on = self._place_before(self.control.client(client_id)) if client_id in self._recording else None
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -1939,7 +1941,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 if own:
                     _RESOLVED.reset(resolved_token)
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
-            self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved)
+            self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
+                              place=ran_on[1] if ran_on is not None else None)
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
             started = time.monotonic()
@@ -2557,7 +2560,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         return None
 
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False,
-                     resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None) -> None:
+                     resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None, place: str | None = None) -> None:
         """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
         text really went into is a secure one (read by type_text itself, after any scroll); the guess made before
         the call (`next_secure`) counts too, and either hides the text. `resolved`: the element the touch was really
@@ -2603,6 +2606,11 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             rec.setdefault("unsaved", []).append(len(rec["steps"]) + 1)
         elif given is not None:
             return  # a target that can't be saved (a ref gone stale): leave the step out rather than guess
+        if place is not None:
+            step["place"] = place  # where the step ran, so a repair can tell a new screen in the way (§26.6)
+        if name in scriptrepair.REPAIRABLE and resolved and isinstance(args.get(key), dict) and args[key].get("x") is None:
+            found, items = resolved[0]  # what the touch really aimed at: its facts, with no text in them (§9.4, v1.16)
+            step["seen"] = scriptrepair.seen_of(found, items, tuple(self.session.screen or (0.0, 0.0)))
         rec["steps"].append(step)
         rec["app"] = rec["app"] or self._bundle()
 
@@ -2629,6 +2637,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             names = batch.saved()
             return _answer([f"Saved scripts: {', '.join(names)}." if names else
                             "No saved scripts yet: record one with record start: true, then stop: true."])
+        repair = self._repair_mode(args)  # §26.5: "suggest", "apply" or None; bad_params before anything is touched
         path = batch.resolve(args.get("name"), args.get("path"))
         data = batch.load_script(path)
         token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
@@ -2638,6 +2647,9 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         drafting = _DRAFTS_ROUTE.set(True) if named and data.get("draftsOnly") is True else None  # §21.3
         run_grants = self._grants_run()
         try:
+            if repair is not None:
+                return await self._repair_replay(client_id, data, scope, args, pathlib.Path(path), repair,
+                                                 named is not None and data.get("draftsOnly") is True)
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
@@ -2662,6 +2674,12 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
 
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
+        steps, notes = await self._replay_prepare(client_id, data, scope)
+        return await self._batch(client_id, steps, scope, args, notes)
+
+    async def _replay_prepare(self, client_id: str, data: dict, scope: "Scope | None") -> tuple[list[dict], list[str]]:
+        """What a replay does before its steps (also `replay` with `repair`, §26.5): the fresh start, a route's drive to its
+        start; the steps as they will run and the notes that go with them."""
         if data.get("fresh", True) and data.get("app"):
             # (these calls are the replay's own: the first-answer note goes on the replay's answer. They are not marked
             # nested: a recording in progress saves the app restart, or a replay of it starts in the wrong app)
@@ -2685,7 +2703,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
         if data.get("fresh", True) and data.get("app"):
             notes.append("Note: the app was closed and opened again first (the script's \"fresh\").")
-        return await self._batch(client_id, steps, scope, args, notes)
+        return steps, notes
 
     async def _fresh_start(self, client_id: str, data: dict, scope: "Scope | None") -> None:
         """A script's fresh start: the app closed and opened, then step 1's target waited for."""

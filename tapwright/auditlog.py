@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
-KINDS = ("grant", "revoke", "vault", "otp", "schedule", "approval")
+KINDS = ("grant", "revoke", "vault", "otp", "schedule", "approval", "repair")  # (repair: a script repair's trials and its adoption, §26.7)
 KEEP_DAYS = 90
 TOOL = "tapwright"
 _FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")

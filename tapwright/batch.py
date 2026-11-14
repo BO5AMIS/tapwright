@@ -18,7 +18,8 @@ EXPECT_DEFAULT, EXPECT_MIN, EXPECT_MAX = 2.0, 0.5, 30.0
 STEP_TOOLS = ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
               "alert", "press_button", "rotate", "open_app", "close_app", "compare_screen", "performance", "network", "drive")
 EXPECT_KINDS = ("text", "id", "label")
-STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot", "brief", "if", "optional")  # besides its tool's own arguments (a step's look, screenshot and brief are ignored, §9.1; `if` and `optional` are the batch's own)
+STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot", "brief", "if", "optional", "place", "seen",
+             "repaired")  # besides its tool's own arguments (a step's look, screenshot and brief are ignored, §9.1; `if` and `optional` are the batch's own; `place` (§26.6), `seen` (§9.4) and `repaired` (§26.6) are a script's notes, never passed to a call)
 IF_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "if": {"text": "Not now"}}'
 OPTIONAL_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "optional": true}'
 FORMAT, VERSION = "agent-tools-script", 1  # a route (AGENT-TOOLS §18.5) is version 2: routes.py

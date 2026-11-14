@@ -23,7 +23,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "run": ("steps", "trace", "dry_run", *_SHOT, *_BRIEF),
     "drive": ("to", "route", "with", "account", "then", "by", "dry_run", *_SHOT, *_BRIEF),
     "record": ("start", "stop", "name", "path", "route", "action"),
-    "replay": ("name", "path", *_SHOT, "update_references"),  # (update_references: the CLI's, not the MCP tool's)
+    "replay": ("name", "path", *_SHOT, "update_references", "repair"),  # (update_references: the CLI's, not the MCP tool's)
     "audit": ("types",),
     "ux_check": (),
     "media": ("add", "remove", "confirm"),
