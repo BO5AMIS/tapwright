@@ -283,6 +283,22 @@ def variables_of(data: object) -> "list[str] | None":
     return None
 
 
+def literal_runs(text: str, variables: "list[str] | None" = None) -> tuple[list[str], bool]:
+    """The literal text of a step's text, as the runs between its variables, and whether it has any variable. In a version 2
+    script a `$${` is a literal `${`: the runs are decoded, so a run is the text the step really types (Codex, PR #10 cycle
+    12). In a version 1 script (`variables` None) only an account's variable is one, and nothing is decoded."""
+    runs, found = [""], False
+    for n, part in enumerate(kept(variables).split(text)):
+        if not n % 2:
+            runs[-1] += part
+        elif part == "$${":
+            runs[-1] += "${"
+        else:
+            found = True
+            runs.append("")
+    return runs, found
+
+
 def redacted_content(data: object, redact: Callable[[str], str]) -> object:
     """A script (or a route) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
     never a key, a tool's name, the format, the version or another structural field, and never a variable's
@@ -290,9 +306,27 @@ def redacted_content(data: object, redact: Callable[[str], str]) -> object:
     `<tester2's username>`)."""
     keep = kept(variables_of(data))
 
+    version2 = variables_of(data) is not None
+
     def text(value: str) -> str:
-        parts = keep.split(value)  # (even: text; odd: a variable or a literal `$${`, kept)
-        return "".join(p if n % 2 else redact(p) for n, p in enumerate(parts))
+        out, run = [], ""  # (a literal run is redacted whole, as the text it stands for: `$${` is `${`, written back after)
+
+        def flush() -> None:
+            nonlocal run
+            if run:
+                done = redact(run)
+                out.append(done.replace("${", "$${") if version2 else done)
+            run = ""
+        for n, part in enumerate(keep.split(value)):
+            if not n % 2:
+                run += part
+            elif part == "$${":
+                run += "${"
+            else:
+                flush()
+                out.append(part)
+        flush()
+        return "".join(out)
 
     def walk(value: object, content: bool) -> object:
         if isinstance(value, str):

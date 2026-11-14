@@ -13,6 +13,7 @@ Pure but for reading the file and asking git: no phone.
 """
 from __future__ import annotations
 
+import bisect
 import functools
 import json
 import os
@@ -271,10 +272,18 @@ class Redaction:
     def _spans(self, text: str) -> list[tuple[int, int, str]]:
         """Where the values are in `text`, as (start, end, placeholder), in the text's order. Overlapping matches are
         merged into one span (the first one's placeholder), so no piece of either value is left out of it: a username
-        `abcdef` and a password `cdefgh` in `abcdefgh` leave no `gh` behind."""
+        `abcdef` and a password `cdefgh` in `abcdefgh` leave no `gh` behind. The values are found on the text as it is,
+        placeholder-shaped parts included (a password `a<tester2's username>b` is one span); only a match that lies
+        wholly inside a placeholder is passed over, so a placeholder already there stays as it is (Codex, PR #10 cycle 12)."""
+        shown = [(m.start(), m.end()) for m in self.placeholders.finditer(text)] if self.placeholders is not None else []
+        starts = [a for a, _ in shown]
         found: list[tuple[int, int, int, int, str]] = []  # (start, -length, precedence, end, label)
         for rank, (each, label) in enumerate(self._each):
             for m in each.finditer(text):
+                if shown:
+                    k = bisect.bisect_right(starts, m.start()) - 1
+                    if k >= 0 and m.end() <= shown[k][1]:
+                        continue  # a piece of a placeholder (`test` in `<tester's password>`), not a value
                 start, end = _quoted(text, m.start(), m.end())
                 found.append((start, start - end, rank, end, label))
         found.sort()
@@ -301,10 +310,7 @@ class Redaction:
         where it goes out (an account called `tester` with the password `test` doesn't become `<<tester's ...`)."""
         if not text or not any(each.search(text) for each, _ in self._each):
             return text
-        parts = self.placeholders.split(text)  # (even: text between placeholders; odd: a placeholder, kept)
-        for n in range(0, len(parts), 2):
-            parts[n] = self._scrubbed(parts[n])
-        return "".join(parts)
+        return self._scrubbed(text)
 
     def holds(self, text: str) -> bool:
         if not text:

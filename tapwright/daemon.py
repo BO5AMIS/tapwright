@@ -1665,10 +1665,10 @@ class Daemon(journey_tool.JourneyTools):
         if getattr(self, "accounts", None) is None:
             return text
         try:
-            text = self._loaded().scrub(text)  # (the server's file is read at least once)
+            self._loaded()  # (the call's file and the server's are read, so what they hold is remembered)
         except Exception:
             pass
-        return self.accounts.scrub(text)
+        return self.accounts.scrub(text)  # one pass over the original text, against every value current and past (cycle 12)
 
     def _loaded(self) -> "accountlib.Loaded":
         """The test accounts file this call uses (the call's own, else the daemon's), loaded; `accountlib.NONE` with none."""
@@ -2593,8 +2593,8 @@ class Daemon(journey_tool.JourneyTools):
             text = step.get("text")
             if step.get("tool") != "type_text" or not isinstance(text, str) or not text:
                 continue
-            literal = [part for k, part in enumerate(batch.kept(rec.get("variables") if "route" in rec else None).split(text)) if not k % 2]
-            kinds = {kind for _, kind, value in loaded.entries() if value == text}
+            literal, has_variable = batch.literal_runs(text, rec.get("variables") if "route" in rec else None)  # (`$${` decoded)
+            kinds = {kind for _, kind, value in loaded.entries() if not has_variable and value == literal[0]}
             if kinds:
                 kind = "password" if step.get("secure") else "username"
                 if kind in kinds:
