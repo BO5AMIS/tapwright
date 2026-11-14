@@ -29,6 +29,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
 from . import policy as safety
+from . import auditlog, grants as grantlib
 from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
@@ -184,12 +185,21 @@ _BASELINES: contextvars.ContextVar[list[tuple[str, str, str]] | None] = \
 CONFIRM_TTL = 120.0  # seconds a person has to answer a request, and an allow lasts for one matching call (11.3)
 DECLINE_HOLD = 60.0  # seconds after a decline during which the same touch isn't asked again
 CONFIRM_KEEP = 600.0  # seconds after that a request is still remembered, to say `They declined.` on a retry
+# the kill switch (§19.5): a run stops between moves when a grant it started with is revoked
+REVOKED_STOP = ("revoked: the grants were revoked while this ran ({names}), so it stopped between moves; nothing more "
+                "was touched. Ask your user what to do.")
 NOTE_ALLOWED = "allowed by a person (in {origin})."  # where the OK came from: "chat" (the host's dialog) or "the live view"
 CONFIRM_TICK = 0.25  # seconds between looks at a waited-for request's clock (an answer wakes it at once)
 NUDGE_EVERY = 3.0  # seconds between the daemon's looks at the phone while a call waits for a person (§11.5)
 # The agent (client id) whose call is being run came with a host dialog: a person's OK is waited for and asked through
 # its channel (dialog.py) instead of answering needs_confirmation at once. None: today's way, the live view alone.
 _DIALOG: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_dialog", default=None)
+# What the grants (§19) said about this call's touch, for its answer and its log line (GrantCall); set per call.
+_GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar("tapwright_grant_call", default=None)
+# The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
+_ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
+# The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
+_RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str]] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
 DRY_TOOLS = ("tap", "long_press", "toggle", "type_text", "swipe", "scroll", "back")  # the tools `dry_run` is for
 
 
@@ -600,6 +610,18 @@ class DryRun(Refused):
 
 
 @dataclasses.dataclass
+class GrantCall:
+    """What the grants said about one call's touch (§19.3, §12): the notes of grants that matched but didn't cover it,
+    and, when one covered it, its note and count. `taken` marks the call the holder belongs to."""
+    notes: list[str] = dataclasses.field(default_factory=list)
+    asked: str | None = None  # §12 grant_asked: limit reached, quiet hours, ended or revoked
+    name: str | None = None  # §12 grant: the grant that let the touch through
+    use: str | None = None  # §12 grant_use: "2 of 3 today"
+    line: str | None = None  # `Note: allowed by grant "…" (2 of 3 today).`
+    taken: bool = False
+
+
+@dataclasses.dataclass
 class Confirm:
     """One request for a person's OK (docs/AGENT-TOOLS.md 11.3) and where it stands: `pending`, then `allowed` or
     `declined`. `until` is the clock time (the controller's) a pending request expires, or an allow lapses."""
@@ -838,9 +860,17 @@ class Daemon(journey_tool.JourneyTools):
                  settle_first_frame: float = 1.0, settle_fallback: float = 0.6,
                  settle_quiet: float = MIN_QUIET, shot_wait: float = 1.0, shot_fresh: float = 1.0,
                  pace_tick: float | None = PACE_TICK, pace_quiet: tuple[float, float, float] = PACE_QUIET,
-                 actions: ActionLog | None = None) -> None:
+                 actions: ActionLog | None = None, audit: "auditlog.AuditLog | None" = None,
+                 grant_clock: "Callable[[], datetime.datetime] | None" = None) -> None:
         self.session = session
         self.actions = actions or ActionLog(None)  # the action log (AGENT-TOOLS §12); off unless the server gives one
+        # The audit log (§23): every grant use, revocation and person's OK. None (tests): no grant covers anything,
+        # since a grant needs its line; the server always gives one. Its lines are scrubbed of account values (§20.3).
+        self.audit = audit
+        if audit is not None:
+            audit.scrub = self.scrub_everywhere
+        self._grant_clock = grant_clock  # (tests) the local clock the grants count by; None: the computer's
+        self._books: dict[str, grantlib.Book] = {}  # policy file -> its grants (§19)
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._outside_ignored: set[str] = set()  # apps whose forms ignore a touch outside the field: the keyboard reflex goes first
@@ -1712,6 +1742,11 @@ class Daemon(journey_tool.JourneyTools):
                  if item not in answer["text"]]
         if (problem := self._loaded().problem) is not None and problem not in answer["text"]:
             lines.append(f"Note: {problem}")  # the accounts file can't be used: said once, as the first answer
+        try:
+            book = self._book()
+            lines += [line for line in (book.notes() if book is not None else []) if line not in answer["text"]]
+        except Exception:
+            pass  # (a grant that can't load is said by doctor too; the touch asks a person either way)
         return {**answer, "text": "\n".join([answer["text"], *lines])} if lines else answer
 
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
@@ -1734,16 +1769,19 @@ class Daemon(journey_tool.JourneyTools):
             if own:
                 resolved = []
                 resolved_token = _RESOLVED.set(resolved)
+            said = GrantCall()  # what the grants say about this call's touch, for its log line (§12)
+            said_token = _GRANT_CALL.set(said)
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
-                self._log_action(name, args, started, e, client=client_id, known_off=known)
+                self._log_action(name, args, started, e, client=client_id, known_off=known, grants=said)
                 raise
             finally:
                 _TYPED_SECURE.reset(secure_token)
+                _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
-            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
+            self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved)
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
@@ -1826,7 +1864,7 @@ class Daemon(journey_tool.JourneyTools):
 
     def _log_action(self, name: str, args: dict, started: float, error: Refused | None,
                     frames: int | None = None, *, client: str | None = None, answer: dict | None = None,
-                    known_off: bool | None = None) -> None:
+                    known_off: bool | None = None, grants: GrantCall | None = None) -> None:
         """The agent's call, one line in the action log. Typed text only as its length (`chars`), the answer only as
         its length (`answer_chars`), never a picture or log text (AGENT-TOOLS §12, §16.1)."""
         read = name in READ_KINDS
@@ -1850,6 +1888,10 @@ class Daemon(journey_tool.JourneyTools):
             "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
             "confirmed": True if self._granted_now and not read else None,
             "confirmed_by": self._granted_by if self._granted_now and not read else None,  # "chat" or "the live view"
+            # §12 (1.14, 1.14.1): the grant that let the touch through and its count, or why a matching one didn't
+            "grant": grants.name if grants is not None and not read and not self._granted_now else None,
+            "grant_use": grants.use if grants is not None and not read and not self._granted_now else None,
+            "grant_asked": grants.asked if grants is not None and not read and grants.name is None else None,
             "screenshot": True if name == "look" and args.get("screenshot", True) else None,  # (look's default is on)
             "to": args.get("to") if name == "scroll" else None,
             "labels": True if name == "look" and args.get("labels") else None,
@@ -2428,19 +2470,30 @@ class Daemon(journey_tool.JourneyTools):
         path = batch.resolve(args.get("name"), args.get("path"))
         data = batch.load_script(path)
         token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
+        # a replay of a saved route runs that route: a grant naming it covers its touches (§19.1)
+        named = data.get("name") if data.get("version") == 2 and isinstance(data.get("name"), str) else None
+        running = _ROUTES.set((*_ROUTES.get(), named)) if named else None
+        run_grants = self._grants_run()
         try:
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
+            if running is not None:
+                _ROUTES.reset(running)
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
 
     async def _drive(self, client_id: str, args: dict, scope: "Scope | None") -> dict:
         """`drive` (AGENT-TOOLS §18.4): to a place over the map's proven roads, or by a link. See trip.py."""
         req = driving.check(args)
         made = trip.Trip(self, client_id, scope, req, args)
+        run_grants = self._grants_run()  # a grant revoked while it drives stops it between moves (§19.5)
         try:
             return await made.run()
         finally:
             made.release()
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
 
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
@@ -2688,12 +2741,23 @@ class Daemon(journey_tool.JourneyTools):
         began, n, ident = clock(), len(steps), f"b{next(self._batch_ids)}"
         traced: list[str] = []
         step_notes = list(notes or [])
+        held = [0.0]  # seconds spent waiting for a person (see held()): they don't count toward the batch's limit (§9.3)
+        held_token = _HELD.set(held)
+        run_grants = self._grants_run()  # (the outermost run's: a grant revoked since stops it between moves, §19.5)
+        try:
+            return await self._batch_steps(client_id, steps, scope, args, view, clock, began, n, ident, traced,
+                                           step_notes, held, held_token)
+        finally:
+            if run_grants is not None:
+                _RUN_GRANTS.reset(run_grants)
+
+    async def _batch_steps(self, client_id: str, steps: list[dict], scope: "Scope | None", args: dict, view, clock,
+                           began: float, n: int, ident: str, traced: list[str], step_notes: list[str],
+                           held: list[float], held_token) -> dict:
         failed: tuple[str, str] | None = None
         done = 0
         marks: dict[str, int | None] = {}
         set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
-        held = [0.0]  # seconds spent waiting for a person (see held()): they don't count toward the batch's limit (§9.3)
-        held_token = _HELD.set(held)
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -2704,6 +2768,10 @@ class Daemon(journey_tool.JourneyTools):
             if clock() - began - held[0] > batch.BATCH_LIMIT:
                 failed = ("timeout", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): the "
                                      f"batch took longer than {batch.BATCH_LIMIT:g} s.")
+                break
+            if i > 1 and (gone := self._grants_revoked()):
+                failed = ("not_allowed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
+                                         f"{REVOKED_STOP.format(names=', '.join(json.dumps(g) for g in gone))}")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
@@ -2928,6 +2996,12 @@ class Daemon(journey_tool.JourneyTools):
     async def _run_tool_inner(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         granted: list[bool] = []
         grant_token, scope_token = _GRANTED.set(granted), _SCOPE.set(scope)
+        said = _GRANT_CALL.get()  # (one made for this call's log line; a nested call's own otherwise)
+        own_grants = said is None or said.taken
+        if own_grants:
+            said = GrantCall()
+            grants_token = _GRANT_CALL.set(said)
+        said.taken = True
         arrival = trace.arrive()  # (None when the trace is off) the touch's trace counts from here, before the front check
         before = self._bundle()  # the app under test when the call began (see _crash_check), and its process if read
         pid_before = self._log_pids.get(before) if before else None
@@ -2946,17 +3020,23 @@ class Daemon(journey_tool.JourneyTools):
                 except Refused as e:
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
+                    if said.notes and e.code != "dry_run":  # why a matching grant didn't cover it (§19.3)
+                        e = Refused(e.code, "\n".join([str(e), *said.notes]))
                     if note is None or e.code == "dry_run":
-                        raise
+                        raise e from None
                     raise Refused(e.code, f"{e}\nNote: {note}") from None
                 note = await self._crash_note(client_id, scope, name, before, None, pid_before)
                 if note is not None:
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
                     self._crash_since = self._wall()
+                if said.notes:  # a grant matched but didn't cover it: said before the person's OK (§19.3)
+                    answer = {**answer, "text": "\n".join([answer["text"], *said.notes])}
                 if granted:  # a person's OK let a touch through: the answer ends with where it came from
                     self._granted_now, self._granted_by = True, granted[-1]
                     answer = {**answer, "text": f"{answer['text']}\nNote: {NOTE_ALLOWED.format(origin=granted[-1])}"}
+                elif said.line is not None:  # a grant let it through: the answer ends with it and its count
+                    answer = {**answer, "text": f"{answer['text']}\n{said.line}"}
                 return answer
         except Refused:
             raise
@@ -2970,6 +3050,8 @@ class Daemon(journey_tool.JourneyTools):
             trace.leave(arrival)
             _GRANTED.reset(grant_token)
             _SCOPE.reset(scope_token)
+            if own_grants:
+                _GRANT_CALL.reset(grants_token)
 
     async def _batch_within(self, scope: "Scope", client_id: str, name: str, args: dict) -> dict:
         """`run`, `record` and `replay` in personal mode: like every tool, nothing without an app list, and the one
@@ -5469,10 +5551,21 @@ class Daemon(journey_tool.JourneyTools):
         now = self.control.clock()
         grant = next((c for c in self._confirms.values()
                       if c.tool == tool and c.key == key and c.state == "allowed" and c.until >= now), None)
+        book = self._book()
+        touch = grantlib.Touch(bundle or self._app_bundle(), element.label if element.role == "input" else element.text,
+                               _ROUTES.get(), tool) if book is not None else None
         if a.get("dry_run"):
-            return "" if grant else f' It needs a person\'s OK (policy word "{word}").'
+            if grant:
+                return ""
+            if book is not None and touch is not None:  # §19.3: a dry run counts nothing
+                decided = book.decide(touch, "peek")
+                if decided.kind == "covered":
+                    return f" {decided.dry}"
+            return f' It needs a person\'s OK (policy word "{word}").'
         if grant is not None and self._claim(grant):
             _GRANTED.get().append(grant.origin or "the live view")
+            return ""
+        if book is not None and touch is not None and self._by_grant(book, touch, tool):
             return ""
         message, request = self._ask(tool, a, key, element, word, what, now)
         if request is None:
@@ -5481,6 +5574,65 @@ class Daemon(journey_tool.JourneyTools):
                  "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
         await self._wait_for_person(request, message, tool, a, key, element, taken)
         return ""
+
+    def _book(self) -> "grantlib.Book | None":
+        """The grants of the policy in force (§19): None for a policy with no file (the built-in one, a version 1
+        file, a thin call's). Made once per file; its leftover uses are pruned then (§19.4)."""
+        path = _POLICY.get().file
+        if path is None:
+            return None
+        book = self._books.get(path)
+        if book is None:
+            book = self._books[path] = grantlib.Book(path, self.audit, now=self._grant_clock)
+            try:
+                book.prune()
+                if self.audit is not None:
+                    self.audit.prune()
+            except OSError:
+                pass
+        return book
+
+    def _by_grant(self, book: "grantlib.Book", touch: "grantlib.Touch", tool: str) -> bool:
+        """Does a grant let this touch through without a person (§19.3)? A use is claimed and its audit line written
+        (book.decide), then checked again right before the touch (book.still_covers). What the grants said goes to
+        the call's answer and log line. A grant that is draftsOnly stops here: a person sees the draft (§21.3; the
+        draft dialog is a later task, so for now the touch asks a person as any other does)."""
+        holder = _GRANT_CALL.get()
+        detail = f"{tool} {ui.clip(self.scrub_everywhere(touch.name or ''))}"
+        try:
+            decided = book.decide(touch, "use", detail)
+            if decided.kind == "covered" and decided.use is not None and not book.still_covers(touch, decided.use):
+                decided = grantlib.Decision("ask")
+        except Exception as e:  # any doubt asks a person
+            self.log(f"grants: {type(e).__name__}: {e}")
+            return False
+        if decided.kind == "covered":
+            if holder is not None:
+                holder.name, holder.use, holder.line = decided.name, f"{decided.counts} today", decided.line
+            return True
+        if holder is not None:
+            holder.notes += [n for n in decided.notes if n not in holder.notes]
+            holder.asked = decided.asked[0] if decided.asked else holder.asked
+        return False
+
+    def _grants_revoked(self) -> list[str]:
+        """The grants in force when the running batch began that are revoked now: it stops between moves (§19.5)."""
+        held = _RUN_GRANTS.get()
+        if held is None or not held[1]:
+            return []
+        try:
+            return held[0].revoked_since(held[1])
+        except Exception:
+            return sorted(held[1])
+
+    def _grants_run(self) -> "contextvars.Token | None":
+        """At the start of the outermost batch, drive or replay: the grants in force then, for _grants_revoked."""
+        if _RUN_GRANTS.get() is not None or (book := self._book()) is None:
+            return None
+        try:
+            return _RUN_GRANTS.set((book, book.active()))
+        except Exception:
+            return None
 
     def _claim(self, grant: Confirm) -> bool:
         """Take an allow for the one call about to touch under it: True once; False for every later call (it was
@@ -5746,6 +5898,11 @@ class Daemon(journey_tool.JourneyTools):
         if request.state != "pending" or request.until < now:
             return False
         request.state, request.origin = "allowed" if allow else "declined", origin
+        if self.audit is not None:  # §23 approval: the policy word, never more of the app's text
+            word = (request.message or {}).get("word")
+            self.audit.write("approval", app=(request.key[0] if request.key else "") or None,
+                             name=word if isinstance(word, str) else None,
+                             detail=f"allowed by a person (in {origin})" if allow else "declined")
         # an allow is good for one call within CONFIRM_TTL; a decline holds for DECLINE_HOLD, then may be asked again
         request.until = now + (CONFIRM_TTL if allow else DECLINE_HOLD)
         request.answered.set()

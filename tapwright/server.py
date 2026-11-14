@@ -2,6 +2,7 @@
 WebSocket and the agent API, all behind one token; and starting, finding and stopping it.
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -184,7 +185,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
         sent = _hv(request, "x-tapwright-policy")
         try:
-            rules = policy.loads(sent) if sent else None
+            rules = policy.loads(sent, header=True) if sent else None
         except ValueError as e:
             return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
         if ceiling is not None:
@@ -201,6 +202,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
+        if rules is not None and rules.file is not None and via.get("via") == "call" \
+                and (ceiling is None or ceiling.policy is None or rules.file != ceiling.policy.file):
+            # The model writes a thin call's command line: a grants file it names is never in force (§19.6: only a
+            # person makes a grant). Only the policy file `tapwright serve` was started with brings grants.
+            rules = dataclasses.replace(rules, file=None)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
         sent_maps = _hv(request, "x-tapwright-maps")
         if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
@@ -555,7 +561,9 @@ def _default_daemon(log, phone: str | None):
     from .session import Session
     from . import actionlog
     actions = actionlog.ActionLog(actionlog.default_folder() if actionlog.enabled() else None, report=log)
-    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions)
+    from .auditlog import AuditLog
+    # the audit log (§23) has no off switch: --no-log turns off the action log only
+    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions, audit=AuditLog())
 
 
 def _lock_instance():

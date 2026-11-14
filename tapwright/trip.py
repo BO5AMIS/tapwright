@@ -8,6 +8,7 @@ The daemon owns the phone: a Trip reaches it through the daemon's own reads and 
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -115,6 +116,9 @@ class Trip:
             raise self._stopped(Refused("paused", "paused by the user in the live view; ask them to resume"))
         if d.state == "locked":
             raise self._stopped(Refused("locked", "the phone is locked; ask the user to unlock it"))
+        if gone := d._grants_revoked():  # the kill switch: revoked, not only stopped (§19.5)
+            from .daemon import REVOKED_STOP
+            raise self._stopped(Refused("not_allowed", REVOKED_STOP.format(names=", ".join(json.dumps(g) for g in gone))))
         waited = self.clock()
         while d.control.person_active():
             if self.clock() - waited >= PERSON_WAIT:
@@ -454,11 +458,15 @@ class Trip:
         """Run a saved route's steps, with its variables filled in, through `run`'s own executor: every step passes the
         same checks as a single call, `if` and `optional` work, and a step that fails stops the drive (§18.5)."""
         steps = routes.substitute(route["steps"], self.req.values, route.get("variables"))
+        from .daemon import _ROUTES
+        running = _ROUTES.set((*_ROUTES.get(), name))  # a grant naming this route covers its touches (§19.1)
         try:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:
             first, sep, rest = str(e).partition("\n")
             raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}") from None
+        finally:
+            _ROUTES.reset(running)
         for line in answer["text"].splitlines():
             found = re.match(r"Note(?: \(step (\d+)\))?: (.*)", line)
             if found:

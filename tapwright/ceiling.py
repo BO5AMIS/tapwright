@@ -2,6 +2,7 @@
 have. With the thin call the model writes the command line, so a call may only narrow the daemon's scope and policy:
 a smaller `--apps`, more words that need an OK or are blocked. A daemon started with none of the flags has no ceiling
 and behaves as it always did, which keeps older clients working. Pure logic: no phone, no network."""
+import dataclasses
 from dataclasses import dataclass
 
 from .policy import Policy
@@ -74,6 +75,10 @@ class Ceiling:
         if gone:
             return None, (f"over_ceiling: this daemon's policy (tapwright serve --policy) names words, and a call's policy may "
                           f"add words but never remove one; this one leaves out {'; '.join(gone)}.")
+        if sent.file is not None and sent.file != self.policy.file:
+            # a grant lets a touch through without a person: under the daemon's ceiling only the daemon's own policy
+            # file's grants count, never another file a call names (§19). The call's words still hold.
+            sent = dataclasses.replace(sent, file=None)
         return sent, None
 
 
