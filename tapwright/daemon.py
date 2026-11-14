@@ -6557,11 +6557,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         hit = await self.session.hit_at(*centre)
         if hit is None:
             return element
+        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
         app = self._app_bundle()
-        if hit.bundle and app and hit.bundle != app:
-            return element
-        if ui.hit_relation(getattr(self.session, "last_source", None), element, hit) == "other":
-            return element
+        foreign = bool(hit.bundle and app and hit.bundle != app)
+        if relation not in (("same", "inside") if foreign else ("same", "inside", "ancestor")):
+            return element  # (a holder, a Window or a full-screen view, proves nothing: the guess stands)
         trace.note("hit", "clears a guessed cover")
         cleared = copy.copy(element)
         cleared.covered_by = tuple(b for b in element.covered_by if b not in guessed)
@@ -6570,16 +6570,22 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _refuse_hit(self, element: ui.Element, at: tuple[float, float]) -> None:
         """QUALITY-BAR 2.5 R3 (`lab-behind-bar`): before a touch on an element, ask the runner what iOS would deliver a
         touch at that point to (Session.hit_at, route version 5) and refuse `covered` when it is something other than
-        the element, one inside it, or one holding it. No answer (an older runner, landscape, an error), or an answer
-        from another app than the one read (the app-in-front check deals with that), leaves the touch as in 1.6."""
+        the element, one inside it, or one holding it. No answer (an older runner, landscape, an error), or a holder that
+        proves nothing (a Window, the Application, a full-screen view: ui.hit_relation) leaves the touch as in 1.6. A hit
+        in another process than the app read (a banner, a share sheet in SpringBoard's) is covered unless it is the
+        target or inside it (a remote view the app's tree lists) or the keyboard's own process."""
         hit = await self.session.hit_at(*at)
         if hit is None:
             return
+        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
         app = self._app_bundle()
         if hit.bundle and app and hit.bundle != app:
             trace.note("hit", "other app")
-            return
-        relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
+            if hit.bundle in ui.KEYBOARD_HOSTS or relation in ("same", "inside"):
+                return
+            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "
+                                            f"{ui.hit_line(hit, self.session.items)} of another app; wait for it to go, "
+                                            f"then look again.")
         trace.note("hit", relation)
         if relation == "other":
             raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "

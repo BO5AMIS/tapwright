@@ -510,12 +510,20 @@ def _is_node(node: ET.Element, kind: str, rect: tuple[float, ...], name: str) ->
     return _kind(node) == kind and _text(node.get("name")) == name and _same_rect(_rect(node), rect)
 
 
+HOLDER_KINDS = frozenset({"Window", "Application"})
+# the processes that draw the keyboard out of the app's own (a hit on the keys there is not something over the app)
+KEYBOARD_HOSTS = frozenset({"com.apple.InputUI", "com.apple.TextInput.kbd", "com.apple.KeyboardUI"})
+
+
 def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
     """Where the element a touch at the target's point lands on (`hit`) stands to the target, by the tree `source`
     (the latest read's XML): "same" (the target itself), "inside" (an element within it), "ancestor" (one that holds
-    it: iOS found nothing deeper there, so nothing else is over it), or "other" (something else takes the touch: the
-    target is covered). Elements are told apart by type, name and frame (within a point), as both reads give them.
-    Where the tree can't place both, the frames decide: within the target's frame is "inside", else "other"."""
+    it: iOS found nothing deeper there, so nothing else is over it), "holder" (what holds it is a Window, the
+    Application, the tree's root or a view of (nearly) the whole screen: a view with no accessibility node of its own,
+    a dimming view or an overlay, falls back to that, so it proves nothing either way), or "other" (something else
+    takes the touch: the target is covered). Elements are told apart by type, name and frame (within a point), as both
+    reads give them. Where the tree can't place both, the frames decide: within the target's frame is "inside", else
+    "other"."""
     if hit.type == target.type and hit.name == target.name and _same_rect(hit.rect, target.rect):
         return "same"
     root = None
@@ -535,10 +543,16 @@ def hit_relation(source: str | None, target: Element, hit: Hit) -> str:
                     if any(up is t for t in targets):
                         return "same" if up is node else "inside"
                     up = parents.get(up)
+            sx, sy, sw, sh = _rect(next((n for n in root.iter() if _kind(n) == "Application"), root))
+            whole = sw * sh
             for node in targets:
                 up = parents.get(node)
                 while up is not None:
                     if any(up is h for h in hits):
+                        o = _overlap(_rect(up), (sx, sy, sw, sh)) if whole > 0 else (0.0, 0.0, 0.0, 0.0)
+                        if (up is root or _kind(up) in HOLDER_KINDS or parents.get(up) is None
+                                or (whole > 0 and o[2] * o[3] >= LAYER_COVER * whole)):
+                            return "holder"
                         return "ancestor"
                     up = parents.get(up)
             return "other"
@@ -869,7 +883,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         if screen_rect and depth + 1 <= LAYER_MAX_DEPTH:
             for k, child in enumerate(node):
                 if k and spans[k][1] > spans[k][0]:  # the earlier children, under what the layer hides
-                    rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends)
+                    rects, presented = _layer(child, spans[k], found, screen_rect, numbered, ends, kind)
                     hidden.extend((spans[0][0], spans[k][0], r, presented, spans[k]) for r in rects)
 
     inf = math.inf
@@ -903,9 +917,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     # The field iOS says has the keyboard focus is in front: a layer that would hide it is no layer there (seen on the
     # phone 2026-11-14: Calendar's search results, a full-screen container that starts with an empty full-screen view
     # like a sheet's backdrop, hid the search bar whose field had the keyboard). Only the runner's focus says so.
-    focused = [(number, e.center) for e, number, _ in found if e.focused]
-    if focused:
-        hidden[:] = [h for h in hidden if not any(h[0] <= n < h[1] and _holds(h[2], c) for n, c in focused)]
+    # Only the focused element is exempt: the rest of what the layer covers stays hidden (a modal over a form whose
+    # field kept the focus still hides the form's buttons).
+    focused = {number for e, number, _ in found if e.focused}
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
     def over(number: int, point: tuple[float, float], barlike: bool) -> tuple[int, int] | None:
@@ -916,7 +930,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     shown: list[tuple[Element, int, tuple[int, ...]]] = []
     under: list[tuple[Element, tuple[int, int]]] = []  # what a layer hides, with that layer's range
     for e, number, inside in found:
-        layer = None if keyboards & set(inside) else over(number, e.center, bool(inside) or e.type in BARS)
+        layer = None if number in focused or keyboards & set(inside) else over(number, e.center,
+                                                                               bool(inside) or e.type in BARS)
         if layer is None:
             shown.append((e, number, inside))
         else:
@@ -1124,9 +1139,41 @@ def _backdrop(span: tuple[int, int], found: list[tuple[Element, int, tuple[int, 
     return None
 
 
+def _accessory_window(child: ET.Element, parent_kind: str, span: tuple[int, int],
+                      found: list[tuple[Element, int, tuple[int, ...]]], numbered: dict[int, ET.Element],
+                      screen: tuple[float, float, float, float]) -> bool:
+    """Is this layer UIKit's window for the keyboard's accessory bar, in the shape UIKit gives it: a Window (or a
+    full-screen view right inside one) holding plain views, one of which is the bar's container: a plain view, not
+    full-screen, whose children are its toolbar(s) and the plain view named `inputView`. Everything the layer lists
+    is inside that container. An app's own element named `inputView` (a React Native testID) inside a modal is not
+    that shape, so the modal stays a layer."""
+    if _kind(child) != "Window" and not (parent_kind == "Window" and _kind(child) == "Other"):
+        return False
+    area = screen[2] * screen[3]
+    holders = [n for n in child.iter() if _kind(n) == "Other" and n.get("name") == INPUT_VIEW and not len(n)]
+    parents = {c: up for up in child.iter() for c in up}
+    for view in holders:
+        container = parents.get(view)
+        if container is None or container is child or _kind(container) != "Other":
+            continue
+        if (o := _overlap(_rect(container), screen))[2] * o[3] >= LAYER_COVER * area:
+            continue
+        if any(c is not view and _kind(c) != "Toolbar" for c in container):
+            continue
+        up = parents.get(container)  # between the container and the layer: plain views only
+        while up is not None and up is not child and _kind(up) == "Other":
+            up = parents.get(up)
+        if up is not child:
+            continue
+        own = set(container.iter())
+        if all(numbered.get(number) in own for _, number, _ in found if span[0] <= number < span[1]):
+            return True
+    return False
+
+
 def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, int, tuple[int, ...]]],
-           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int]
-           ) -> tuple[list[tuple[float, float, float, float]], bool]:
+           screen: tuple[float, float, float, float], numbered: dict[int, ET.Element], ends: dict[int, int],
+           parent_kind: str = "") -> tuple[list[tuple[float, float, float, float]], bool]:
     """The places a later sibling hides in the earlier ones (empty when it is no layer; see LAYER_MAX_DEPTH, the
     caller checks the depth), and whether it is a presentation. With a backdrop and something to act on: its whole
     rect, and bars are hidden too (a sheet dims them). With no backdrop: the rects of what it lists, when they
@@ -1140,7 +1187,7 @@ def _layer(child: ET.Element, span: tuple[int, int], found: list[tuple[Element, 
     kinds = {_kind(n) for n in child.iter()}
     if "Keyboard" in kinds:
         return [], False
-    if any(n.get("name") == INPUT_VIEW for n in child.iter()):
+    if _accessory_window(child, parent_kind, span, found, numbered, screen):
         # the window of the keyboard's accessory bar (UIKit hosts it in a full-screen window that starts with an empty
         # full-screen view, like a sheet's backdrop): it hides nothing but its own bar (seen on the phone 2026-11-14:
         # Reminders' bar over the keyboard hid the whole New Reminder sheet, its title field too)

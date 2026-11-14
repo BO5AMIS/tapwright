@@ -311,9 +311,9 @@ def test_a_hit_on_the_target_or_inside_it_taps():
     run(go)
 
 
-def test_no_answer_another_apps_element_force_or_a_point_tap_as_before():
+def test_no_answer_force_or_a_point_tap_as_before():
     async def go():
-        for answer in (None, hit(BAR_BUTTON, bundle="com.apple.springboard")):
+        for answer in (None,):  # (another app's element over it is covered since W144: test_review_17_w144)
             d = armed_daemon(answer)
             stop, task = await started(d)
             await looked(d, lab_items())
