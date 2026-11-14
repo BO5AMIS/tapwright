@@ -27,6 +27,8 @@ from . import pidlock
 from .auditlog import AuditLog
 
 MAX_DAYS = 30
+OFFER_PER_DAY = 3  # §19.6: the grant a person is offered after an Allow once: 3 a day ...
+OFFER_DAYS = 7  # ... for 7 days
 TOOL = "tapwright"
 # §19.2: never grantable, whatever the file says. "Any word the tool treats as a payment" adds a few to the four.
 PAYMENT_WORDS = ("Buy", "Purchase", "Pay", "Subscribe", "Checkout", "Check out", "Place order", "Donate")
@@ -83,6 +85,38 @@ def touch_never(app: str | None, name: str | None) -> bool:
 
 def reaches_people(word: str) -> bool:
     return _any(REACH_WORDS, word) is not None
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def short_date(day: datetime.date) -> str:
+    """`2026-11-21` as `21 Nov` (the same in every locale)."""
+    return f"{day.day} {_MONTHS[day.month - 1]}"
+
+
+def caption(grant: "Grant", app: str) -> str:
+    """The grant dialog's question, saying everything the grant allows (§19.6): the word, the app, the counts, the end
+    date, the route, the quiet hours, and drafts shown first. `app` is the app's name; text from the app and the file is
+    cleaned and cut to 80 characters, as §11.3 says."""
+    from .dialog import clean
+    words = [f'"{clean(w)}"' for w in grant.words]
+    spoken = words[0] if len(words) == 1 else f"{', '.join(words[:-1])} or {words[-1]}"
+    counts = f"up to {grant.per_day} {'time' if grant.per_day == 1 else 'times'} a day"
+    if grant.per_hour is not None:
+        counts += f" and {grant.per_hour} an hour"
+    quiet = f", not between {grant.quiet[0]} and {grant.quiet[1]}" if grant.quiet else ""
+    route = f", only in route {clean(grant.route)}" if grant.route else ""
+    drafts = " (drafts shown to you first)" if grant.drafts_only else ""
+    return (f"Allow tapping {spoken} in {clean(app) or 'the app'} {counts}{quiet}{route}, "
+            f"until {short_date(grant.until)}{drafts}?")
+
+
+def name_base(app: str, word: str) -> str:
+    """A grant's name from the app's name and the word, as `instagram_post`: ASCII letters, digits and `_`."""
+    def slug(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", ascii_lower(text)).strip("_")
+    return "_".join(part for part in (slug(app), slug(word)) if part) or "grant"
 
 
 def _date(text: object) -> datetime.date | None:
@@ -227,6 +261,20 @@ def parse_grants(raw: object, today: datetime.date,
                             drafts if isinstance(drafts, bool) else any(reaches_people(w) for w in words_t),
                             revoked))
     return grants, refused
+
+
+@dataclasses.dataclass(frozen=True)
+class Spec:
+    """What a person was offered (§19.6), before it is a grant."""
+    name_base: str
+    app: str
+    words: tuple[str, ...]
+    per_day: int = OFFER_PER_DAY
+    per_hour: int | None = None
+    days: int = OFFER_DAYS
+    route: str | None = None
+    quiet: tuple[str, str] | None = None
+    drafts_only: bool | None = None  # only False is written: the person said Yes to sending without drafts
 
 
 # ---- what a touch is, and what the grants say -------------------------------------------------------------------
@@ -697,6 +745,61 @@ class Book:
             if safe_name(name):
                 self._remove_uses(ascii_lower(name))
         return [n for n, _ in revoked], already
+
+    def create(self, spec: "Spec") -> Grant | str:
+        """A grant a person made through the dialog (§19.6), written into the policy file under the edit lock: a name
+        not used yet (ignoring ASCII case, revoked ones too), `until` at most 30 days away, checked by the loader's own
+        rules, a version 1 file becoming version 2. The creation is audited (§23, `approval`, `grant created`). Only
+        the daemon's dialog calls this, with what the person answered. The grant, or why nothing was written."""
+        today = self.now().date()
+        until = today + datetime.timedelta(days=min(MAX_DAYS, max(0, spec.days)))
+        made: list[Grant] = []
+        refusal: list[str] = []
+
+        def change(obj: dict) -> bool:
+            from . import policy
+            made.clear()
+            refusal.clear()
+            if obj.get("version") not in (1, 2):
+                refusal.append("the policy file has no version 1 or 2.")
+                return False
+            items = obj.get("grants")
+            items = items if isinstance(items, list) else []
+            taken = {ascii_lower(i["name"]) for i in items if isinstance(i, dict) and isinstance(i.get("name"), str)}
+            name = spec.name_base
+            n = 2
+            while ascii_lower(name) in taken:
+                name = f"{spec.name_base}_{n}"
+                n += 1
+            raw: dict = {"name": name, "app": spec.app, "words": list(spec.words)}
+            if spec.route:
+                raw["route"] = spec.route
+            raw["perDay"] = spec.per_day
+            if spec.per_hour is not None:
+                raw["perHour"] = spec.per_hour
+            raw["until"] = until.isoformat()
+            if spec.quiet:
+                raw["quiet"] = {"from": spec.quiet[0], "to": spec.quiet[1]}
+            if spec.drafts_only is False:  # only a person's Yes writes it; otherwise the file says nothing (§19.1)
+                raw["draftsOnly"] = False
+            rules = policy.parse({**obj, "version": 2, "grants": []})
+            grants, refused = parse_grants([raw], today, lambda app: rules.words(app)[0])
+            if not grants:
+                refusal.append(refused[0].reason if refused else "it can't be a grant.")
+                return False
+            obj["version"] = 2
+            obj["grants"] = [*items, raw]
+            made.append(grants[0])
+            return True
+        why = self.edit(change)
+        if why is not None:
+            return why
+        if not made:
+            return refusal[0] if refusal else "nothing was written."
+        if self.audit is not None:
+            first = made[0].words[0]
+            self.audit.write("approval", app=made[0].app, name=first, detail="grant created")
+        return made[0]
 
     def active(self) -> frozenset[str]:
         """The grants that cover anything now (not revoked, not ended): what a running route started with."""

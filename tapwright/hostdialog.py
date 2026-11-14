@@ -36,8 +36,19 @@ class Needs(BaseModel):
     answer: Literal["Done", "Can't now"] = Field(title="Your answer")
 
 
-MODELS: dict[str, type[BaseModel]] = {dialog.CONFIRM: Confirm, dialog.NEEDS: Needs}
-REFUSAL = {dialog.CONFIRM: "decline", dialog.NEEDS: "cant"}
+class GrantAsk(BaseModel):
+    """§19.6, the grant's question: one required field, the choices Allow and Don't allow, no default."""
+    answer: Literal["Allow", "Don't allow"] = Field(title="Your answer")
+
+
+class DraftsAsk(BaseModel):
+    """§19.6, the separate second question for a word that reaches other people: it defaults to No."""
+    answer: Literal["No", "Yes"] = Field(default="No", title="Send without showing drafts?")
+
+
+MODELS: dict[str, type[BaseModel]] = {dialog.CONFIRM: Confirm, dialog.NEEDS: Needs, dialog.GRANT: GrantAsk,
+                                      dialog.DRAFTS: DraftsAsk}
+REFUSAL = {dialog.CONFIRM: "decline", dialog.NEEDS: "cant", dialog.GRANT: "decline", dialog.DRAFTS: "no"}
 FORM = ClientCapabilities(elicitation=ElicitationCapability(form=FormElicitationCapability()))
 
 

@@ -12,10 +12,13 @@ import unicodedata
 
 ALLOW, DENY = "Allow once", "Don't allow"  # a person's OK: the one required field's choices, no default
 DONE, CANT = "Done", "Can't now"  # a "needs a person" moment's
-CONFIRM, NEEDS = "confirm", "needs"  # the kinds of ask
-CHOICES = {CONFIRM: [ALLOW, DENY], NEEDS: [DONE, CANT]}
+GRANT_ALLOW = "Allow"  # §19.6: the grant's question (the choices are Allow and Don't allow, no default)
+YES, NO = "Yes", "No"  # §19.6: the separate drafts question; it defaults to No
+DRAFTS_QUESTION = "Send these without showing you each one first?"
+CONFIRM, NEEDS, GRANT, DRAFTS = "confirm", "needs", "grant", "drafts"  # the kinds of ask
+CHOICES = {CONFIRM: [ALLOW, DENY], NEEDS: [DONE, CANT], GRANT: [GRANT_ALLOW, DENY], DRAFTS: [NO, YES]}
 # what the MCP server sends back for each choice; anything else, and no answer at all, is the refusal
-ANSWERS = {ALLOW: "allow", DENY: "decline", DONE: "done", CANT: "cant"}
+ANSWERS = {ALLOW: "allow", DENY: "decline", DONE: "done", CANT: "cant", GRANT_ALLOW: "allow", YES: "yes", NO: "no"}
 CLIP = 80  # characters of the app's own text a caption keeps
 KEEP = 50  # events a channel remembers
 MAX_POLL = 25.0  # seconds a poll may wait

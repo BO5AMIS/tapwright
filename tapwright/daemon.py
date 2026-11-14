@@ -635,6 +635,7 @@ class Confirm:
     dialog: bool = False  # the host was asked too (a `dialog.CONFIRM` ask went to the owner's channel)
     origin: str = ""  # where the answer came from: "chat" or "the live view"
     used: bool = False  # an allow was taken by one call (Daemon._claim): no other call touches under it
+    offer: "dict | None" = None  # what the follow-up grant offer (§19.6) needs, kept when the host was asked too
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)  # set at the first answer
 
 
@@ -645,6 +646,17 @@ class Need:
     id: str
     owner: str  # the agent (client id) whose call waits
     state: str = "pending"
+    answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+
+@dataclasses.dataclass
+class Offer:
+    """One question of the grant dialog (§19.6) open now: the grant's (`grant`) or the drafts one (`drafts`). `answer`
+    is the word the person gave (`allow`/`decline`, `yes`/`no`), None while open."""
+    id: str
+    owner: str
+    kind: str
+    answer: str | None = None
     answered: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
 
 
@@ -975,6 +987,8 @@ class Daemon(journey_tool.JourneyTools):
         self._confirms: dict[str, Confirm] = {}  # requests for a person's OK, by id (see _police)
         self._confirm_seq = 0
         self._needs: dict[str, Need] = {}  # "needs a person" asks open now, by id (see _hold_for_person)
+        self._offers: dict[str, Offer] = {}  # grant dialog questions open now, by id (see _offer_grant)
+        self._offered: set[tuple[str, str, str]] = set()  # (agent, app, word) a grant was offered for: once a session
         self._need_seq = 0
         self._channels: dict[str, dialog.Channel] = {}  # what each agent's host is asked (dialog.py), by client id
         self._granted_by: str | None = None  # where the OK that let this agent call through came from (for its log line)
@@ -5691,6 +5705,9 @@ class Daemon(journey_tool.JourneyTools):
                 request.dialog = True
                 label = scrub(element.label if element.role == "input" else element.text)
                 app = (self.session.app or (None, None))[0]
+                held = _GRANT_CALL.get()  # (a grant that matched and ran out: a new one would only undo its limit)
+                request.offer = {"app": key[0] or None, "app_name": app, "word": word, "label": label,
+                                 "routes": _ROUTES.get(), "asked": held.asked if held is not None else None}
                 self.dialog_channel(caller).push({"type": "ask", "id": request.id, "kind": dialog.CONFIRM,
                                                   "message": scrub(dialog.caption(tool, label, app, word)),
                                                   "choices": dialog.CHOICES[dialog.CONFIRM]})
@@ -5730,8 +5747,75 @@ class Daemon(journey_tool.JourneyTools):
             if not self._claim(request):
                 raise Refused("not_allowed", taken)
         await self._aside(answered)
+        await self._offer_grant(request)  # (§19.6) a follow-up dialog; never a reason to refuse this touch
         await self._still_there(tool, a, key, element)
         _GRANTED.get().append(request.origin or "the live view")
+
+    async def _ask_offer(self, owner: str, kind: str, message: str) -> str | None:
+        """One question of the grant dialog to the owner's host, waited on up to CONFIRM_TTL (the wait lets go of the
+        phone and doesn't count toward a batch's own limit). The answer's word (`allow`/`decline`, `yes`/`no`), or None
+        when nobody answered (the dialog is closed)."""
+        self._need_seq += 1
+        offer = Offer(f"g{self._need_seq}-{secrets.token_hex(4)}", owner, kind)
+        self._offers[offer.id] = offer
+        self.dialog_channel(owner).push({"type": "ask", "id": offer.id, "kind": kind, "message": message,
+                                         "choices": dialog.CHOICES[kind]})
+        began = self.control.clock()
+
+        async def waiting() -> None:
+            while offer.answer is None and self.control.clock() < began + CONFIRM_TTL:
+                try:
+                    await asyncio.wait_for(offer.answered.wait(), CONFIRM_TICK)
+                except asyncio.TimeoutError:
+                    pass
+        try:
+            await self._aside(waiting)
+        finally:
+            self.held(self.control.clock() - began)
+            self._offers.pop(offer.id, None)
+            if offer.answer is None:
+                self.dialog_channel(owner).push({"type": "close", "id": offer.id})
+        return offer.answer
+
+    async def _offer_grant(self, request: Confirm) -> None:
+        """AGENT-TOOLS §19.6: a person has just allowed a touch (in the host's dialog or the live view) and the host can
+        show a dialog: offer to make it a standing grant, as a follow-up dialog. Only a person creates it: this starts
+        from a person's OK and writes only from their answers; no argument, header or answer of the model reaches it.
+        Never offered for a word no grant can cover (§19.2), nor where a grant matched and ran out, once per app and
+        word in a session. 3 a day for 7 days, route-scoped inside a route. The drafts question is separate and
+        defaults to No. The file is written under the edit lock; the creation is audited as `approval`."""
+        info, owner = request.offer, request.owner
+        if info is None or not owner or request.state != "allowed" or not request.dialog or self.audit is None:
+            return
+        try:
+            book = self._book()
+            word, app = info["word"], info["app"]
+            if book is None or not app or not word or info["asked"] not in (None, "ended"):
+                return
+            loaded = book.load()
+            if not loaded.ok or grantlib.never_reason(word, loaded.block_for(app)) is not None \
+                    or grantlib.touch_never(app, info["label"]):
+                return
+            once = (owner, app, word.lower())
+            if once in self._offered:
+                return
+            self._offered.add(once)
+            routes = info["routes"]
+            name = info["app_name"] or app
+            spec = grantlib.Spec(grantlib.name_base(name, word), app, (word,), route=routes[-1] if routes else None)
+            reach = grantlib.reaches_people(word)
+            shown = grantlib.Grant(spec.name_base, app, spec.words,
+                                   book.now().date() + datetime.timedelta(days=spec.days), spec.per_day,
+                                   None, spec.route, None, reach)
+            if await self._ask_offer(owner, dialog.GRANT, self.scrub_everywhere(grantlib.caption(shown, name))) != "allow":
+                return
+            if reach and await self._ask_offer(owner, dialog.DRAFTS, dialog.DRAFTS_QUESTION) == "yes":
+                spec = dataclasses.replace(spec, drafts_only=False)
+            made = await asyncio.to_thread(book.create, spec)
+            if isinstance(made, str):
+                self.log(f"grants: no grant written: {made}")
+        except Exception as e:  # a failed offer never costs the person's touch
+            self.log(f"grants: offer: {type(e).__name__}: {e}")
 
     async def _aside(self, wait: Callable[[], Awaitable[None]]) -> None:
         """Inside an agent's action: `wait()` for a person's answer without holding the phone (Controller.aside), so a
@@ -5808,6 +5892,14 @@ class Daemon(journey_tool.JourneyTools):
         """The host's dialog answered for an agent. Only `allow` allows; anything else refuses. False when there is no
         such open request for that agent (an unknown, answered, expired or another agent's id): nothing happens. For a
         "needs a person" ask (§11.5) the answers are `done` and `cant`; anything else is `cant`."""
+        offer = self._offers.get(ask_id) if isinstance(ask_id, str) else None
+        if offer is not None:  # a question of the grant dialog (§19.6): only the agent whose call waits answers it
+            if offer.owner != client_id or offer.answer is not None:
+                return False
+            yes = "allow" if offer.kind == dialog.GRANT else "yes"
+            offer.answer = yes if answer == yes else ("decline" if offer.kind == dialog.GRANT else "no")
+            offer.answered.set()
+            return True
         need = self._needs.get(ask_id) if isinstance(ask_id, str) else None
         if need is not None:
             if need.owner != client_id or need.state == "cant":
