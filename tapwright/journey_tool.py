@@ -169,7 +169,7 @@ class JourneyTools:
             self.log(f"journey: no picture after {name}: {e}")
             return
         point = self.session.last_point if name in journey.TAPS else None
-        caption = (text.splitlines() or [name])[0][:100]
+        caption = (ui.shown(text).splitlines() or [name])[0][:100]  # (redacted before the cut, §18.6)
         jr.frames.append(journey.Frame(path, caption, point, tuple(self.session.screen) if self.session.screen else None,
                                        jr.current.index, jr.elapsed(self.control.clock())))
 
@@ -254,7 +254,7 @@ class JourneyTools:
             raise Refused("bad_params", f"conditions network must be one of {', '.join(network.MODES)}, not {mode!r}")
         now = datetime.datetime.now()
         base = journey.reports_dir()
-        folder = base / f"{now:%Y%m%d-%H%M%S}-{journey.slug(ask['goal'])}"
+        folder = base / f"{now:%Y%m%d-%H%M%S}-{journey.slug(ui.shown(ask['goal']))}"
         try:
             folder.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
@@ -334,7 +334,7 @@ class JourneyTools:
         except Exception as e:  # noqa: BLE001 - OSError, or text the files can't hold
             notes.append(f"couldn't write the report to {jr.folder}: {getattr(e, 'strerror', None) or e}")
         first, second = journey.summary_line(jr, reached, elapsed), journey.findings_line(jr, jr.folder)
-        summary = "\n".join([first, second])
+        summary = ui.shown("\n".join([first, second]))  # (it goes to GitHub, cut to a title there: redacted first, §18.6)
         lines = [first, *([f"Why: {why}"] if why else []), second]
         if spec is not None and written is not None:
             try:

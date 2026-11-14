@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
-from . import filmstrip, journey as jr
+from . import filmstrip, journey as jr, ui
 
 GIF_WIDTH = 360
 GIF_MAX_BYTES = 3_000_000
@@ -314,7 +314,9 @@ def write(j: jr.Journey, reached: bool, why: str | None, elapsed: float) -> dict
         except Exception as e:  # noqa: BLE001
             problems.append(f"no marked screenshot for finding {n}: {e}")
     j.notes.extend(problems)
-    m = model(j, reached, why, elapsed, pictures, folder)
+    # a backstop for AGENT-TOOLS §18.6: the findings and steps came from redacted screen data already; anything that
+    # still holds a test account's value is redacted before it is written (this call's accounts, ui.REDACT)
+    m = ui.redacted(model(j, reached, why, elapsed, pictures, folder), keep=frozenset({"image", "strip", "gif"}))  # (paths kept)
     (folder / "report.md").write_text(markdown(m), encoding="utf-8")
     (folder / "report.html").write_text(page(m), encoding="utf-8")
     (folder / "journey.json").write_text(json.dumps({k: v for k, v in m.items() if k != "extra"}, indent=1), encoding="utf-8")

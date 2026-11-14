@@ -20,7 +20,7 @@ Key = tuple[str, str]
 
 @dataclass(frozen=True)
 class Seen:
-    """A screen observed: its place's name, whether the place is new, its earlier name when a title just named it, and
+    """A screen observed: its place's name, whether the place is new, its earlier name when a place was just renamed (never by a title since 1.13.2), and
     whether the app had a map (a place saved) before this screen."""
     name: str
     new: bool
@@ -29,8 +29,9 @@ class Seen:
 
 
 class Maps:
-    def __init__(self, root: str | None = None) -> None:
-        self.root = root  # the folder given to `tapwright serve --maps`; None: the tool's home
+    def __init__(self, root: str | None = None, scrub: Callable[[str], str] | None = None) -> None:
+        self.root = root
+        self.scrub = scrub  # takes a test account's value out of a string (the daemon sets it): the writer's backstop  # the folder given to `tapwright serve --maps`; None: the tool's home
         self._files: dict[Key, mapfile.MapFile] = {}
         self._memory: dict[Key, dict] = {}
         self._dirty: set[Key] = set()
@@ -47,7 +48,7 @@ class Maps:
     def file(self, root: str | None, app: str) -> mapfile.MapFile:
         key = self._key(root, app)
         if key not in self._files:
-            self._files[key] = mapfile.MapFile(key[0], app)
+            self._files[key] = mapfile.MapFile(key[0], app, lambda text: self.scrub(text) if self.scrub is not None else text)
         return self._files[key]
 
     def data(self, root: str | None, app: str) -> dict:
@@ -93,12 +94,27 @@ class Maps:
         return Seen(visit.name, visit.new, visit.renamed_from, had_map)
 
     def record(self, root: str | None, app: str, src: str, dst: str, move: dict, names: dict, ms: int,
-               build: str | None) -> roads.Recorded | None:
-        made = roads.record(self.data(root, app), src, dst, move, names, ms, mapfile.now(), build)
+               build: str | None, held: frozenset[str] = frozenset()) -> roads.Recorded | None:
+        data = self.data(root, app)
+        if self.titled(data, src, dst, move, held):
+            return None  # a name that is a title is never saved: no road rather than a title in plain text
+        made = roads.record(data, src, dst, move, self.untitled(data, src, dst, names, held), ms, mapfile.now(), build)
         if made is not None:
             self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
             self._changed(root, app)
         return made
+
+    @staticmethod
+    def titled(data: dict, src: str, dst: str, move: dict, held: frozenset[str] = frozenset()) -> bool:
+        """Does the move aim by a label or text that is a title of the road's two places? (`held`: the places a title
+        matched before the screen was read, places.titled_places.)"""
+        target = move.get("target")
+        return isinstance(target, dict) and places.is_title(data, (src, dst), *(target.get(k) for k in ("label", "text")), held=held)
+
+    @staticmethod
+    def untitled(data: dict, src: str, dst: str, names: dict, held: frozenset[str] = frozenset()) -> dict:
+        """The names a road keeps, without the label or text that is a title of its two places (the id stays)."""
+        return {k: v for k, v in names.items() if k == "id" or not places.is_title(data, (src, dst), v, held=held)}
 
     def fail(self, root: str | None, app: str, src: str, move: dict) -> list[tuple[str, str]]:
         gone: list[dict] = []
@@ -108,10 +124,24 @@ class Maps:
         return dropped
 
     def repair(self, root: str | None, app: str, src: str, old_move: dict, dst: str, new_move: dict, names: dict, ms: int,
-               build: str | None) -> roads.Recorded:
+               build: str | None, live: frozenset[str] = frozenset()) -> roads.Recorded:
         """A road driven by another name than the one it was saved with, and the arrival check passed (§18.4): the new
-        move replaces the old one, here and (a merge would bring it back) in the file."""
-        made = roads.repair(self.data(root, app), src, old_move, dst, new_move, names, ms, mapfile.now(), build)
+        move replaces the old one, here and (a merge would bring it back) in the file. `live`: the titles the two screens
+        showed during the drive (their stored hashes may not have caught up): never kept in the road's target or names."""
+        data = self.data(root, app)
+        if self.titled(data, src, dst, new_move):
+            return roads.Recorded(False)  # the road stays as it was; a title is not put in its place
+        shown = {places._flat(t) for t in live if t}
+        move = new_move
+        target = new_move.get("target")
+        if shown and isinstance(target, dict):
+            kept = {k: v for k, v in target.items() if not (k in ("label", "text") and isinstance(v, str) and places._flat(v) in shown)}
+            if kept != target:
+                if "id" not in kept and "x" not in kept:
+                    return roads.Recorded(False)  # nothing safe is left to aim by
+                move = {**new_move, "target": kept}
+        names = {k: v for k, v in names.items() if k == "id" or not (isinstance(v, str) and places._flat(v) in shown)}
+        made = roads.repair(data, src, old_move, dst, move, self.untitled(data, src, dst, names), ms, mapfile.now(), build)
         self._dropped.setdefault(self._key(root, app), []).extend(roads.identity(r) for r in made.gone)
         self._changed(root, app)
         return made

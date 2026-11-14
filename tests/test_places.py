@@ -128,14 +128,6 @@ def test_the_language_of_a_title():
     assert places.language_of("") == "und"
 
 
-def test_slug_is_ascii_lower_case_with_underscores():
-    assert places.slugify("Language Settings") == "language_settings"
-    assert places.slugify("Café & Bar!") == "cafe_bar"
-    assert places.slugify("الإعدادات") is None  # no ASCII letters
-    assert places.slugify("12345") is None
-    assert places.slugify("") is None
-
-
 def new_map():
     return places.empty_map("com.example.app")
 
@@ -151,14 +143,37 @@ def seen(data, tree, now="2026-11-12T10:00:00Z", arrived=True, lang=None):
     return places.visit(data, places.read_place(tree, lang), now, arrived)
 
 
-def test_a_new_place_is_numbered_until_its_title_shows_twice():
+def test_a_new_place_is_numbered_and_a_repeated_title_never_names_it():
     data = new_map()
     first = seen(data, screen(title="Language", ids=("a",)))
     assert first.new and first.name == "place_1" and first.renamed_from is None
-    again = seen(data, screen(title="Language", ids=("a",)))
-    assert not again.new and again.name == "language" and again.renamed_from == "place_1"
-    assert list(data["places"]) == ["language"]
-    assert seen(data, screen(title="Language", ids=("a",))).name == "language"  # and it stays
+    for _ in range(3):
+        again = seen(data, screen(title="Language", ids=("a",)))
+        assert not again.new and again.name == "place_1" and again.renamed_from is None
+    assert list(data["places"]) == ["place_1"]
+
+
+def test_a_repeated_private_title_is_never_a_name_and_never_stored_as_text():
+    data = new_map()
+    for _ in range(4):
+        v = seen(data, screen(title="Chat with Sara", ids=("send",)))
+    assert v.name == "place_1" and list(data["places"]) == ["place_1"]
+    assert "sara" not in json.dumps(data).lower() and "chat" not in json.dumps(data).lower()  # only a hash is kept
+
+
+def test_a_person_names_a_place_and_a_title_never_replaces_it():
+    data = new_map()
+    seen(data, screen(title="Language", ids=("a",)))
+    places.set_name(data, "place_1", "lang_page")
+    for _ in range(3):
+        assert seen(data, screen(title="Language", ids=("a",))).name == "lang_page"
+
+
+def test_a_map_made_before_1_13_2_keeps_its_title_names():
+    data = new_map()
+    places.rename(data, seen(data, screen(title="Language", ids=("a",))).name, "language")
+    v = seen(data, screen(title="Language", ids=("a",)))
+    assert v.name == "language" and v.renamed_from is None
 
 
 def test_a_look_at_the_same_screen_is_not_a_second_visit():
@@ -168,30 +183,11 @@ def test_a_look_at_the_same_screen_is_not_a_second_visit():
     assert again.name == "place_1" and again.renamed_from is None
 
 
-def test_a_title_that_changes_is_content_not_a_name():
-    data = new_map()
-    seen(data, screen(title="Chat with Sara", ids=("send",)))
-    second = seen(data, screen(title="Chat with Omar", ids=("send",)))
-    assert second.name == "place_1" and not second.new
-    third = seen(data, screen(title="Chat with Omar", ids=("send",)))
-    assert third.name == "place_1"  # it changed once: never a name
-    assert "omar" not in json.dumps(data).lower() and "sara" not in json.dumps(data).lower()
-
-
 def test_a_title_with_no_ascii_letters_never_names_a_place():
     data = new_map()
     for _ in range(3):
         v = seen(data, screen(title="الإعدادات", ids=("a",)))
     assert v.name == "place_1"
-
-
-def test_two_places_with_one_title_get_a_suffix():
-    data = new_map()
-    for _ in range(2):
-        seen(data, screen(title="Details", ids=("a",)))
-    for _ in range(2):
-        seen(data, screen(title="Details", ids=("b", "c")))
-    assert sorted(data["places"]) == ["details", "details_2"]
 
 
 def test_numbering_continues_after_a_place_is_forgotten():

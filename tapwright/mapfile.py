@@ -12,6 +12,7 @@ driving from memory without it.
 import copy
 import errno
 import json
+import logging
 import os
 import re
 import threading
@@ -21,6 +22,7 @@ from typing import Callable
 
 from . import names, places, roads, routes, store
 
+log = logging.getLogger(__name__)
 LOCK_STALE = 10.0  # seconds after which a lock file is taken as left behind
 LOCK_WAIT = 15.0  # seconds to wait for a fresh lock before giving up
 LOCK_POLL = 0.01
@@ -68,6 +70,32 @@ def invalid(data: object) -> str | None:
     if not all(isinstance(r, dict) for r in data.get("reflexes", [])):
         return "a reflex isn't an object"
     return None
+
+
+# the keys whose string values are the screen's words in a map: a target's or a road's names (id, label, text), a link
+# (a place's, a move's), a place's identifiers and selected tab. Nothing else is content: not the format, the version,
+# the app, the title key, a hash, a signature, a place's or a route's name, a reference or a time (those are made by the
+# code and a value in them would break the map: Codex, PR #10 cycle 5)
+CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url", "link", "ids", "tab"})
+
+
+def without_values(data: dict, scrub: Callable[[str], str]) -> dict:
+    """The map as it may be written: no CONTENT string (CONTENT_KEYS, at any depth) holds a test account's value (`scrub`
+    takes it out; AGENT-TOOLS §18.6). A road that held one is dropped whole (a road with half a target is no road);
+    anywhere else the value is replaced by its placeholder. Keys and every other value are never touched. A last
+    backstop: what learns a map keeps values out already."""
+    def clean(v: object, content: bool) -> object:
+        if isinstance(v, str):
+            return scrub(v) if content else v
+        if isinstance(v, dict):
+            return {k: clean(x, k in CONTENT_KEYS) for k, x in v.items()}
+        if isinstance(v, list):
+            return [clean(x, content) for x in v]
+        return v
+    out = {k: clean(v, k in CONTENT_KEYS) for k, v in data.items() if k != "roads"}
+    if "roads" in data:
+        out["roads"] = [r for r in data["roads"] if clean(r, False) == r]
+    return out
 
 
 def _normal(data: dict) -> dict:
@@ -178,7 +206,7 @@ def merge(disk: dict, memory: dict) -> dict:
 class MapFile:
     """One app's map folder. `problem` is why the file is being left alone (None when all is well)."""
 
-    def __init__(self, base: str | os.PathLike, app: str) -> None:
+    def __init__(self, base: str | os.PathLike, app: str, scrub: Callable[[str], str] | None = None) -> None:
         if not _BUNDLE.match(app) or set(app) == {"."}:
             raise ValueError(f"{app!r} isn't an app id a map folder can be named after")
         self.app = app
@@ -187,6 +215,7 @@ class MapFile:
         self.lock_path = self.folder / "map.json.lock"
         self.routes_dir = self.folder / "routes"
         self.problem: str | None = None
+        self.scrub = scrub  # takes a test account's value out of a string; None: no accounts to keep out
 
     # ---- reading ----
     def read(self) -> tuple[dict | None, str | None]:
@@ -252,6 +281,11 @@ class MapFile:
 
     def _write(self, data: dict) -> None:
         self.routes_dir.mkdir(parents=True, exist_ok=True)
+        if self.scrub is not None:
+            data = without_values(data, self.scrub)
+            if (why := invalid(data)) is not None:  # never replace a map that reads with one that doesn't: the old file stays
+                log.error("the map %s was not saved: the redacted map is invalid (%s)", self.path, self.scrub(why))
+                return
         tmp = self.folder / f"map.json.{os.getpid()}.{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
         try:

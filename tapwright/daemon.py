@@ -143,6 +143,11 @@ JOURNEY_FRAMES = frozenset({"tap", "long_press", "type_text", "scroll", "toggle"
 # whether the field type_text really typed into is secure, appended by _type_text once it has resolved the field (after
 # any scroll or re-read), so a recording never trusts a guess made before the call (Codex, PR #6)
 _TYPED_SECURE: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar("tapwright_typed_secure", default=None)
+# while a recorded action runs: the element its touch was really aimed at, with the list it was found in, appended as the
+# touch goes out (a nested call's too: performance's tap). A recording saves a selector that holds an account's value by
+# this element, never by the list the agent had before the call (Codex, PR #10 cycle 6)
+_RESOLVED: contextvars.ContextVar[list[tuple["ui.Element", list["ui.Element"]]] | None] = contextvars.ContextVar(
+    "tapwright_resolved", default=None)
 # True while a replay's fresh start runs: its calls are real steps of a recording in progress (the app restart), but the
 # first-answer note goes on the replay's own answer, not on theirs
 _GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_greeting_held", default=False)
@@ -152,6 +157,12 @@ _GREETING_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright
 _COMPARED: contextvars.ContextVar[list["Compared"] | None] = contextvars.ContextVar("tapwright_compared", default=None)
 # While a client records: the pictures its recording already compared (the recording's `references`: folder, name,
 # digest of the bytes the check used), so `_compare` can refuse a save that would change one before it writes anything.
+def _title_of(tree: "ui.Tree | None") -> str:
+    """The navigation title a screen read shows, whitespace collapsed ("" when it has none)."""
+    structure = getattr(tree, "structure", None)
+    return " ".join((getattr(structure, "title", "") or "").split())
+
+
 def _name_key(name: str) -> str:
     """What a file system may make of a reference name: Windows and macOS ignore case (`home.png`, `HOME.png`), and
     macOS also treats a name's Unicode forms as one (NFC and NFD Hangul or accents). Names with one key are one file."""
@@ -677,6 +688,7 @@ class Toggled(Noted):
 class Typed(Noted):
     """`type_text`'s result, `Typed into <line>.` until the tree is read: then the first line also gives the value."""
     field: ui.Element = ui.Element("", "input")  # the input as it was when typed into
+    typed: str | None = None  # the text really typed (an account's value for its placeholder); never in an answer
 
     def same_field(self, now: ui.Element) -> bool:
         """Is `now` the field typed into (the ref may have gone to another input since)? The same ref and
@@ -689,7 +701,7 @@ class Typed(Noted):
         line = now.line(actions=False, place=False)
         if now.secure:
             return f"Typed into {line}. The value is hidden (secure field)."
-        return f"Typed into {line}. Value is now {json.dumps(now.value, ensure_ascii=False)}."
+        return f"Typed into {line}. Value is now {ui.quoted(now.value)}."
 
 
 class Scrolled(Noted):
@@ -874,7 +886,7 @@ class Daemon(journey_tool.JourneyTools):
         self.hub = FrameHub()
         self.pump = StreamPump(self._open_stream, self.hub, linger=stream_linger, retry=stream_retry, log=log,
                                suspended=self._fed_by_video)
-        self.log = log
+        self.log = lambda message: log(self.scrub_everywhere(message))  # (what any sink gets holds no account's value)
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that iOS's photo prompt holds, and until when: the runner answers nothing else meanwhile (Codex, PR #8)
         self._photo_wait: "tuple[asyncio.Future, float] | None" = None
@@ -921,7 +933,7 @@ class Daemon(journey_tool.JourneyTools):
         self._policed: tuple | None = None  # (tool, key) of a touch the policy checked before a scroll (§16.2)
         self._hunts: dict[str, list[ui.Element]] = {}  # {agent: the off-screen list when its run of scrolls began}
         # the maps (AGENT-TOOLS §18): learned from what agents see and do, saved in the background (mapkeeper.py)
-        self.maps = mapkeeper.Maps()
+        self.maps = mapkeeper.Maps()  # (the setter below gives it the accounts' scrub)
         self.accounts = accountlib.Store()  # the test accounts files, read again when they change (§18.6)
         self._builds: dict[str, tuple[float, str | None]] = {}  # bundle id -> (when read, "1.4.0 (212)"): the app's build
         self._language: dict[str, str] = {}  # bundle id -> the language open_app last started it with, for title hashes
@@ -1010,7 +1022,7 @@ class Daemon(journey_tool.JourneyTools):
     def _announce(self, by: str, kind: str, label: str | None = None, point=None, ok: bool = True,
                   code: str | None = None, caption: str | None = None, reason: str | None = None) -> None:
         # an account's value is scrubbed before it is broadcast or logged, as in an answer (Codex, PR #9 cycle 1)
-        scrub = self._loaded().scrub
+        scrub = self.scrub_everywhere
         label = scrub(label) if label else label
         caption = scrub(caption) if caption else caption
         reason = scrub(reason) if reason else reason
@@ -1266,7 +1278,7 @@ class Daemon(journey_tool.JourneyTools):
             self.stuck = stuck
         if self.state in ("live", "locked"):
             self.log(f"connection lost: {reason}")
-            self._set_state("not-answering" if stuck is not None else "reconnecting", str(reason)[:200])
+            self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
         # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
@@ -1456,10 +1468,10 @@ class Daemon(journey_tool.JourneyTools):
                         self.log(f"connected, but {e}")
                     self.stuck = e
                     state = "reconnecting" if self._ever_connected else "connecting"
-                    self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, str(e)[:200])
+                    self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, self._redact(str(e))[:200])
                 except Exception as e:
                     self.stuck = None
-                    self._set_state("reconnecting" if self._ever_connected else "connecting", str(e)[:200])
+                    self._set_state("reconnecting" if self._ever_connected else "connecting", self._redact(str(e))[:200])
                 else:
                     attempt = failures = 0
                     self.stuck = None
@@ -1530,6 +1542,7 @@ class Daemon(journey_tool.JourneyTools):
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
         atoken = _ACCOUNTS.set(accounts) if accounts is not None else None
+        rtoken = ui.REDACT.set(self._redactor())  # every screen string is redacted as it is rendered
         try:
             jr = self._journeys.get(client_id)
             if jr is None or name == "journey":
@@ -1542,6 +1555,7 @@ class Daemon(journey_tool.JourneyTools):
                 _MAPS.reset(mtoken)
             if dtoken is not None:
                 _DIALOG.reset(dtoken)
+            ui.REDACT.reset(rtoken)
             if atoken is not None:
                 _ACCOUNTS.reset(atoken)
 
@@ -1604,14 +1618,14 @@ class Daemon(journey_tool.JourneyTools):
                         finally:
                             _BASELINES.reset(basetoken)
             except Refused as e:
-                if (said := self._loaded().scrub(str(e))) != str(e):  # an account's value is never in an error either
+                if (said := self.scrub_everywhere(str(e))) != str(e):  # an account's value is never in an error either
                     raise Refused(e.code, said) from None
                 raise
             if top_level:
                 answer = self._with_network(name, answer)
                 if (ended := self._network_notes.pop(client_id, None)) is not None and name != "network":
                     answer = {**answer, "text": f"{answer['text']}\nNote: {ended}"}
-            if (said := self._loaded().scrub(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
+            if (said := self.scrub_everywhere(answer["text"])) != answer["text"]:  # ...nor in an answer: `<tester2's username>`
                 answer = {**answer, "text": said}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
@@ -1623,6 +1637,38 @@ class Daemon(journey_tool.JourneyTools):
                 _BRIEF.reset(btoken)
             if ftoken is not None:
                 _FIRED.reset(ftoken)
+
+    def _redact(self, text: str) -> str:
+        """A screen string without the test accounts' values (the call's accounts file, else the daemon's)."""
+        return self.scrub_everywhere(text)
+
+    def _redactor(self) -> "Callable[[str], str] | None":
+        """The redactor in force now: this call's (ui.REDACT), else the accounts' scrub; None when no account has a value
+        (nothing to redact: every string then goes out as it is)."""
+        if (inside := ui.REDACT.get()) is not None:
+            return inside
+        loaded = self._loaded()
+        return self.scrub_everywhere if loaded.redacts or self.accounts._redaction.redacts else None
+
+    @property
+    def maps(self) -> "mapkeeper.Maps":
+        return self._maps
+
+    @maps.setter
+    def maps(self, kept: "mapkeeper.Maps") -> None:
+        kept.scrub = self.scrub_everywhere  # whoever builds the maps, what they write holds no account's value
+        self._maps = kept
+
+    def scrub_everywhere(self, text: str) -> str:
+        """The text without the values of every accounts file this daemon has loaded (the call's, the server's, and any
+        earlier one): for what is written outside a call, a log line or a log ring's entry."""
+        if getattr(self, "accounts", None) is None:
+            return text
+        try:
+            self._loaded()  # (the call's file and the server's are read, so what they hold is remembered)
+        except Exception:
+            pass
+        return self.accounts.scrub(text)  # one pass over the original text, against every value current and past (cycle 12)
 
     def _loaded(self) -> "accountlib.Loaded":
         """The test accounts file this call uses (the call's own, else the daemon's), loaded; `accountlib.NONE` with none."""
@@ -1678,6 +1724,11 @@ class Daemon(journey_tool.JourneyTools):
             aimed = self._aim_for_recording(client_id, name, args)
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
+            resolved = _RESOLVED.get()
+            own = resolved is None or not _NESTED.get()  # (a nested call's touch is its caller's: performance's tap)
+            if own:
+                resolved = []
+                resolved_token = _RESOLVED.set(resolved)
             try:
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
@@ -1685,8 +1736,10 @@ class Daemon(journey_tool.JourneyTools):
                 raise
             finally:
                 _TYPED_SECURE.reset(secure_token)
+                if own:
+                    _RESOLVED.reset(resolved_token)
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known)
-            self._record_step(client_id, name, args, aimed, secure=any(typed_secure))
+            self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved)
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
             started = time.monotonic()
@@ -1777,7 +1830,7 @@ class Daemon(journey_tool.JourneyTools):
         reason = message.split(":", 1)[0] if error is not None and error.code in REASONED else None
         text = args.get("text")
         said = answer["text"] if answer is not None else message
-        scrub = self._loaded().scrub  # an account's value is never in the log (a label, a target's text)
+        scrub = self.scrub_everywhere  # an account's value is never in the log (a label, a target's text)
         target = actionlog.target_of(args.get("target"))
         if target is not None:
             target = {k: scrub(v) if isinstance(v, str) else v for k, v in target.items()}
@@ -1834,6 +1887,7 @@ class Daemon(journey_tool.JourneyTools):
         async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
             if entry_pid == proc.pid:
                 got[0] += 1
+                text = self.scrub_everywhere(text)  # a test account's value is never kept, so no retention cut can split one
                 if floor is None or at >= floor:
                     # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
                     ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
@@ -2054,7 +2108,7 @@ class Daemon(journey_tool.JourneyTools):
             raise Refused("unsupported", diagnostics.CRASH_NO_EXECUTABLE.format(app=shown))
         search = await self._phone_files("read the phone's crash reports",
                                          self.session.device.crash_reports(exe, diagnostics.CRASH_RECENT, bundle))
-        infos = [diagnostics.describe_crash(r, exe) for r in search.reports]
+        infos = [diagnostics.describe_crash(r, exe, self.scrub_everywhere) for r in search.reports]
         skipped = diagnostics.skipped_notes(search)
         # AGENT-TOOLS §15.2: only reports since the session began; `all` is the last 5 of those, not the newest alone
         infos = [i for i in infos if diagnostics.newer(i, self._began_wall)][:diagnostics.CRASH_RECENT if args["all"] else 1]
@@ -2079,8 +2133,12 @@ class Daemon(journey_tool.JourneyTools):
         data = await self._phone_files("copy the crash report", read())
         path = diagnostics.crash_folder(bundle) / diagnostics.safe_name(info.filename)
         try:
+            clean = diagnostics.sanitized_report(data, self.scrub_everywhere)  # no account's value, whatever the app wrote
+        except diagnostics.Unsanitizable as e:
+            raise Refused("unsupported", f"{info.filename}: {e}") from None
+        try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            path.write_bytes(clean)
         except OSError as e:
             raise Refused("internal", f"couldn't save the crash report to {path.parent}: {e.strerror or e}") from None
         return str(path)
@@ -2101,7 +2159,7 @@ class Daemon(journey_tool.JourneyTools):
             except Exception:
                 return None
             for crash in found.reports:
-                info = diagnostics.describe_crash(crash, exe)
+                info = diagnostics.describe_crash(crash, exe, self.scrub_everywhere)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
                     return info
@@ -2166,14 +2224,15 @@ class Daemon(journey_tool.JourneyTools):
     # ---- batches and scripts (AGENT-TOOLS §9) ----
     def _aim_for_recording(self, client_id: str, name: str, args: dict) -> dict | None:
         """While this agent records: the target its step will be saved with, worked out before the call (a ref names
-        an element of the list the agent has now)."""
+        an element of the list the agent has now). A recording keeps what was recorded, a navigation title too (only
+        learned map data keeps titles out, §18.1); a test account's value never (§18.6)."""
         if client_id not in self._recording or name not in batch.STEP_TOOLS or _NESTED.get():
             return None
         if name == "type_text" and args.get("as") is not None:
             routes.recorded_text("", args["as"])  # a name that can't be a variable is refused before the text is typed
         items = self.control.client(client_id).items
         if name == "performance":  # its `tap` is saved by id, label or text like a target
-            return batch.recorded_target(args.get("tap"), items)
+            return self._pre_aim(args.get("tap"), items)
         if name == "type_text":  # is the field secure? Its text then never goes into the file (safety review M4)
             field = None
             try:
@@ -2185,10 +2244,20 @@ class Daemon(journey_tool.JourneyTools):
                 inputs = [e for e in items if e.role == "input"]
                 field = inputs[0] if len(inputs) == 1 else None
             self._recording[client_id]["next_secure"] = bool(field is not None and field.secure)
-        return batch.recorded_target(args.get("target"), items)
+        return self._pre_aim(args.get("target"), items, name)
+
+    @staticmethod
+    def _pre_aim(target: object, items: list[ui.Element], tool: str | None = None) -> dict | None:
+        """The selector worked out before the call. One that holds a test account's value is never worked out from this
+        list (it may be stale, or empty before a first look): it is made from the element the touch really aimed at, in
+        `_record_step` (Codex, PR #10 cycle 6)."""
+        if batch.holds_value(target):
+            return None
+        return batch.recorded_target(target, items, tool)
 
     def _record_expect(self, client_id: str, args: dict) -> None:
-        """While recording: a `wait_for` that held right after an action becomes that step's `expect`."""
+        """While recording: a `wait_for` that held right after an action becomes that step's `expect`. A wait on a test
+        account's value can't be saved (§18.6): the save is refused, naming the step (Codex, PR #10 cycle 6)."""
         rec = self._recording[client_id]
         kind = next((k for k in batch.EXPECT_KINDS if args.get(k) is not None), None)
         if rec["steps"] and kind is not None and rec["steps"][-1]["tool"] == "performance":
@@ -2196,6 +2265,9 @@ class Daemon(journey_tool.JourneyTools):
             self._record_step(client_id, "wait_for", args, None)
             return
         if not rec["steps"] or kind is None or "expect" in rec["steps"][-1] or rec["steps"][-1]["tool"] == "compare_screen":
+            return
+        if isinstance(args[kind], str) and ui.private(args[kind]):
+            rec.setdefault("unsaved", []).append(len(rec["steps"]))  # (the step it would be the expectation of)
             return
         expect: dict = {kind: args[kind]}
         if args.get("gone"):
@@ -2253,32 +2325,74 @@ class Daemon(journey_tool.JourneyTools):
             step["width"] = int(args["width"])  # (a whole-number float passed the check; a script wants an int)
         rec["steps"].append(step)
 
-    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False) -> None:
+    def _typed_account_value(self, rec: dict, step: dict, text: str, secure: bool) -> str | None:
+        """The text a recorded `type_text` types, when it is or holds a test account's value (§18.6; Codex, PR #10 cycle 8).
+        Text that is exactly an account's username or password is saved as the variable the tools already type
+        (`${account.username}` / `${account.password}`, filled from drive's account); that variable is returned. Text that
+        merely holds a value, or is the placeholder an answer shows, has no variable to stand for it, and a value that
+        doesn't suit the field (a password in a text field) isn't one the variable would type: the step is left unsaved,
+        so the save is refused naming it, and its text is cleared. A value from before a reload (not in the file now) is
+        refused the same way, whole or held (Codex, PR #10 cycle 9). None for any other text (saved as typed)."""
+        if accountlib.mentions(text):
+            return None  # the placeholder itself, checked by the typing
+        loaded = self._loaded()
+        kinds = {kind for _, kind, value in loaded.entries() if value == text}
+        if kinds:
+            kind = "password" if secure else "username"
+            if kind in kinds:
+                return "${account." + kind + "}"
+        elif not (loaded.holds(text) or self.accounts.holds(text)):
+            return None  # (accounts: every value of the daemon's life, current or older)
+        rec.setdefault("unsaved_text", []).append(len(rec["steps"]) + 1)
+        step["text"] = ""
+        return None
+
+    def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False,
+                     resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None) -> None:
         """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
         text really went into is a secure one (read by type_text itself, after any scroll); the guess made before
-        the call (`next_secure`) counts too, and either hides the text."""
+        the call (`next_secure`) counts too, and either hides the text. `resolved`: the element the touch was really
+        aimed at, with its list; a selector that holds a test account's value is saved from it (its id, else its label
+        or text, else its point), and a step that can't be saved that way makes the save refused (Codex, PR #10 cycle
+        6), never left out without a word."""
         rec = self._recording.get(client_id)
         if rec is None or name not in batch.STEP_TOOLS or _NESTED.get():
             return
         key = "tap" if name == "performance" else "target"  # the argument that aims at an element
         step = {"tool": name, **{k: v for k, v in args.items() if k not in (key, "look", "screenshot")}}
         guessed = rec.pop("next_secure", False)
+        variable = None
+        if name == "type_text" and isinstance(args.get("text"), str) and not ("route" in rec and args.get("as")):
+            variable = self._typed_account_value(rec, step, args["text"], guessed or secure)
         if name == "type_text" and (guessed or secure):
             # a password is never written to a file (safety review M4): the user puts a test password in the script
             step["text"] = ""
             step["secure"] = True
-            if isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
+            if variable is not None:
+                step["text"] = variable  # the account's password, as the variable that types it
+            elif isinstance(args.get("text"), str) and accountlib.PLACEHOLDER.fullmatch(args["text"]):
                 step["text"] = args["text"]  # an account's placeholder isn't a password: it is what a script should hold
             else:
                 rec.setdefault("secure_steps", []).append(len(rec["steps"]) + 1)
+        elif variable is not None:
+            step["text"] = variable
         step.pop("as", None)
-        if name == "type_text" and "route" in rec and not step.get("secure") and isinstance(step.get("text"), str):
+        if variable is not None and "route" in rec and routes.ACCOUNT not in rec["variables"]:
+            rec["variables"].append(routes.ACCOUNT)  # a route that types an account's value lists it, so drive is given one
+        if name == "type_text" and variable is None and "route" in rec and not step.get("secure") and isinstance(step.get("text"), str):
             step["text"] = routes.recorded_text(step["text"], args.get("as"))  # `${name}`, or the text with a `${` escaped
             if args.get("as") and args["as"] not in rec["variables"]:
                 rec["variables"].append(args["as"])
+        given = args.get(key)
+        if aimed is None and batch.holds_value(given) and resolved:
+            found, items = resolved[0]  # the element the touch really went to, in the list it was aimed from
+            aimed = batch.recorded_element(found, items, name)
         if aimed is not None:
             step[key] = aimed
-        elif args.get(key) is not None:
+        elif batch.holds_value(given):
+            # a selector that holds an account's value, with no element it reached to save it by: the save is refused
+            rec.setdefault("unsaved", []).append(len(rec["steps"]) + 1)
+        elif given is not None:
             return  # a target that can't be saved (a ref gone stale): leave the step out rather than guess
         rec["steps"].append(step)
         rec["app"] = rec["app"] or self._bundle()
@@ -2342,7 +2456,7 @@ class Daemon(journey_tool.JourneyTools):
                                 {"look": False}).reach()
             finally:
                 _NESTED.reset(nested)
-            steps = routes.substitute(steps, {})
+            steps = routes.substitute(steps, {}, data.get("variables"))
         points = [n for n, step in enumerate(steps, 1)
                   if isinstance(step.get("target"), dict) and step["target"].get("x") is not None]
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
@@ -2428,15 +2542,25 @@ class Daemon(journey_tool.JourneyTools):
             rec = self._recording.get(client_id)
             if rec is None:
                 raise Refused("bad_params", "nothing is being recorded; start with record start: true")
+            self._recheck_typed(rec)
+            self._refuse_unsaved(client_id, rec)
             if rec.get("route"):
-                return await self._save_route(client_id, rec, scope)
+                # a route's every field is a template at the replay: a literal `${` recorded in a selector, an expectation or
+                # a link is written `$${`, so replay gives back the exact text (typed text was written so as it was typed).
+                # The copy that is saved is escaped; the recording keeps its raw steps, so a stop that fails (no place to
+                # end at) can be tried again without escaping them twice (Codex, PR #10 cycle 15)
+                return await self._save_route(client_id, rec, scope, [routes.escaped(step) for step in rec["steps"]])
             path = args.get("path")
             if path is not None and (not isinstance(path, str) or not path):
                 raise Refused("bad_params", f"path must be a file path, not {path!r}")
             path = str(batch.writable(path or str(batch.named(rec["name"]))))
             try:
                 pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-                pathlib.Path(path).write_text(json.dumps(batch.script(rec["name"], rec["app"], rec["steps"]),
+                # (a backstop: the steps' selectors were chosen without an account's value, §18.6; what is left of the
+                # screen's words in them, a typed text or an expectation, is redacted, never a key, a tool or a format,
+                # and the result must still be a script that loads: Codex, PR #10 cycle 3)
+                saved = batch.saved_script(batch.script(rec["name"], rec["app"], rec["steps"]), self._redact, path)
+                pathlib.Path(path).write_text(json.dumps(saved,
                                                          ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             except OSError as e:
                 raise Refused("bad_params", f"can't save the script to {path}: {e.strerror or e}") from None
@@ -2461,6 +2585,62 @@ class Daemon(journey_tool.JourneyTools):
         raise Refused("bad_params", "record takes start: true (with an optional name), or stop: true (with an optional "
                                     "path)")
 
+    def _recheck_typed(self, rec: dict) -> None:
+        """The typed text of every step checked again at the save, against the accounts as they are now and every value of
+        the daemon's life (Codex, PR #10 cycle 10): a file reloaded after the typing can make a typed literal an account's
+        value. Text that is exactly a current value, of the kind the field takes, becomes its variable; text that holds
+        any value, or a placeholder, makes the save refused naming the step (`unsaved_text`), never written as the
+        placeholder an answer shows. A variable the step already has (`${account.username}`, a route's `${name}`) is
+        kept; only the literal text around it is checked."""
+        loaded = self._loaded()
+        for n, step in enumerate(rec["steps"], 1):
+            # every field that isn't typed (a selector, an expectation, an ignore entry, an `if`) is checked as the text it
+            # stands for. While recording it is the raw text (a route's `$${` is written only at the save),
+            # which is what the decoded literal runs of the saved field are. The save is refused when it holds a value
+            # (Codex, PR #10 cycle 13 and 14)
+            if any(loaded.holds(s) or self.accounts.holds(s) for s in batch.literal_strings(step)):
+                rec.setdefault("unsaved", []).append(n)
+            text = step.get("text")
+            if step.get("tool") != "type_text" or not isinstance(text, str) or not text:
+                continue
+            literal, has_variable = batch.literal_runs(text, rec.get("variables") if "route" in rec else None)  # (`$${` decoded)
+            kinds = {kind for _, kind, value in loaded.entries() if not has_variable and value == literal[0]}
+            if kinds:
+                kind = "password" if step.get("secure") else "username"
+                if kind in kinds:
+                    step["text"] = "${account." + kind + "}"
+                    if "route" in rec and routes.ACCOUNT not in rec["variables"]:
+                        rec["variables"].append(routes.ACCOUNT)
+                    continue
+            elif not any(part and (loaded.holds(part) or self.accounts.holds(part)) for part in literal):
+                continue
+            rec.setdefault("unsaved_text", []).append(n)
+            step["text"] = ""
+
+    def _refuse_unsaved(self, client_id: str, rec: dict) -> None:
+        """A step that aimed by, or waited for, a test account's value and has nothing else to be saved by makes the save
+        refused (§18.6; Codex, PR #10 cycle 6): it is never left out, and the value is never written. The recording
+        ends, so it can be made again aiming by an id or a point. The step is named, never the value."""
+        typed = sorted(set(rec.get("unsaved_text") or ()))
+        if typed:
+            del self._recording[client_id]
+            many = len(typed) > 1
+            raise Refused("bad_params", f"can't save the recording: step{'s' if many else ''} {', '.join(map(str, typed))} "
+                                        "typed text that is or holds a test account's value in a way no variable can stand "
+                                        "for (only the whole text, a username in a text field or a password in a secure one, "
+                                        "is saved, as ${account.username} or ${account.password}). Nothing was saved and the "
+                                        "recording has ended: record it again, typing the account's value as the whole text "
+                                        "of a step.")
+        unsaved = sorted(set(rec.get("unsaved") or ()))
+        if not unsaved:
+            return
+        del self._recording[client_id]
+        steps = ", ".join(map(str, unsaved))
+        raise Refused("bad_params", f"can't save the recording: step{'s' if len(unsaved) > 1 else ''} {steps} aimed by or "
+                                    "waited for a test account's value, which is never saved, and there is nothing else "
+                                    "to save it by. Nothing was saved and the recording has ended: record it again, "
+                                    "aiming at that element by its id or a point, and waiting for other words.")
+
     async def _route_twin(self, name: str, scope: "Scope | None") -> str | None:
         """The refusal for a route name that is a saved route's in another case (1.13.1, item 5): it names the existing
         one. None when the app's map has no such route (or the screen can't say which app's map to read)."""
@@ -2471,11 +2651,14 @@ class Daemon(journey_tool.JourneyTools):
         other = namelib.twin(name, self.maps.file(self._maps_root(), bundle).load()["routes"])
         return None if other is None else namelib.twin_message("route", name, other)
 
-    async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None") -> dict:
-        """`record` with `stop` for a route: the steps, from the place it started to the place it ends at, as a file in the
-        app's map folder (§18.5)."""
+    async def _save_route(self, client_id: str, rec: dict, scope: "Scope | None", steps: list[dict]) -> dict:
+        """`record` with `stop` for a route: the steps (`steps`, as they are written), from the place it started to the
+        place it ends at, as a file in the app's map folder (§18.5)."""
         bundle, end = await self._route_place(scope)
-        route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], rec["steps"])
+        route = routes.route(rec["route"], rec["app"] or bundle, rec["start"], end, rec["variables"], steps)
+        # (a backstop: no step holds an account's value, §18.6; only the screen's words are redacted, and the result is
+        # checked as a script before it is saved)
+        route = batch.saved_script(route, self._redact, f"route {rec['route']}")
         routes.check(route)
         root = self._maps_root()
         try:
@@ -3236,6 +3419,12 @@ class Daemon(journey_tool.JourneyTools):
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
+            if not dry and client_id in self._recording and (touched := _RESOLVED.get()) is not None:
+                aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from
+                if aimed_at is not None and aimed_at[1] is not None and aimed_at[0] is not None and aimed_at[0].kind != "point":
+                    touched.append((aimed_at[1], aimed_at[2]))
+            box["back"] = getattr(getattr(s, "last_tree", None), "back", None)  # what `back` would press, before the touch
+            box["title_before"] = _title_of(getattr(s, "last_tree", None))  # the title the screen showed before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
             if name in DELIVERED_TOOLS and not dry:
                 box["hint"] = self._delivered_hint(args)  # what the touch was aimed at, as the list had it
@@ -3302,7 +3491,7 @@ class Daemon(journey_tool.JourneyTools):
                 raise Refused("ambiguous", f'{head}\nLook again, then add "index" (0-based) or use a ref.') from None
             # a touch a finger couldn't make: people watching see the step and why (VIEWER-PROTOCOL 1.4 `reason`)
             if e.code == "not_actionable":
-                said = str(e)
+                said = self._redact(str(e))  # (before element_name and the caption cut it, §18.6)
                 word = said.split(":", 1)[0] if ":" in said else ""
                 self._announce("agent", name, label=element_name(said) or None, ok=False, code=e.code,
                                reason=word if word.isidentifier() else None, caption=step_caption(name, said, args))
@@ -3323,7 +3512,8 @@ class Daemon(journey_tool.JourneyTools):
         view.moved = view.moved or not looks
         if not reads_only:
             self.unsettled = not looks
-        self._announce("agent", name, label=element_name(str(result)), caption=step_caption(name, str(result), args),
+        said_done = self._redact(str(result))  # (before element_name and the caption cut it, §18.6)
+        self._announce("agent", name, label=element_name(said_done), caption=step_caption(name, said_done, args),
                        point=self._point(self.session.last_point))
         if not looks and name == "back" and settle is not None:
             # back exists to change the screen: even with `look: false` it checks that something did (the stream's
@@ -3351,14 +3541,16 @@ class Daemon(journey_tool.JourneyTools):
         if isinstance(result, Toggled):
             landed = await self._toggle_landed(view, result)
         elif isinstance(result, Typed) and args.get("replace", True) and not args.get("submit"):
-            landed = await self._typed_landed(view, result, args["text"])
-            if landed is None and not result.field.secure and await self._typed_wrong(result, args["text"]) and \
-                    await self.control.agent(lambda: self.session.retype(args["text"])):
+            # the text the keys made (an account's value, not the ${account.…} the agent wrote), as the tree reads it
+            typed = result.typed if result.typed is not None else args["text"]
+            landed = await self._typed_landed(view, result, typed)
+            if landed is None and not result.field.secure and await self._typed_wrong(result, typed) and \
+                    await self.control.agent(lambda: self.session.retype(typed)):
                 # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
                 # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
                 # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
                 notes = [*notes, NOTE_RETYPED]
-                landed = await self._typed_landed(view, result, args["text"])
+                landed = await self._typed_landed(view, result, typed)
         else:
             landed = None
         if landed is not None:
@@ -3572,7 +3764,7 @@ class Daemon(journey_tool.JourneyTools):
                     break
                 return snap, loop.time() - began
             why = (f"{len(same)} matching fields" if len(same) != 1 else "the field is secure" if same[0].secure
-                   else f"the field reads {same[0].value!r}, not the typed text")
+                   else f"the field reads {self._redact(same[0].value)!r}, not the typed text")
             await asyncio.sleep(TOGGLE_POLL)
         if session_module.TRACE:  # (a typing that doesn't land here waits for the screen to settle: 1.6 USB took 2.1 s)
             self.log(f"trace type_text not landed after {loop.time() - began:.2f} s: {why}")
@@ -3630,11 +3822,13 @@ class Daemon(journey_tool.JourneyTools):
                 if call and ui.USERS_EYES.get() and element is not None and element.text:
                     call = {"target": {"text": element.text}}  # a user can't see ids: by the words on the glass
                 nested = _NESTED.set(True)  # the tool's own step: not recorded, not learned as a road
+                apart = _RESOLVED.set(None)  # (its touch is not the one the action it fires inside was aimed at)
                 try:
                     await self.run_tool(client_id, do["tool"], {**call, "look": False}, scope)
                 except Refused:
                     continue
                 finally:
+                    _RESOLVED.reset(apart)
                     _NESTED.reset(nested)
                 fired[r["name"]] = fired.get(r["name"], 0) + 1
                 return [reflex.said(r, reflex.seen(r), reflex.aim(r))]
@@ -3719,6 +3913,10 @@ class Daemon(journey_tool.JourneyTools):
         root = self._maps_root()
         before = box.get("from")
         previous = before[1] if before is not None and before[0] == bundle else None
+        # which places' titles the aimed element carries, decided BEFORE this read updates the stored title hashes: a
+        # screen that arrives with another title (Chat with Sara, then Omar) would hide a Back button's label (Codex,
+        # PR #10 cycle 2)
+        box["held"] = self._held_titles(box, root, bundle, previous)
         seen = self.maps.observe(root, bundle, tree, arrived=None, lang=self._language.get(bundle), previous=previous)
         if seen is None:
             view.place = None
@@ -3734,14 +3932,14 @@ class Daemon(journey_tool.JourneyTools):
             if (said := self.maps.link(root, bundle, seen.name, str(args.get("url")))) is not None:
                 notes.append(said)
         if box.get("mapping") and previous is not None and previous != seen.name and not typed_here:
-            move = self._move_of(name, args, box, root, bundle)
+            move = self._move_of(name, args, box, root, bundle, (previous, seen.name))
             if move is not None and _GRANTED.get():
                 notes.append(NOTE_NOT_ROAD)
             elif move is not None:
                 aim = box.get("aim")
-                names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None else {})
+                names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None and move["tool"] != "back" else {})
                 made = self.maps.record(root, bundle, previous, seen.name, move, names,
-                                        round((time.monotonic() - began) * 1000), await self._build_of(bundle))
+                                        round((time.monotonic() - began) * 1000), await self._build_of(bundle), box["held"])
                 notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in (made.dropped if made else []))
         if (problem := self.maps.problem_once(root, bundle)) is not None:
             notes.append(problem)
@@ -3752,16 +3950,42 @@ class Daemon(journey_tool.JourneyTools):
             text = "\n".join(lines)
         return {**answer, "text": text + "".join(f"\nNote: {n}" for n in notes)} if (notes or text != answer["text"]) else answer
 
-    def _move_of(self, name: str, args: dict, box: dict, root: str | None, bundle: str) -> dict | None:
+    def _held_titles(self, box: dict, root: str | None, bundle: str, previous: str | None) -> frozenset[str]:
+        """The places whose title (as the map held it before this read, or as the screen showed it before the touch) is
+        the label, text or value of the element the move aimed at."""
+        element = (box.get("aim") or (None, None, None))[1]
+        if element is None:
+            return frozenset()
+        texts = (element.label, element.text, element.value)
+        held = places.titled_places(self.maps.data(root, bundle), *texts)
+        shown = box.get("title_before")
+        if previous is not None and shown and any(t and " ".join(t.split()) == shown for t in texts):
+            held |= {previous}
+        return held
+
+    def _move_of(self, name: str, args: dict, box: dict, root: str | None, bundle: str,
+                 between: tuple[str, str]) -> dict | None:
         """The move an action made, as a road keeps it (roads.move_of); None when it isn't one that can be kept (an
-        `open_url` whose link matches no pattern, §18.3)."""
+        `open_url` whose link matches no pattern, §18.3). A native Back button is labelled with a screen's title, and a
+        title is never saved in plain text: its road is `back`, with no name, and any other move aimed by a title is no
+        road (Codex, PR #10 cycle 1)."""
         target, element, items = box.get("aim") or (None, None, [])
-        if element is not None and self._loaded().holds(element.text or ""):
-            return None  # a field that shows an account's value is no name for a road
+        if element is not None and any(self._loaded().holds(v) for v in (element.identifier, element.label, element.value)):
+            return None  # a field that shows an account's value (or the placeholder an agent may have aimed by) is no name for a road
+        data = self.maps.data(root, bundle)
+        held = box.get("held") or frozenset()
+        if (name == "tap" and element is not None and element.role != "cell"
+                and ui.is_back(element, box.get("back"))
+                and (element.name == "BackButton"
+                     or places.is_title(data, between, element.label, element.text, element.value, held=held))):
+            return {"tool": "back"}
         extra = dict(args)
         if name == "open_url":
-            extra = {"link": links.canonical(self.maps.data(root, bundle), str(args.get("url")))}
-        return roads.move_of(name, target, element, items, extra)
+            extra = {"link": links.canonical(data, str(args.get("url")))}
+        move = roads.move_of(name, target, element, items, extra)
+        if move is not None and self.maps.titled(data, *between, move, held):
+            return None  # Maps.record would refuse it too; no road, and no note
+        return move
 
     def _mapped_look(self, view, text: str) -> tuple[str, list[str]]:
         """A look's text with the `Place:` line in its header (§18.1, once the app has a map), and the notes the map has
@@ -3997,6 +4221,8 @@ class Daemon(journey_tool.JourneyTools):
         else:
             picture = await self._read(self.session.screenshot_png)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
+        # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
+        # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
         width, height = self.session.screen
         top = STATUS_BAR if height > width else 0.0  # the clock and the battery are the phone's, not the app's
@@ -4005,7 +4231,7 @@ class Daemon(journey_tool.JourneyTools):
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
         head = OCR_HEAD if new else OCR_NONE
-        lines[cut:cut] = [head, *(s.line(f"o{n}") for n, s in enumerate(new, 1))]
+        lines[cut:cut] = [head, *(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1))]
         return {**answer, "text": "\n".join(lines)}
 
     async def _audit(self, view, args: dict, notes: list) -> dict:
@@ -4681,6 +4907,8 @@ class Daemon(journey_tool.JourneyTools):
         self._dry(a, f"Would type {len(a['text'])} character{'s' if len(a['text']) != 1 else ''} into {_brief(field)}.")
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
 
+        self._touching(field)
+
         async def typed() -> None:
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
                                          submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=at)
@@ -4696,6 +4924,7 @@ class Daemon(journey_tool.JourneyTools):
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
+        done.typed = real
         return done
 
     async def _scroll(self, view, a: dict) -> Scrolled:
@@ -4721,6 +4950,7 @@ class Daemon(journey_tool.JourneyTools):
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
+            self._touching(hit if isinstance(hit, ui.Element) else None)
         direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
         top, bottom = s.last_insets
         band = (SCROLL_TOP_INSET if top is None else top,
@@ -4821,8 +5051,8 @@ class Daemon(journey_tool.JourneyTools):
             # comes before one on screen that only contains it (seen on the phone 2026-11-10: "Alert" found the
             # state line, which reads "… alert=none …", and the Alert button below the screen was never reached)
             want = ui._norm(target.text)
-            if (not any(want in (ui._norm(e.label), ui._norm(e.value)) for e in view.items)
-                    and any(want in (ui._norm(e.label), ui._norm(e.value)) for e in off)):
+            if (not any(want in ui._forms(e.label) | ui._forms(e.value) for e in view.items)
+                    and any(want in ui._forms(e.label) | ui._forms(e.value) for e in off)):
                 return ui.resolve(sorted([*view.items, *off], key=lambda e: (e.y, e.x)), target)
         try:
             return ui.resolve(view.items, target)
@@ -5008,7 +5238,7 @@ class Daemon(journey_tool.JourneyTools):
         (it can't touch an element that isn't found)."""
         if view.alert_now is not None:
             title, buttons = view.alert_now
-            alert = " ".join([json.dumps(title, ensure_ascii=False), *(f"[{b}]" for b in buttons)])
+            alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))
 
@@ -5140,7 +5370,7 @@ class Daemon(journey_tool.JourneyTools):
             tree = [*view.items, *getattr(s, "offscreen", [])]
             if final.identifier != hit.identifier or sum(e.identifier == hit.identifier for e in tree) != 1:
                 raise Refused("stale", f"{hit.line(ref=False, actions=False)} isn't the element found after the "
-                                       f"scroll (its identifier \"{hit.identifier}\" is gone or no longer its own), "
+                                       f"scroll (its identifier \"{ui.shown(hit.identifier)}\" is gone or no longer its own), "
                                        f"so nothing was touched. Look, then target what is there.")
         if name != "type_text" and self._police_key(final) != self._police_key(hit):
             # the scroll's own element isn't the one the policy checked first: what will be touched has its say too
@@ -5220,7 +5450,7 @@ class Daemon(journey_tool.JourneyTools):
         # what the element is called in what is said and sent (the refusal, the live view's request, the host's dialog):
         # an account's value scrubbed first, before a cut or an escape could leave part of it (Codex, PR #9 cycle 2);
         # the key the OK is matched by keeps the element's own words
-        what = f"{element.role} {ui.clip(self._loaded().scrub(element.text))}"
+        what = f"{element.role} {ui.clip(self.scrub_everywhere(element.text))}"
         if _DOUBLE.get():  # two touches under one check would act twice on what the policy holds back
             raise Refused("not_allowed", f'double_tap on an element the safety policy holds: {what} (policy word '
                                          f'"{word}"). Do one tap instead; a person\'s OK is for a single touch.')
@@ -5293,10 +5523,11 @@ class Daemon(journey_tool.JourneyTools):
             self._confirms[request.id] = request
             # an account's value is never in what a person is shown (as in an answer, _announce): `what` is scrubbed
             # already; the dialog's label is scrubbed before it is cleaned and cut, and both texts again as they go out
-            scrub = self._loaded().scrub
+            scrub = self.scrub_everywhere
             caption = step_caption(tool, what, a)
+            # (the policy word too: an account's value can be one, a password `Delete`)
             request.message = {"type": "confirm", "id": request.id, "by": "agent", "kind": tool,
-                               "caption": scrub(caption) if caption else caption, "word": word,
+                               "caption": scrub(caption) if caption else caption, "word": scrub(word),
                                "expires": int((time.time() + CONFIRM_TTL) * 1000)}
             self.broadcast(request.message)
             if caller is not None:  # the host's dialog, at the same moment (§11.3)
@@ -5605,6 +5836,14 @@ class Daemon(journey_tool.JourneyTools):
         found = ui.resolve(items, target)
         return self._element_at(found, items) if isinstance(found, tuple) else found
 
+    def _touching(self, element: "ui.Element | None") -> None:
+        """Right before a touch: the element it goes to, in the list it was chosen from, for a recording (Codex, PR #10
+        cycle 7). Every handler says what it finally chose (a toggle prefers a switch, a point has an element under it),
+        so a saved selector is never worked out again by another lookup. The last one before the call ends wins."""
+        touched = _RESOLVED.get()
+        if touched is not None and element is not None:
+            touched[:] = [(element, list(self.session.items))]
+
     async def _touch(self, view, a: dict, hold_ms: int) -> str:
         """`tap` and `long_press`: refuse a disabled element or one behind an alert, and touch the part of an
         element under a bar that shows. `force` skips all of it. A point is a raw touch."""
@@ -5625,11 +5864,13 @@ class Daemon(journey_tool.JourneyTools):
                 under = self._element_at(found, (await s.refresh()).items)
             said = await self._police(tool, a, under)
             self._dry(a, f"Would {word} at {found[0]:g},{found[1]:g}.{said}")
+            self._touching(under)
             return ui.without_place(await self._press(target, hold_ms))
         self._refuse_disabled(found)  # even `force` doesn't touch what the app has switched off
         if a.get("force"):
             said = await self._police(tool, a, found)  # `force` skips the checks above, never the policy
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
+            self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
             done.note = self._forced(view, found)
             return done
@@ -5643,6 +5884,7 @@ class Daemon(journey_tool.JourneyTools):
             point = self._touch_point(found)  # what is drawn over it now
         at = point or found.center
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
+        self._touching(found)
         if point is None:
             return ui.without_place(await self._press(target, hold_ms))
         await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
@@ -5751,6 +5993,7 @@ class Daemon(journey_tool.JourneyTools):
                 point = self._switch_control(view.items, found, shown)
         want = a.get("value")
         if want is not None and found.checked == want:
+            self._touching(found)  # nothing is touched, but a recording saves this switch, not the generic lookup's element
             return Unchanged(f"{found.line(actions=False, place=False)} is already {'true' if want else 'false'}.")
         aimed_with = self.session.items
         said = await self._police("toggle", a, found)
@@ -5768,6 +6011,7 @@ class Daemon(journey_tool.JourneyTools):
                     point = self._switch_control(self.session.items, found, shown)
         at = point or found.center
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
+        self._touching(found)
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
         # Until the tree is read, claim no new state: the first line is the verdict's to write
         where = "" if shown is None else f" at its visible part ({round(point[0])}, {round(point[1])})"
@@ -5800,13 +6044,7 @@ class Daemon(journey_tool.JourneyTools):
     @staticmethod
     def _switch_first(items: list[ui.Element], target: ui.Target) -> ui.Element:
         """The element a target names, preferring a switch: a row and its switch often share a label."""
-        if target.ref is None:
-            try:
-                return ui.resolve([e for e in items if e.role == "switch"], target)
-            except Refused as e:
-                if e.code != "not_found":
-                    raise  # several switches match: the agent picks one
-        return ui.resolve(items, target)
+        return ui.switch_first(items, target)
 
     async def _back(self, view, a: dict) -> str:
         """Close an open popover by a touch outside it (AGENT-TOOLS v1.4); else tap the navigation bar's back
@@ -6302,7 +6540,7 @@ class Daemon(journey_tool.JourneyTools):
             self._announce("person", action, point=self._point(point))
             return None
         except Refused as e:
-            return {"type": "error", "code": e.code, "message": str(e)}
+            return {"type": "error", "code": e.code, "message": self._redact(str(e))}
         except ConnectionLost as e:
             self.lost(e)
             return {"type": "error", "code": "reconnecting",
@@ -6310,7 +6548,7 @@ class Daemon(journey_tool.JourneyTools):
         except (ValueError, KeyError, TypeError, IndexError) as e:
             return {"type": "error", "code": "unsupported", "message": f"bad {kind} message: {e}"}
         except Exception as e:
-            return {"type": "error", "message": str(e)[:300]}
+            return {"type": "error", "message": self._redact(str(e))[:300]}
 
     def _person_action(self, kind: str, m: dict):
         """(coroutine function to run, kind for the action message, start point in points)."""

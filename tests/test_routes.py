@@ -36,14 +36,14 @@ def test_a_route_is_checked():
         assert e.value.code == "bad_params" and why in str(e.value), bad
 
 
-def test_a_step_may_use_only_the_variables_the_route_declares():
+def test_an_account_placeholder_needs_account_declared_and_any_other_undeclared_name_is_literal():
     with pytest.raises(Refused) as e:
         routes.check(sign_in(variables=[]))
     assert "account" in str(e.value) and "variables" in str(e.value)
     routes.check(sign_in(steps=[{"tool": "type_text", "text": "${language}"}], variables=["language"]))
-    with pytest.raises(Refused) as e:
-        routes.check(sign_in(steps=[{"tool": "type_text", "text": "${other}"}], variables=["language"]))
-    assert "other" in str(e.value)
+    # (Codex, PR #10 cycle 15: an undeclared `${other}` is literal text in typed text too, as in every other field)
+    routes.check(sign_in(steps=[{"tool": "type_text", "text": "${other}"}], variables=["language"]))
+    assert routes.substitute([{"tool": "type_text", "text": "${other}"}], {"other": "x"}, ["language"])[0]["text"] == "${other}"
 
 
 def test_an_account_value_is_the_whole_text_of_a_step_never_part_of_one():
@@ -63,6 +63,20 @@ def test_variables_are_filled_in_everywhere_a_step_has_text():
     got = routes.substitute(steps, {"language": "Arabic", "id": "42"})
     assert got[0]["target"] == {"text": "Arabic"} and got[1]["text"] == "to Arabic!" and got[2]["url"] == "wayfare://trips/42"
     assert got[3]["expect"] == {"text": "Arabic"} and steps[0]["target"] == {"text": "${language}"}  # the route itself is untouched
+
+
+def test_an_undeclared_variable_is_literal_text_in_every_field():
+    steps = [{"tool": "tap", "target": {"text": "a ${x} b $${language}"}}]
+    got = routes.substitute(steps, {"language": "Arabic", "x": "X"}, ["language"])
+    assert got[0]["target"] == {"text": "a ${x} b ${language}"}  # (`x` is not declared; `$${` is a literal `${`)
+    routes.check(sign_in(steps=steps, variables=["language"]))
+
+
+def test_the_recorder_writes_a_literal_dollar_brace_twice_in_every_field_but_the_typed_text_it_writes_itself():
+    step = {"tool": "tap", "target": {"label": "hi ${a}"}, "expect": {"text": "ok $${b}"}}
+    saved = routes.escaped(step)
+    assert saved == {"tool": "tap", "target": {"label": "hi $${a}"}, "expect": {"text": "ok $$${b}"}}
+    assert routes.substitute([saved], {}, [])[0] == step  # (replay reads the exact text back)
 
 
 def test_an_account_placeholder_is_left_for_the_typing_to_fill():

@@ -89,6 +89,7 @@ class Trip:
         self.bid = ""
         self.may_jump = True
         self.foreign = False  # the app in front at the last read isn't the trip's app
+        self.live: dict[str, set[str]] = {}  # the titles each place's screen showed during this call (kept out of a repaired road)
 
     # ---- the map ----
     @property
@@ -99,7 +100,11 @@ class Trip:
         """The saved place a read is; None when it is none (nothing is saved here: a drive only recognises)."""
         if tree is None or self.foreign or not places.has_structure(tree):
             return None
-        return places.locate(self.data, places.read_place(tree, self.d._language.get(self.bundle)))[0]
+        read = places.read_place(tree, self.d._language.get(self.bundle))
+        place = places.locate(self.data, read)[0]
+        if place is not None and read.title:
+            self.live.setdefault(place, set()).add(read.title)
+        return place
 
     # ---- reading the screen ----
     async def _stop_if_needed(self) -> None:
@@ -429,8 +434,10 @@ class Trip:
             return
         if seen.place == hop.dst:
             if hop.fixed is not None:
-                made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, d._loaded().clean(hop.fixed.names), ms, self.build)
-                self.dropped([(a, b) for a, b in made.dropped])
+                if not d._loaded().holds_in(hop.move):  # a target that holds an account's value is no road: it stays as it was
+                    made = d.maps.repair(self.root, self.bundle, hop.src or "", hop.road["move"], hop.dst, hop.move, d._loaded().clean(hop.fixed.names), ms, self.build,
+                                       frozenset(self.live.get(hop.src or "", set()) | self.live.get(hop.dst, set())))
+                    self.dropped([(a, b) for a, b in made.dropped])
                 self.repairs.append(hop.fixed)
                 self.lines.append(driving.repaired_line(hop.fixed))
             else:
@@ -446,7 +453,7 @@ class Trip:
     async def run_route(self, name: str, route: dict) -> None:
         """Run a saved route's steps, with its variables filled in, through `run`'s own executor: every step passes the
         same checks as a single call, `if` and `optional` work, and a step that fails stops the drive (§18.5)."""
-        steps = routes.substitute(route["steps"], self.req.values)
+        steps = routes.substitute(route["steps"], self.req.values, route.get("variables"))
         try:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:

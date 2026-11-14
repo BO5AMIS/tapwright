@@ -488,6 +488,7 @@ class Session:
         rect). `types` are XCUIAccessibilityAuditType names; empty is all of them."""
         found = (await self._call("POST", "/session/{sid}/wda/performAccessibilityAudit", {"auditTypes": types},
                                   timeout=AUDIT_TIMEOUT)).get("value")
+        # (kept as XCTest says it, to be matched with the tree's elements: audit.rows_of redacts what it shows)
         return [i for i in found if isinstance(i, dict)] if isinstance(found, list) else []
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:

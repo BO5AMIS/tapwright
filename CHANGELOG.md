@@ -1,5 +1,88 @@
 # Changelog
 
+## 1.6.1 (2026-11-14)
+
+- A place is `place_<n>` until a person names it. Tapwright no longer names a place after a repeated navigation title
+  (a private title such as "Chat with Sara" would have become a stored place name). Maps that already hold
+  title-derived names keep them. Same rule as AGENT-TOOLS 1.13.2, §18.1.
+- Tapwright never names a place after a navigation title, and learned roads keep no title in plain text (a native Back
+  is learned as `back`). Scripts, routes and reflexes you record or define keep what you recorded.
+  A native Back button is labelled with the title of the screen under it, so a road learned from a tap on it is `back`
+  with no name; a road that would aim by a title (or keep one among its other names) keeps none of it. Whether a tap was
+  on the Back button is decided before the screen is read again, so a screen that comes back with another title (a chat
+  renamed) doesn't hide it, and only a tap on it is learned as `back` (a long press is not). A recorded script or route
+  keeps its steps, waits, expectations and `ignore` entries as recorded, a title included, so it replays the same way.
+- `crash` with `pull` also replaces a number, true, false or null in the report's JSON whose text is a test account's
+  value (a PIN, a user id) with the placeholder, and checks the finished file; a report that still holds a value is not
+  saved, and the answer says so. A road repaired during `drive` keeps none of the titles the screens showed on the way.
+  A recorded step aimed by a placeholder is saved from the element the action really touched (a toggle's switch).
+- A test account's password or username that a screen shows (a revealed password) is now replaced by its placeholder
+  (`<tester2's password>`) in everything that leaves Tapwright, in any form (escaped, collapsed, cut): text answers and
+  errors, change lists (a `(was …)` cut no longer keeps a password's end), alerts, the audit's element lines (`id=`) and
+  XCTest's words, OCR lines, the live view's captions and confirmation requests, the host's OK dialog, recorded scripts
+  and routes, maps (ids and title hashes), journey reports (`report.md`, `report.html`, `journey.json`, an exported
+  issue's title) and the action log. Each is redacted before it is cut.
+  Inside, Tapwright keeps the screen's own words, so the safety policy, typing and matching work as they do without
+  accounts: a password `Delete` doesn't hide a Delete button (or an alert's Delete) from the confirmation or a block
+  rule, and replacing a field's text erases all of it, not as many characters as its placeholder has. A target or an
+  expectation matches the screen's words or their placeholder, so `{"text": "<tester2's username>"}` finds what an
+  answer showed that way, and a script that names the value itself still replays.
+  A recording never saves a selector that holds a value or its placeholder: it takes the id, else the label or text,
+  else the point of the element the touch really reached (not of the list the agent had before the call, which may be
+  empty before a first look). A step that can't be saved that way, or a wait or expectation on a value, refuses the save
+  with a message that names the step and never the value; nothing is saved and no step is dropped without a word. A
+  `compare_screen` ignore that holds a value is saved by the element's id or rectangle. As a script or route is written, only its content (labels, texts, ids, values, links) is redacted,
+  never a key, a tool, the format or a `${account.…}`, so an account whose username is `tap` leaves the saved tool
+  `tap`. A redacted file is checked as `replay` reads it before it is reported saved.
+  Every sink is guarded where it writes, so a path that was missed can't leak: a diagnostic (an app's log line, a
+  crash reason, the logs a failed step carries) is redacted before any length cut, and a value is never kept in the log
+  ring; the daemon's log (`serve.log`) redacts every message and traceback with the accounts the daemon has loaded; a map
+  holds no account value (the selected tab's id, a repaired road's target; the writer drops a road or replaces a value
+  that still holds one, never a key); and a value that the screen's text shows without its invisible direction marks
+  is redacted in that form too.
+  Every shape of a value is redacted, and `holds` knows each. What is guaranteed: a value is found as it is; with
+  whitespace normalized (any run of whitespace or `+` is one space, the ends may be trimmed) and direction marks
+  anywhere; percent-encoded (`%HH` in either case, UTF-8); with JSON or Python escapes (`\uXXXX` and surrogate pairs,
+  `\UXXXXXXXX`, `\xHH`, `\\`, `\"`, `\'`, `\/`, `\b`, `\f`, `\n`, `\t`, `\r`); and any composition of those, each
+  layer a whole-text encoder (a `%r` inside a JSON crash report, a URL inside a JSON string) or a different escape per
+  character, decoded pass by pass to convergence. Only those escapes are decoded: any other backslash is a literal
+  character, so a password `pass\word` doesn't hide the word `password`. Every occurrence at every level, overlapping
+  ones included, is mapped back to the characters it came from and redacted whole, and a log message, a traceback or a
+  report shows none. Decoding stops at a work limit of 16 passes; a whitespace-separated token that
+  would still change is redacted whole as `<a value encoded too deep to check>` and counts as holding a value, so
+  nothing is released unchecked. Searching is linear in the text and the values. A username or password is 3 to 256
+  characters (at most 256 as written, at least 3 once decoded and trimmed, so three spaces are refused) and must settle
+  within the limit, and a file holds at most 32 accounts (64 values); a file that breaks this is refused when it loads,
+  naming the account and the field (or the number of accounts), never the
+  value. Not covered: other encodings (base64, HTML entities, a hash, a change of case, a value split by other text), and a
+  backslash left bare right before an escaped character (`\` + `\x73`), which JSON and Python, and the matcher, read
+  as an escaped backslash; and text around a value that ends or starts with an incomplete escape (`%2`, `\`, `\u00`)
+  and so is decoded together with the value's first or last characters (boundary fusion), which the matcher catches
+  in the common cases as a best effort, without a guarantee.
+  A route's declared variables are filled in every string field and an undeclared `${name}` is literal text in every
+  field, typed text included; a literal `${` is written `$${` in every field the recorder saves (in the copy it writes,
+  so a save that fails and is tried again escapes it once), so a replay taps the element that was recorded; the save
+  reads every field's literal runs decoded. A value ever
+  loaded from any accounts file stays redacted for the daemon's life, even after the file changes (typing uses only the
+  current ones). A crash report saved by `crash` with `pull` (and the copy `replay` puts beside a failing script) is a
+  sanitized copy in the same format: each JSON document (or JSON line) is parsed and every decoded string scrubbed, so
+  a value its bytes hold only escaped is caught too. The map writer redacts only content fields (never the format, a hash, a key or a
+  name), and a redacted map that wouldn't read never replaces the file.
+  Only escapes are case-insensitive; the value's own letters keep their case.
+  A recording refuses to save typed text that holds a value from before an accounts-file reload, as it does for a current
+  one, and checks typed text again at the save against the file as it is then.
+  Typed account values are recorded as `${account.username}` / `${account.password}` (text that is exactly the value, a
+  username in a text field, a password in a secure one); text that only holds a value is refused naming the step. A
+  recorded selector is counted and checked the way the replaying tool resolves it (a toggle counts switches first), and a
+  toggle that changes nothing is still recorded by its switch.
+- `tapwright call TOOL -` reads its JSON from standard input as UTF-8 on every system. On Windows it was read in the
+  console's code page, so Arabic or Japanese piped in was typed as mojibake. Input that isn't UTF-8 is refused, not
+  sent.
+- QUALITY-BAR 2.5 (`docs/QUALITY-BAR.md`).
+- The spec is AGENT-TOOLS 1.13.2 (`docs/AGENT-TOOLS.md`, the same bytes as Tapline's). Besides §18.1, it says that
+  pictures are free of a password only while its field stays secure (§18.6), adds `"by": "chat"` to `confirm_closed`
+  for an OK given in the chat (§11.3), and marks the passcode unlock (`phone.passcode`) as planned.
+
 ## 1.6.0, "the Speed Update" (2026-11-13)
 
 An agent on the phone should feel almost instant. A real run (10 workers, 760 calls) showed the largest cost was

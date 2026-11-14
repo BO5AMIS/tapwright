@@ -6,8 +6,9 @@ sheet or an alert). The keyboard isn't counted. `parts` keeps those pieces, so t
 part.
 
 Never in a key, a name or the map file: a list row's text, a param's value, typed text, anything from a secure field.
-A navigation title is the one piece of content that is looked at: it breaks a tie between two places, and it names a
-place once it showed the same title on two visits. In the map it is kept only as an HMAC (`title_hash`), per language.
+A navigation title is the one piece of content that is looked at: it breaks a tie between two places. It never names
+one (1.13.2): a place is `place_<n>` until a person names it. In the map it is kept only as an HMAC (`title_hash`), per
+language.
 
 The functions here work on the map as plain JSON (the `agent-tools-map` of §18.9, built by `empty_map`), so they are
 testable without a file or a phone. mapfile.py reads and writes it.
@@ -69,13 +70,14 @@ def _tab(tree: ui.Tree) -> str | None:
     tabs = [e for e in tree.items if e.role == "tab"]
     for position, tab in enumerate(tabs, 1):
         if tab.selected:
-            return tab.identifier or f"#{position}"
+            return ui.shown(tab.identifier) if tab.identifier else f"#{position}"  # (as an answer shows it, §18.6)
     return None
 
 
 def parts_of(tree: ui.Tree) -> dict:
     layer = "alert" if tree.alert is not None else "sheet" if tree.behind else None
-    return {"ids": list(tree.structure.ids), "kinds": list(tree.structure.kinds), "tab": _tab(tree), "layer": layer}
+    # (an id is kept in the map as an answer shows it: a test account's value as its placeholder, §18.6)
+    return {"ids": [ui.shown(i) for i in tree.structure.ids], "kinds": list(tree.structure.kinds), "tab": _tab(tree), "layer": layer}
 
 
 def signature(parts: dict) -> str:
@@ -148,16 +150,35 @@ def _flat(title: str) -> str:
 def title_hash(title_key: str, lang: str, title: str) -> str:
     """A title as it is kept in the map: HMAC-SHA-256 with the map's random key, over the language and the title,
     cut to 16 hex characters. Equality is all a tie-break needs; no title can be read back."""
-    mac = hmac.new(bytes.fromhex(title_key), f"{lang}\0{_flat(title)}".encode("utf-8"), hashlib.sha256)
+    # (over the title as an answer shows it: a test account's value in it as its placeholder, §18.6)
+    mac = hmac.new(bytes.fromhex(title_key), f"{lang}\0{_flat(ui.shown(title))}".encode("utf-8"), hashlib.sha256)
     return mac.hexdigest()[:HASH_CHARS]
 
 
-def slugify(title: str) -> str | None:
-    """A title as a name: ASCII, lower case, `_` for spaces. None when it has no ASCII letter left (Arabic, or only
-    digits): such a place stays `place_<n>`, so a name never depends on the language of the first visit."""
-    plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii").lower()
-    slug = re.sub(r"[^a-z0-9]+", "_", plain).strip("_")
-    return slug[:NAME_MAX].strip("_") if re.search(r"[a-z]", slug) else None
+def titled_places(data: dict, *texts: str | None) -> frozenset[str]:
+    """The places (of the whole map) whose stored title hash is any of these texts. Worked out BEFORE a screen read
+    updates the hashes: an arrival that changes a title ("Chat with Sara" to "Chat with Omar") overwrites the hash the
+    Back button's label still matches (Codex, PR #10 cycle 2)."""
+    return frozenset(name for name, place in data["places"].items()
+                     if any(text and title_hash(data["titleKey"], lang, text) == wanted
+                            for lang, wanted in place.get("titles", {}).items() for text in texts))
+
+
+def is_title(data: dict, between: tuple[str, ...], *texts: str | None, held: frozenset[str] = frozenset()) -> bool:
+    """Is any of these texts the navigation title of one of the places `between` (a road's two ends)? A native Back
+    button is labelled with the title of the screen under it, and a button often carries the title of the screen it
+    opens, so those two places are the ones whose titles a road's names can hold. A title is kept only as a hash
+    (never in plain text), so a road that would hold one keeps nothing of it. Only the two ends are checked, not every
+    title of the app: a label that merely equals some other screen's title is no title of this road. `held`: the places
+    a title matched before the screen was read (`titled_places`), which a title change since cannot take back."""
+    if held.intersection(between):
+        return True
+    for name in between:
+        place = data["places"].get(name)
+        for lang, wanted in (place.get("titles", {}) if place else {}).items():
+            if any(text and title_hash(data["titleKey"], lang, text) == wanted for text in texts):
+                return True
+    return False
 
 
 def clean_name(text: str) -> str:
@@ -223,8 +244,8 @@ def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
 
 def visit(data: dict, read: PlaceRead, now: str, arrived: bool = True) -> Visit:
     """The screen the agent is on: the saved place it is, or a new one (`place_<n>`). `arrived`: the agent came here
-    from somewhere else (a look at the same screen again is not a second visit). A place whose title shows the same
-    on a second arrival is named after it, unless a person named it or its title has changed between visits."""
+    from somewhere else (a look at the same screen again is not a second visit). A place stays `place_<n>` until a
+    person names it: a title never names it (AGENT-TOOLS 1.13.2, §18.1)."""
     name, score = locate(data, read)
     if name is None:
         name = _unique(data, f"place_{_next_number(data)}")
@@ -233,24 +254,9 @@ def visit(data: dict, read: PlaceRead, now: str, arrived: bool = True) -> Visit:
         return Visit(name, True, None, 1.0)
     place = data["places"][name]
     place["last"] = now
-    renamed = None
-    if arrived and read.title:
-        titles = place.setdefault("titles", {})
-        now_hash, before = title_hash(data["titleKey"], read.lang, read.title), titles.get(read.lang)
-        varies = place.setdefault("titleVaries", [])
-        if before is None:
-            titles[read.lang] = now_hash
-        elif before != now_hash:  # a title that changes between visits is content, not a name
-            titles[read.lang] = now_hash
-            if read.lang not in varies:
-                varies.append(read.lang)
-        elif not place.get("named") and read.lang not in varies and (slug := slugify(read.title)):
-            if _NUMBERED.match(name):  # only a number is replaced; a title's name stays as it is
-                renamed, name = name, _unique(data, slug, besides=name)
-                _move(data, renamed, name)
-        if not varies:
-            del place["titleVaries"]
-    return Visit(name, False, renamed, score)
+    if arrived and read.title:  # the latest title's hash, for the tie-break; it never names the place (1.13.2)
+        place.setdefault("titles", {})[read.lang] = title_hash(data["titleKey"], read.lang, read.title)
+    return Visit(name, False, None, score)
 
 
 def _move(data: dict, old: str, new: str) -> None:

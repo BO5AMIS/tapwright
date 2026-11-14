@@ -69,7 +69,9 @@ def element_of(attrs: dict, items: list[ui.Element]) -> str:
     # what the app's own text says is shown as element lines show text: one line, quoted and capped (review 1.3.1:
     # a raw label could add a line of its own to the answer)
     named = f" {ui.clip(label)}" if label else ""
-    plain_id = " ".join(str(ident).split())[:ui.TEXT_LIMIT] if ident else ""
+    # (matched above in XCTest's own words; shown redacted, before it is collapsed or cut: a test account's value
+    # as its placeholder, §18.6)
+    plain_id = " ".join(ui.shown(str(ident)).split())[:ui.TEXT_LIMIT] if ident else ""
     shown = f" id={plain_id}" if plain_id else ""
     if not kind:
         if not (label or ident or any(box[2:])):
@@ -118,7 +120,7 @@ NO_TRAIT_FIX = 'give it accessibilityRole="button" (or a native control) with ac
 def no_trait(items: list[ui.Element]) -> list[tuple[str, str, str]]:
     """(`trait`, element line, what) for every radio or checkbox that React Native types `Other` (no trait: VoiceOver
     can focus it but doesn't announce it as a control)."""
-    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {json.dumps(e.text or e.role, ensure_ascii=False)}'
+    return [("trait", e.line(), f'no trait: VoiceOver doesn\'t announce {ui.quoted(e.text or e.role)}'
              " as a control") for e in items if e.no_trait]
 
 
@@ -130,7 +132,8 @@ def rows_of(issues: list[dict], items: list[ui.Element], types: list[str]) -> li
         kind = FROM_XCTEST.get(str(issue.get("auditType") or ""), "")
         if not kind or kind not in types:
             continue
-        what = str(issue.get("compactDescription") or "").strip().rstrip(".") or WHAT[kind]
+        # XCTest's words quote the element's text (a revealed password too): shown redacted, as every answer is
+        what = ui.shown(str(issue.get("compactDescription") or "")).strip().rstrip(".") or WHAT[kind]
         rows.append((kind, element_of(issue.get("elementAttributes") or {}, items), what))
     if "trait" in types:
         told = {line for kind, line, _ in rows if kind == "trait"}  # XCTest's own row for an element stands for ours

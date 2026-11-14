@@ -11,10 +11,11 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from contextvars import ContextVar
+from typing import Callable, NamedTuple
 from xml.etree import ElementTree as ET
 
-from . import trace
+from . import accounts, trace
 from .control import TAP_MS, Refused
 from .device import DeviceError
 
@@ -59,7 +60,7 @@ ROLE_ACTIONS = {"button": ("tap",), "link": ("tap",), "cell": ("tap",), "tab": (
 # and any other set are listed.
 IMPLIED_ACTIONS = {role: acts for role, acts in ROLE_ACTIONS.items() if role != "cell"}
 
-_BIDI_MARKS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"))
+_BIDI_MARKS = accounts.BIDI_MARKS  # (what iOS puts around numbers; an account value shown without them is redacted too)
 
 
 def _text(v) -> str:
@@ -67,10 +68,58 @@ def _text(v) -> str:
     return "" if v is None else str(v).translate(_BIDI_MARKS).strip()
 
 
+REDACT: ContextVar[Callable[[str], str] | None] = ContextVar("tapwright_redact", default=None)
+
+
+def shown(text: str) -> str:
+    """Screen text as an answer may show it: a test account's username or password is replaced by its placeholder
+    (AGENT-TOOLS §18.6). Every string from the screen goes through this before it is escaped, collapsed or cut."""
+    redact = REDACT.get()
+    return redact(text) if redact is not None else text
+
+
+# the placeholder an account's value is shown as (accounts.Loaded.scrub): `<tester2's password>`
+PRIVATE = re.compile(r"<[A-Za-z0-9_-]{1,40}'s (?:username|password)>")
+
+
+def private(text: str) -> bool:
+    """Does the text hold a test account's value, or the placeholder it is shown as? Such text is never saved as a
+    selector, a name or a step (a recording, a route, a map): the value is private, and the placeholder is no text an
+    app shows."""
+    return bool(text) and (shown(text) != text or PRIVATE.search(text) is not None)
+
+
+def redacted(data: object, redact: Callable[[str], str] | None = None, keep: frozenset[str] = frozenset()) -> object:
+    """`data` (strings, lists, tuples, dicts) with every string VALUE redacted (`redact`, else this call's REDACT). A
+    dict's keys are never touched (they are the data's structure, not the screen's words: an account whose username is
+    `tap` must not rename a key), nor the values under the keys in `keep` (a file's path, a format's name). For what
+    is written to a file, after the screen's own words have been redacted where they were put in."""
+    redact = redact or REDACT.get()
+    if redact is None:
+        return data
+
+    def walk(v: object) -> object:
+        if isinstance(v, str):
+            return redact(v)
+        if isinstance(v, dict):
+            return {k: (x if k in keep else walk(x)) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            if isinstance(v, list):
+                return [walk(x) for x in v]
+            return type(v)(*(walk(x) for x in v)) if hasattr(v, "_fields") else tuple(walk(x) for x in v)
+        return v
+    return walk(data)
+
+
+def quoted(text: str) -> str:
+    """Screen text as a JSON string, redacted first (no collapsing or cutting)."""
+    return json.dumps(shown(text), ensure_ascii=False)
+
+
 def clip(text: str, limit: int = TEXT_LIMIT) -> str:
     """One line, at most `limit` characters, as a JSON string. A cut ends, inside the quotes, with how many
     characters are missing: `…(+57)` (AGENT-TOOLS v1.5)."""
-    flat = " ".join(text.split())
+    flat = shown(" ".join(shown(text).split()))  # a value is redacted before escaping, collapsing or cutting
     missing = len(flat) - limit
     return json.dumps(flat[:limit] + (f"…(+{missing})" if missing > 0 else ""), ensure_ascii=False)
 
@@ -152,7 +201,7 @@ class Element:
         elif self.text:
             parts.append(clip(self.text))
         if self.identifier and not eyes:  # a user sees no ids
-            parts.append(f"id={self.identifier}")
+            parts.append(f"id={shown(self.identifier)}")
         # a switch's value ("1", "0") is already `checked=`; an empty input's placeholder is `placeholder=` (v1.7)
         if self.shows_placeholder:
             parts.append(f"placeholder={clip(self.placeholder)}")
@@ -219,6 +268,7 @@ class Tree:
     # one is covered); what is off screen under a presented sheet is here too
     behind: list[tuple[Element, Element | None]] = field(default_factory=list)  # (hidden, what is in front)
     structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
+    back: "Back | None" = None  # what `back` would do on this screen (back_button), when the screen's size is known
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
@@ -486,7 +536,11 @@ def rn_label(label: str) -> str:
 
 
 def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
-    """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError."""
+    """WebDriverAgent's XML as a tree, with every frame in the screen's coordinates. Raises DeviceError.
+
+    The tree keeps the screen's own words, a test account's value too: the policy, matching, typing and the recorder
+    decide with them. Everything that leaves the process redacts them (`shown`, `clip`, `quoted`; AGENT-TOOLS §18.6;
+    Codex, PR #10 cycle 3: redacting here hid a `Delete` from the policy and cut a field's erase short)."""
     try:
         root = ET.fromstring(_clean(source))
     except ET.ParseError as e:
@@ -717,6 +771,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
         tree.app = (_text(root.get("label")) or _text(root.get("name")) or bundle, bundle)
     walk(root,(0.0, 0.0, screen[0], screen[1]) if screen else (-inf, -inf, inf, inf), False, False, False)
     tree.structure = _structure(root, screen_rect)
+    tree.back = _back_of(root, screen) if screen else None
 
     keyboards = {n for n, bar in covering if bar.kind == "Keyboard"}
 
@@ -956,7 +1011,7 @@ def elements(source: str, screen: tuple[float, float] | None = None, keyboard: b
 
 
 def alert_line(alert: Alert) -> str:
-    return f"Alert: {json.dumps(alert.title, ensure_ascii=False)} " + " ".join(f"[{b}]" for b in alert.buttons)
+    return f"Alert: {quoted(alert.title)} " + " ".join(f"[{shown(b)}]" for b in alert.buttons)
 
 
 ICON_MAX = 64.0  # points: a button this small and square, with a label and no visible text of its own, is an icon
@@ -1122,27 +1177,46 @@ def more_candidates(total: int, shown: int) -> list[str]:
     return [f'  (+{total - shown} more; use a ref or "index")'] if total > shown else []
 
 
+def _forms(text: str) -> set[str]:
+    """A text as a selector may name it: the screen's own words, and as an answer shows them (a test account's value
+    as its placeholder), each stripped and casefolded. An agent that read `<tester2's username>` finds the element by
+    it, and a script saved before with the words themselves still does (Codex, PR #10 cycle 3)."""
+    return {_norm(text), _norm(shown(text))} if text else {""}
+
+
+def _same_id(e: Element, want: str) -> bool:
+    return bool(e.identifier) and want in (e.identifier, shown(e.identifier))
+
+
 def _hits(items: list[Element], target: Target) -> tuple[list[Element], str, str]:
     """The elements an id, label or text target matches, in reading order, with how a message names the target and
-    what it says when nothing matches. The matches before the alert rule (`resolve` applies that)."""
+    what it says when nothing matches. The matches before the alert rule (`resolve` applies that). A target matches
+    the screen's words or the placeholder an answer shows for a test account's value in them (`_forms`)."""
     if target.id is not None:
         # a real identifier first; WebDriverAgent's raw name (it mirrors the label) only if none match
-        hits = [e for e in items if e.identifier == target.id] or [e for e in items if e.name == target.id]
+        hits = [e for e in items if _same_id(e, target.id)] or             [e for e in items if e.name and target.id in (e.name, shown(e.name))]
         what, miss = f'id "{target.id}"', f'nothing on screen has id "{target.id}"; look, then pick another target.'
     elif target.label is not None:
-        hits = _without_nested([e for e in items if _norm(e.label) == _norm(target.label)])
+        want = _norm(target.label)
+        hits = _without_nested([e for e in items if want in _forms(e.label)])
         what = f'label "{target.label}"'
         miss = f'nothing on screen has label "{target.label}"; use {{text}} for a partial match, or look.'
     else:
         want = _norm(target.text)
         # in a user's eyes (a journey) text is what shows on the glass: an icon-only button's label is VoiceOver's
         pool = [e for e in items if not (USERS_EYES.get() and e.icon_only)]
-        hits = [e for e in pool if _norm(e.label) == want or _norm(e.value) == want]
+        hits = [e for e in pool if want in _forms(e.label) | _forms(e.value)]
         if not hits:
-            hits = [e for e in pool if want in _norm(e.label) or want in _norm(e.value)]
+            hits = [e for e in pool if shows(e, want)]
         hits = _without_nested(hits)
         what, miss = f'text "{target.text}"', f'nothing on screen shows "{target.text}"; look, then pick another target.'
     return hits, what, miss
+
+
+def shows(e: Element, want: str) -> bool:
+    """Does the element's label or value hold `want` (stripped and casefolded) as a part, in the screen's words or as
+    an answer shows them?"""
+    return any(want in form for form in _forms(e.label) | _forms(e.value))
 
 
 def _in_alert(hits: list[Element]) -> tuple[list[Element], str]:
@@ -1157,6 +1231,32 @@ def candidates(items: list[Element], target: Target) -> list[Element]:
     """The elements `resolve` picks among for an id, label or text target, in its order: what `index` counts in. A
     recording uses it to save an `index` that finds the same element again."""
     return _in_alert(_hits(items, target)[0])[0] if target.kind in ("id", "label", "text") else []
+
+
+def switch_first(items: list[Element], target: Target) -> Element:
+    """The element a target names, preferring a switch: a row and its switch often share a label (what `toggle` resolves)."""
+    if target.ref is None:
+        try:
+            return resolve([e for e in items if e.role == "switch"], target)  # type: ignore[return-value]
+        except Refused as e:
+            if e.code != "not_found":
+                raise  # several switches match: the agent picks one
+    return resolve(items, target)  # type: ignore[return-value]
+
+
+def replayed_candidates(items: list[Element], target: Target, tool: str | None) -> list[Element]:
+    """`candidates` as the tool that will replay the step picks among them: `toggle` counts `index` among the switches
+    first (Codex, PR #10 cycle 8), every other tool among all the matches."""
+    if tool == "toggle" and target.ref is None:
+        hits = candidates([e for e in items if e.role == "switch"], target)
+        if hits:
+            return hits
+    return candidates(items, target)
+
+
+def replayed(items: list[Element], target: Target, tool: str | None) -> Element | tuple[float, float]:
+    """`resolve` as the tool that will replay the step resolves a target."""
+    return switch_first(items, target) if tool == "toggle" else resolve(items, target)
 
 
 def resolve(items: list[Element], target: Target) -> Element | tuple[float, float]:
@@ -1207,8 +1307,20 @@ def back_button(source: str, screen: tuple[float, float]) -> Back:
     the element list. In the top bar, in order: a Button named `BackButton` or labelled "Back"; else the
     leftmost Button in the bar's left quarter, unless it is Cancel, Done, Menu or another button that
     does something else; else no point (a bar without a back button is usually a root screen)."""
-    root = _parse(source, screen)
+    return _back_of(_parse(source, screen), screen)
 
+
+def is_back(element: Element, back: Back | None) -> bool:
+    """Is the element exactly the button `back_button` presses (a button of a real NavigationBar, in its order of
+    choice: named BackButton or labelled Back, else the leftmost button of its left quarter that isn't Cancel, Done, Menu
+    and the like), with no id of its own (`BackButton` is iOS's; an id the app gave it says the app means it as itself)?
+    What a recording saves as `back` is this element and no other: replay then does what the tap did."""
+    return (back is not None and back.point is not None and element.type == "Button" and element.role != "cell"
+            and element.identifier in ("", "BackButton")
+            and abs(element.center[0] - back.point[0]) < 1 and abs(element.center[1] - back.point[1]) < 1)
+
+
+def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect
         return w > 0 and h > 0 and 0 <= x + w / 2 < screen[0] and 0 <= y + h / 2 < screen[1]

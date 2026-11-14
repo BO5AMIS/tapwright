@@ -2,7 +2,10 @@
 answer, the script file, and the target a recording saves. The daemon runs the steps (Daemon._batch)."""
 from __future__ import annotations
 
+import functools
 import json
+import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from . import compare, names, params, performance, ui
@@ -216,10 +219,11 @@ def value_of(element: ui.Element) -> str:
 
 
 def has_value(element: ui.Element, want: str) -> bool:
-    """Does the element hold the expected value? A switch also takes "true" and "false", as its line shows it."""
+    """Does the element hold the expected value? A switch also takes "true" and "false", as its line shows it. A value
+    that is a test account's also matches the placeholder an answer shows for it (Codex, PR #10 cycle 3)."""
     if element.checked is not None:
         want = {"true": "on", "false": "off"}.get(want.strip().lower(), want.strip().lower())
-    return value_of(element) == want
+    return want in (value_of(element), ui.shown(value_of(element)))
 
 
 def load_script(path: str) -> dict:
@@ -230,6 +234,11 @@ def load_script(path: str) -> dict:
         raise Refused("bad_params", f"can't read the script {path}: {e.strerror or e}") from None
     except ValueError as e:
         raise Refused("bad_params", f"the script {path} isn't valid JSON: {e}") from None
+    return check_script(data, path)
+
+
+def check_script(data: object, path: str) -> dict:
+    """A script's data (§9.4), checked as `load_script` checks a file's (`bad_params` naming `path`)."""
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise Refused("bad_params", f'the script {path} isn\'t an agent-tools script (its "format" must be "{FORMAT}")')
     if data.get("version") not in VERSIONS:
@@ -244,32 +253,180 @@ def load_script(path: str) -> dict:
     return data
 
 
-def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None:
+# the keys whose string values are the screen's words or the agent's text in a script's steps (a target's, an
+# expectation's, an `if`'s, an ignore entry's, a typed or waited-for text, a link): the persistence backstop redacts
+# these, and nothing else (a key, a tool, a format, a script's or a picture's name, an app is never the screen's)
+CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url"})
+# what a step's text keeps as it is: an account's `${account.username}` / `${account.password}`, and in a version 2 route
+# its declared variables (`${name}`) and a literal `$${`. In a version 1 script any other `${...}` is ordinary text (Codex,
+# PR #10 cycle 11): it is checked and redacted like anything typed.
+_ACCOUNT_VARIABLES = r"account\.(?:username|password)"
+
+
+def kept(variables: "list[str] | None" = None) -> "re.Pattern[str]":
+    """What a step's text keeps as it is. `variables` is a route's declared names (a version 2 script's), or None."""
+    return _kept_pattern(None if variables is None else tuple(sorted(v for v in variables if isinstance(v, str))))
+
+
+@functools.lru_cache(maxsize=64)
+def _kept_pattern(variables: "tuple[str, ...] | None") -> "re.Pattern[str]":
+    if variables is None:
+        return re.compile(r"(\$\{" + _ACCOUNT_VARIABLES + r"\})")
+    names = "|".join([_ACCOUNT_VARIABLES, *map(re.escape, variables)])
+    return re.compile(r"(\$\$\{|\$\{(?:" + names + r")\})")
+
+
+def variables_of(data: object) -> "list[str] | None":
+    """The variables a script declares: a version 2 script's `variables`, None for any other."""
+    if isinstance(data, dict) and data.get("version") == 2 and isinstance(data.get("variables"), list):
+        return data["variables"]
+    return None
+
+
+def literal_runs(text: str, variables: "list[str] | None" = None) -> tuple[list[str], bool]:
+    """The literal text of a step's text, as the runs between its variables, and whether it has any variable. In a version 2
+    script a `$${` is a literal `${`: the runs are decoded, so a run is the text the step really types (Codex, PR #10 cycle
+    12). In a version 1 script (`variables` None) only an account's variable is one, and nothing is decoded."""
+    runs, found = [""], False
+    for n, part in enumerate(kept(variables).split(text)):
+        if not n % 2:
+            runs[-1] += part
+        elif part == "$${":
+            runs[-1] += "${"
+        else:
+            found = True
+            runs.append("")
+    return runs, found
+
+
+def literal_strings(step: object, content: bool = False) -> Iterator[str]:
+    """The strings of a step's content fields (CONTENT_KEYS, at any depth) that are literal: every one but the `text` a
+    `type_text` types, which is the only place an account's variable or a route's variable stands for anything."""
+    if isinstance(step, str):
+        if content:
+            yield step
+    elif isinstance(step, dict):
+        typing = step.get("tool") == "type_text"
+        for k, v in step.items():
+            if not (typing and k == "text"):
+                yield from literal_strings(v, k in CONTENT_KEYS)
+    elif isinstance(step, list):
+        for v in step:
+            yield from literal_strings(v, content)
+
+
+def redacted_content(data: object, redact: Callable[[str], str]) -> object:
+    """A script (or a route; there every content field's literal runs, `$${` decoded, are what is redacted) with a test account's value redacted from its content only (CONTENT_KEYS, at any depth):
+    never a key, a tool's name, the format, the version or another structural field, and never a variable's
+    `${…}` syntax (Codex, PR #10 cycle 3: an account whose username is `tap` had made the saved step's tool
+    `<tester2's username>`)."""
+    keep = kept(variables_of(data))
+
+    version2 = variables_of(data) is not None
+
+    def text(value: str) -> str:
+        out, run = [], ""  # (a literal run is redacted whole, as the text it stands for: `$${` is `${`, written back after)
+
+        def flush() -> None:
+            nonlocal run
+            if run:
+                done = redact(run)
+                out.append(done.replace("${", "$${") if version2 else done)
+            run = ""
+        for n, part in enumerate(keep.split(value)):
+            if not n % 2:
+                run += part
+            elif part == "$${":
+                run += "${"
+            else:
+                flush()
+                out.append(part)
+        flush()
+        return "".join(out)
+
+    def walk(value: object, content: bool) -> object:
+        if isinstance(value, str):
+            if not content:
+                return value
+            return text(value) if version2 else redact(value)  # (a route's field is a template: its literal runs are redacted)
+        if isinstance(value, dict):
+            typing = value.get("tool") == "type_text"  # the only field that is typed: its `text` (Codex, PR #10 cycle 13)
+            return {k: text(v) if typing and k == "text" and isinstance(v, str) else walk(v, k in CONTENT_KEYS)
+                    for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v, content) for v in value]
+        return value
+    return walk(data, False)
+
+
+def saved_script(data: dict, redact: Callable[[str], str] | None, where: str) -> dict:
+    """What `record` writes: the script redacted (`redacted_content`). When the redaction changed it, it is checked as
+    it will be read back, so the redaction never makes a file that `replay` or `drive` would refuse reported saved
+    (`bad_params` naming `where`). One it left alone is written as before (an empty recording too)."""
+    if redact is None:
+        return data
+    out = json.loads(json.dumps(redacted_content(data, redact), ensure_ascii=False))
+    if out == json.loads(json.dumps(data, ensure_ascii=False)):
+        return data
+    try:
+        return check_script(out, where)
+    except Refused as e:
+        raise Refused("bad_params", f"can't save {where}: {e}") from None
+
+
+def recorded_target(target: dict | None, items: list[ui.Element], tool: str | None = None) -> dict | None:
     """The target a recording saves (§9.4): the element's id, else its label, else its text, else the point; with
-    `index` when that target matches several elements. A ref is turned into the element it names first."""
+    `index` when that target matches several elements. A ref is turned into the element it names first.
+
+    A test account's value, or the placeholder it is shown as, is never saved (AGENT-TOOLS §18.6; Codex, PR #10 cycle
+    2): an id, label or text that holds one is passed over for the next, and the point is the last resort, as for an
+    element with none of the three. A selector the agent wrote with a placeholder in it is saved the same way, from
+    the element it finds. Any other words are saved as given: a recording keeps what was recorded (a navigation title
+    too; only learned map data keeps titles out, §18.1)."""
     if not isinstance(target, dict):
         return None
     if target.get("x") is not None:
         return {"x": target["x"], "y": target["y"]}
-    if not target.get("ref"):
-        return {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
+    named = {k: v for k, v in target.items() if k in ("id", "label", "text", "index") and v is not None}
+    if not target.get("ref") and not holds_value(named):
+        return named
     try:
-        found = ui.resolve(items, ui.parse_target(target))
+        found = ui.replayed(items, ui.parse_target(target), tool)
     except Refused:
         return None
     if not isinstance(found, ui.Element):
         return None
+    return recorded_element(found, items, tool)
+
+
+def holds_value(selector: object) -> bool:
+    """Does a selector (a target, an expectation, an ignore entry) hold a test account's value or its placeholder in
+    its id, label or text? Such a selector is never saved (§18.6)."""
+    return isinstance(selector, dict) and any(isinstance(selector.get(k), str) and ui.private(selector[k])
+                                              for k in ("id", "label", "text"))
+
+
+def recorded_element(found: ui.Element, items: list[ui.Element], tool: str | None = None) -> dict:
+    """How a recording saves the element `found` of the list `items`: its id, else its label, else its text (one that
+    holds no account value, and that finds this very element again among `items` as the tool `tool` that replays the step
+    resolves it, with `index` when it matches several), else its point."""
     for kind, value in (("id", found.identifier), ("label", found.label), ("text", found.text)):
-        if not value:
+        if not value or ui.private(value):
             continue
         aim = {kind: value}
-        # the candidates are the ones replay's `ui.resolve` picks among, so the saved selector finds this element again
-        same = ui.candidates(items, ui.parse_target(aim))
+        # the candidates are the ones the replaying tool picks among (`tool`: a toggle counts the switches first), so the
+        # saved selector finds this element again
+        same = ui.replayed_candidates(items, ui.parse_target(aim), tool)
         place = next((n for n, e in enumerate(same) if e is found), None)
         if place is None:
             continue  # this selector never reaches the element (a nested text, a match behind an alert): try the next
         if len(same) > 1:
             aim["index"] = place
+        try:  # and it is checked as the replaying tool resolves it (Codex, PR #10 cycle 8)
+            if ui.replayed(items, ui.parse_target(aim), tool) is not found:
+                continue
+        except Refused:
+            continue
         return aim
     x, y = found.center
     return {"x": round(x, 1), "y": round(y, 1)}
@@ -278,9 +435,12 @@ def recorded_target(target: dict | None, items: list[ui.Element]) -> dict | None
 def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
     """The `ignore` list a recording saves (§14.2): a ref becomes the element's id, label or text (with `index` when it
     matches several), because refs don't outlive a session. A ref whose element has none of the three can't be saved
-    (`bad_params`, naming it). Rects and the other targets are kept as given."""
+    (`bad_params`, naming it). Rects and the other targets are kept as given, unless one holds a test account's value."""
     saved = []
     for entry in ignore:
+        if _names_private(entry):
+            saved.append(_ignored_without_name(entry, items))
+            continue
         if not isinstance(entry, dict) or not entry.get("ref"):
             saved.append(entry)
             continue
@@ -291,11 +451,37 @@ def recorded_ignore(ignore: list[dict], items: list[ui.Element]) -> list[dict]:
         aim = recorded_target(entry, items) if isinstance(found, ui.Element) else None
         if aim is None or "x" in aim:
             what = found.line(ref=False, actions=False, place=False) if isinstance(found, ui.Element) else entry["ref"]
-            raise Refused("bad_params", f"can't record ignore {entry['ref']} ({what}): it has no id, label or text to "
-                                        "find it by when the script replays; ignore it by a rect {x, y, width, "
-                                        "height} instead")
+            account = isinstance(found, ui.Element) and any(ui.private(v) for v in (found.identifier, found.label, found.text))
+            why = ("its only name is a test account's value, which is never saved" if account
+                   else "it has no id, label or text to find it by when the script replays")
+            raise Refused("bad_params", f"can't record ignore {entry['ref']} ({what}): {why}; ignore it by a rect "
+                                        "{x, y, width, height} instead")
         saved.append(aim)
     return saved
+
+
+def _names_private(entry: object) -> bool:
+    """Is this ignore an id, label or text selector that holds a test account's value?"""
+    if not isinstance(entry, dict) or entry.get("ref") or entry.get("x") is not None:
+        return False
+    return holds_value(entry)
+
+
+def _ignored_without_name(entry: dict, items: list[ui.Element]) -> dict:
+    """An ignore selector that holds a test account's value is saved as the id of the element it finds, else as that
+    element's rectangle: never as the value. `bad_params`, not echoing the value, when it finds no one element (Codex,
+    PR #10 cycle 3)."""
+    try:
+        found = ui.resolve(items, ui.parse_target(entry))
+    except Refused:
+        found = None
+    if not isinstance(found, ui.Element):
+        raise Refused("bad_params", "can't record an ignore that holds a test account's value and finds no one element; "
+                                    "ignore it by an id or a rect {x, y, width, height}")
+    aim = recorded_element(found, items)
+    if "x" not in aim:
+        return aim
+    return {"x": round(found.x, 1), "y": round(found.y, 1), "width": round(found.width, 1), "height": round(found.height, 1)}
 
 
 def scripts_dir() -> Path:

@@ -3,7 +3,7 @@
 import math
 from dataclasses import dataclass, replace
 
-from .ui import USERS_EYES, Element, clip
+from .ui import USERS_EYES, Element, clip, shown
 
 NO_CHANGE = "No visible change."
 SAME_SCREEN = "Same screen. Changes:"
@@ -135,8 +135,10 @@ def cut_old(old: str, new: str) -> str:
 
 
 def _old(old: str, new: str) -> str:
-    """An old value as `(was …)` quotes it: cut to what changed, then as `clip` writes any text."""
-    return clip(cut_old(old, new))
+    """An old value as `(was …)` quotes it: cut to what changed, then as `clip` writes any text. Both values are
+    redacted before the cut (the tree's are already, where they came in): a cut taken from the raw value would keep
+    the end of a long password next to its placeholder (Codex, PR #10 cycle 2)."""
+    return clip(cut_old(shown(old), shown(new)))
 
 
 def _was(old: Element, new: Element) -> list[str]:
@@ -166,7 +168,7 @@ def _gone(e: Element) -> str:
     """`- <role> "<text>"`, else `<role> id=<id>`, else the role alone: no ref, no position."""
     if e.text:
         return f"- {e.role} {clip(e.text)}"
-    return f"- {e.role} id={e.identifier}" if e.identifier and not USERS_EYES.get() else f"- {e.role}"
+    return f"- {e.role} id={shown(e.identifier)}" if e.identifier and not USERS_EYES.get() else f"- {e.role}"
 
 
 def _frame_moved(old: Element, new: Element) -> bool:

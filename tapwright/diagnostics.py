@@ -147,8 +147,10 @@ class LogRing:
 
 
 def cut(text: str, limit: int = LOG_TEXT_CUT) -> str:
-    """Text cut at `limit` characters, with how many are missing (as element text is cut: `…(+57)`)."""
-    flat = " ".join(text.split())
+    """Text cut at `limit` characters, with how many are missing (as element text is cut: `…(+57)`). A test account's
+    value is redacted first (this call's accounts): cut first, a value half inside the limit would no longer match."""
+    from . import ui  # (ui reads device, which reads this module)
+    flat = " ".join(ui.shown(text).split())
     missing = len(flat) - limit
     return flat[:limit] + (f"…(+{missing})" if missing > 0 else "")
 
@@ -250,16 +252,16 @@ def _safely(fn: Callable[[], object], default=None):
         return default
 
 
-def _reason_of(report) -> str:
+def _reason_of(report, redact: Callable[[str], str] = str) -> str:
     sub = _safely(lambda: report.exception_subtype)
     if sub:
-        return str(sub)
+        return redact(str(sub))
     info = _safely(lambda: report.application_specific_information)
     if isinstance(info, dict):
         info = " ".join(str(x) for v in info.values() for x in (v if isinstance(v, (list, tuple)) else [v]))
     elif isinstance(info, (list, tuple)):
         info = " ".join(str(x) for x in info)
-    return " ".join(str(info).split())[:CRASH_REASON_CUT] if info else ""
+    return " ".join(redact(str(info)).split())[:CRASH_REASON_CUT] if info else ""  # (redacted before the cut)
 
 
 def _is_app_frame(image: str | None, executable: str) -> bool:
@@ -295,22 +297,23 @@ def _when_of(report) -> datetime.datetime | None:
     return _safely(lambda: report.timestamp)
 
 
-def describe_crash(report, executable: str) -> CrashInfo:
-    """A parsed crash report (pycrashreport's) as the few facts `crash` shows."""
-    kind = str(_safely(lambda: report.exception_type) or "unknown exception")
+def describe_crash(report, executable: str, redact: Callable[[str], str] = str) -> CrashInfo:
+    """A parsed crash report (pycrashreport's) as the few facts `crash` shows. `redact` takes a test account's value out
+    of every text taken from the report, before any cut."""
+    kind = redact(str(_safely(lambda: report.exception_type) or "unknown exception"))
     frames = list(_safely(lambda: report.frames, []) or [])
     shown: list[str] = []
     top_app = top_any = None
     for n, frame in enumerate(frames):
         image = posixpath.basename(getattr(frame, "image_name", None) or "?")
         mine = _is_app_frame(getattr(frame, "image_name", None), executable)
-        text = f"{image} {_frame_text(frame)}"
+        text = redact(f"{image} {_frame_text(frame)}")
         top_any = top_any or text
         top_app = top_app or (text if mine else None)
         if n < CRASH_FRAMES:
             shown.append(f"{n:>2} {CRASH_MARK if mine else ' '} {text}")
     where = top_app or top_any
-    return CrashInfo(_when_of(report), kind, _reason_of(report), tuple(shown),
+    return CrashInfo(_when_of(report), kind, _reason_of(report, redact), tuple(shown),
                      f"{kind} in {where}" if where else kind,
                      posixpath.basename(str(_safely(lambda: report.filename) or "")),
                      str(_safely(lambda: report.filename) or ""))
@@ -351,6 +354,63 @@ def newer(info: CrashInfo, than: datetime.datetime) -> bool:
     if (when.tzinfo is None) != (than.tzinfo is None):
         when, than = when.astimezone(), than.astimezone()  # a naive time is local time to astimezone
     return when >= than - datetime.timedelta(seconds=CRASH_SLACK)
+
+
+class Unsanitizable(Exception):
+    """A report that can't be made free of the test accounts' values."""
+
+
+CRASH_UNSAFE = "the crash report couldn't be saved safely (it holds a test account's value that couldn't be removed), so nothing was saved"
+
+
+def sanitized_report(data: bytes, redact: Callable[[str], str]) -> bytes:
+    """A crash report as it may be saved: a test account's value (`redact`) replaced in its content, its format kept
+    (Codex, PR #10 cycles 5 and 6). An .ips is JSON documents one after another (a header line, then the body, each on
+    one line or several; JSON lines too). Each is parsed, and every string in it, key or value, is redacted as decoded:
+    a value the raw bytes hold only escaped (a `repr` inside a JSON string, a unicode escape) is found too. A document
+    that needs no change stays byte for byte; one that does is written as JSON again (one line stays one line). A report
+    that isn't JSON (a .crash text) is redacted as text. Bytes that aren't UTF-8 pass through the same way."""
+    text = data.decode("utf-8", errors="surrogateescape")
+
+    def walk(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {redact(k): walk(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        shown = json.dumps(value)  # a number, true, false or null: its JSON text can be an account value (a PIN, a user id)
+        return value if redact(shown) == shown else redact(shown)  # (becomes the placeholder text: the JSON stays valid)
+
+    parts: list[str] = []
+    changed = False
+    decoder, at = json.JSONDecoder(), 0
+    try:
+        while at < len(text):
+            if text[at].isspace():
+                end = at
+                while end < len(text) and text[end].isspace():
+                    end += 1
+                parts.append(text[at:end])
+                at = end
+                continue
+            parsed, end = decoder.raw_decode(text, at)
+            raw = text[at:end]
+            clean = walk(parsed)
+            if clean == parsed and redact(raw) == raw:
+                parts.append(raw)
+            else:
+                changed = True
+                many = chr(10) in raw
+                parts.append(json.dumps(clean, ensure_ascii=False, indent=2 if many else None,
+                                        separators=None if many else (",", ":")))
+            at = end
+    except ValueError:
+        parts, changed = [redact(text)], True  # not JSON: a text report
+    final = "".join(parts)
+    if redact(final) != final:  # a value form is still in it (a number written as 8.36291e5, a split form): nothing is saved
+        raise Unsanitizable(CRASH_UNSAFE)
+    return final.encode("utf-8", errors="surrogateescape") if changed and final != text else data
 
 
 def crash_folder(bundle_id: str) -> Path:

@@ -9,7 +9,9 @@ that has never seen the tool gets on with it. Version 2.2 (2026-11-11, the owner
 launch links to USB and Wi-Fi on the same network, for a test phone that stays next to the computer;
 5G and Tailscale move to "Later". Version 2.3 (2026-11-11, the owner's decision) gives Tapwright over
 Wi-Fi a speed target of its own for a tap, type or toggle (S1). Version 2.4 (2026-11-12, the plan the owner chose
-for 1.4) adds group K: how many calls a common check costs, against the same check on Android. Each repo keeps an identical copy.
+for 1.4) adds group K: how many calls a common check costs, against the same check on Android. Version 2.5 (2026-11-13) aligns R3 with AGENT-TOOLS 1.13.1 item 3:
+a tool scrolls an off-screen target into view and acts, so R3's off-screen case is one no scroll can reach
+(lab-behind-bar), and lab-bottom moves to R1. Each repo keeps an identical copy.
 
 The two tools should feel like one product made by one team. They differ only in setup: how an
 agent is wired to them, how the user gives access (an app pairs with Tapline; a whole phone
@@ -53,9 +55,9 @@ the end with a plan. There are no per-tool targets.
 
 | | Standard | Measured by |
 |---|---|---|
-| R1 | **Right element.** An action changes exactly what it targets and nothing else. | Each lab action, then lab-state compared with the expected state. |
+| R1 | **Right element.** An action changes exactly what it targets and nothing else. | Each lab action, then lab-state compared with the expected state. Includes: tap lab-bottom from the top: the tool scrolls to it and taps (expect pressed=bottom, starting scrolled to the start). |
 | R2 | **No false refusals.** What a person could do, the tool does. | The same checks: 0 refusals of reachable targets. |
-| R3 | **Never silently something else.** When a person couldn't reach the target (off screen, covered by a sheet or overlay, under a bar the OS draws, disabled, behind a system alert), the tool doesn't act on something else. It refuses with `not_actionable` and names what's in the way, or, for a tap on the real screen, reports what the tap landed on. | Lab fixtures for each case: lab-state unchanged, the code and the reason present. |
+| R3 | **Never silently something else.** When a person couldn't reach the target (off screen where no scroll can reach it (AGENT-TOOLS 1.13.1 item 3), covered by a sheet or overlay, under a bar the OS draws, disabled, behind a system alert), the tool doesn't act on something else. It refuses with `not_actionable` and names what's in the way, or, for a tap on the real screen, reports what the tap landed on. | Lab fixtures for each case: lab-state unchanged, the code and the reason present. The off-screen case is `lab-behind-bar`, a button the lab's fixed header covers, which no scroll can bring out: refused `not_actionable: off_screen` (or `covered`), lab-state unchanged. |
 | R4 | **The viewer's input lands where a real touch would.** A click in the viewer at a point does what a finger at that point does. | A grid of points over the lab: inside a sheet, on the tab bar, on buttons, near the edges, on empty space. Viewer taps and real taps (or the tool's own tap at that point) give the same lab-state. |
 | R5 | **No silent guesses.** When a target matches several elements and no `index` is given, the tool refuses with `ambiguous` and lists the candidates. It never picks one silently (AGENT-TOOLS.md). | Two lab buttons with the same label. |
 | R6 | **Drops end clearly.** A request in flight when the link or the app drops ends with a code (`reconnecting`, `timeout`, `in_background`, `locked`, `not_answering`), never a false success, and never in silence: a call made while the app in front doesn't answer ends within 20 s. After the app or phone comes back, the next action works with no step from the user beyond reopening it. | Background the app or cut the link mid-action, then bring it back and act. And the lab's 20 s freeze: every call during it ends within 20 s with an answer or one of the codes, and the next action after it works. |

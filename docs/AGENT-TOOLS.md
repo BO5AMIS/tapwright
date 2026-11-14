@@ -18,7 +18,7 @@ apps an agent was given answers `not_allowed`. Version 1.6 (2026-11-10) adds wha
 change block covers more than one action, a forced action says so, typing into the next field of
 a form leaves the keyboard up, and both tools say `Keyboard: shown` and `Keyboard: hidden`. Version 1.7
 (2026-11-11) adds `placeholder="…"` to the element line: an empty input shows its placeholder that way, never as
-`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Each repo keeps an
+`value=`, which a first-time agent read as a field already filled in. Version 1.8 (2026-11-12) adds batches that are also scripts (`run`, `record`, `replay`), the accessibility audit (`audit`), the safety policy with a person's confirmation and dry runs, the action log, the rule for secure fields, and shorter answers (§13). Both projects agree on it under the plan the owner approved on 2026-11-12. Version 1.9 (2026-11-12) adds visual checks (§14): `compare_screen` in both tools with a pass bar (`threshold`) and `ignore`, the `matches` expectation and `compare_screen` steps in `run` and scripts, and references that travel with a script; Tapwright adds `filmstrip`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.10 (2026-11-12) adds diagnostics (§15): `logs` in both tools with `level`, `grep` and `limit`, the crash note and `crash`, `performance` with `under` limits in `run` and scripts, and failures that carry the app's recent logs. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.11 (2026-11-12) adds fewer steps (§16): reads in the call log and `session_report`, actions that scroll to an off-screen target and `not_found` with the closest matches, language, region and text size without Settings, network conditions, and a calls-per-check bar against Android. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.12 (2026-11-12) adds journeys and usability (§17): `journey` in a user's eyes with what it measures, personas as guidance, `ux_check` with optional house rules, stress moments, a visual report with its export, and `media` for photo pickers. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13 (2026-11-12) adds driving: `drive`, `map`, places, roads, routes and test accounts, reflexes, `brief` answers, `if` and `optional` steps, the thin call, a person's OK through the host's dialog, and seconds in `session_report`. Both projects agree on it under the plan the owner chose on 2026-11-12. Version 1.13.1 (2026-11-13) clarifies 1.13 where building it in both tools showed the text silent or unclear: list rows in `brief`, a change under the `compare_screen` threshold that is still named, `off_screen` after §16.2, the retry advice for an id, ASCII names and names that differ only in case, a double tap's second tap, the viewer's `confirm_closed`, the no-change note naming its action, what `allow` lifts in a journey, when reflexes are checked, some wording, the declined answer, and a road's `move`. Both leads agree on it. Version 1.13.2 (2026-11-13) corrects four places where building 1.13 showed the text wrong or too strong: what pictures show of a password, the viewer's `confirm_closed` when the chat dialog answers first, the passcode unlock marked as planned, and Tapwright's place names no longer taken from a title. Both leads agree on it. Each repo keeps an
 identical copy in `docs/`. It changes only by
 agreement between the two projects, like `VIEWER-PROTOCOL.md`. Each tool's
 **Change** items below are its work to reach this interface.
@@ -743,7 +743,7 @@ elicitation (`elicitation/create`, form mode), when the client's capabilities sa
 - **One required field,** `answer`, with the choices `Allow once` and `Don't allow` and no default. Only `accept` with
   `Allow once` allows. `accept` without it, `decline`, `cancel` or an error is Don't allow.
 - **The first answer from either place wins.** When the live view answers first, the elicitation is aborted; when the
-  dialog answers first, the viewer gets `confirm_closed`.
+  dialog answers first, the viewer gets `confirm_closed` with `"by": "chat"` (1.13.2).
 - One dialog at a time per server; a second request waits behind the first.
 - **Blocked words never reach a dialog:** a blocked touch is refused as in §11.2.
 - **With a dialog, the call waits** for the answer, up to the 120 s, instead of answering `needs_confirmation` at once.
@@ -781,7 +781,7 @@ When a call can't go on without a person, the tool asks through the host's dialo
 - **The moments.**
   - **Both tools:** an iOS alert over the app that the tool may not answer; a journey's stress moment that needs hands
     (§17.4); a media picker the person must use (§17.6).
-  - **Tapwright:** the phone locked and no passcode given (§18.6); the XCTest passcode prompt; iOS's Health sheet.
+  - **Tapwright:** the phone locked (planned: and no passcode given; the passcode unlock is not shipped by either tool yet, §18.6); the XCTest passcode prompt; iOS's Health sheet.
   - **Tapline:** the app never paired; the app not open, not in front, or closed; the app not answering twice; a native
     crash (close and reopen it). Tapline can't tell a locked phone from an app in the background, so for it the phone
     locked is the app not in front: `Needs a person: open <app> on the phone (unlock it first if it's locked).`
@@ -1296,10 +1296,9 @@ A **place** is a screen the tool can recognise again. Each place has a key, a na
   - **Tapline** names a place from its route only: the last route name, skipping groups such as `(tabs)`. When the
     last segment is a param, the name is its parent plus the param's name, so `trips/[id]` is `trips_id`. `index`
     takes its parent's name, so `trips/index` is `trips`. Tapline never needs titles.
-  - **Tapwright** names a place after its navigation title only when that place showed the same title on two visits:
-    a title that changes between visits is content, not a name. Otherwise the place is `place_<n>` until someone names
-    it. So is a place whose title has no ASCII letters (Arabic, for example): a name doesn't depend on the language of
-    the first visit.
+  - **Tapwright** never names a place after its navigation title (1.13.2): a repeated title such as "Chat with Sara"
+    would become a stored place name. A place is `place_<n>` until a person names it with `map`. A map that already
+    holds title-derived names keeps them. Tapline's route-based naming is unchanged.
   - `map {"name": ...}` renames the current place.
 - **Known before any visit:** an Expo Router app's places can be listed from its route tree, each with its link
   (`scheme://path`). A place whose route has params takes their values as variables (`trips_id` needs `id`).
@@ -1454,11 +1453,12 @@ Both servers take `--accounts FILE` when they start:
   `"text": "hi ${account.password}"` is `bad_params`, since joining text would get around the secure-field rule.
 - `password` is typed only into a secure field, `username` only into a text input that isn't secure. Any other
   target: `Error bad_params: an account's password goes only into a password field; e14 is a text field.`
-- **What can be seen.** The password never: secure fields show dots. While a field holds exactly an account's
-  username, text answers show `value=<tester2's username>`. Pictures (screenshots, journey frames, the GIF) show what
-  is on screen, so a username can be seen in them. Only the password is guaranteed never to be seen.
+- **What can be seen.** The password never in text answers: secure fields show dots. While a field holds exactly an
+  account's username, text answers show `value=<tester2's username>`. Pictures (screenshots, journey frames, the GIF)
+  show what is on screen. They are free of a password only while its field stays secure: a "show password" toggle puts
+  it in pictures (1.13.2). A username in a plain field is visible in pictures anyway.
 - `apps`: the apps the account may be typed into (absent: any given app).
-- `phone.passcode` (Tapwright only) is typed by the tool itself, only on the lock screen's keypad, when a call needs
+- `phone.passcode` (Tapwright only; **planned**, not shipped by either tool yet) is typed by the tool itself, only on the lock screen's keypad, when a call needs
   the phone and it is locked. No step or tool can type it anywhere else.
 - **An accounts file inside a git work tree that doesn't ignore it:** the server starts but loads no accounts. Every
   use of an account answers `Error bad_params: accounts file is inside the git repo at <path> and not ignored; move
