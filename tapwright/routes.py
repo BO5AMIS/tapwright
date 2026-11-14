@@ -98,6 +98,9 @@ def check(data: dict) -> None:
         raise Refused("bad_params", "a route needs a start: the name of the place it starts at, like \"welcome\"")
     if data.get("end") is not None and (not isinstance(data["end"], str) or not data["end"].strip()):
         raise Refused("bad_params", "a route's end is a place's name, or left out")
+    if "draftsOnly" in data and not isinstance(data["draftsOnly"], bool):
+        raise Refused("bad_params", "a route's draftsOnly is true or false (true: a touch on Send, Post, Publish, Reply or "
+                                    "Comment stops at a draft a person sees first)")
     variables = data.get("variables", [])
     if not isinstance(variables, list) or any(not isinstance(v, str) or not VARIABLE.match(v) for v in variables):
         raise Refused("bad_params", "a route's variables are a list of names made of letters, digits and _, like [\"language\"]"

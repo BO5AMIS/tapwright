@@ -533,15 +533,25 @@ class Book:
                 return False
         return days == 1 and hours == (0 if grant.per_hour is None else 1)
 
-    def holds(self, grant: Grant, touch: Touch, at: datetime.datetime) -> bool:
-        """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)?"""
+    def holds(self, grant: Grant, touch: Touch, at: datetime.datetime, draft: bool = False) -> bool:
+        """Does this grant, as it is now, cover the touch at `at`, the counts aside (§19.3)? `draft`: for the use a
+        person's Send of a draft counts (§21.3), which a draftsOnly grant holds too."""
         return (grant.app == touch.app and not touch_never(touch.app, touch.name)
                 and _any(grant.words, touch.name or "") is not None
                 and (grant.route is None or grant.route in touch.routes)
-                and grant.revoked is None and not grant.drafts_only and at.date() <= grant.until
+                and grant.revoked is None and (draft or not grant.drafts_only) and at.date() <= grant.until
                 and not grant.in_quiet(at))
 
-    def _use(self, grant: Grant, touch: Touch, detail: str) -> Use | str | None:
+    def use_draft(self, touch: Touch, name: str, detail: str) -> bool:
+        """A draft a person sent (§21.3) counts as a use of the draftsOnly grant that stopped it, so that a loop can't post
+        50 times (§19.1's limits): claimed, checked again and audited as any use is. False when it can't be counted; the
+        person's Send stands all the same (the touch was theirs)."""
+        grant = next((g for g in self.load().grants if g.name == name), None)
+        if grant is None:
+            return False
+        return isinstance(self._use(grant, touch, detail, draft=True), Use)
+
+    def _use(self, grant: Grant, touch: Touch, detail: str, draft: bool = False) -> Use | str | None:
         """Claim a use, then read the file and the clock again (a revocation, an end, quiet hours or a cut quota that
         came meanwhile win), then write the audit line. No line: the use is given back and the grant doesn't cover
         the touch (§23)."""
@@ -556,7 +566,7 @@ class Book:
                 self._hook("after_claim", got)
                 fresh = next((g for g in self.load().grants if g.name == grant.name), None)
                 at = self.now()
-                if fresh is None or not self.holds(fresh, touch, at):
+                if fresh is None or not self.holds(fresh, touch, at, draft):
                     self.release(got)
                     return None
                 if not self._current(got, at) or not self._fits(fresh, got):

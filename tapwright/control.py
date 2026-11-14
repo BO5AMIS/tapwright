@@ -74,6 +74,7 @@ class ClientView:
     read_frame: "Frame | None" = None  # the stream frame at that moment: the picture that matches the list
     read_mark: tuple[int, "Frame | None"] = (0, None)  # (seq, the newest stream frame) when `items` was read
     place: tuple[str, str] | None = None  # (bundle id, place name) the agent's last answer put the app at (AGENT-TOOLS §18.1)
+    typed_field: "tuple[str, str, tuple[float, float, float, float]] | None" = None  # (id, label, rect) of the input last typed into (§21.3)
     typed_at: tuple[str, str] | None = None  # the place the agent typed text at: a move from there isn't a road (§18.2)
     place_seen: int = -1  # the screen generation `place` was worked out at: a person's input since makes it unknown
     tree: "ui.Tree | None" = None  # the tree of the agent's newest answer's read, for the place it shows

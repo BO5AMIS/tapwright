@@ -463,6 +463,8 @@ class Trip:
         steps = routes.substitute(route["steps"], self.req.values, route.get("variables"))
         from .daemon import _ROUTES
         running = _ROUTES.set((*_ROUTES.get(), name))  # a grant naming this route covers its touches (§19.1)
+        from .daemon import _DRAFTS_ROUTE
+        drafting = _DRAFTS_ROUTE.set(True) if route.get("draftsOnly") is True else None  # §21.3: stop at drafts
         try:
             answer = await self.d._batch(self.client_id, steps, self.scope, {"look": False})
         except Refused as e:
@@ -470,6 +472,8 @@ class Trip:
             raise Refused(e.code, f"route {name}: {first} {driving.done(self.moves + self.jumps)}{sep}{rest}") from None
         finally:
             _ROUTES.reset(running)
+            if drafting is not None:
+                _DRAFTS_ROUTE.reset(drafting)
         for line in answer["text"].splitlines():
             found = re.match(r"Note(?: \(step (\d+)\))?: (.*)", line)
             if found:
