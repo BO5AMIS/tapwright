@@ -263,6 +263,7 @@ Every failure is `Error <code>: <message>`, and the message says what to do next
 | `timeout` | the action may have happened: `look` before you retry |
 | `expect_failed` | a `run` step's expectation didn't hold: the first line says which step and what was expected. Look, then decide: a bug to report, or a step to fix |
 | `off_route` | `drive` stopped because the screen isn't where the road leads, and touched nothing else: go on by hand from the screen the answer shows (what you do is remembered) |
+| `draft_stopped` | a touch that reaches other people stopped at a draft a person sees first, and nothing was sent: ask your user; never send it another way |
 | `bad_params` | fix the call |
 | `internal` | a bug in the tool: report it with the call you made |
 

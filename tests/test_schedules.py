@@ -348,8 +348,12 @@ def test_the_vault_and_grants_files_reach_the_daemon_as_this_clients_own(tmp_pat
     ("expect_failed", "Ran 2 of 5 steps; stopped at step 3 (tap id=save): text \"x\" didn't appear within 2 s.",
      "failed at step 3 (expect)", "failed"),
     ("off_route", "Stopped at step 2 of 4: the app is at a screen the route doesn't know.", "failed at step 2 (off_route)", "failed"),
-    ("not_allowed", "needs_confirmation: the draft wasn't sent. Ask your user what to do.",
+    ("draft_stopped", "needs_confirmation: the draft wasn't sent. Ask your user what to do.",
      "stopped: a draft is waiting for a person.", "stopped"),
+    # the signal is the code: the text decides nothing
+    ("draft_stopped", "something else entirely", "stopped: a draft is waiting for a person.", "stopped"),
+    ("not_allowed", "needs_confirmation: Allow deleting the draft \"Trip notes\"?", schedulerun.NEEDS_PERSON, "stopped"),
+    ("not_allowed", "needs_confirmation: the draft wasn't sent. Ask your user what to do.", schedulerun.NEEDS_PERSON, "stopped"),
     ("not_allowed", "needs_confirmation: Allow tapping \"Post\"?", schedulerun.NEEDS_PERSON, "stopped"),
 ])
 def test_a_run_stops_at_the_first_failure_and_reports_it(tmp_path, home, code, message, result, status):

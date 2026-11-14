@@ -24,6 +24,7 @@ from pathlib import Path
 from types import ModuleType
 
 from . import auditlog, mapfile, pidlock, schedules, store
+from .errors import DRAFT_STOPPED
 
 WAIT_SECONDS = 600.0  # how long a run waits for a busy phone (§22.3)
 POLL_SECONDS = 5.0
@@ -91,8 +92,10 @@ def find_route(s: schedules.Schedule) -> str:
 def classify(code: str, message: str) -> tuple[str, str]:
     """(status, result) of a refusal that ended the drive."""
     first = message.strip().splitlines()[0][:200] if message.strip() else ""
+    if code == DRAFT_STOPPED:  # the daemon's own code for a stop at a draft (21.3), never the words of the message
+        return "stopped", DRAFT
     if code == "not_allowed" and "needs_confirmation" in message or code == "needs_confirmation":
-        return "stopped", DRAFT if "draft" in message.lower() else NEEDS_PERSON
+        return "stopped", NEEDS_PERSON
     if code in ("expect_failed", "off_route"):
         step = re.search(r"\bstep (\d+)", message)
         return "failed", f"failed at step {step.group(1)} ({code.removesuffix('_failed')})" if step else \

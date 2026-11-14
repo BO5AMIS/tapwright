@@ -34,6 +34,7 @@ from .actionlog import ActionLog
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
+from .errors import DRAFT_STOPPED
 from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
                      Unanswered, PhoneNotFound)
 from .session import Snapshot
@@ -5688,7 +5689,7 @@ class Daemon(journey_tool.JourneyTools):
             drafted = (stopped or "", await self._draft_text())
         message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
         if request is None:
-            raise Refused("not_allowed", message)
+            raise Refused(DRAFT_STOPPED if drafted is not None else "not_allowed", message)
         taken = (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and the OK given was used by "
                  "another call of the same touch. Nothing was touched by this call; make it again to ask again.")
         await self._wait_for_person(request, message, tool, a, key, element, taken)
@@ -5895,11 +5896,11 @@ class Daemon(journey_tool.JourneyTools):
                 if request.state == "pending" and request.dialog:  # it ran out, or the call was given up on
                     self.dialog_channel(request.owner or "").push({"type": "close", "id": request.id})
             if request.state == "declined":
-                raise Refused("not_allowed", self._draft_refusal("They declined.") if request.draft is not None
-                              else message + " They declined.")
+                raise (Refused(DRAFT_STOPPED, self._draft_refusal("They declined.")) if request.draft is not None
+                       else Refused("not_allowed", message + " They declined."))
             if request.state != "allowed":
-                raise Refused("not_allowed", self._draft_refusal("Nobody answered.") if request.draft is not None
-                              else message + " Nobody answered.")
+                raise (Refused(DRAFT_STOPPED, self._draft_refusal("Nobody answered.")) if request.draft is not None
+                       else Refused("not_allowed", message + " Nobody answered."))
             # used up, whatever happens next (a pause, the re-check); taken by one call only: another call of the same
             # touch that waited on this request too, or repeated it after the allow, got there first (Codex, PR #9 c2)
             if not self._claim(request):
