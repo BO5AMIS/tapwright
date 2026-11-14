@@ -4,6 +4,7 @@ that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
 import contextvars
+import copy
 import itertools
 import io
 import json
@@ -5155,6 +5156,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             forced = self._forced(view, field)
         else:
             self._guard(view, field)
+            field = await self._hit_clears(field)
             at = self._touch_point(field)
         active = _ACCOUNT.get()
         using = None
@@ -6339,6 +6341,29 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")
 
+    async def _hit_clears(self, element: ui.Element) -> ui.Element:
+        """The element with the tree's guess of what covers its centre dropped when the runner's hit test (route version
+        5) says a touch there lands on it, inside it or on what holds it. Only a later element's cover is a guess (a
+        scroll view listed after a bar it overlaps: seen on the phone 2026-11-14, Reminders' New Reminder sheet, whose
+        table is listed after its nav bar and drawn under it); bars, the keyboard and the status bar always count. No
+        answer leaves it as the tree says."""
+        centre = element.center
+        guessed = [b for b in element.covered_by if b.kind not in ui.COVERING_BARS and ui._holds(b.rect, centre)]
+        if not guessed:
+            return element
+        hit = await self.session.hit_at(*centre)
+        if hit is None:
+            return element
+        app = self._app_bundle()
+        if hit.bundle and app and hit.bundle != app:
+            return element
+        if ui.hit_relation(getattr(self.session, "last_source", None), element, hit) == "other":
+            return element
+        trace.note("hit", "clears a guessed cover")
+        cleared = copy.copy(element)
+        cleared.covered_by = tuple(b for b in element.covered_by if b not in guessed)
+        return cleared
+
     async def _refuse_hit(self, element: ui.Element, at: tuple[float, float]) -> None:
         """QUALITY-BAR 2.5 R3 (`lab-behind-bar`): before a touch on an element, ask the runner what iOS would deliver a
         touch at that point to (Session.hit_at, route version 5) and refuse `covered` when it is something other than
@@ -6448,6 +6473,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             done.note = self._forced(view, found)
             return done
         self._guard(view, found)
+        found = await self._hit_clears(found)
         point = self._touch_point(found)
         await self._refuse_hit(found, point or found.center)
         aimed_with = s.items
@@ -6455,6 +6481,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if s.items is not aimed_with:  # the policy waited for a person's OK and read the screen again (_still_there)
             found = ui.resolve(s.items, target)  # (it checked that the target still names that very element)
             self._guard(view, found)
+            found = await self._hit_clears(found)
             point = self._touch_point(found)  # what is drawn over it now
             await self._refuse_hit(found, point or found.center)
         at = point or found.center

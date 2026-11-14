@@ -336,3 +336,48 @@ def test_the_runner_pinned_is_tw_16_15_3_5():
     repo, tag, sha, folder = store.WDA_SOURCES["fork"]
     assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.5", "fork-tw-16.15.3.5")
     assert len(sha) == 64 and store.WDA_VERSION == "fork-tw-16.15.3.5"
+
+
+# ---- a cover the tree only guesses: the runner's hit test decides ----
+
+CANCEL = node("Button", (24, 83, 36, 36), n="Cancel", l="Cancel")
+SHEET_TABLE = node("Table", (0, 59, 430, 873), n="sheet-table")
+SHEET = node("Application", (0, 0, 430, 932), [node("Window", (0, 0, 430, 932), [node("Other", (0, 0, 430, 932), [
+    node("NavigationBar", (0, 79, 430, 54), [CANCEL], n="New Item"), SHEET_TABLE])])],
+    n="Lab", l="Lab", pid=42, b="com.example.lab")
+
+
+def sheet_items() -> list[ui.Element]:
+    """Seen on the phone 2026-11-14 (Reminders' New Reminder sheet): the sheet's table is listed after its nav bar and
+    overlaps it, so the tree guesses the table covers Cancel; iOS draws the bar on top."""
+    cancel = button("e1", "Cancel", "", rect=(24, 83, 36, 36), name="Cancel")
+    cancel.covered_by = (ui.Bar("Table", (0, 59, 430, 873), 'scroll id=sheet-table @0,59 430x873'),)
+    return [cancel]
+
+
+def test_a_cover_the_tree_only_guesses_is_dropped_when_the_hit_lands_on_the_target():
+    async def go():
+        d = armed_daemon(hit(CANCEL))
+        d.session.last_source = source(SHEET)
+        stop, task = await started(d)
+        await looked(d, sheet_items())
+        r = await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
+        assert r["text"].startswith("Tapped") and "tap" in d.session.calls
+        await finish(stop, task)
+        # the hit lands on the table: the guess holds, and nothing is touched
+        d = armed_daemon(hit(SHEET_TABLE))
+        d.session.last_source = source(SHEET)
+        stop, task = await started(d)
+        await looked(d, sheet_items())
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
+        assert e.value.code == "not_actionable" and "tap" not in d.session.calls
+        await finish(stop, task)
+        # no answer (an older runner): as the tree says
+        d = armed_daemon(None)
+        stop, task = await started(d)
+        await looked(d, sheet_items())
+        with pytest.raises(Refused):
+            await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
+        await finish(stop, task)
+    run(go)
