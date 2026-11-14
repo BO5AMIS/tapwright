@@ -288,10 +288,13 @@ class Trip:
             return self.dry(way, here)
         if way.kind == "none":
             await self.no_way(here)
-        await self.travel([] if way.kind == "here" else self.hops(way, here), here)
-        if self.route is not None:
-            await self.run_route(self.route["name"], self.route)
-            await self.check_end(self.route)
+        try:
+            await self.travel([] if way.kind == "here" else self.hops(way, here), here)
+            if self.route is not None:
+                await self.run_route(self.route["name"], self.route)
+                await self.check_end(self.route)
+        except Refused as e:
+            raise await self.with_screen(e) from None
         return await self.arrive()
 
     async def reach(self) -> None:
@@ -490,6 +493,20 @@ class Trip:
         self.notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in gone)
 
     # ---- the end ----
+    async def with_screen(self, e: Refused) -> Refused:
+        """A stop (a refusal, a needs-a-person stop, a pause) carries the screen as an action's answer shows it, whatever
+        `look` said (AGENT-TOOLS 1.13.3 §18.4): the error's text, then the screen. An `off_route` has it already."""
+        if getattr(e, "screened", False):
+            return e
+        first, sep, rest = str(e).partition("\n")
+        try:
+            text = (await self.d._after(self.view, first, [], True, moves_content=None))["text"]
+        except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
+            return e
+        shown = Refused(e.code, "\n".join([text, rest]) if sep else text)
+        shown.screened = True  # type: ignore[attr-defined]
+        return shown
+
     async def off_route(self, step: int, total: int, move: dict | None, why: str, here: str | None) -> None:
         """Stop where the screen isn't where the road leads, with nothing else touched (§4, §18.4)."""
         d = self.d
@@ -503,7 +520,9 @@ class Trip:
             text = answer["text"]
         except Exception:  # noqa: BLE001 - the reason is the answer; the screen is a courtesy
             text = "\n".join([head, *(f"Note: {n}" for n in notes)])
-        raise Refused("off_route", text)
+        stop = Refused("off_route", text)
+        stop.screened = True  # type: ignore[attr-defined]
+        raise stop
 
     async def arrive(self) -> dict:
         from .daemon import _answer

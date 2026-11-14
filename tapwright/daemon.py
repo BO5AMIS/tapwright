@@ -231,7 +231,7 @@ def _outside(bundle: str | None, name: str | None, given: str, alert: bool = Fal
 class UxRead(NamedTuple):
     """What one ux_check turn read (Daemon._ux_check): checked, filed and shown from this, never from the shared view."""
     items: list
-    alert_now: "tuple[str, tuple[str, ...]] | None"
+    alert_now: "tuple[str, tuple[str, ...], str] | None"
     screen: tuple
     app: "tuple[str, str] | None"
 
@@ -416,8 +416,9 @@ def settled_line(seconds: float) -> str:
     return f"Settled in {seconds:.2f} s."
 
 
-def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...]] | None:
-    return (alert.title, alert.buttons) if alert else None
+def _alert_key(alert: ui.Alert | None) -> tuple[str, tuple[str, ...], str] | None:
+    """What makes the alert the same one: title, buttons and message (a change in the message alone is a change of the alert)."""
+    return (alert.title, alert.buttons, alert.message) if alert else None
 
 
 def _furniture(view, alert: ui.Alert | None, keyboard: bool) -> list[str]:
@@ -5338,7 +5339,7 @@ class Daemon(journey_tool.JourneyTools):
         """When the newest read shows an OS alert: `behind_alert`. `force` says whether passing it could help
         (it can't touch an element that isn't found)."""
         if view.alert_now is not None:
-            title, buttons = view.alert_now
+            title, buttons, _message = view.alert_now
             alert = " ".join([ui.quoted(title), *(f"[{b}]" for b in buttons)])
             raise Refused("not_actionable", f"behind_alert: an alert covers it: {alert}; answer it with alert, "
                                             + ("or pass force: true." if force else "or ask the user."))

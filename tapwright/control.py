@@ -67,10 +67,10 @@ class ClientView:
     shown: list = field(default_factory=list)  # the list as of the agent's last answer: what changes are measured against
     top_ref: int = 0  # the highest ref number this agent was given: numbers are never reused until a full list
     app: tuple[str, str] | None = None  # (name, bundle id) of the foreground app at the last read
-    alert: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert at the last answer
+    alert: tuple[str, tuple[str, ...], str] | None = None  # (title, buttons, message) of the OS alert at the last answer
     keyboard: bool = False  # whether the keyboard was shown at the last answer
     read_keyboard: bool = False  # whether the keyboard showed on the newest read of any kind (answers and silent reads)
-    alert_now: tuple[str, tuple[str, ...]] | None = None  # (title, buttons) of the OS alert on the newest read of any kind
+    alert_now: tuple[str, tuple[str, ...], str] | None = None  # (title, buttons, message) of the OS alert on the newest read of any kind
     read_frame: "Frame | None" = None  # the stream frame at that moment: the picture that matches the list
     read_mark: tuple[int, "Frame | None"] = (0, None)  # (seq, the newest stream frame) when `items` was read
     place: tuple[str, str] | None = None  # (bundle id, place name) the agent's last answer put the app at (AGENT-TOOLS §18.1)
