@@ -1,5 +1,6 @@
 """Codex, PR #10 cycle 7: a number in an exported crash report that is an account value is replaced (or the export refused),
 a repaired road keeps no title the screens showed during the drive, and a recording saves the element a handler touched."""
+from fakes import bare
 import json
 
 import pytest
@@ -127,7 +128,7 @@ def test_a_toggle_by_a_value_is_recorded_as_the_switch_it_toggled_and_replays(tm
         said = (await d.run_tool("a", "record", {"stop": True, "path": str(script)}))["text"]
         assert said.startswith("Saved 1 steps"), said
         steps = json.loads(script.read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "toggle", "target": {"id": "account-switch"}}], steps
+        assert bare(steps) == [{"tool": "toggle", "target": {"id": "account-switch"}}], steps
         assert_absent(USERNAME, script.read_text("utf-8") + said)
         before = d.session.calls.count("tap")
         await d.run_tool("a", "replay", {"path": str(script)})
@@ -146,6 +147,6 @@ def test_a_tap_by_a_value_is_still_recorded_as_the_element_tapped(tmp_path):
         await d.run_tool("a", "tap", {"target": {"label": "<tester2's username>"}, "look": False})
         script = tmp_path / "tp.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(script)})
-        assert json.loads(script.read_text("utf-8"))["steps"] == [{"tool": "tap", "target": {"id": "profile-btn"}}]
+        assert bare(json.loads(script.read_text("utf-8"))["steps"]) == [{"tool": "tap", "target": {"id": "profile-btn"}}]
         await finish(stop, task)
     run(go)

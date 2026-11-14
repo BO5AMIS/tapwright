@@ -1,6 +1,7 @@
 """Codex, PR #10 cycle 14: a route's fields other than typed text are literal at the replay as at the save, and account
 values are found by decoding the text (percent, JSON and Python escapes, nested, direction marks, whitespace) with a map
 back to the original positions, instead of one regular expression per value."""
+from fakes import bare
 import json
 import random
 import time
@@ -349,7 +350,7 @@ def test_the_review_trace_saves_the_label_written_twice_and_replay_taps_the_reco
     run(go)
     assert out["said"].startswith("Saved route literal_selector"), out["said"]
     saved = json.loads(out["raw"])
-    assert saved["steps"] == [{"tool": "tap", "target": {"label": TYPED_LIKE.replace("${", "$${")}}]  # (written twice)
+    assert bare(saved["steps"]) == [{"tool": "tap", "target": {"label": TYPED_LIKE.replace("${", "$${")}}]  # (written twice)
     assert NEW_PASSWORD not in out["raw"]
     assert out["replayed"].startswith("Ran 1 of 1 steps"), out["replayed"]
     assert out["taps"][-1] == out["recorded_at"]  # the recorded button, not the one labelled with the password

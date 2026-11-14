@@ -672,3 +672,13 @@ class DescribingSession(FakeSession):
     async def rotate(self, to):
         self._record(f"rotate:{to}")
         return f"rotated to {to}"
+
+
+def bare(steps):
+    """A recorded script's steps (or one step) without the notes a repair reads (`place` and `seen`, AGENT-TOOLS §26.6, §9.4):
+    for a test that is about what else the recording kept."""
+    if isinstance(steps, list):
+        return [bare(s) for s in steps]
+    if isinstance(steps, dict):
+        return {k: v for k, v in steps.items() if k not in ("place", "seen")}
+    return steps

@@ -1,6 +1,7 @@
 """Codex, PR #10 cycle 15: JSON's \\b and \\f, escapes that take in both ends of one value, decoding to convergence with a
 work limit that fails closed, literal backslashes, a route stop that fails, long values, and undeclared variables in
 typed text."""
+from fakes import bare
 import json
 import random
 import time
@@ -242,7 +243,7 @@ def test_the_review_trace_a_plain_word_password_is_saved(tmp_path):
     run(go)
     assert "password" in out["look"] and "<tester2's password>" not in out["look"], out["look"]
     assert out["said"].startswith("Saved 1 steps"), out["said"]  # (the wait is the tap's expectation)
-    assert out["saved"]["steps"] == [{"tool": "tap", "target": {"id": "info"}, "expect": {"text": "password"}}]
+    assert bare(out["saved"]["steps"]) == [{"tool": "tap", "target": {"id": "info"}, "expect": {"text": "password"}}]
 
 
 # ---- 5: a route stop that fails changes nothing ----
@@ -286,7 +287,7 @@ def test_a_failed_route_stop_then_a_good_one_escapes_once_and_replay_taps_the_re
     run(go)
     assert out["files_after_failure"] == []
     assert out["said"].startswith("Saved route dollar_label"), out["said"]
-    assert out["saved"]["steps"] == [{"tool": "tap", "target": {"label": "hi $${x}"}}]  # (escaped once)
+    assert bare(out["saved"]["steps"]) == [{"tool": "tap", "target": {"label": "hi $${x}"}}]  # (escaped once)
     assert out["replayed"].startswith("Ran 1 of 1 steps"), out["replayed"]
     assert out["taps"] == [out["recorded_at"]]
 

@@ -1,4 +1,5 @@
 """Routes through the daemon (AGENT-TOOLS §18.5): record one, drive it, use it as a way, replay it."""
+from fakes import bare
 import json
 
 import pytest
@@ -59,7 +60,7 @@ def test_recording_a_route_saves_it_in_the_map_folder_from_place_to_place(tmp_pa
         assert r["text"].startswith("Saved route sign_in (3 steps, welcome > home) to ")
         saved = json.loads((folder(tmp_path) / "routes" / "sign_in.json").read_text("utf-8"))
         assert (saved["version"], saved["start"], saved["end"], saved["variables"], saved["app"]) == (2, "welcome", "home", ["email"], BUNDLE)
-        assert saved["steps"] == [{"tool": "tap", "target": {"id": "continue-btn"}},
+        assert bare(saved["steps"]) == [{"tool": "tap", "target": {"id": "continue-btn"}},
                                   {"tool": "type_text", "text": "${email}", "target": {"id": "email"}},
                                   {"tool": "tap", "target": {"id": "sign-in-btn"}}]
         assert "tester@example.com" not in (folder(tmp_path) / "routes" / "sign_in.json").read_text("utf-8")

@@ -1,4 +1,5 @@
 """Recording while a fresh replay runs (Codex P2, PR #5): the replay's app restart is part of what the recording saves."""
+from fakes import bare
 import asyncio
 import json
 
@@ -26,7 +27,7 @@ def test_a_recording_that_replays_a_fresh_script_keeps_its_app_restart(tmp_path)
         out = tmp_path / "out.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(out)})
         steps = json.loads(out.read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "open_app", "app": "com.example.a"},
+        assert bare(steps) == [{"tool": "open_app", "app": "com.example.a"},
                          {"tool": "close_app", "app": "com.example.b"},
                          {"tool": "open_app", "app": "com.example.b", "expect": {"id": "b_only",
                                                                                  "timeout": 30.0}},

@@ -1,4 +1,5 @@
 """`compare_screen`, `expect.matches` and references that travel with a script (AGENT-TOOLS §14, v1.9)."""
+from fakes import bare
 import asyncio
 import io
 import json
@@ -405,7 +406,7 @@ def test_record_folds_a_compare_into_the_action_before_it_and_copies_the_referen
         folder = tmp_path / "flows" / "buy.references"
         assert r["text"] == f"Saved 3 steps to {path}, and 3 reference pictures to {folder}.", r["text"]
         steps = json.loads(path.read_text("utf-8"))["steps"]
-        assert steps == [
+        assert bare(steps) == [
             {"tool": "tap", "target": {"id": "lab-save"}, "expect": {"matches": "after-tap", "threshold": 1.5,
                                                                       "ignore": [{"id": "clock"}]}},
             {"tool": "compare_screen", "name": "second"},
@@ -782,7 +783,7 @@ def test_a_run_while_recording_keeps_its_visual_checks_and_their_references(tmp_
         folder = tmp_path / "flows" / "flow.references"
         assert r["text"].startswith(f"Saved 2 steps to {path}, and 1 reference picture to {folder}"), r["text"]
         data = json.loads(path.read_text("utf-8"))
-        assert data["steps"] == [
+        assert bare(data["steps"]) == [
             {"tool": "tap", "target": {"id": "lab-save"},
              "expect": {"matches": "home", "threshold": 2, "ignore": [{"id": "clock"}]}},
             {"tool": "compare_screen", "name": "home", "threshold": 1}]
@@ -813,7 +814,7 @@ def test_a_check_that_did_not_hold_in_a_recorded_run_is_not_saved(tmp_path):
                                                     {"tool": "compare_screen", "name": "home"}]})
         path = tmp_path / "flow.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(path)})
-        assert json.loads(path.read_text("utf-8"))["steps"] == [{"tool": "tap", "target": {"id": "lab-save"}}]
+        assert bare(json.loads(path.read_text("utf-8"))["steps"]) == [{"tool": "tap", "target": {"id": "lab-save"}}]
         await finish(stop, task)
     run(go)
 

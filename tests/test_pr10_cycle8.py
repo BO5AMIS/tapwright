@@ -1,5 +1,6 @@
 """Codex, PR #10 cycle 8: percent escapes in any case, a toggle that changes nothing recorded by its switch, a recorded
 selector counted as the replaying tool counts, and typed account values recorded as the variables the tools type."""
+from fakes import bare
 import json
 from io import StringIO
 
@@ -80,7 +81,7 @@ def test_a_toggle_that_changes_nothing_is_recorded_as_the_switch_it_resolved(tmp
         script = tmp_path / "nop.json"
         assert (await d.run_tool("a", "record", {"stop": True, "path": str(script)}))["text"].startswith("Saved 1 steps")
         steps = json.loads(script.read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "toggle", "value": False, "target": {"id": "account-switch"}}], steps
+        assert bare(steps) == [{"tool": "toggle", "value": False, "target": {"id": "account-switch"}}], steps
         r = await d.run_tool("a", "replay", {"path": str(script)})
         assert "Ran 1 of 1 steps" in r["text"], r["text"]
         await finish(stop, task)
@@ -101,7 +102,7 @@ def test_a_recorded_toggle_index_counts_the_switches_as_replay_does(tmp_path):
         script = tmp_path / "ix.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(script)})
         steps = json.loads(script.read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "toggle", "target": {"id": "shared-control", "index": 0}}], steps
+        assert bare(steps) == [{"tool": "toggle", "target": {"id": "shared-control", "index": 0}}], steps
         assert_absent(USERNAME, script.read_text("utf-8"))
         await d.run_tool("a", "look", {"screenshot": False})
         await d.run_tool("a", "replay", {"path": str(script)})

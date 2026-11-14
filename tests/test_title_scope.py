@@ -2,6 +2,7 @@
 is `place_<n>` until a person names it, and a learned road keeps no title in plain text (a native Back tap is learned as
 `back`). What a user or an agent records or defines keeps what was recorded or given, titles included: a script, a route,
 their waits, expectations and ignore entries, and a reflex (Codex, PR #10 cycle 6, findings 2, 4, 5 and 7)."""
+from fakes import bare
 import json
 from xml.etree import ElementTree as ET
 
@@ -57,7 +58,7 @@ def test_a_script_keeps_chat_with_sara_and_replays_to_the_same_screen(tmp_path):
         script = tmp_path / "sara.json"
         said = (await d.run_tool("a", "record", {"stop": True, "path": str(script)}))["text"]
         assert said.startswith("Saved 1 steps"), said
-        assert json.loads(script.read_text("utf-8"))["steps"] == [
+        assert bare(json.loads(script.read_text("utf-8"))["steps"]) == [
             {"tool": "tap", "target": {"label": SARA}, "expect": {"text": SARA}}]
         d.session.at = "home"
         said = (await d.run_tool("a", "replay", {"path": str(script)}))["text"]
@@ -84,7 +85,7 @@ def test_a_route_keeps_the_title_it_was_recorded_with_and_the_map_holds_none(tmp
         await d.maps.flush()
         folder = tmp_path / "maps" / BUNDLE
         route = json.loads(next((folder / "routes").glob("to_sara*.json")).read_text("utf-8"))
-        assert route["steps"] == [{"tool": "tap", "target": {"label": SARA}, "expect": {"label": SARA}}]
+        assert bare(route["steps"]) == [{"tool": "tap", "target": {"label": SARA}, "expect": {"label": SARA}}]
         data = map_json(tmp_path)
         assert "Sara" not in json.dumps(data)
         assert all(name.startswith("place_") for name in data["places"])
@@ -127,7 +128,7 @@ def test_an_ignore_selected_by_a_title_is_kept_as_given(tmp_path):
         await d.run_tool("a", "record", {"stop": True, "path": str(script)})
         steps = json.loads(script.read_text("utf-8"))["steps"]
         assert steps[0] == {"tool": "compare_screen", "name": "home", "ignore": [{"label": SARA}]}
-        assert steps[1] == {"tool": "tap", "target": {"label": SARA}}
+        assert bare(steps[1]) == {"tool": "tap", "target": {"label": SARA}}
         await finish(stop, task)
     run(go)
 
@@ -171,7 +172,7 @@ def test_a_recorded_native_back_tap_keeps_its_label_while_the_learned_road_is_ba
         await d.run_tool("a", "tap", {"target": {"label": SARA}})
         script = tmp_path / "back.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(script)})
-        assert json.loads(script.read_text("utf-8"))["steps"] == [{"tool": "tap", "target": {"label": SARA}}]
+        assert bare(json.loads(script.read_text("utf-8"))["steps"]) == [{"tool": "tap", "target": {"label": SARA}}]
         await d.maps.flush()
         data = map_json(tmp_path)
         assert "Sara" not in json.dumps(data)
@@ -221,6 +222,6 @@ def test_nothing_in_a_recording_is_rewritten_for_a_title_learned_later(tmp_path,
             await d.run_tool("a", "record", {"stop": True})
             await d.maps.flush()
             steps = json.loads(next((tmp_path / "maps" / BUNDLE / "routes").glob("r*.json")).read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "tap", "target": {"label": SARA}}, {"tool": "tap", "target": {"label": "Reply"}}]
+        assert bare(steps) == [{"tool": "tap", "target": {"label": SARA}}, {"tool": "tap", "target": {"label": "Reply"}}]
         await finish(stop, task)
     run(go)

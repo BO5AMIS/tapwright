@@ -1,6 +1,7 @@
 """Codex, PR #10 cycle 6 (account values): composed forms (a repr inside a JSON document) are redacted everywhere and held
 by `holds`, a crash report is scrubbed as decoded JSON, and a recording saves a selector that holds a value from the element
 the touch really reached, or refuses the save naming the step, never the value, and never drops a step without a word."""
+from fakes import bare
 import json
 import time
 import urllib.parse
@@ -109,7 +110,7 @@ def test_a_tap_by_the_value_before_any_look_is_saved_by_the_element_it_reached(t
         said = (await d.run_tool("a", "record", {"stop": True, "path": str(script)}))["text"]
         assert said.startswith("Saved 2 steps"), said
         saved = script.read_text("utf-8")
-        assert json.loads(saved)["steps"] == [{"tool": "tap", "target": {"id": "profile-btn"}},
+        assert bare(json.loads(saved)["steps"]) == [{"tool": "tap", "target": {"id": "profile-btn"}},
                                               {"tool": "tap", "target": {"id": "l1"}}]
         assert_absent(USERNAME, saved + said)
         await finish(stop, task)
@@ -126,7 +127,7 @@ def test_a_value_selector_with_no_id_is_saved_by_the_point_it_reached(tmp_path):
         script = tmp_path / "pt.json"
         await d.run_tool("a", "record", {"stop": True, "path": str(script)})
         steps = json.loads(script.read_text("utf-8"))["steps"]
-        assert steps == [{"tool": "tap", "target": {"x": 160.0, "y": 220.0}}]
+        assert bare(steps) == [{"tool": "tap", "target": {"x": 160.0, "y": 220.0}}]
         await finish(stop, task)
     run(go)
 

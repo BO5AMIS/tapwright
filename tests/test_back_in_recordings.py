@@ -1,6 +1,7 @@
 """ui.is_back: the very button `back` would press (a button of a real NavigationBar, by ui.back_button's own choice). A
 road learned from a tap on it is `back` (AGENT-TOOLS §18.1); a recording (script, route) keeps the tap as recorded, its
 label too (PR #10, title scope: titles are kept out of learned map data only)."""
+from fakes import bare
 import json
 from xml.etree import ElementTree as ET
 
@@ -61,21 +62,21 @@ def recorded(tmp_path, tree: ui.Tree, target: dict, how: str):
 def test_a_tap_on_the_native_back_is_recorded_as_it_was_made(tmp_path, how, target):
     tree = view("Detail", leading=("Chat with Sara", "BackButton"))
     steps = recorded(tmp_path, tree, target, how)
-    assert steps == [{"tool": "tap", "target": target}]  # (what was recorded: replay taps the same button)
+    assert bare(steps) == [{"tool": "tap", "target": target}]  # (what was recorded: replay taps the same button)
 
 
 @pytest.mark.parametrize("how", ["script", "route"])
 def test_a_toolbars_leading_profile_button_is_not_recorded_as_back(tmp_path, how):
     tree = view("Toolbar title", bar="Toolbar", leading=("Profile", "Profile"))
     steps = recorded(tmp_path, tree, {"label": "Profile"}, how)
-    assert steps == [{"tool": "tap", "target": {"label": "Profile"}}]  # (what the tap did, not `back`)
+    assert bare(steps) == [{"tool": "tap", "target": {"label": "Profile"}}]  # (what the tap did, not `back`)
 
 
 @pytest.mark.parametrize("how", ["script", "route"])
 def test_a_menu_button_on_a_screen_titled_menu_is_recorded_by_its_label(tmp_path, how):
     tree = view("Menu", leading=("Menu", "Menu"))
     steps = recorded(tmp_path, tree, {"label": "Menu", "index": 1}, how)
-    assert steps == [{"tool": "tap", "target": {"label": "Menu", "index": 1}}]
+    assert bare(steps) == [{"tool": "tap", "target": {"label": "Menu", "index": 1}}]
 
 
 def test_is_back_is_the_element_back_would_press_in_a_real_navigation_bar():

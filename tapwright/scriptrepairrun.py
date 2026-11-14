@@ -63,7 +63,6 @@ class Run:
     learn: list[tuple] = dataclasses.field(default_factory=list)
     accepted: list[tuple[int, str]] = dataclasses.field(default_factory=list)  # (the original step, its phrase), for a later rejection
     start: int = 0  # where the run goes on from, in `work`
-    audited: bool = False
 
 
 def renumbered(text: str, offset: int, total: int) -> str:

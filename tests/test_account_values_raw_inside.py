@@ -4,6 +4,7 @@ The tree Tapwright reads keeps the screen's own words, so what it decides with t
 the safety policy (confirm and block words, an alert's buttons too), matching a target or an expectation, erasing a
 field before typing. What leaves the process (an answer, an error, the live view, a file) shows a test account's value
 as its placeholder, and a recording's file keeps its structure (a tool name that is also a value stays the tool)."""
+from fakes import bare
 import asyncio
 import json
 from xml.etree import ElementTree as ET
@@ -220,7 +221,7 @@ def test_a_value_that_is_a_tool_or_a_key_leaves_the_saved_script_whole(tmp_path,
         said = (await d.run_tool("a", "record", {"stop": True, "path": str(path)}))["text"]
         assert said.startswith("Saved 1 ") and path.is_file(), said  # (the answer's words are redacted: `steps` too)
         data = batch.load_script(str(path))
-        assert data["format"] == "agent-tools-script" and data["steps"] == [{"tool": "tap", "target": {"id": "l1"}}]
+        assert data["format"] == "agent-tools-script" and bare(data["steps"]) == [{"tool": "tap", "target": {"id": "l1"}}]
         await finish(stop, task)
     run(go)
 
