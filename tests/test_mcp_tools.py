@@ -42,7 +42,7 @@ EXPECTED = {
     "compare_screen": {"name", "update", "width", "threshold", "ignore"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot", "brief"},
     "record": {"start", "stop", "name", "path", "route", "action"},
-    "replay": {"name", "path", "look", "screenshot"},
+    "replay": {"name", "path", "look", "screenshot", "repair"},
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],

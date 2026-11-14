@@ -82,7 +82,7 @@ BASE_TOKENS = 4632
 # four touches scroll for themselves), the §3 no-change note (about 45), and the `compare_screen` match that names a
 # change under the threshold (about 70). Each is a thing an agent would otherwise get wrong and pay a call for.
 # 1.7 (W134): + the `notifications` tool (AGENT-TOOLS §24.2), about 40 tokens: a new tool's paragraph.
-ALLOWED_GROWTH = 1362  # 1.8 (W137): + the `explore` tool (AGENT-TOOLS §25), 187 tokens (1175 before it); # + the test-account line (66) and the host dialog sentence (36), both agreed 2026-11-13; + the two lines about text from others and platform terms (about 90 tokens, AGENT-TOOLS 1.16 §21.2)
+ALLOWED_GROWTH = 1432  # 1.8 (W138): + the `replay` repair sentence (AGENT-TOOLS §26), about 70 tokens (1362 before it); 1.8 (W137): + the `explore` tool (AGENT-TOOLS §25), 187 tokens (1175 before it); # + the test-account line (66) and the host dialog sentence (36), both agreed 2026-11-13; + the two lines about text from others and platform terms (about 90 tokens, AGENT-TOOLS 1.16 §21.2)
 
 
 def test_the_tool_list_stays_within_its_budget():
