@@ -230,6 +230,7 @@ class Look:
     place: str | None  # None: nothing to recognise it by, another app is in front, or an alert can't be answered
     new: bool = False
     foreign: bool = False
+    sheet: bool = False  # a system sheet that spends or shares is open (the share sheet): it is not a place
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,7 @@ class Explorer:
         self.resets_in_row = 0
         self.at: str | None = None  # the place the app was last seen at
         self._announced: set[str] = set()
+        self._listed: dict[str, set[str]] = {}  # the signatures already put on each place's frontier in this run
 
     # ---- hooks for part 2b (all do nothing here) ----
 
@@ -439,6 +441,8 @@ class Explorer:
             return Look(tree, None)
         if self._foreign(tree):
             return Look(tree, None, foreign=True)
+        if explorefloor.system_sheet(tree):
+            return Look(tree, None, sheet=True)
         seen = self.map.observe(tree, arrived)
         if seen is None:
             return Look(tree, None)
@@ -471,7 +475,7 @@ class Explorer:
             toggles = e.role in TOGGLE_ROLES or "toggle" in e.actions
             if not toggles and ("tap" not in e.actions or e.role in ("input", "scroll", "cell")):
                 continue
-            if inside_row(e) or ui.is_back(e, tree.back):
+            if inside_row(e) or ui.is_back(e, tree.back) or not e.enabled:
                 continue
             sig, target = base(e, "toggle" if toggles else "tap")
             if sig is not None:
@@ -531,7 +535,7 @@ class Explorer:
             await self.phone.gate()
             self._time()
             look = await self._look(False)
-            if look.foreign or look.place != place:
+            if look.foreign or look.sheet or look.place != place:
                 lost += 1
                 if lost > 3 or not (await self._come_back(place) if look.foreign else await self._return_to(place)):
                     self.notes.append("the explorer lost a place it was expanding")
@@ -546,11 +550,14 @@ class Explorer:
                         self._skip(place, a.sig, screen)
                 self.notes.append("a screen of the system or of an account, privacy or security setting was saved, not expanded")
                 return
-            if explored.mark_seen(self.data, place, [a.sig for a in actions if a.kind != "back"], mapfile.now()):
+            fresh = [a.sig for a in actions if a.kind != "back" and a.sig not in self._listed.setdefault(place, set())]
+            if fresh and explored.mark_seen(self.data, place, fresh, mapfile.now()):
+                self._listed[place].update(fresh)
                 self.map.changed()
             action = next((a for a in actions if a.sig not in done), None)
             if action is None:
-                if scrolls < SCROLLS and tree.below > 0:
+                if scrolls < SCROLLS and tree.below > 0 and not any(
+                        self.floor.element(e) for e in tree.items if e.role == "scroll"):  # a scroll view is a recipient too
                     scrolls += 1
                     self._spend()
                     await self._moved(await self.phone.scroll())
@@ -619,11 +626,11 @@ class Explorer:
         self._errors(place, step, watch)
         if moved.settled > SLOW_SECONDS:
             self._find("slow", place, f"The screen settles within {SLOW_SECONDS:g} seconds.", f"{moved.settled:.1f} s to settle", step)
-        if look.foreign or self._sheet(look.tree):
+        if look.foreign or look.sheet:
             bundle = look.tree.app[1] if look.tree.app and look.foreign else "the system's sheet"
             self._mark(place, action.sig, "left")
             self._find("dead_end", place, "The move stays in the app.", f"it left the app (now {bundle})", step)
-            await self._come_back(place)
+            await (self._come_back(place) if look.foreign else self._return_to(place))
             return True
         if look.place is None:
             self._mark(place, action.sig, "same")
@@ -636,9 +643,6 @@ class Explorer:
         self._arrived(place, look, action, element, items, titles, moved)
         await self._return_to(place)
         return True
-
-    def _sheet(self, tree: ui.Tree) -> bool:
-        return any((e.identifier or e.name) in explorefloor.SHEET_MARKERS for e in tree.items)
 
     def _arrived(self, place: str, look: Look, action: Action, element: ui.Element, items: list[ui.Element],
                  titles: frozenset[str], moved: Moved) -> None:
@@ -759,6 +763,12 @@ class Explorer:
         """Back to the place a move left (§25.4 item 8): by `back`, by a proven road, by a link, in that order, checking
         that it is there; when it can't, a reset."""
         look = await self._look(False)
+        for _ in range(2):  # a system sheet is closed by `back` (it is no place, and no app is left)
+            if not look.sheet:
+                break
+            self._spend()
+            await self._moved(await self.phone.back())
+            look = await self._look(False)
         if look.place == place:
             self.resets_in_row = 0
             return True

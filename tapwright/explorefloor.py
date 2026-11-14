@@ -29,9 +29,11 @@ PROTECTED_TITLE_WORDS = ("Account", "Accounts", "Privacy", "Security", "Password
 # §25.7: on a screen with a text input, a control with one of these words may submit a form
 SUBMIT_WORDS = ("Save", "Submit", "Continue", "Sign in", "Log in", "Sign up", "Register", "Create", "Confirm", "Apply",
                 "Update", "Share")
-# the system's own sheets that spend or share, seen inside the app's tree (§28.4). A sheet in another process shows as
-# another app in front, which the explorer treats as leaving the app.
-SHEET_MARKERS = ("ActivityListView",)
+# the system's own sheets that spend or share, seen inside the app's tree (§28.4): an element with one of these identifiers,
+# or an open popover (the way iOS 26 draws the share sheet: `Back.dismiss`, ui.py). A sheet in another process shows as
+# another app in front, which the explorer treats as leaving the app. An app's own popover is taken for a system sheet too:
+# it is left alone and reported as a dead end, which is safe, if noisy.
+SHEET_MARKERS = ("ActivityListView", "ActivityContentView")
 # an alert's answers the explorer may give, best first: it denies and cancels, it never allows (§25.5, §28.4)
 DENY_BUTTONS = ("Don't Allow", "Not Now", "Ask App Not to Track", "Cancel", "Dismiss", "Close", "Later", "No Thanks")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -120,7 +122,7 @@ class Floor:
         where = bundle or (tree.app[1] if tree.app else None)
         if where in grants.NEVER_APPS:
             return Skip("system")
-        if any((e.identifier or e.name) in SHEET_MARKERS for e in [*tree.items, *(h for h, _ in tree.behind)]):
+        if system_sheet(tree):
             return Skip("system")
         titles = [tree.structure.title, *(e.text for e in tree.items if e.role == "header")]
         for title in titles:
@@ -144,6 +146,12 @@ class Floor:
 def inside(inner: ui.Element, outer: ui.Element) -> bool:
     return (outer.width > 0 and outer.height > 0 and outer.x <= inner.x and outer.y <= inner.y
             and inner.x + inner.width <= outer.x + outer.width and inner.y + inner.height <= outer.y + outer.height)
+
+
+def system_sheet(tree: ui.Tree) -> bool:
+    """Is a system sheet that spends or shares (the share sheet, an App Store purchase) open in the app's tree (§28.4)?"""
+    named = [*(e.identifier or e.name for e in [*tree.items, *(h for h, _ in tree.behind)]), *tree.structure.ids]
+    return any(name in SHEET_MARKERS for name in named) or (tree.back is not None and tree.back.dismiss is not None)
 
 
 def safe_button(alert: ui.Alert, floor: Floor) -> str | None:

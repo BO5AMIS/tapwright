@@ -1,5 +1,6 @@
 """The explorer's search (§25.4, §25.9, §28): order, rows, depth, focus, tried, budget, crash, leaving the app, one app, pause."""
 import asyncio
+import json
 from dataclasses import replace
 
 from explorefakes import FakePhone, OTHER, build, identity, standard
@@ -231,3 +232,22 @@ def test_findings_come_out_in_one_shape(tmp_path):
     crash = result.findings[0]
     assert findings.parse(findings.to_dict(crash), lambda s: s) == crash
     assert crash.path_from == result.start_place and crash.place == result.places[1]
+
+
+def test_what_is_saved_holds_no_title_and_no_row_text(tmp_path):
+    from tapwright import mapfile
+    phone = world()
+    explorer, maps = build(tmp_path, phone)
+    run(explorer, maps)
+    text = "".join(f.read_text(encoding="utf-8") for f in tmp_path.rglob("*.json"))
+    assert text and "explored" in text and "id:go-settings" in text
+    for private in ("Trip A", "Trip B", "Trip C", "Settings", "Language", "Detail", "Trips"):
+        assert f'"{private}"' not in text and f"label:{private}" not in text and f"text:{private}" not in text
+    assert mapfile.invalid(json.loads(next(tmp_path.rglob("map.json")).read_text(encoding="utf-8"))) is None
+
+
+def test_a_scroll_reveals_what_lies_below_up_to_five_times(tmp_path):
+    phone = world()
+    phone.screens["home"].below = 2
+    result = run(build(tmp_path, phone)[0])
+    assert phone.scrolls == explore.SCROLLS and result.stopped == "frontier_empty"

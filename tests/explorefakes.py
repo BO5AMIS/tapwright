@@ -1,6 +1,8 @@
 """A fake phone for the explorer (tapwright/explore.py): screens are real accessibility trees (mapfakes.screen), a tap moves
 between them by a table, and everything the explorer asks the phone is recorded, so a test can say what was touched, in
 what order, and what was never touched."""
+from xml.etree import ElementTree as ET
+
 from mapfakes import APP, SCREEN, screen
 
 from tapwright import explore, mapkeeper, policy, ui
@@ -173,3 +175,61 @@ def build(tmp_path, phone: FakePhone, rules: policy.Policy = policy.DEFAULT, who
           **options) -> tuple[explore.Explorer, mapkeeper.Maps]:
     maps, own = mapsport(tmp_path)
     return explore.Explorer(phone, port or own, rules, who or identity(), clock=phone.clock, **options), maps
+
+
+def grid(title: str, buttons: tuple[tuple[str, str], ...] = (), inputs: tuple[str, ...] = (), secure: tuple[str, ...] = (),
+         switches: tuple[tuple[str, str], ...] = (), cells: tuple[tuple[str, tuple[str, ...]], ...] = (), back: str | None = None,
+         bundle: str = APP[1], alert: tuple[str, tuple[str, ...]] | None = None, others: tuple[str, ...] = (),
+         headers: tuple[str, ...] = (), popover: bool = False) -> ui.Tree:
+    """A screen of many controls in two columns: `buttons` as (id, label) (an empty label is an icon-only button), text
+    `inputs` and `secure` fields, `switches` as (id, label), `cells` as (row label, nested button labels), a native Back, an
+    alert as (title, buttons), `others` (named Other elements, for a system sheet) and `headers` (static texts with the Header trait)."""
+    def node(kind, **attrs):
+        return ET.Element(f"XCUIElementType{kind}", {"type": f"XCUIElementType{kind}", "enabled": "true", **{k: str(v) for k, v in attrs.items()}})
+    app = node("Application", bundleId=bundle, label=APP[0], x=0, y=0, width=400, height=800)
+    bar = node("NavigationBar", name=title, x=0, y=40, width=400, height=60)
+    bar.append(node("StaticText", label=title, name=title, value=title, x=10, y=50, width=200, height=30, traits="StaticText,Header"))
+    if back:
+        bar.append(node("Button", label=back, name=back, x=10, y=50, width=60, height=30))
+    app.append(bar)
+    n = 0
+
+    def place() -> tuple[int, int]:
+        nonlocal n
+        n += 1
+        return 10 + 200 * ((n - 1) % 2), 110 + 44 * ((n - 1) // 2)
+    for ident, label in buttons:
+        x, y = place()
+        app.append(node("Button", label=label, name=ident, x=x, y=y, width=180, height=40))
+    for ident in inputs:
+        x, y = place()
+        app.append(node("TextField", label=f"Field {ident}", name=ident, value="", x=x, y=y, width=180, height=40))
+    for ident in secure:
+        x, y = place()
+        app.append(node("SecureTextField", label=f"Field {ident}", name=ident, value="", x=x, y=y, width=180, height=40))
+    for ident, label in switches:
+        x, y = place()
+        app.append(node("Switch", label=label, name=ident, value="0", x=x, y=y, width=180, height=40))
+    for label, nested in cells:
+        x, y = place()
+        cell = node("Cell", label=label, name=label, x=x, y=y, width=180, height=40)
+        for k, inner in enumerate(nested):
+            cell.append(node("Button", label=inner, name=inner, x=x + 4, y=y + 2, width=60, height=30))
+        app.append(cell)
+    for name in others:
+        x, y = place()
+        app.append(node("Other", name=name, label=name, x=x, y=y, width=180, height=40))
+    for text in headers:
+        x, y = place()
+        app.append(node("StaticText", label=text, name=text, value=text, x=x, y=y, width=180, height=30, traits="StaticText,Header"))
+    if popover:  # how iOS 26 draws a share sheet: a Popover over a PopoverDismissRegion
+        app.append(node("Other", name="PopoverDismissRegion", x=0, y=0, width=400, height=800))
+        sheet = node("Popover", x=20, y=450, width=360, height=330)
+        sheet.append(node("Button", label="Copy", name="Copy", x=30, y=460, width=100, height=40))
+        app.append(sheet)
+    if alert:
+        box = node("Alert", label=alert[0], x=50, y=250, width=300, height=200)
+        for k, name in enumerate(alert[1]):
+            box.append(node("Button", label=name, name=name, x=60, y=330 + 44 * k, width=280, height=40))
+        app.append(box)
+    return ui.read(ET.tostring(app, encoding="unicode"), SCREEN)
