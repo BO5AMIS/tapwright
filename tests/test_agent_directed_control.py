@@ -269,6 +269,7 @@ def test_automatic_retype_retains_original_turn_ownership(change):
             await looked(d, [field])
             s = real_dispatch(d.session)
             s.retype = types.MethodType(Session.retype, s)
+            s.focused = "email"
             original_http = s.device.http
 
             async def http(method, path, payload=None, timeout=30):
@@ -349,4 +350,111 @@ def test_frozen_app_close_keeps_ownership_during_native_setup(change, code):
             await d._close_stuck(d.stuck, "Lab", [])
         assert error.value.code == code and not sent
         assert device_module.BEFORE_SEND.get() is None
+    run(go)
+
+
+@pytest.mark.parametrize("new_focus", ["email", "other", None])
+def test_retype_checks_original_field_after_another_agent_turn(new_focus):
+    from fakes import el
+    from test_daemon import looked
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        try:
+            field = el("e1", "input", "Email", "email", value="a", rect=(25, 450, 380, 50))
+            other = el("e2", "input", "Other", "other", value="keep me", rect=(25, 550, 380, 50))
+            await looked(d, [field, other])
+            s = real_dispatch(d.session)
+            s.retype = types.MethodType(Session.retype, s)
+            s.is_focused = types.MethodType(Session.is_focused, s)
+            focus = "email"
+            reads = []
+
+            async def active():
+                return focus
+
+            async def is_field(element, expected):
+                reads.append(expected.identifier)
+                return element == expected.identifier
+
+            async def wrong(result, text):
+                async def other_agent():
+                    nonlocal focus
+                    focus = new_focus
+                await d.control.agent(other_agent)
+                return True
+
+            async def landed(*args):
+                return None
+
+            s._active_element, s._is_field = active, is_field
+            d._typed_wrong, d._typed_landed = wrong, landed
+            if new_focus == "email":
+                await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "abc"})
+                assert [path.rsplit("/", 1)[-1] for path, _ in s.dispatched] == ["clear", "keys"]
+                assert "/element/email/clear" in s.dispatched[0][0]
+            else:
+                with pytest.raises(Refused) as error:
+                    await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "abc"})
+                assert error.value.code == "stale"
+                assert not s.dispatched
+            assert reads == (["email"] if new_focus else [])
+            assert s.execution_guard is None
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("to", ["end", "target"])
+@pytest.mark.parametrize("refuse_drag", [1, 2])
+@pytest.mark.parametrize("code", ["paused", "busy"])
+def test_scroll_refusal_invalidates_other_clients_only_after_delivery(to, refuse_drag, code, monkeypatch):
+    from test_daemon import LongList
+
+    async def go():
+        d = make(settle_fallback=0.001)
+        stop, task = await started(d)
+        try:
+            s = real_dispatch(d.session)
+            for name in ("_drag", "_fast_drag"):
+                setattr(s, name, types.MethodType(getattr(Session, name), s))
+            rows = LongList(d)
+
+            async def scroll(x0, y0, x1, y1):
+                done = await Session.scroll(s, x0, y0, x1, y1)
+                rows.offset = min(0.0, max(rows.lowest, rows.offset + y1 - y0))
+                rows.lay()
+                return done
+
+            s.scroll = scroll
+            await d.run_tool("a", "look", {"screenshot": False})
+            await d.run_tool("observer", "look", {"screenshot": False})
+            observer = d.control.client("observer")
+            before = d.control.generation
+            assert observer.seen == before
+            notices = 0
+
+            async def notify(ms):
+                nonlocal notices
+                notices += 1
+                if notices == refuse_drag:
+                    if code == "paused":
+                        d.control.paused = True
+                    else:
+                        d.control.person_generation += 1
+
+            monkeypatch.setattr(d._agent_touches, "notify", notify)
+            args = {"to": to, "look": False}
+            if to == "target":
+                args["target"] = {"id": "row-30"}
+            with pytest.raises(Refused) as error:
+                await d.run_tool("a", "scroll", args)
+            assert error.value.code == code
+            assert len(s.dispatched) == refuse_drag - 1
+            assert d.control.generation == before + (refuse_drag == 2)
+            assert (observer.seen != d.control.generation) == (refuse_drag == 2)
+            assert s.execution_guard is None
+        finally:
+            await finish(stop, task)
     run(go)

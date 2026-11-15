@@ -3762,11 +3762,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         execution_guard = None
 
-        async def guarded_retype(text):
+        async def guarded_retype(text, field):
             previous = self.session.execution_guard
             self.session.execution_guard = execution_guard
             try:
                 await execution_guard()
+                if not await self.session.is_focused(field):
+                    raise Refused("stale", "the original input no longer has focus; look before typing again")
                 return await self.session.retype(text)
             finally:
                 self.session.execution_guard = previous
@@ -3890,7 +3892,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             typed = result.typed if result.typed is not None else args["text"]
             landed = await self._typed_landed(view, result, typed)
             if landed is None and not result.field.secure and await self._typed_wrong(result, typed) and \
-                    await self.control.agent(lambda: guarded_retype(typed)):
+                    await self.control.agent(lambda: guarded_retype(typed, result.field)):
                 # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
                 # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
                 # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
@@ -5422,35 +5424,41 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         loop = asyncio.get_running_loop()
         began, previous, note = loop.time(), self._mark()[1], ""
         swipes, length = 0, abs(y1 - y0)
-        while swipes < MAX_SCROLL_SWIPES:
-            seq, since = self._mark()
-            # Where the tree shows how far the end lies, the drags that cover it go out one after the other (a drag
-            # doesn't slide on, so each moves the content by the finger's distance); the screen is read once after
-            # them. Before, each drag was followed by two waits for the screen and a read (about 2 s a drag on the
-            # phone: 7 s for a list of 14 rows, 2026-11-13).
-            runs = self._drags_to_the_end(direction, bounds, length) if beyond else 1
-            for _ in range(max(1, min(runs, MAX_SCROLL_SWIPES - swipes))):
-                swipes += 1
-                await s.scroll(x0, y0, x1, y1)
-                if not to:
+        try:
+            while swipes < MAX_SCROLL_SWIPES:
+                seq, since = self._mark()
+                # Where the tree shows how far the end lies, the drags that cover it go out one after the other (a drag
+                # doesn't slide on, so each moves the content by the finger's distance); the screen is read once after
+                # them. Before, each drag was followed by two waits for the screen and a read (about 2 s a drag on the
+                # phone: 7 s for a list of 14 rows, 2026-11-13).
+                runs = self._drags_to_the_end(direction, bounds, length) if beyond else 1
+                for _ in range(max(1, min(runs, MAX_SCROLL_SWIPES - swipes))):
+                    await s.scroll(x0, y0, x1, y1)
+                    swipes += 1
+                    if not to:
+                        break
+                if not to or swipes >= MAX_SCROLL_SWIPES:
                     break
-            if not to or swipes >= MAX_SCROLL_SWIPES:
-                break
-            if beyond:
-                await self._silent_read(view)  # waits for the screen to be still itself: no settle of its own first
-                if not self._more_beyond(direction, bounds):
-                    break  # the tree said there was more past that edge, and now there is none: reached
-                settled = self._mark()[1]
-            else:
-                await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
-                settled = self._mark()[1]
-            if alike(settled, previous):
-                break  # the swipe left the screen as the one before did: the end of the list
-            previous = settled  # (with no stream there is nothing to compare: every swipe is made)
-            if loop.time() - began >= SCROLL_CAP:
-                # the screen still changed after every swipe: more may be loading, or the list is long
-                note = f"the {to} wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
-                break
+                if beyond:
+                    await self._silent_read(view)  # waits for the screen to be still itself: no settle of its own first
+                    if not self._more_beyond(direction, bounds):
+                        break  # the tree said there was more past that edge, and now there is none: reached
+                    settled = self._mark()[1]
+                else:
+                    await self._settle(seq, cap=RESOLVE_SETTLE, since=since)
+                    settled = self._mark()[1]
+                if alike(settled, previous):
+                    break  # the swipe left the screen as the one before did: the end of the list
+                previous = settled  # (with no stream there is nothing to compare: every swipe is made)
+                if loop.time() - began >= SCROLL_CAP:
+                    # the screen still changed after every swipe: more may be loading, or the list is long
+                    note = f"the {to} wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
+                    break
+        except Refused:
+            if swipes:  # earlier drags changed the screen even though this tool call failed
+                view.moved = True
+                self.control.touched()
+            raise
         done = Scrolled(f"Scrolled {area.line(actions=False, place=False) if area else 'the screen'} {direction}.")
         done.note = note
         return done
@@ -5522,41 +5530,42 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         loop = asyncio.get_running_loop()
         began, note, where, clear = loop.time(), "", None, False
         seen: list[tuple[float, ...]] = []  # where the element was before each drag
-        for drags in range(MAX_SCROLL_SWIPES + 1):
-            try:
+        try:
+            for drags in range(MAX_SCROLL_SWIPES + 1):
                 element = self._anywhere(view, target, together)
-            except Refused:
-                if seen:  # the screen has moved under the agent's list, and this answer carries none
-                    view.moved = True
-                raise
-            area = ui.scroll_holding(view.items, element, s.screen)
-            where = where or (area.line(actions=False, place=False) if area else "the screen")
-            top, bottom = s.last_insets
-            band = (SCROLL_TOP_INSET if top is None else top,
-                    s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
-            x, y, w, h = area.rect if area else (0.0, 0.0, *s.screen)
-            y, h = max(y, band[0]), min(y + h, band[1]) - max(y, band[0])
-            if h <= 0:  # the scroll view itself lies under the bars: nothing to drag in
-                note = "it doesn't scroll further: the target is as far into view as it gets."
-                break
-            move = ui.scroll_move(element.rect, (x, y, w, h))
-            # after a drag, inside the view is enough: chasing the last points of margin with a drag that can't
-            # be shorter than SCROLL_MIN_DRAG would go back and forth
-            if move == (0.0, 0.0) or (seen and ui.scroll_move(element.rect, (x, y, w, h), margin=0.0) == (0.0, 0.0)):
-                clear = True
-                break
-            if any(ui._same_rect(was, element.rect) for was in seen):
-                note = "it doesn't scroll further: the target is as far into view as it gets."
-                break
-            if loop.time() - began >= SCROLL_CAP:
-                note = f"the target wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
-                break
-            if drags == MAX_SCROLL_SWIPES:
-                note = f"the target wasn't reached in {MAX_SCROLL_SWIPES} drags; scroll again to go on."
-                break
-            seen.append(element.rect)
-            await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
-            await self._silent_read(view)  # once the screen is still: where the element is now
+                area = ui.scroll_holding(view.items, element, s.screen)
+                where = where or (area.line(actions=False, place=False) if area else "the screen")
+                top, bottom = s.last_insets
+                band = (SCROLL_TOP_INSET if top is None else top,
+                        s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom))
+                x, y, w, h = area.rect if area else (0.0, 0.0, *s.screen)
+                y, h = max(y, band[0]), min(y + h, band[1]) - max(y, band[0])
+                if h <= 0:  # the scroll view itself lies under the bars: nothing to drag in
+                    note = "it doesn't scroll further: the target is as far into view as it gets."
+                    break
+                move = ui.scroll_move(element.rect, (x, y, w, h))
+                # after a drag, inside the view is enough: chasing the last points of margin with a drag that can't
+                # be shorter than SCROLL_MIN_DRAG would go back and forth
+                if move == (0.0, 0.0) or (seen and ui.scroll_move(element.rect, (x, y, w, h), margin=0.0) == (0.0, 0.0)):
+                    clear = True
+                    break
+                if any(ui._same_rect(was, element.rect) for was in seen):
+                    note = "it doesn't scroll further: the target is as far into view as it gets."
+                    break
+                if loop.time() - began >= SCROLL_CAP:
+                    note = f"the target wasn't reached in {SCROLL_CAP:g} s; scroll again to go on."
+                    break
+                if drags == MAX_SCROLL_SWIPES:
+                    note = f"the target wasn't reached in {MAX_SCROLL_SWIPES} drags; scroll again to go on."
+                    break
+                await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
+                seen.append(element.rect)
+                await self._silent_read(view)  # once the screen is still: where the element is now
+        except Refused:
+            if seen:  # only completed drags count, including a refusal in the following read
+                view.moved = True
+                self.control.touched()
+            raise
         line = element.line(ref=bool(element.ref), actions=False, place=False)
         if clear and not seen:  # nothing was dragged: "Scrolled" would read as if the layout had moved
             return Scrolled(f"{line} is already on screen.")
