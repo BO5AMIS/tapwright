@@ -335,10 +335,11 @@ def test_no_answer_force_or_a_point_tap_as_before():
 
 # ---- the pin ----
 
-def test_the_runner_pinned_is_tw_16_15_3_5():
+def test_the_runner_pinned_is_tw_16_15_3_6():
     repo, tag, sha, folder = store.WDA_SOURCES["fork"]
-    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.5", "fork-tw-16.15.3.5")
-    assert len(sha) == 64 and store.WDA_VERSION == "fork-tw-16.15.3.5"
+    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.6", "fork-tw-16.15.3.6")
+    assert sha == "5562fb2c0df223ea675c7be57e0f70e8e26c692f20012b7ae9783f64c4a3a081"
+    assert store.WDA_VERSION == "fork-tw-16.15.3.6"
 
 
 # ---- a cover the tree only guesses: the runner's hit test decides ----

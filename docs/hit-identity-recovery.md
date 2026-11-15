@@ -16,7 +16,9 @@ The foreign-recipient branch now records fixed diagnostics: `gate`, `owner`, `po
 
 ## Deployment boundary
 
-This is a paired runner/client correction. The client must be installed before a version-6 runner is activated: older clients can treat hit-route failures as unavailable optional checks. Do not install the runner alone. The release pin and exact signed-artifact verification must be completed after Apple CI succeeds.
+This is a paired runner/client correction. The client must be installed before a version-6 runner is activated: older clients can treat hit-route failures as unavailable optional checks. Do not install the runner alone. The client pins candidate runner `tw-16.15.3.6`, SHA256 `5562fb2c0df223ea675c7be57e0f70e8e26c692f20012b7ae9783f64c4a3a081`. This is the exact unsigned artifact from successful Apple tests/build run `43715569455` at `d659398`; release-tag merge commit `3892ed9` has the identical source tree. Later tag rebuilds failed in hosted simulator initialization before tests, so the release promotes the previously verified artifact. Signing and installed-artifact verification remain part of the coordinated cutover.
+
+Rollback must restore a matched pair: stop the candidate, reinstall the previous pinned v5 runner with the intact previous client, then start that client. A Python-only rollback while v6 remains installed is not supported.
 
 No live system is changed by this source work. The phone lead retains exclusive ownership, and the installed 1.7.2rc1 environment remains running. Any future signing, runner installation, daemon switch or normal Cancel trial needs a separately coordinated quiet window. Existing scope, policy, wrapper and confirmation protections remain in force. The correction does not select saved credentials, operate the Passwords sheet, or grant other-app control.
 
