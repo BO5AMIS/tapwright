@@ -3,7 +3,6 @@ given apps' notifications (every app's with --dedicated or --phone), newest firs
 other app's notification appears in no output; a one-time code is read from the setting's SOURCE apps only, within 2
 minutes after the code field, once, and is never shown; `/otp` answers with its `source`; the notification trigger fires
 once per new notification and never while the phone is in use. Synthetic SpringBoard XML and values only."""
-import asyncio
 import datetime
 import json
 import time
@@ -198,6 +197,7 @@ def test_personal_mode_reads_only_the_given_apps_and_the_others_are_in_no_output
             r2 = await d.run_tool("a", "notifications", {"open": 2}, scope=Scope((BUNDLE,)))
             answers.append(r2["text"])
             await finish(stop, task)
+            await d.maps.flush()  # the disk scan must wait for map writers and their temporary locks
         finally:
             trace._path = None
         lines = r["text"].splitlines()
@@ -359,6 +359,7 @@ def test_a_code_is_read_from_the_source_app_only_typed_once_and_shown_nowhere(tm
             answers.append(whole["text"])
             assert "Your Wayfare code is <one-time code>." in whole["text"]
             await finish(stop, task)
+            await d.maps.flush()  # finish() stops supervision; it does not drain background map writes
         finally:
             trace._path = None
         assert [(x["kind"], x.get("app"), x.get("detail")) for x in audit_lines(tmp_path)] == [("otp", BUNDLE, f"from {SMS}")]
@@ -552,7 +553,7 @@ class TriggerPhone:
 
 def trigger_deps(tmp_path, phone):
     from test_schedules import Clock, T1, make_route
-    from tapwright import pidlock, store
+    from tapwright import pidlock
     make_route(tmp_path / "home")
     clock = Clock()
     return schedulerun.Deps(client=phone, sleep=clock.sleep, monotonic=clock.monotonic, where=tmp_path / "sched",
