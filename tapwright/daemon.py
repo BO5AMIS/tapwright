@@ -3350,11 +3350,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 except Refused as e:
                     # a call the crash cut short ends in an error too: it carries the note as well
                     note = await self._crash_note(client_id, scope, name, before, e, pid_before)
-                    if said.notes and e.code != "dry_run":  # why a matching grant didn't cover it (§19.3)
-                        e = Refused(e.code, "\n".join([str(e), *said.notes]))
-                    if note is None or e.code == "dry_run":
-                        raise e from None
-                    raise Refused(e.code, f"{e}\nNote: {note}") from None
+                    if e.code != "dry_run" and (said.notes or note is not None):
+                        notes = [*said.notes]  # why a matching grant didn't cover it (§19.3)
+                        if note is not None:
+                            notes.append(f"Note: {note}")
+                        enriched = Refused(e.code, "\n".join([str(e), *notes]), draft=e.draft)
+                        enriched.hit_check = e.hit_check
+                        e = enriched
+                    raise e from None
                 note = await self._crash_note(client_id, scope, name, before, None, pid_before)
                 if note is not None:
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}

@@ -4,6 +4,8 @@ The 1.7.2rc1 live authentication-browser trial stopped at a normal dry-run. No i
 
 That record does not identify the foreign process, establish ancestry, or show which candidate point was tested. The reported hit frame was disjoint from the target. Geometry alone cannot authorize another app's control, nor prove that the hit-test snapshot was wrong. The original live cause remains unproven.
 
+A later rc1 Welcome-screen report reproduced the same-label refusal on Continue: button `(16, 733, 398, 57)`, text `(179, 748, 72, 27)`. Its sanitized action diagnostic reports `initial_relation: unplaced`, `relation: unplaced`, `recovery: probing`, four candidates and four probes, with the last probe still `unplaced` and owned by the same app. Recovery was attempted but did not prove the original Button as recipient; this is not a label-matching rejection. Regression coverage uses the reported geometry to check both exact-button recovery and refusal when all probes remain passive text. The live hierarchy and cause are still unproven, and the paired correction has not yet demonstrated live Continue success.
+
 ## Source correction
 
 The runner's direct snapshot path could combine the original AX hit's process identity with attributes from a snapshot whose AX identity was never checked. Route version 6 requires both the accessibility element ID and process ID to match. A mismatched or unusable direct snapshot uses the existing exact-identity application-tree fallback. If neither read proves identity, the runner returns the fixed error `tapwright hit: identity_unproven`. Successful replies carry `identity: verified`.

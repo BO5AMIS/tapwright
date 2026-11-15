@@ -18,6 +18,7 @@ SHAPES = [
     ("Settings", (370, 98, 44, 45), "Other", "", (381, 109, 22, 23)),
     ("Account", (28, 594, 374, 49), "StaticText", "Account", (76, 607, 296, 24)),
     ("Sign out", (28, 246, 374, 45), "StaticText", "Sign out", (186, 256, 58, 24)),
+    ("Continue", (16, 733, 398, 57), "StaticText", "Continue", (179, 748, 72, 27)),
 ]
 NO_CONFIRM = policy.parse({"version": 1, "confirm": [], "block": []})
 
