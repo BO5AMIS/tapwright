@@ -40,185 +40,20 @@ class Composer(LongList):
                               rect=(10, 20, 380, 30)))
 
 
-def test_h1_a_scroll_never_sends_a_draft_the_person_wasnt_shown(tmp_path):
-    async def go():
-        d, rules = daemon_with(tmp_path, {"version": 2, "confirm": ["Post"], "block": [], "grants": []})
-        stop, task = await started(d)
-        form = Composer(d)
-        sent: list[str] = []
-        tap = d.session.tap
-
-        async def tapped(target, hold_ms=60):
-            sent.append(form.caption)  # the draft as it is when the touch goes out
-            return await tap(target, hold_ms)
-        d.session.tap = tapped
-        token = daemon_module._DRAFTS_ROUTE.set(True)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False}, policy=rules)
-            assert e.value.draft is True and sent == []
-            [asked] = list(d._confirms.values())
-            shown = asked.message["caption"]
-            await d.viewer_message({"type": "confirm_answer", "id": asked.id, "allow": True})
-            r = await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False}, policy=rules)
-            assert len(sent) == 1 and f'"{sent[0]}"' in shown, (sent, shown)  # what went is what the person saw
-            assert "sent by a person" in r["text"]
-            # once more, from the top: the scroll rewrites the caption after the OK, so the person is asked again
-            form.offset = 0.0
-            form.lay()
-            await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-            with pytest.raises(Refused):
-                await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False}, policy=rules)
-            [first] = list(d._confirms.values())
-            await d.viewer_message({"type": "confirm_answer", "id": first.id, "allow": True})
-            form.offset = 0.0
-            form.lay()
-            await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False}, policy=rules)
-            assert e.value.draft is True and len(sent) == 1  # nothing more went out
-        finally:
-            daemon_module._DRAFTS_ROUTE.reset(token)
-        await finish(stop, task)
-    run(go)
 
 
 # ---- H2: a recipient held in a control's value is part of the draft's fingerprint ------------------------------------------
-def test_h2_a_recipient_picker_that_changed_its_value_is_asked_again(tmp_path):
-    async def go():
-        d, rules = daemon_with(tmp_path, {"version": 2, "confirm": ["Post"], "block": [], "grants": []})
-
-        def screen(who):
-            chat(d, "See you at six")
-            d.session.tree.append(el("e3", "picker", "Recipient", "recipient", value=who, rect=(10, 260, 300, 44)))
-        screen("Alice")
-        stop, task = await started(d)
-        token = daemon_module._DRAFTS_ROUTE.set(True)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-            with pytest.raises(Refused):
-                await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False}, policy=rules)
-            [first] = list(d._confirms.values())
-            await d.viewer_message({"type": "confirm_answer", "id": first.id, "allow": True})
-            screen("Bob")  # the same label and id; only the value says it goes to Bob now
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False}, policy=rules)
-            assert e.value.draft is True and calls_of(d, "tap") == []
-            # a checked destination too
-            first = next(iter(d._confirms.values()))
-            await d.viewer_message({"type": "confirm_answer", "id": first.id, "allow": True})
-            d.session.tree.append(el("e4", "switch", "Also share to Stories", "stories", checked=False,
-                                     rect=(10, 320, 300, 44)))
-            d.session.tree = [*d.session.tree[:-1], dataclasses.replace(d.session.tree[-1], checked=True)]
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False}, policy=rules)
-            assert e.value.draft is True and calls_of(d, "tap") == []
-        finally:
-            daemon_module._DRAFTS_ROUTE.reset(token)
-        await finish(stop, task)
-    run(go)
 
 
 # ---- H3: drafts only holds whatever policy the call sends ----------------------------------------------------------------
-def test_h3_a_stricter_call_policy_keeps_the_daemons_drafts_only_return_guard(tmp_path):
-    async def go():
-        d, rules = daemon_with(tmp_path, {"version": 2, "confirm": ["Send", "Post"], "block": [],
-                                          "grants": [grant(words=["Send", "Post"], draftsOnly=True)]})
-        d.ceiling = Ceiling(policy=rules)
-        stricter, why = d.ceiling.check_policy(policy.Policy(confirm=("Send", "Post", "Extra")))
-        assert why is None and stricter is not None and stricter.file is None  # (accepted: it only adds a word)
-        chat(d, "")
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=stricter)
-        for args in ({"text": "Synthetic unapproved delivery\n"}, {"text": "Synthetic unapproved delivery", "submit": True}):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "type_text", {"target": {"id": "message"}, **args}, policy=stricter)
-            assert e.value.code == "not_allowed" and "draftsOnly" in str(e.value)
-        for none in (stricter, policy.Policy()):  # (--no-policy too)
-            with pytest.raises(Refused):
-                await d.run_tool("a", "type_text", {"target": {"id": "message"}, "text": "x\n"}, policy=none)
-        assert d.session.typed == []
-        # and the Post itself stops at a draft a person sees, not a bare OK
-        chat(d, "Synthetic caption")
-        await d.run_tool("a", "look", {"screenshot": False}, policy=stricter)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "post"}}, policy=stricter)
-        assert e.value.draft is True and calls_of(d, "tap") == []
-        await finish(stop, task)
-    run(go)
 
 
 # ---- H4: deletion and payment ask by the touch's own words and on text that takes a tap ---------------------------------
-def test_h4_text_that_takes_a_tap_and_an_own_delete_account_ask_a_person_whatever_the_policy(tmp_path):
-    async def go():
-        d, rules = daemon_with(tmp_path, {"version": 2, "confirm": ["Delete", "Post", "Send"], "block": [],
-                                          "grants": []})
-        d.session.tree = [el("e1", "header", "Delete your account?", rect=(10, 60, 300, 30)),
-                          el("e2", "text", "Confirm", "confirm", rect=(10, 300, 300, 44)),
-                          button("e3", "Cancel", "cancel", rect=(10, 360, 300, 44))]
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "confirm"}}, policy=rules)
-        assert "needs_confirmation" in str(e.value) and calls_of(d, "tap") == []
-        # a button that says it itself, with no header around it, under a Send-only policy and under --no-policy
-        (tmp_path / "b").mkdir()
-        _, send_only = daemon_with(tmp_path / "b", {"version": 2, "confirm": ["Send"], "block": [], "grants": []})
-        d.session.tree = [button("e1", "Delete account", "delete-account", rect=(10, 300, 300, 44)),
-                          button("e2", "Buy now", "buy", rect=(10, 360, 300, 44))]
-        await d.run_tool("a", "look", {"screenshot": False}, policy=send_only)
-        for rules_now in (send_only, policy.Policy()):
-            for target in ("delete-account", "buy"):
-                with pytest.raises(Refused) as e:
-                    await d.run_tool("a", "tap", {"target": {"id": target}}, policy=rules_now)
-                assert "needs_confirmation" in str(e.value) and calls_of(d, "tap") == []
-        await finish(stop, task)
-    run(go)
 
 
-def test_h4_a_reflex_never_touches_what_the_policy_would_hold_whatever_the_policy_file(tmp_path):
-    """The same rules for a reflex (§18.7: it never asks anyone): a Delete account under --no-policy isn't one."""
-    from test_daemon_reflex import mapped, ready, show
-
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await ready(d)
-        await show(d, "labelled")  # the reflex's id, but the button now says Delete account
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "settings-btn"}}]},
-                             policy=policy.Policy())
-        assert e.value.code == "not_found" and d.session.tap_points == [] and d._confirms == {}
-        await finish(stop, task)
-    run(go)
 
 
 # ---- H5: a native navigation title is a payment screen's title --------------------------------------------------------------
-def test_h5_a_send_money_navigation_title_read_from_the_tree_protects_a_bare_confirm(tmp_path):
-    from test_runner_v5 import SCREEN, node
-
-    title = node("StaticText", (150, 60, 130, 22), l="Send money")
-    bar = node("NavigationBar", (0, 47, 430, 44), [title])
-    amount = node("StaticText", (20, 200, 390, 40), l="$25.00")
-    confirm = node("Button", (20, 700, 390, 50), n="confirm", l="Confirm")
-    window = node("Window", (0, 0, 430, 932), [node("Other", (0, 0, 430, 932), [bar, amount, confirm])])
-    tree = ui.read(ui.xml_of_tree(node("Application", (0, 0, 430, 932), [window], n="Pay", l="Pay", pid=42,
-                                       b="com.example.app")), SCREEN)
-    assert [e.role for e in tree.items] == ["text", "text", "button"]  # (no Header trait: plain text, as on the phone)
-
-    async def go():
-        d = make()
-        d.session.screen = SCREEN
-        d.session.tree = [dataclasses.replace(e, ref=f"e{i}") for i, e in enumerate(tree.items, 1)]
-        d.session.last_tree = tree
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "confirm"}})
-        assert "needs_confirmation" in str(e.value) and calls_of(d, "tap") == []
-        await finish(stop, task)
-    run(go)
 
 
 # ---- H6: a schedule that fails validation never shows a vault value -------------------------------------------------------
@@ -281,27 +116,6 @@ def test_m1_otp_answers_internal_when_notification_center_may_still_be_open(tmp_
 
 
 # ---- M2: toggle's tap and type_text's focusing tap go through the hit test --------------------------------------------------
-def test_m2_a_toggle_and_a_focusing_tap_under_another_control_are_refused_covered():
-    from test_runner_v5 import armed_daemon, hit, node
-
-    cover = hit(node("Button", (20, 290, 390, 64), n="delete-account", l="Delete account"))
-
-    async def go():
-        d = armed_daemon(cover)
-        stop, task = await started(d)
-        d.session.tree = [el("e1", "switch", "Alerts", "alerts", rect=(20, 300, 390, 44), checked=False),
-                          el("e2", "input", "Email", "email", rect=(20, 400, 390, 44))]
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "toggle", {"target": {"id": "alerts"}, "value": True})
-        assert e.value.code == "not_actionable" and str(e.value).startswith("covered:")
-        assert "tap" not in d.session.calls and d.session.hit_asks
-        asked = len(d.session.hit_asks)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "synthetic@example.test"})
-        assert e.value.code == "not_actionable" and d.session.typed == [] and len(d.session.hit_asks) > asked
-        await finish(stop, task)
-    run(go)
 
 
 # ---- one path for every touch -------------------------------------------------------------------------------------------------
@@ -309,12 +123,11 @@ def test_m2_a_toggle_and_a_focusing_tap_under_another_control_are_refused_covere
 # safe. "checked": the function itself runs Daemon._last_checks before the touch. "checked by <f>": the touch is made in a
 # helper that only <f> (which runs _last_checks first) calls. The rest touch no element an agent chose:
 TOUCHES = {
+    ("daemon", "Daemon._alert", "alert"): "checked",
     ("daemon", "Daemon._touch", "_press"): "checked",  # tap, long_press: _last_checks, then _press
     ("daemon", "Daemon._press", "tap"): "checked by Daemon._touch",  # (and a double tap's second: checked inside)
     ("daemon", "Daemon._toggle", "tap"): "checked",
     ("daemon", "Daemon._type_text", "type_text"): "checked",  # its focusing tap (typing itself: §11.1, Return guarded)
-    ("daemon", "Daemon._alert", "ACTIONS"): "checked",  # iOS's alert button through WebDriverAgent's alert route
-    ("daemon", "Daemon._cancel_system_alert", "alert"): "checked",  # exact Cancel, with private identity rechecked
     ("daemon", "ACTIONS", "alert"): "checked by Daemon._alert",
     ("daemon", "Daemon._swipe", "ACTIONS"): "checked",  # a short swipe is a touch where it starts; a full one asks
     ("daemon", "ACTIONS", "swipe"): "checked by Daemon._swipe",

@@ -315,24 +315,6 @@ def test_it_waits_for_a_screen_that_is_still_loading(tmp_path):
     run(go)
 
 
-def test_a_flagged_move_stops_the_drive_with_the_usual_error_and_what_was_done(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await learn(d)
-        before = taps(d)
-        d.session.screens["settings"] = screen("Settings", ids=("Delete", "about-row", "s1", "s2", "s3"))
-        data = d.maps.data(None, BUNDLE)
-        for road in data["roads"]:
-            if road["move"]["target"].get("id") == "general-row":
-                road["names"] = {"id": "general-row", "label": "Label of Delete"}
-        with pytest.raises(Refused) as e:
-            await drive(d, to="language")
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value).splitlines()[0]
-        assert "Done: 1 move." in str(e.value).splitlines()[0]
-        assert taps(d) - before == 1  # only the first move was made
-        await finish(stop, task)
-    run(go)
 
 
 def _flagged(d):
@@ -360,20 +342,6 @@ def test_look_false_wins_over_brief_and_the_next_answer_covers_both(tmp_path):
     run(go)
 
 
-def test_a_stop_always_carries_the_screen_whatever_look_says(tmp_path):
-    async def go():
-        for look in (False, True):
-            d = mapped(tmp_path)
-            stop, task = await started(d)
-            await learn(d)
-            _flagged(d)
-            with pytest.raises(Refused) as e:
-                await drive(d, to="language", look=look, brief=True)
-            lines = str(e.value).splitlines()
-            assert e.value.code == "not_allowed" and "needs_confirmation" in lines[0] and "Done: 1 move." in lines[0]
-            assert any(line.startswith("Screen ") for line in lines[1:]), (look, lines)
-            await finish(stop, task)
-    run(go)
 
 
 def test_an_off_route_stop_carries_the_screen_with_look_false(tmp_path):
@@ -478,22 +446,6 @@ def test_bad_arguments(tmp_path):
     run(go)
 
 
-def test_personal_mode_only_in_a_given_app(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await learn(d)
-        r = await d.run_tool("a", "drive", {"to": "language"}, scope=Scope(apps=(BUNDLE,)))
-        assert r["text"].startswith("Arrived at language")
-        d.session.at = "home"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "drive", {"to": "language"}, scope=Scope(apps=("com.other.app",)))
-        assert e.value.code == "not_allowed"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "drive", {"to": "language"}, scope=Scope(apps=()))
-        assert e.value.code == "not_allowed" and "no_apps" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 def test_the_drive_is_logged_as_one_call_and_its_moves_as_steps_of_it(tmp_path):

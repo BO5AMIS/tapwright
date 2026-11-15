@@ -22,21 +22,18 @@ def split_claude(text: str) -> tuple[dict[str, str], str]:
     return dict(re.findall(r"^([\w-]+): (.+)$", block, re.M)), body
 
 
-def test_the_handbook_is_short_and_says_what_the_plan_asks():
+def test_handbook_describes_the_current_control_contract():
     text = driver.handbook()
-    assert len(text) / 4 <= 600, "about 600 tokens at most"
-    for word in ("`map`", "`drive`", "`run`", "`expect`", "`if`", "`optional`", "Read every answer whole",
-                 "Never cut it", "Write nothing between calls", "`needs_confirmation`", "`locked`", "`paused`",
-                 "`off_route`", "Finish with five lines", "`account`", "`record`"):
-        assert word in text, word
-    assert len(re.findall(r"^[1-5]\. ", text.split("Finish with five lines")[1], re.M)) == 5
+    assert len(text) / 4 <= 600
+    for phrase in ("existing user authorization", "verify the result", "whole phone", "pause", "exclusive device ownership", "timed-out"):
+        assert phrase in text
+    assert "needs_confirmation" not in text
 
 
 def test_the_handbook_never_names_a_brand_of_model():
     text = driver.handbook().lower()
     for brand in ("haiku", "claude", "gpt", "codex", "sonnet", "opus", "openai", "anthropic"):
         assert brand not in text, brand
-    assert "small, fast model" in text
 
 
 def test_the_handbook_is_the_skills_reference_and_the_two_copies_match():

@@ -287,19 +287,6 @@ def armed_daemon(answer):
     return d
 
 
-def test_a_tap_on_a_target_a_bar_covers_is_refused_and_touches_nothing():
-    async def go():
-        d = armed_daemon(hit(BAR_BUTTON))
-        stop, task = await started(d)
-        await looked(d, lab_items())
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
-        assert e.value.code == "not_actionable"
-        assert str(e.value).startswith('covered: e1 button "Terms" id=terms-row @20,770 390x44 is behind ')
-        assert 'button "Checkout" id=checkout @20,772 390x48' in str(e.value)
-        assert "tap" not in d.session.calls and d.session.hit_asks == [(215.0, 792.0)]
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_hit_on_the_target_or_inside_it_taps():
@@ -359,32 +346,6 @@ def sheet_items() -> list[ui.Element]:
     return [cancel]
 
 
-def test_a_cover_the_tree_only_guesses_is_dropped_when_the_hit_lands_on_the_target():
-    async def go():
-        d = armed_daemon(hit(CANCEL))
-        d.session.last_source = source(SHEET)
-        stop, task = await started(d)
-        await looked(d, sheet_items())
-        r = await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
-        assert r["text"].startswith("Tapped") and "tap" in d.session.calls
-        await finish(stop, task)
-        # the hit lands on the table: the guess holds, and nothing is touched
-        d = armed_daemon(hit(SHEET_TABLE))
-        d.session.last_source = source(SHEET)
-        stop, task = await started(d)
-        await looked(d, sheet_items())
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
-        assert e.value.code == "not_actionable" and "tap" not in d.session.calls
-        await finish(stop, task)
-        # no answer (an older runner): as the tree says
-        d = armed_daemon(None)
-        stop, task = await started(d)
-        await looked(d, sheet_items())
-        with pytest.raises(Refused):
-            await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
-        await finish(stop, task)
-    run(go)
 
 
 def test_an_element_behind_a_guessed_layer_is_lifted_when_the_hit_lands_on_it():

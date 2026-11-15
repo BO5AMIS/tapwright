@@ -164,33 +164,6 @@ def test_a_restarted_app_is_read_by_its_new_process():
     run(go)
 
 
-def test_personal_mode_reads_only_a_given_apps_log():
-    async def go():
-        d = tuned(make())
-        d.session.installed.append({"bundle_id": "com.bank.app", "name": "Bank", "version": "1", "build": "1",
-                                    "executable": "Bank"})
-        stop, task = await started(d)
-        await opened(d)
-        d._rings["com.bank.app"] = LogRing()
-        d._rings["com.bank.app"].add(LogEntry(BASE, "error", "account 1234 overdrawn"))
-        d.session.device.emit(42, BASE + 1, "app line")
-        await settle(lambda: len(d._rings[APP].entries) == 1)
-        with pytest.raises(Refused) as e:  # no app list: nothing runs
-            await d.run_tool("a", "logs", {}, scope=Scope(()))
-        assert e.value.code == "not_allowed" and "no_apps" in str(e.value)
-        # another app in front, two given, none opened by the agent: nothing is read, and the refusal says why
-        d.session.app, d.session.foreground, d._opened = ("Bank", "com.bank.app"), "com.bank.app", None
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "logs", {}, scope=Scope((APP, "com.other.app")))
-        assert e.value.code == "not_allowed" and "outside_apps" in str(e.value)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "crash", {}, scope=Scope((APP, "com.other.app")))
-        assert e.value.code == "not_allowed"
-        # the only given app is read, and the other app's ring never appears, whatever is in front
-        r = await d.run_tool("a", "logs", {}, scope=Scope((APP,)))
-        assert "app line" in r["text"] and "overdrawn" not in r["text"]
-        await finish(stop, task)
-    run(go)
 
 
 def test_logs_and_crash_go_in_the_action_log_as_counts_only(tmp_path):
@@ -781,24 +754,6 @@ def test_errors_of_the_phones_services_are_refused_clearly_and_an_unreadable_rep
     run(go)
 
 
-def test_performance_refuses_an_app_that_came_to_the_front_after_the_check():
-    from tapwright.performance import Measurement
-    async def go():
-        d = tuned(make())
-        stop, task = await started(d)
-        session = d.session
-        reads = []
-
-        async def front():
-            reads.append(1)
-            return APP if len(reads) == 1 else "com.bank.app"  # another app comes forward between the two reads
-        session.foreground_bundle_id = front
-        session.device.measurement = Measurement(memory_mb=[1.0])
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "performance", {"seconds": 1}, scope=Scope((APP,)))
-        assert e.value.code == "not_allowed" and session.device.metered == []
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_late_crash_note_goes_to_its_own_client_while_it_drives_that_app():

@@ -62,48 +62,8 @@ async def ask_of(d):
 
 
 # ---- B-H2: the draft stop is the reach words', whatever the policy file says ---------------------------------------
-@pytest.mark.parametrize("rules", [None, {"confirm": ["Buy"], "block": []},
-                                   {"confirm": ["Send"], "block": [], "apps": {APP: {"confirm": []}}}])
-@pytest.mark.parametrize("target,word", [("send", "Send"), ("reply", "Reply"), ("comment", "Comment")])
-def test_a_draftsonly_route_stops_at_the_draft_whatever_the_policy_says(tmp_path, rules, target, word):
-    async def go():
-        d, given = daemon_with(tmp_path, rules)
-        stop, task = await started(d)
-        token = daemon_module._DRAFTS_ROUTE.set(True)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=given)
-            call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"id": target}, "look": False}, policy=given,
-                                                  dialog=True))
-            ask = await ask_of(d)
-            assert ask["kind"] == "draft" and ask["message"] == f'{word} this in Example? "Hello there"'
-            assert taps(d) == []  # nothing was touched
-            d.dialog_answer("a", ask["id"], "decline")
-            with pytest.raises(Refused) as e:
-                await asyncio.wait_for(call, 2)
-            assert e.value.code == "not_allowed" and e.value.draft is True and taps(d) == []
-        finally:
-            daemon_module._DRAFTS_ROUTE.reset(token)
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_draftsonly_grant_stops_at_the_draft_when_the_policy_has_no_such_word(tmp_path):
-    async def go():
-        d, given = daemon_with(tmp_path, {"version": 2, "confirm": ["Buy"], "block": [], "grants": [draft_grant()]})
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=given)
-        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"id": "send"}, "look": False}, policy=given,
-                                              dialog=True))
-        ask = await ask_of(d)
-        assert ask["kind"] == "draft" and ask["message"] == 'Send this in Example? "Hello there"' and taps(d) == []
-        d.dialog_answer("a", ask["id"], "allow")
-        r = await asyncio.wait_for(call, 2)
-        assert r["text"].splitlines()[-1] == "Note: sent by a person (in chat)." and len(taps(d)) == 1
-        # a word that reaches nobody, with no policy word, still goes through untouched by any of this
-        r = await d.run_tool("a", "tap", {"target": {"id": "message"}, "look": False}, policy=given)
-        assert "needs_confirmation" not in r["text"]
-        await finish(stop, task)
-    run(go)
 
 
 def test_outside_a_draftsonly_route_or_grant_a_send_with_no_policy_word_goes_through(tmp_path):
@@ -117,30 +77,6 @@ def test_outside_a_draftsonly_route_or_grant_a_send_with_no_policy_word_goes_thr
     run(go)
 
 
-@pytest.mark.parametrize("where", ["route", "grant"])
-def test_submit_is_refused_where_a_send_stops_at_a_draft(tmp_path, where):
-    async def go():
-        rules = {"version": 2, "confirm": [], "block": [], "grants": [draft_grant()] if where == "grant" else []}
-        d, given = daemon_with(tmp_path, rules)
-        stop, task = await started(d)
-        token = daemon_module._DRAFTS_ROUTE.set(True) if where == "route" else None
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=given)
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "message"}, "submit": True},
-                                 policy=given)
-            assert e.value.code == "not_allowed" and "submit would send" in str(e.value)
-            assert "tap the send button" in str(e.value)
-            assert not taps(d, "type")
-            # without submit it types, as always
-            r = await d.run_tool("a", "type_text", {"text": "hi", "target": {"id": "message"}, "look": False},
-                                 policy=given)
-            assert r["text"].startswith("Typed into")
-        finally:
-            if token is not None:
-                daemon_module._DRAFTS_ROUTE.reset(token)
-        await finish(stop, task)
-    run(go)
 
 
 def test_submit_goes_through_with_no_draftsonly_route_or_grant(tmp_path):
@@ -156,36 +92,6 @@ def test_submit_goes_through_with_no_draftsonly_route_or_grant(tmp_path):
 
 
 # ---- B-L9: a pending request is reused only in the same draft mode ----------------------------------------------------
-def test_a_pending_plain_request_is_never_reused_for_a_draft(tmp_path):
-    async def go():
-        d, given = daemon_with(tmp_path, {"confirm": ["Send"], "block": []})
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=given)
-        with pytest.raises(Refused):  # a plain request, pending in the live view ("Allow tap Send?", no draft)
-            await d.run_tool("a", "tap", {"target": {"id": "send"}, "look": False}, policy=given)
-        [plain] = list(d._confirms.values())
-        assert plain.draft is None
-        token = daemon_module._DRAFTS_ROUTE.set(True)
-        try:
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "tap", {"target": {"id": "send"}, "look": False}, policy=given)
-        finally:
-            daemon_module._DRAFTS_ROUTE.reset(token)
-        assert e.value.draft is True
-        drafts = [c for c in d._confirms.values() if c is not plain]
-        assert len(drafts) == 1 and drafts[0].draft is not None
-        assert drafts[0].message["caption"] == 'Send this in Example? "Hello there"'
-        # the person allows the plain one: the route's Send still doesn't go through on it
-        await d.viewer_message({"type": "confirm_answer", "id": plain.id, "allow": True})
-        token = daemon_module._DRAFTS_ROUTE.set(True)
-        try:
-            with pytest.raises(Refused):
-                await d.run_tool("a", "tap", {"target": {"id": "send"}, "look": False}, policy=given)
-        finally:
-            daemon_module._DRAFTS_ROUTE.reset(token)
-        assert taps(d) == []
-        await finish(stop, task)
-    run(go)
 
 
 # ---- B-M7: a full swipe on a list row --------------------------------------------------------------------------------
@@ -196,57 +102,8 @@ def row_screen(d):
     screen(d, el("e9", "cell", "Lunch with Sam", "row-1", rect=ROW))
 
 
-def test_a_full_swipe_across_a_list_row_needs_a_persons_ok_and_a_short_one_doesnt(tmp_path):
-    async def go():
-        d, given = daemon_with(tmp_path, {"version": 2, "confirm": ["Delete"], "block": [],
-                                          "grants": [draft_grant(name="del", words=["Delete"], draftsOnly=False)]})
-        row_screen(d)
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=given)
-        full = {"x0": 380, "y0": 530, "x1": 20, "y1": 530}
-        dry = await d.run_tool("a", "swipe", {**full, "dry_run": True}, policy=given)
-        assert "It needs a person's OK (a full swipe on a list row" in dry["text"] and not taps(d, "swipe")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "swipe", full, policy=given)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("needs_confirmation: a full swipe on cell")
-        assert "short swipe" in str(e.value) and not taps(d, "swipe")
-        [request] = list(d._confirms.values())
-        assert request.offer is None  # no grant is ever offered for it
-        # a short swipe reveals the row's buttons: it goes as before
-        await d.run_tool("a", "swipe", {"x0": 380, "y0": 530, "x1": 260, "y1": 530, "look": False}, policy=given)
-        assert len(taps(d, "swipe")) == 1
-        # a mostly-vertical swipe that starts on a row is a scroll
-        await d.run_tool("a", "swipe", {"x0": 200, "y0": 530, "x1": 120, "y1": 100, "look": False}, policy=given)
-        assert len(taps(d, "swipe")) == 2
-        # the person allows it: the same call makes the swipe, once
-        await d.viewer_message({"type": "confirm_answer", "id": request.id, "allow": True})
-        r = await d.run_tool("a", "swipe", {**full, "look": False}, policy=given)
-        assert r["text"].splitlines()[-1] == "Note: allowed by a person (in the live view)." and len(taps(d, "swipe")) == 3
-        with pytest.raises(Refused):
-            await d.run_tool("a", "swipe", full, policy=given)
-        await finish(stop, task)
-    run(go)
 
 
-@pytest.mark.parametrize("who", ["route", "schedule"])
-def test_a_full_row_swipe_is_never_made_in_a_draftsonly_route_or_a_scheduled_run(tmp_path, who):
-    async def go():
-        d, given = daemon_with(tmp_path, None)
-        row_screen(d)
-        stop, task = await started(d)
-        client = "schedule-tidy" if who == "schedule" else "a"
-        token = daemon_module._DRAFTS_ROUTE.set(True) if who == "route" else None
-        try:
-            await d.run_tool(client, "look", {"screenshot": False}, policy=given)
-            with pytest.raises(Refused) as e:
-                await d.run_tool(client, "swipe", {"x0": 380, "y0": 530, "x1": 20, "y1": 530}, policy=given, dialog=True)
-        finally:
-            if token is not None:
-                daemon_module._DRAFTS_ROUTE.reset(token)
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value) and "short swipe" in str(e.value)
-        assert not d._confirms and not taps(d, "swipe")  # nobody is asked: it is never made there
-        await finish(stop, task)
-    run(go)
 
 
 # ---- B-H1: the phone in use, for the schedules --------------------------------------------------------------------------
@@ -469,9 +326,6 @@ def test_record_never_replaces_a_route_a_grant_or_a_schedule_names(tmp_path):
         schedules.write(schedules.Schedule("daily", "home_run", {}, "09:00 daily", None), d.schedules_folder)
         stop, task = await started(d)
         await explore(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "record", {"start": True, "route": "sign_in"}, policy=rules)
-        assert e.value.code == "not_allowed" and 'grant "g" names it' in str(e.value)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "record", {"start": True, "route": "home_run"}, policy=rules)
         assert e.value.code == "not_allowed" and 'schedule "daily" runs it' in str(e.value)

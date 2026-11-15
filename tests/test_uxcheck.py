@@ -248,24 +248,6 @@ def test_the_house_rules_of_the_call_reach_the_check_and_a_look_remembers_the_sc
     run(go)
 
 
-def test_ux_check_is_a_read_in_personal_mode_and_refused_outside_the_given_apps():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.tree = [button("e1", "", "gear", rect=(340, 60, 44, 44))]
-        d.session.foreground = "com.example.app"
-        ok = await d.run_tool("a", "ux_check", {}, scope=Scope(("com.example.app",)))
-        assert ok["text"].startswith('UX check of "Example": 1 finding.')
-        d.session.foreground = "com.apple.mobilesafari"
-        d.session.app = ("Safari", "com.apple.mobilesafari")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "ux_check", {}, scope=Scope(("com.example.app",)))
-        assert e.value.code == "not_allowed"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "ux_check", {}, scope=Scope(()))
-        assert e.value.code == "not_allowed"
-        await finish(stop, task)
-    run(go)
 
 
 def test_findings_are_added_to_a_running_journey_when_there_is_one(monkeypatch):

@@ -100,9 +100,8 @@ def test_a_link_a_reflex_and_forgetting(tmp_path):
         assert listed[1:] == ["Places: home (link wayfare://home)", "Reflexes: rate_prompt."]
         await d.maps.flush()  # no background save is under way while the edits below are made
         assert (await d.run_tool("a", "map", {"forget_reflex": "rate_prompt"}))["text"] == "Reflex removed: rate_prompt."
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "map", {"reflex": {**rate, "do": {"tool": "tap", "target": {"text": "Delete account"}}}})
-        assert e.value.code == "not_allowed"
+        assert (await d.run_tool("a", "map", {"reflex": {**rate, "do": {"tool": "tap", "target": {"text": "Delete account"}}}}))["text"] == "Reflex added: rate_prompt."
+        await d.run_tool("a", "map", {"forget_reflex": "rate_prompt"})
         assert (await d.run_tool("a", "map", {"forget": "home"}))["text"] == "Forgot home."
         assert file_of(tmp_path)["places"] == {} and file_of(tmp_path)["reflexes"] == []
         await finish(stop, task)
@@ -192,19 +191,6 @@ def test_map_is_not_a_step_of_run(tmp_path):
     run(go)
 
 
-def test_map_needs_the_app_in_scope_like_every_call(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        assert (await d.run_tool("a", "map", {}, scope=Scope(apps=(BUNDLE,))))["text"].startswith("Map of Example")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "map", {}, scope=Scope(apps=("com.other.app",)))
-        assert e.value.code == "not_allowed"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "map", {}, scope=Scope(apps=()))
-        assert e.value.code == "not_allowed" and "no_apps" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 def test_no_app_in_front(tmp_path):

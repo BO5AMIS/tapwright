@@ -174,18 +174,6 @@ def test_a_reflex_that_is_not_one_is_refused(bad):
     assert e.value.code == "bad_params"
 
 
-def test_a_reflex_the_policy_flags_is_refused_when_it_is_added():
-    data = wayfare()
-    for do in ({"tool": "tap", "target": {"text": "Delete"}}, {"tool": "tap", "target": {"label": "Buy now"}},
-               {"tool": "tap", "target": {"id": "Delete"}}):
-        with pytest.raises(Refused) as e:
-            maptool.edit(data, ctx(), {"reflex": {**RATE, "do": do}})
-        assert e.value.code == "not_allowed" and "policy" in str(e.value)
-    blocked = policy.parse({"block": ["Wipe"]})
-    with pytest.raises(Refused) as e:
-        maptool.edit(data, ctx(policy=blocked), {"reflex": {**RATE, "do": {"tool": "tap", "target": {"text": "Wipe all"}}}})
-    assert e.value.code == "not_allowed"
-    assert data["reflexes"] == []
 
 
 def test_the_apps_name_in_the_listing_is_the_apps_not_a_places():

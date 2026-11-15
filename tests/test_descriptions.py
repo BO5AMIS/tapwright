@@ -28,13 +28,11 @@ def test_the_instructions_explain_targets_answers_and_safety():
     assert not any(old in INSTRUCTIONS for old in OLD)
 
 
-def test_the_instructions_are_the_shared_core_then_what_tapwright_adds():
-    assert INSTRUCTIONS.startswith("You can see and drive a real mobile app, to test it. Work in a loop: "
-                                   "look, act, read the answer.\n\nWorkflow\n")
-    core, _, ours = INSTRUCTIONS.partition("\n\nTapwright drives the whole iPhone")
-    assert core.endswith("- Give the live view's link to the user only. It carries a key.")
-    assert ours.startswith(" through real touches and reads the accessibility tree.\n- System alerts")
-    assert "Tapline" not in INSTRUCTIONS and "check_layout" not in INSTRUCTIONS
+def test_instructions_describe_agent_directed_whole_phone_control():
+    assert "whole-phone access" in INSTRUCTIONS
+    assert "Permission judgment belongs to you" in INSTRUCTIONS
+    assert "existing authorization" in INSTRUCTIONS
+    assert "No app list or label-based approval" in INSTRUCTIONS
 
 
 def test_shared_texts_are_pinned_word_for_word():
@@ -72,22 +70,12 @@ def test_shared_and_tapwright_only_tools_are_the_documented_ones():
     assert "wait" not in EXTRA  # no Tapwright line: the shared paragraph only
 
 
-def test_the_docs_name_only_the_shared_tool_set():
+def test_current_docs_name_real_tools_and_current_control_contract():
     for path in ("README.md", "AGENTS.md", "docs/setup.md"):
         text = (ROOT / path).read_text(encoding="utf-8")
-        for old in OLD:
-            assert old not in text, f"{path} still names {old}"
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    section = readme.split("## Tools", 1)[1].split("\n## ", 1)[0]
-    named = set(re.findall(r"`([a-z_]+)`", section))
-    assert set(TOOLS) <= named, sorted(set(TOOLS) - named)
-    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    testing = agents.split("## Testing an app", 1)[1].split("\n## ", 1)[0]
-    for tool in ("apps", "open_app", "look", "tap", "type_text", "scroll", "wait_for", "alert"):
-        assert f"`{tool}`" in testing, tool
-    for code in ("not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", "locked",
-                 "reconnecting", "timeout"):
-        assert f"`{code}`" in testing, code
-    for reason in REASONS:
-        assert reason in testing, reason
-
+        assert not any(old in text for old in OLD)
+        assert "1.7.5" in text
+    docs = (ROOT / "docs/AGENT-TOOLS.md").read_text(encoding="utf-8")
+    for tool in TOOLS:
+        assert tool in docs
+    assert "Permission judgment" in docs

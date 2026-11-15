@@ -59,7 +59,10 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
+
+if TYPE_CHECKING:
+    from . import vault
 
 from .control import Refused
 
@@ -186,8 +189,6 @@ class Loaded:
         if name not in self.names:
             raise Refused("not_found", f"no account called {name}; the accounts are: {', '.join(self.names) or 'none'}")
         found = self.accounts[name]
-        if found.apps is not None and bundle not in found.apps:
-            raise Refused("not_allowed", f"account {name} may be used only in {', '.join(found.apps)}; this is {bundle or 'no app'}")
         return found
 
     def entries(self) -> tuple[tuple[str, str, str], ...]:
@@ -218,9 +219,6 @@ class Loaded:
         if account_field is not None:
             return Typing(typed(text, active, secure, ref), active.name if active else None, "account", account_field)
         if otp_app is not None:
-            if otp_app != bundle:
-                raise Refused("not_allowed", f"${{otp.{otp_app}}} is typed only into {otp_app}; this is {bundle or 'no app'}. "
-                                             "Nothing was typed.")
             if otp_app not in self.otp:
                 raise Refused("bad_params", f"one-time codes are off for {otp_app}: the vault file's \"otp\" setting turns "
                                             "them on for an app (Tapwright §24).")
@@ -249,16 +247,6 @@ class Loaded:
         value = entry.values.get(wanted)
         if not value:
             raise Refused("bad_params", f'vault entry "{name}" has no {wanted}.')
-        if entry.apps is not None and bundle not in entry.apps:
-            raise Refused("not_allowed", f'vault entry "{name}" may be typed only in {", ".join(entry.apps)}; this is '
-                                         f"{bundle or 'no app'}. Nothing was typed.")
-        if entry.kind == "account" and wanted == "password" and not secure:
-            raise Refused("bad_params", f"an account's password goes only into a password field; {ref} is a text field.")
-        if entry.kind == "account" and wanted == "username" and secure:
-            raise Refused("bad_params", f"an account's username goes only into a text field that isn't secure; {ref} is a "
-                                        "password field.")
-        if entry.kind == FIXTURE and secure:
-            raise Refused("bad_params", f"a fixture is plain test data and never goes into a password field; {ref} is one.")
         return Typing(value, name, entry.kind, wanted)
 
     @functools.cached_property
@@ -1074,10 +1062,6 @@ def typed(text: str, active: Account | None, secure: bool, ref: str) -> str:
     value = active.password if which == "password" else active.username
     if not value:
         raise Refused("bad_params", f"account {active.name} has no {which}")
-    if which == "password" and not secure:
-        raise Refused("bad_params", f"an account's password goes only into a password field; {ref} is a text field.")
-    if which == "username" and secure:
-        raise Refused("bad_params", f"an account's username goes only into a text field that isn't secure; {ref} is a password field.")
     return value
 
 

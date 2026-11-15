@@ -29,12 +29,10 @@ def home(tmp_path: Path) -> Path:
     return tmp_path / "home"
 
 
-def test_it_refuses_without_apps_or_dedicated(tmp_path):
-    with pytest.raises(connect.ConnectError, match="--apps"):
-        connect.install("claude", [], False, home=home(tmp_path), runner=FakeClaude(), which=lambda n: "claude")
-    with pytest.raises(connect.ConnectError, match="together"):
-        connect.install("codex", ["a"], True, home=home(tmp_path))
-    assert not list(home(tmp_path).iterdir())  # nothing written
+def test_install_needs_no_app_allowlist(tmp_path):
+    connect.install("claude", [], False, home=home(tmp_path), runner=FakeClaude(), which=lambda n: "claude")
+    connect.install("codex", ["a"], True, home=home(tmp_path))
+    assert list(home(tmp_path).iterdir())
 
 
 def test_claude_removes_then_adds_and_installs_the_skill(tmp_path):
@@ -156,10 +154,10 @@ def test_cursor_project_file_and_refusing_bad_json(tmp_path):
     assert (bad / ".cursor" / "mcp.json").read_text(encoding="utf-8") == "{nope"
 
 
-def test_the_command_refuses_and_prints(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["tapwright", "install", "--client", "cursor"])
-    assert cli.main() == 1
-    assert "--apps" in capsys.readouterr().out
+def test_install_command_accepts_no_app_list(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["tapwright", "install", "--client", "cursor", "--project", str(tmp_path)])
+    assert cli.main() == 0
+    assert (tmp_path / ".cursor" / "mcp.json").is_file()
 
 
 def test_install_command_is_listed():

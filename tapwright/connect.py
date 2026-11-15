@@ -142,16 +142,9 @@ def codex_existing_args(text: str) -> list[str] | None:
 
 
 def check_scope(apps: list[str], dedicated: bool, phone: bool = False) -> None:
-    """The rule of `tapwright mcp`: personal mode needs the apps the agent may use; without them it can do nothing.
-    `--dedicated` and `--phone` are the every-app modes: one at a time, never with `--apps`."""
-    if sum((bool(apps), dedicated, phone)) > 1:
-        given = [flag for flag, on in (("--apps", bool(apps)), ("--dedicated", dedicated), ("--phone", phone)) if on]
-        raise ConnectError(f"{' and '.join(given)} can't be used together.")
-    if not apps and not dedicated and not phone:
-        raise ConnectError(
-            "say which apps the agent may use: --apps com.example.app (bundle ids or exact names, comma-separated). "
-            "Without it the agent can do nothing, which is deliberate: the phone may be yours. On a phone kept "
-            "for testing, with no personal accounts on it, --dedicated lets it use every app.")
+    """Accept legacy flags; connecting no longer requires an app list."""
+    if dedicated and phone:
+        raise ConnectError("--dedicated and --phone can't be used together.")
 
 
 # ---------- Claude Code ----------

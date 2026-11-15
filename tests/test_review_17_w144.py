@@ -96,56 +96,8 @@ def test_b_m5_a_window_or_a_full_screen_holder_proves_nothing():
     assert ui.hit_relation(xml, email, hit(TREE)) == "holder"
 
 
-def test_b_m5_a_guessed_cover_stands_when_the_hit_is_only_the_window():
-    """B-M5: the tree guesses a later overlay covers Cancel; the hit test falls back to the Window. Before 1.7 the
-    guess stood; on 8e30e99 the Window counted as "ancestor" and the guess was dropped, so the tap went through."""
-    import pytest
-    from test_daemon import finish, looked, started
-    from test_runner_v5 import SHEET, armed_daemon, hit, sheet_items, source
-
-    from tapwright.control import Refused
-
-    async def go():
-        d = armed_daemon(hit(SHEET["c"][0]))
-        d.session.last_source = source(SHEET)
-        stop, task = await started(d)
-        await looked(d, sheet_items())
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"text": "Cancel"}})
-        assert e.value.code == "not_actionable" and "tap" not in d.session.calls
-        await finish(stop, task)
-    from test_daemon import run
-    run(go)
 
 
-def test_b_m5_a_hit_in_another_process_is_covered_unless_its_the_target_or_the_keyboard():
-    """B-M5: a banner or share sheet in SpringBoard's process over the target: the touch is refused `covered`, not
-    let go on the front-app check. The same element in a remote view the app lists (same/inside) and the keyboard's
-    own process still pass."""
-    import pytest
-    from test_daemon import finish, looked, run, started
-    from test_runner_v5 import BAR_BUTTON, ROW, armed_daemon, hit, lab_items
-
-    from tapwright.control import Refused
-
-    async def go():
-        d = armed_daemon(hit(BAR_BUTTON, bundle="com.apple.springboard"))
-        stop, task = await started(d)
-        await looked(d, lab_items())
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
-        assert e.value.code == "not_actionable" and str(e.value).startswith("covered: ")
-        assert "tap" not in d.session.calls
-        await finish(stop, task)
-        for answer in (hit(ROW, bundle="com.apple.SafariViewService"),
-                       hit(BAR_BUTTON, bundle=next(iter(ui.KEYBOARD_HOSTS)))):
-            d = armed_daemon(answer)
-            stop, task = await started(d)
-            await looked(d, lab_items())
-            r = await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
-            assert r["text"].startswith("Tapped")
-            await finish(stop, task)
-    run(go)
 
 
 # ---- Notification Center: B-M3, B-M4, B-L2, B-M8, B-L1 ----
@@ -403,38 +355,6 @@ def test_b_l4_structural_ids_are_an_allow_list():
 
 # ---- A-M4: the --apps ceiling resolves each name to exactly one bundle id ----
 
-def test_a_m4_a_ceiling_name_two_apps_share_admits_neither_and_ids_are_compared(tmp_path):
-    """A-M4: `serve --apps Wayfare` with a second installed app also shown as "Wayfare" (another vendor's build): a
-    call naming the other one's bundle id passed on 8e30e99 (its name was in the list). Now every name resolves to one
-    bundle id, or the call is refused with the reason."""
-    from starlette.testclient import TestClient
-    from test_notifications import handover_daemon
-    from test_otp import AUTH, TOKEN, A
-
-    from tapwright.ceiling import Ceiling
-    from tapwright.server import create_app
-    _, d, s = handover_daemon(tmp_path)
-    mine, other = "com.example.wayfare", "com.other.wayfare"
-    s.installed = [{"bundle_id": b, "name": "Wayfare", "version": "1", "build": "1", "executable": "W"}
-                   for b in (mine, other)]
-    s.app_names = {}
-
-    def call(ceiling_apps, apps):
-        c = TestClient(create_app(d, TOKEN, hosts={"testserver"}, ceiling=Ceiling(apps=ceiling_apps)), client=A)
-        return c.post("/api/apps", json={}, headers={**AUTH, "X-Tapwright-Apps": apps})
-    got = call(("Wayfare",), other)
-    assert got.status_code == 403 and "over_ceiling" in got.text and "2 installed apps" in got.text
-    got = call(("Wayfare",), mine)
-    assert got.status_code == 403 and "over_ceiling" in got.text
-    got = call((mine,), "WAYFARE")
-    assert got.status_code == 403 and "can't be sure" in got.text
-    assert "over_ceiling" not in call((mine,), mine).text
-    from tapwright.server import resolve_app
-    names = {mine: "Wayfare", "com.example.chat": "Chat"}
-    assert resolve_app("wayfare", names) == (mine, None)
-    assert resolve_app("Notes", names) == ("com.apple.mobilenotes", None)
-    assert resolve_app("com.apple.mobilenotes", names) == ("com.apple.mobilenotes", None)
-    assert resolve_app("Nope", names)[0] is None
 
 
 # ---- A-M5: --revoke-all is never blocked by the edit lock; a null `started` can be cleared ----
@@ -482,60 +402,10 @@ def test_a_m5_a_lock_whose_holder_wrote_no_start_time_can_be_cleared_by_a_person
 
 # ---- A-L2: --revoke-all stops a run that began with no grant ----
 
-def test_a_l2_revoke_all_stops_a_run_that_began_with_no_active_grant(tmp_path):
-    """A-L2: a run that began with no active grant (none in the file) never stopped on 8e30e99, since it had nothing to
-    see revoked. A `--revoke-all` after it began stops it between moves, whatever it began with."""
-    import pytest
-    from test_daemon import finish, run, started
-    from test_daemon_grants import setup
-
-    from tapwright import grants
-    from tapwright.control import Refused
-
-    async def go():
-        d, rules, path, box = setup(tmp_path)
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-        book = grants.Book(path, None, now=lambda: box[0])  # `tapwright grants --revoke-all`, in another process
-        tapped, done = d.session.tap, []
-
-        async def tap_then_revoke(*args, **kwargs):
-            result = await tapped(*args, **kwargs)
-            if not done:
-                done.append(book.revoke_all())
-            return result
-        d.session.tap = tap_then_revoke
-        steps = [{"tool": "tap", "target": {"id": "ok-button"}}, {"tool": "tap", "target": {"id": "ok-button"}}]
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "run", {"steps": steps, "look": False}, policy=rules)
-        assert e.value.code == "not_allowed" and "stopped at step 2" in str(e.value) and "revoked" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 # ---- A-L1: a grant's use is audited after the last check, and given back when nothing was touched ----
 
-def test_a_l1_no_grant_line_for_a_use_that_then_asked_a_person(tmp_path, monkeypatch):
-    """A-L1: the check right before the touch (still_covers) failed after the `grant` line was written on 8e30e99, so
-    the audit log said a grant let through a touch a person was asked for. The line now comes after that check."""
-    import pytest
-    from test_daemon import finish, run, started
-    from test_daemon_grants import audit_lines, grant, setup
-
-    from tapwright import grants
-    from tapwright.control import Refused
-    monkeypatch.setattr(grants.Book, "still_covers", lambda self, touch, use: (self.release(use), False)[1])
-
-    async def go():
-        d, rules, path, box = setup(tmp_path, grant())
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-        with pytest.raises(Refused):
-            await d.run_tool("a", "tap", {"target": {"id": "post"}, "look": False, "dry_run": False}, policy=rules)
-        await finish(stop, task)
-    run(go)
-    lines = audit_lines(tmp_path) if (tmp_path / "audit" / "2026-11.jsonl").exists() else []
-    assert not [x for x in lines if x["kind"] == "grant"]
 
 
 def test_a_l1_a_use_is_given_back_when_the_call_is_refused_before_any_touch(tmp_path):

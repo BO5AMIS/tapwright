@@ -2,7 +2,6 @@
 WebSocket and the agent API, all behind one token; and starting, finding and stopping it.
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
-import dataclasses
 import hashlib
 import hmac
 import json
@@ -20,10 +19,10 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import otp as otplib, policy, store, trace, uxcheck
+from . import otp as otplib, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
-from .daemon import BUNDLE_ID, SYSTEM_APPS, Scope
+from .daemon import BUNDLE_ID, SYSTEM_APPS
 from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
@@ -132,34 +131,6 @@ def resolve_app(app: str, names: dict[str, str]) -> tuple[str | None, str | None
 
 
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
-    async def over_ceiling(apps: tuple[str, ...], dedicated: bool, mode: str | None) -> str | None:
-        """Why a call's scope is wider than serve's --apps, or None (§18.10). Every name in the ceiling and in the call is
-        resolved to exactly one bundle id (resolve_app), and only bundle ids are compared (review 1.7 A-M4): `serve
-        --apps Wayfare` takes a call naming its bundle id, and the other way round (seen on the phone 2026-11-14), but
-        never a second app that shows the same name."""
-        if ceiling is None:
-            return None
-        why = ceiling.refuse_scope(apps, dedicated, mode)
-        if dedicated or not ceiling.apps:
-            return why
-        names = await daemon.installed_names() if hasattr(daemon, "installed_names") else {}
-        listed: set[str] = set()
-        for app in ceiling.apps:
-            bundle, problem = resolve_app(app, names)
-            if bundle is None:
-                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and {problem}, so "
-                        "no call runs. Restart tapwright serve with --apps naming each app by its bundle id.")
-            listed.add(bundle)
-        outside: list[str] = []
-        for app in apps:
-            bundle, problem = resolve_app(app, names)
-            if bundle is None:
-                return (f"over_ceiling: this daemon was started with --apps {','.join(ceiling.apps)}, and the call names "
-                        f"an app it can't be sure of: {problem}.")
-            if bundle not in listed:
-                outside.append(app)
-        return ceiling.refuse_scope(tuple(outside), False, mode) if outside else None
-
     page = files("tapwright").joinpath("viewer.html").read_text(encoding="utf-8")
     proved = otplib.Proved()  # the connections that proved this daemon a moment ago: only they may ask /otp (§18.11)
 
@@ -229,13 +200,6 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
         if not isinstance(app, str) or not app.strip():
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
-        # the app asked for is within serve's scope, as any call's is (§18.10; Codex, PR #12 cycle 2, M5): a code setting
-        # for another app in the vault never widens it. Nothing is read before this
-        if ceiling is None or not (ceiling.apps or ceiling.dedicated or ceiling.phone):
-            return _error("not_allowed", "no_apps: tapwright serve was started without --apps (or --dedicated, --phone), "
-                                         "so no app's code is handed over", HTTP_STATUS["not_allowed"])
-        if (why := await over_ceiling((app,), False, None)) is not None:
-            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         try:
             caller = repr(request.scope.get("client"))  # the proved connection, never a body-supplied client id
             found = await daemon.otp_handover(app, caller=caller) if hasattr(daemon, "otp_handover") else None
@@ -263,25 +227,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", "the body must be a JSON object", 400)
         # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
         client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client") or "anonymous"
-        # Personal mode unless the caller says the device is dedicated (to testing, `dedicated`, or to automation,
-        # `phone`, §24.4; both are every app): a caller that names no apps gets none.
-        apps = tuple(a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip())
-        mode = _hv(request, "x-tapwright-mode")
-        dedicated = mode in WHOLE_PHONE
-        scope = None if dedicated else Scope(apps)
-        # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
-        if (why := await over_ceiling(apps, dedicated, mode)) is not None:
-            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
-        # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
-        sent = _hv(request, "x-tapwright-policy")
-        try:
-            rules = policy.loads(sent, header=True) if sent else None
-        except ValueError as e:
-            return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
-        if ceiling is not None:
-            rules, why = ceiling.check_policy(rules)  # the daemon's own policy when the call sent none
-            if why is not None:
-                return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        # 1.7.5: legacy app/policy headers do not restrict device access.
+        # Request authentication remains mandatory.
+        scope, rules = None, None
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
         sent_ux = _hv(request, "x-tapwright-ux-rules")
         try:
@@ -290,13 +238,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", f"the ux rules this agent was started with are refused: {e}", 400)
         # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
+        apps = [a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip()]
+        if client.startswith("schedule-") and len(apps) == 1:
+            via["app_hint"] = apps[0]  # route launch context, never an allowlist
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
-        if rules is not None and rules.file is not None and via.get("via") == "call" \
-                and (ceiling is None or ceiling.policy is None or rules.file != ceiling.policy.file):
-            # The model writes a thin call's command line: a grants file it names is never in force (§19.6: only a
-            # person makes a grant). Only the policy file `tapwright serve` was started with brings grants.
-            rules = dataclasses.replace(rules, file=None)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
         sent_maps = _hv(request, "x-tapwright-maps")
         if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
@@ -379,8 +325,6 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if not isinstance(app, str) or not app.strip() or len(app) > 200:
             return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
         app = app.strip()
-        if (why := await over_ceiling((app,), False, None)) is not None:
-            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
         try:
             keys = await daemon.notification_keys(app)
         except Refused as e:

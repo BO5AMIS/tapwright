@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapwright"
-version = "1.7.2rc2"
-description = "Let LLM agents test apps on your real iPhone, from Windows, Linux or macOS. No Mac needed."
+version = "1.7.5"
+description = "Let AI agents operate real iPhones for QA, research and mobile workflows from Windows, Linux or macOS."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

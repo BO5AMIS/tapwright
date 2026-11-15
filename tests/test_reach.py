@@ -101,40 +101,8 @@ def test_a_dry_run_says_what_it_would_do_and_moves_nothing():
     run(go)
 
 
-def test_the_policy_has_its_say_before_the_scroll_and_an_allow_is_used_once(monkeypatch):
-    monkeypatch.setattr(daemon.secrets, "token_hex", lambda n=4: "x")
-
-    async def go():
-        d = make()
-        d._queues_seen = d.subscribe()
-        stop, task = await started(d)
-        LongList(d, labels=lambda i: "Delete trip" if i == 30 else f"Row {i}")
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "row-30"}})
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value)
-        assert d.session.scrolls == [] and "tap" not in d.session.calls  # nothing moved
-        dry = await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "dry_run": True})
-        assert dry["text"].endswith('It needs a person\'s OK (policy word "Delete").') and d.session.scrolls == []
-        await d.viewer_message({"type": "confirm_answer", "id": "c1-x", "allow": True})
-        r = await d.run_tool("a", "tap", {"target": {"id": "row-30"}, "look": False})
-        assert r["text"].startswith("Scrolled to it, then tapped e") and r["text"].endswith("Note: allowed by a person (in the live view).")
-        assert d.session.scrolls and "tap" in d.session.calls
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_block_word_refuses_before_any_scroll():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        LongList(d, labels=lambda i: "Delete account" if i == 30 else f"Row {i}")
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "row-30"}}, policy=policy.parse({"block": ["Delete account"]}))
-        assert str(e.value).startswith("blocked:") and d.session.scrolls == []
-        await finish(stop, task)
-    run(go)
 
 
 def test_when_no_scroll_can_bring_it_on_screen_the_refusal_says_why():

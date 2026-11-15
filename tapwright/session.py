@@ -135,6 +135,7 @@ class Session:
         # A one-use authorization check installed by the daemon. It runs at HTTP dispatch, after banner waits,
         # touch_hook, session setup and runner probing, and is retained across a refused fast-route fallback.
         self.before_input = None
+        self.execution_guard = None  # persistent ownership check for every mutation in an agent turn
         self.input_point: tuple[float, float] | None = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
@@ -271,6 +272,9 @@ class Session:
 
     async def _timed(self, method: str, path: str, full: str, payload: dict | None, timeout: float) -> dict:
         """device.http, with the timing trace (trace.py) noting a touch's or a tree read's request and answer."""
+        guard = getattr(self, "execution_guard", None)
+        if method == "POST" and guard is not None:
+            await guard()
         input_request = method == "POST" and (path in (FAST_TAP_PATH, FAST_DRAG_PATH,
             "/session/{sid}/actions", "/session/{sid}/wda/keys", "/session/{sid}/alert/accept",
             "/session/{sid}/alert/dismiss") or path.endswith("/clear"))
@@ -1010,21 +1014,21 @@ class Session:
         return bool((await self._call("GET", "/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value"))
 
     async def alert(self, action: str, *, name: str | None = None) -> str:
-        """The system alert: accept/dismiss/text, or the daemon's checked, exact named Cancel recovery."""
+        """Read or answer the system alert, optionally selecting an exact localized button."""
         if action not in ("accept", "dismiss", "text", "cancel"):
             raise Refused("bad_params", f"action must be one of accept, dismiss, text, cancel, not {action!r}")
-        if action == "cancel" and name != "Cancel":
-            raise Refused("bad_params", "system alert cancellation requires the exact Cancel button")
+        if name is not None and (not isinstance(name, str) or not name.strip() or action == "text"):
+            raise Refused("bad_params", "name must identify an alert button for accept, dismiss or cancel")
         if action != "text":
             self.typed_into = None
         try:
             if action == "text":
                 return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
             await self._touching(TAP_MS)
-            if action == "cancel":
-                await self._call("POST", "/session/{sid}/alert/dismiss", {"name": name}, again=False)
-            else:
-                await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
+            chosen = "dismiss" if action == "cancel" else action
+            button = (name or "Cancel") if action == "cancel" else name
+            await self._call("POST", f"/session/{{sid}}/alert/{chosen}",
+                             {"name": button} if button is not None else {}, again=False)
         except DeviceError as e:
             if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
                 raise Refused("not_found", "no alert on screen.") from e

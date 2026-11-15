@@ -70,7 +70,7 @@ tapwright smoke --app <bundle id of one of your apps>
 Then connect your agent. One command registers the MCP server and installs the skill:
 
 ```sh
-tapwright install --client claude --apps <bundle id>      # or --client codex, --client cursor
+tapwright install --client claude      # or --client codex, --client cursor
 ```
 
 - Claude Code: it runs `claude mcp add` for you (user scope; `--project DIR` for one
@@ -79,9 +79,8 @@ tapwright install --client claude --apps <bundle id>      # or --client codex, -
   comments stay as they are.
 - Cursor: it edits `mcpServers.tapwright` in `~/.cursor/mcp.json` (`.cursor/mcp.json` with
   `--project DIR`).
-- Run it again to change the apps: it updates the entry, never adds a second one.
-- It needs `--apps` or `--dedicated`, like `tapwright mcp`. Without either, the agent can do
-  nothing.
+- Run it again to update the integration; it never adds a second entry.
+- Whole-phone access is the default in 1.7.5. No app list or dedicated mode is required. Legacy app/policy options do not restrict calls; see [migration](agent-directed-control.md).
 
 ### Driving fast: the options
 
@@ -116,86 +115,14 @@ ones as the daemon's own settings.
 - **`--no-dialog`**: never ask the host's dialog (MCP elicitation) for a person's OK or a moment that needs a
   person; only the live view answers. For a host that passes such a question to the model instead of showing it.
   Without it, a host that can show the dialog does, and the first answer, in chat or in the live view, wins.
-- **`tapwright serve --apps A,B`** (or `--dedicated`): the ceiling, the widest scope any call may ask for, from
-  an MCP server or from `tapwright call`. A call may name these apps or fewer, never more, and its own `--policy`
-  may add words that need an OK or are blocked, never remove one (`serve --policy FILE` sets the daemon's own).
-  Without `--apps` or `--dedicated` the daemon refuses every call (no scope, nothing allowed), and adding `--apps` to
-  each call doesn't fix that: restart it with a scope. The flags apply when the daemon starts: a daemon that is
-  already running keeps its own, so `tapwright serve --stop` first.
-- **`tapwright call TOOL ['JSON']`**: one tool without an MCP connection, for a host that can't keep one. It talks to
-  the running daemon (it never starts one: `tapwright serve` does) and loads only Python's standard library, so it
-  starts in a fraction of a second. For example `tapwright call look --apps com.example.app` and
-  `tapwright call tap '{"target": {"id": "save"}}' --apps com.example.app`; `--apps` (or `$TAPWRIGHT_APPS`) is the
-  scope, and without it the call is refused, as for an MCP server. Also `--dedicated`, `--policy`, `--maps`,
-  `--client NAME` (keeps one run's report and journey together: pass one), `--json` and `--timeout`. It exits 0 with
-  the answer, 2 for a refusal (`Error <code>: <message>` on stderr) or a mistake in the command, and 3 when the
-  daemon can't be reached. Loading the MCP server once, when the session starts, is faster still.
+- **`tapwright serve`** starts the authenticated local daemon with whole-phone access.
+- **`tapwright call`** sends one JSON call to that running daemon without starting another server. Example: `tapwright call look` or `tapwright call tap '{"target":{"id":"save"}}'`. Use a persistent MCP connection for lower per-call overhead.
 
-### Safety rules of 1.7 worth knowing
+### Agent-directed control in 1.7.5
 
-- **`~/.tapwright/serve.json` is trusted like you.** It holds the daemon's key. Any process of your user that can
-  read it can answer the approval dialog (including the offer to make a grant, so it can create a standing grant),
-  fetch one-time codes and ask the daemon to unlock the phone. An agent that runs shell commands as you can read it.
-  Keep the file private, and run agents you don't trust where they can't read your home folder.
-- **Locking the phone stops a run.** A lock in the middle of a `run`, `drive`, `replay`, route or journey ends it with
-  `locked`; the passcode is never typed there. The tool unlocks a locked phone only at the start of a scheduled run,
-  and with `tapwright serve --phone --accounts FILE` at the start of a new call. A dry run never unlocks it.
-- **Unlock limits.** At most 2 passcode attempts an hour and 3 a day, counted across restarts in
-  `~/.tapwright/unlock-state.json`. Once the phone refuses the passcode, nothing more is typed until you check the
-  vault file and run `tapwright unlock-reset` (it clears the refusal; the counts stay).
-- **One-time codes only into a code field.** `${otp.<app>}` is typed only into a one-line field whose id, label or
-  placeholder says code, OTP, verification or PIN. Any other field is refused (`not_allowed`) and no code is read. A
-  draft that holds a code says so. Tapline's `/otp` gets a code only for an app within `serve --apps` (or with
-  `--dedicated`, `--phone`), only while the tool's own read shows the app in front with such a field, and each code
-  goes out once, also across a restart of the daemon: a handed-over code leaves a
-  mark (a keyed digest, never the code) in `~/.tapwright/otp-used` for 10 minutes. A handover counts as phone use:
-  a scheduled run waits while it is in progress and for the following 90 seconds.
-- **Drafts, whatever the policy file says.** In a route with `"draftsOnly": true`, or under a draftsOnly grant, a
-  touch on Send, Post, Reply, Comment and the like stops at a draft even when your policy file has no such word, or
-  with `--no-policy`. A draftsOnly grant holds in any grants file the daemon knows (its own `--policy`, a call's), so
-  a call that sends another policy, a stricter one or none, doesn't lift it. A grant without draftsOnly doesn't lift a route's draftsOnly. `type_text` with `submit: true` is
-  refused there, and so is text with a line break in it (a vault value too, named, never shown): a line break is
-  Return, which sends in many apps. Type without it, then tap the send button. Your OK is for the draft you saw, as
-  one read of the screen showed it: if the text, any field, or what else the screen says (the conversation's name, the
-  navigation title, a recipient, a picker's chosen value, a checked option) changed before the send, nothing is sent
-  and you are asked again. When the Send button is below the screen, the tool scrolls to it first and shows you the
-  draft as it is after the scroll; a grant is counted on that screen too. The known Send identifiers in Mail and
-  Messages retain the draft stop when their labels are translated. If a known grants file becomes unreadable,
-  Return is refused and Send still stops at a draft until the file can be read again.
-- **Deleting an account or paying always asks you**, whatever the policy file says (also with `--no-policy`). On a
-  screen or in an alert that says it deletes the account ("Delete your account?"), and on a payment screen (titled
-  Send money, Checkout, Transfer and the like, or with a text such as "Transfer $25 to Alice", or an amount on its own
-  beside a Send), every button but Cancel, Back, Not now and the like asks you each time: Confirm and OK too, and text
-  that takes a tap. A navigation bar's title counts as the screen's title. A button that says it itself ("Delete
-  account", "Buy now", "Send $25") asks you whatever the policy file says too. No grant covers those, and none is
-  offered. A price among other words ("The latte was $4") doesn't make a payment screen.
-- **A full swipe across a list row needs your OK.** A horizontal swipe that starts on a row and goes further than 40%
-  of its width runs the row's first action (often Delete or Archive), so it asks you, and no grant covers it. In a
-  draftsOnly route or a scheduled run it is refused. A short swipe only shows the row's buttons; tap the one you want.
-- **`--revoke-all` always works.** If the policy file's edit lock is held, it writes `<policy file>.revoked`, which
-  revokes every grant at once; the next change to the file writes the revocation in and removes the mark. It also
-  stops a running batch or drive that began before it, whatever grants it began with.
-- **A vault in the macOS keychain can't be named `…#<number>`.** The keychain keeps those names for the pieces of a
-  large vault, so `vault protect` refuses such a file name; rename it first.
-- **A route a grant names stays as it is**, whatever policy a call sends: a stricter call policy turns off the grants
-  for its own touches, never the protection of a route the daemon's grants name, so `record` refuses that name.
-  Schedule creation and route replacement share a lock too: a newly scheduled route cannot be replaced between
-  the final check and the write.
-- **Grant counts survive a restart.** For an active grant, pruning removes only usage folders from before today;
-  today's daily and hourly counts remain. This corrects the frozen shared spec's §19.4 wording about pruning by
-  the future expiry date, which would otherwise reset a live allowance.
-- **Scheduled reports redact metadata too.** Schedule and route names, picture references, error details and printed
-  report paths pass through the run's vault redactor. The files retain their actual paths on disk.
-- **A control that changed is not touched.** If the element at the target's place has the target's id and frame but
-  other words than your agent's last look showed (Terms became Delete account), the touch answers `stale`. Every touch
-  on an element goes through the same checks right before it goes out: `tap`, `long_press`, `toggle`, `type_text`'s tap
-  that focuses the field, and a target scrolled into view first. A point, `force`, an alert's button and a short swipe
-  are raw touches: they skip the runner's hit test, never the policy. Another
-  app's banner or sheet over the target is named by its kind and place only, never by its words. If the actual
-  recipient is a different actionable parent or child, target that control explicitly. Immediately before input is
-  delivered, after banner waits and runner setup, the checked point, draft approval and grant are checked again.
-- **`--apps` names one app each.** A name in `serve --apps` or in a call must be the name of exactly one installed
-  app (ignoring case), or a bundle id. A name two apps share is refused: use the bundle id.
+App lists, word policies, grants and draftsOnly gates no longer restrict actions. Agents follow the user's goal and existing authorization and clarify consequential work outside it. Pause, authentication, input ownership, dry-run and Apple platform gates remain. `--phone` retains its explicitly configured automatic-unlock behavior and is not required for device access.
+
+See [the control and migration contract](agent-directed-control.md). Install a pinned artifact in an isolated environment for unattended runs. Coordinate an update with the active device owner before stopping or starting its daemon.
 
 ### Schedules and the phone
 
@@ -320,24 +247,9 @@ tapwright serve --video
 | port 8417 in use | the daemon takes a free port by itself; `tapwright view` finds it |
 | "another tapwright serve is starting or stuck" | wait a minute and retry; if it stays, see `~/.tapwright/serve.log`, end the stuck process, then `tapwright serve` |
 
-### A system alert blocks an unattended test
+### A system alert blocks a workflow
 
-An unrelated iOS account reminder can sit over the tested app. Personal mode withholds its text and picture;
-`look` and ordinary `alert` calls can therefore return `outside_apps`. Home followed by `open_app` may leave a
-persistent alert in place. Repeating those calls or using `force` does not authorize its buttons.
-
-When the owner explicitly asks to **cancel** the obstruction, Tapwright 1.7.1 supports a standalone
-`alert {"action":"cancel"}` call through the normal scoped client. It only presses an unambiguous enabled button
-labelled exactly `Cancel` (English), by name, after checking the current alert twice. The tested app must still be in the foreground
-beneath the system alert. The answer is generic: private account names, alert text and screenshots stay withheld.
-It does not accept permissions or enter credentials. Then use `open_app` for the tested app and read its fresh
-screen. If there is no supported Cancel button, the alert changes, or the phone is locked, the call refuses.
-This recovery is not available inside a batch, replay, scheduled run or recording.
-
-The human live viewer can also answer an alert on the attached computer, including through an existing authorized
-remote-desktop session. It uses the person's control channel. Do not extract its key or move it to a different
-browser to work around an agent's refusal. A browser host that cannot authorize the private viewer URL is separate
-from the scoped `alert` recovery command; repairing the alert does not require changing browser access checks.
+Use `alert {"action":"text"}` to read it. Answer with `accept`/`dismiss`, optionally `name` for an exact visible button, or target it from a fresh look. `cancel` defaults to Cancel and supports localized names. No extra app scope or policy exception is required. Use dry_run to inspect without input. A genuine XCTest passcode/trust gate remains an Apple requirement.
 
 ## Undo
 

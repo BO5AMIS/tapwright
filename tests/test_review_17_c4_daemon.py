@@ -52,28 +52,6 @@ def test_lifted_target_gets_a_ref_above_every_ref_ever_issued_in_the_view():
     run(go)
 
 
-@pytest.mark.parametrize("app,identifier", [("com.apple.mobilemail", "Mail.sendButton"),
-                                           ("com.apple.MobileSMS", "sendButton")])
-@pytest.mark.parametrize("where", ["route", "grant"])
-def test_localized_starter_send_stops_at_a_draft_by_stable_identifier(tmp_path, app, identifier, where):
-    async def go():
-        d, policy = daemon_with(tmp_path, {"version": 2, "confirm": [], "block": [],
-                                           "grants": [draft_grant(app=app)] if where == "grant" else []})
-        d.session.app = d.session.tree_app = ("Mail", app)
-        d.session.tree = [button("e1", "Senden", identifier),
-                          el("e2", "input", "Message", "message", value="Synthetic draft")]
-        stop, task = await started(d)
-        token = dm._DRAFTS_ROUTE.set(where == "route")
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=policy)
-            with pytest.raises(Refused) as refused:
-                await d.run_tool("a", "tap", {"target": {"id": identifier}, "look": False}, policy=policy)
-            assert refused.value.draft and not taps(d)
-            assert len(d._confirms) == 1 and next(iter(d._confirms.values())).draft is not None
-        finally:
-            dm._DRAFTS_ROUTE.reset(token)
-            await finish(stop, task)
-    run(go)
 
 
 def test_schedule_creation_cannot_race_the_final_route_replacement_check(tmp_path):

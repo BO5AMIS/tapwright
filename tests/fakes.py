@@ -626,7 +626,7 @@ class FakeSession:
         self.terminated.append(bundle_id)
         return f"closed {bundle_id}"
 
-    async def alert(self, action):
+    async def alert(self, action, *, name=None):
         self._record("alert")
         return f"alert {action}ed"
 

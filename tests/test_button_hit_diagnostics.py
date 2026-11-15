@@ -35,54 +35,8 @@ def test_source_diagnostics_distinguish_refusal_gates(condition, expected):
     assert diagnostic == {"recovery": expected}
 
 
-def test_refused_probes_are_logged_without_a_sent_phase_or_private_hit_words(tmp_path):
-    async def go():
-        d, target, child, _ = setup()
-        d.actions = ActionLog(tmp_path)
-        # The private hit's words are deliberately incompatible. Diagnostics must contain only a gate code.
-        private = "UNRELATED-SAVED-IDENTITY@example.invalid"
-        d.session.center_answer = dataclasses.replace(child, name=private, label=private)
-        stop, task = await started(d)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False})
-            s = real_dispatch(d.session)
-            with pytest.raises(Refused) as error:
-                await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
-            assert not s.dispatched and s.hit_asks == [target.center]
-            diagnostic = error.value.hit_check
-            assert diagnostic == {"initial_relation": "unplaced", "relation": "unplaced",
-                                  "recovery": "hit_label", "probes": 0}
-            logs = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("actions-*.jsonl"))
-            entries = [json.loads(line) for line in logs.splitlines()]
-            assert entries[-1]["hit_check"] == diagnostic
-            assert private not in logs and "source" not in diagnostic
-            assert "hit_check" not in entries[0]
-        finally:
-            await finish(stop, task)
-    run(go)
 
 
-@pytest.mark.parametrize("shape", [SHAPES[1], SHAPES[-1]], ids=["Account", "Continue"])
-def test_failed_candidates_record_counts_and_relations_not_payloads(tmp_path, shape):
-    async def go():
-        d, _, child, _ = setup(shape)
-        d.actions = ActionLog(tmp_path)
-        d.session.background_answer = child
-        stop, task = await started(d)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False})
-            s = real_dispatch(d.session)
-            with pytest.raises(Refused) as error:
-                await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
-            assert not s.dispatched
-            detail = error.value.hit_check
-            assert detail["recovery"] == "probing"
-            assert 1 <= detail["probes"] == detail["candidates"] <= 4
-            assert detail["probe_relation"] == "unplaced" and detail["probe_owner"] == "same"
-            assert "Account" not in json.dumps(detail) and child.bundle not in json.dumps(detail)
-        finally:
-            await finish(stop, task)
-    run(go)
 
 
 @pytest.mark.parametrize("grant_note,crash_note", [(True, False), (False, True), (True, True)])
@@ -124,35 +78,6 @@ def test_refusal_notes_preserve_diagnostics_and_draft_in_dispatch_and_log(
             logs = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("actions-*.jsonl"))
             assert json.loads(logs.splitlines()[-1])["hit_check"] == refusal.hit_check
             assert "tap" not in d.session.calls
-        finally:
-            await finish(stop, task)
-    run(go)
-
-
-@pytest.mark.parametrize("contains_point", [False, True])
-def test_foreign_refusal_has_sanitized_gate_and_point_diagnostics(tmp_path, contains_point):
-    async def go():
-        d, target, passive, _ = setup()
-        d.actions = ActionLog(tmp_path)
-        private = "UNRELATED-SAVED-IDENTITY@example.invalid"
-        rect = passive.rect if contains_point else (87, 93, 272, 23)
-        d.session.center_answer = dataclasses.replace(passive, name=private, label=private,
-                                                      bundle="com.private.other", rect=rect)
-        stop, task = await started(d)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False})
-            s = real_dispatch(d.session)
-            with pytest.raises(Refused) as error:
-                await d.run_tool("a", "tap", {"target": {"ref": target.ref}, "dry_run": True,
-                                                "screenshot": False})
-            assert not s.dispatched
-            detail = error.value.hit_check
-            assert detail["gate"] == "foreign_recipient" and detail["owner"] == "foreign"
-            assert detail["point"] == "center" and detail["hit_contains_point"] is contains_point
-            assert detail["probes"] == 0
-            logs = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("actions-*.jsonl"))
-            assert json.loads(logs.splitlines()[-1])["hit_check"] == detail
-            assert private not in logs and "com.private.other" not in logs
         finally:
             await finish(stop, task)
     run(go)

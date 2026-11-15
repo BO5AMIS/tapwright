@@ -39,35 +39,8 @@ def test_the_cap_is_30_minutes_and_clears_whatever_the_agent_does(monkeypatch):
     run(go)
 
 
-def test_a_global_block_word_network_refuses_every_mode_but_normal():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        p = policy.parse({"block": ["network"]})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "network", {"mode": "3g"}, policy=p)
-        assert e.value.code == "not_allowed" and str(e.value) == "blocked: the safety policy blocks network here."
-        assert d.session.device.network_calls == []
-        await d.run_tool("a", "network", {"mode": "3g"})
-        r = await d.run_tool("a", "network", {"mode": "normal"}, policy=p)  # always allowed
-        assert r["text"].startswith("Network: normal")
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_block_word_in_the_front_apps_own_list_names_the_app():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        p = policy.parse({"apps": {"com.example.app": {"block": ["network"]}}})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "network", {"mode": "lossy"}, policy=p)
-        assert str(e.value) == "blocked: the safety policy blocks network for Example."
-        other = policy.parse({"apps": {"com.other": {"block": ["network"]}}})
-        d.session.foreground = "com.example.app"  # the phone names its front app (an unnamed one is refused)
-        assert (await d.run_tool("a", "network", {"mode": "3g"}, policy=other))["text"].startswith("Network: 3g")
-        await finish(stop, task)
-    run(go)
 
 
 # ---- M2: set and clear never leak a hold ----
@@ -239,15 +212,6 @@ def test_closest_and_candidates_stay_quiet_when_another_app_is_in_front():
 
 
 # ---- L2 ----
-def test_session_report_with_no_app_list_is_refused_in_personal_mode(tmp_path):
-    async def go():
-        d = make(actions=ActionLog(tmp_path))
-        stop, task = await started(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "session_report", {}, scope=Scope(apps=[]))
-        assert e.value.code == "not_allowed" and "no_apps" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 # ---- L3 ----
