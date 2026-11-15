@@ -7392,7 +7392,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # WDA's named-button failure can embed the entire foreign alert (including account details).
             raise Refused("not_actionable", "the system alert could not be cancelled; check its current state before retrying.") from None
         finally:
-            s.before_input = None
+            if self.control.holds_turn():  # an approval wait may have yielded to another action
+                s.before_input = None
         return "Cancelled system alert. Go back to your app with open_app."
 
     async def _swipe(self, view, a: dict) -> str:

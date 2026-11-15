@@ -328,3 +328,62 @@ def test_default_alert_operations_do_not_gain_access(action):
         finally:
             await finish(stop, task)
     run(go)
+
+
+@pytest.mark.parametrize("ending", ["cancelled_in_queue", "declined"])
+def test_cancel_losing_its_turn_preserves_the_current_actions_final_guard(ending):
+    async def go():
+        d, s = synthetic()
+        stop, task = await started(d)
+        entered, release, queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        cancel_call = other_call = None
+        validated = []
+
+        async def guard(point):
+            validated.append(point)
+            raise Refused("not_allowed", "the current action's final authorization refused")
+
+        async def other_action():
+            s.before_input = guard
+            entered.set()
+            await release.wait()
+            await s.alert("cancel", name="Cancel")
+
+        take_turn = d.control._take_turn
+
+        async def observed_turn():
+            if asyncio.current_task() is cancel_call and entered.is_set():
+                queued.set()
+            await take_turn()
+
+        d.control._take_turn = observed_turn
+        try:
+            rules = policy.loads('{"version":1,"block":[],"confirm":["Cancel"]}')
+            cancel_call = asyncio.create_task(request(d, policy=rules, dialog=True))
+            events = await d.dialog_poll("agent", 0, 2.0)
+            ask = events["events"][0]
+            other_call = asyncio.create_task(d.control.agent(other_action))
+            await asyncio.wait_for(entered.wait(), 2)
+            if ending == "cancelled_in_queue":
+                assert d.dialog_answer("agent", ask["id"], "allow")
+                await asyncio.wait_for(queued.wait(), 2)
+                cancel_call.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await cancel_call
+            else:
+                assert d.dialog_answer("agent", ask["id"], "decline")
+                with pytest.raises(Refused):
+                    await asyncio.wait_for(cancel_call, 2)
+            assert s.before_input is guard
+            release.set()
+            with pytest.raises(Refused, match="final authorization refused"):
+                await asyncio.wait_for(other_call, 2)
+            assert validated == [None] and not s.dispatched
+        finally:
+            release.set()
+            for pending in (cancel_call, other_call):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+            await asyncio.gather(*(p for p in (cancel_call, other_call) if p is not None), return_exceptions=True)
+            await finish(stop, task)
+    run(go)
