@@ -70,7 +70,7 @@ def test_private_content_uses_only_a_proven_button_background_and_dispatches_tha
 
 
 @pytest.mark.parametrize("placement", ["inside", "sibling"])
-def test_known_descendant_still_uses_center_and_known_overlay_never_searches(placement):
+def test_descendant_uses_center_but_passive_sibling_needs_exact_background_proof(placement):
     async def go():
         d, target, _, _ = setup(placement=placement)
         stop, task = await started(d)
@@ -80,11 +80,12 @@ def test_known_descendant_still_uses_center_and_known_overlay_never_searches(pla
             if placement == "inside":
                 await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
                 assert len(s.dispatched) == 1
+                assert set(s.hit_asks) == {target.center}
             else:
-                with pytest.raises(Refused) as error:
-                    await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
-                assert error.value.code == "not_actionable" and not s.dispatched
-            assert set(s.hit_asks) == {target.center}
+                await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
+                [(_, payload)] = s.dispatched
+                point = (payload["x"], payload["y"])
+                assert point != target.center and s.hit_asks == [target.center, point, point]
         finally:
             await finish(stop, task)
     run(go)

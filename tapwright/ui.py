@@ -594,50 +594,106 @@ def current_button(source: str | None, target: Element, bundle: str) -> bool:
     Used only for the bounded background-hit recovery, whose extra proof is stricter than an ordinary tap.
     Missing app ownership, duplicate nodes, an unreadable tree or a changed/disabled target prove nothing.
     """
-    if not source or not bundle or target.type != "Button" or target.role not in ("button", "tab") or not target.enabled:
-        return False
+    return button_source_check(source, target, bundle) == "current"
+
+
+def button_source_check(source: str | None, target: Element, bundle: str) -> str:
+    """Only a fixed diagnostic code, never source words or identifiers, for the recovery's fresh target proof."""
+    if target.type != "Button" or target.role not in ("button", "tab") or not target.enabled:
+        return "not_enabled_button"
+    if not source:
+        return "missing_source"
+    if not bundle:
+        return "unknown_app"
     try:
         root = ET.fromstring(_clean(source))
     except ET.ParseError:
-        return False
+        return "invalid_source"
     apps = [n for n in root.iter() if _kind(n) == "Application"]
-    if len(apps) != 1 or _text(apps[0].get("bundleId")) != bundle:
-        return False
+    if len(apps) != 1:
+        return "source_app_count"
+    if _text(apps[0].get("bundleId")) != bundle:
+        return "source_app_mismatch" if apps[0].get("bundleId") else "source_app_unknown"
     if any(_kind(n) == "Alert" for n in root.iter()):
-        return False
+        return "source_alert"
     found = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name, target.label)]
-    return len(found) == 1 and found[0].get("enabled", "true") != "false" and "NotEnabled" not in {
-        t.strip() for t in (found[0].get("traits") or "").split(",")}
+    if len(found) != 1:
+        return "source_target_count"
+    if found[0].get("enabled", "true") == "false" or "NotEnabled" in {
+            t.strip() for t in (found[0].get("traits") or "").split(",")}:
+        return "source_disabled"
+    return "current"
+
+
+def current_button_bars(source: str | None, target: Element,
+                        screen: tuple[float, float]) -> tuple[Bar, ...] | None:
+    """Fresh hard-cover geometry, or no proof when the target is no longer in the visible list.
+
+    An exact recipient cannot override the tool's bars/keyboard protections. Inferred sibling covers are not
+    included here: only their live hit test can distinguish an oversized frame from an actual obstruction.
+    """
+    if not source:
+        return None
+    try:
+        tree = read(source, screen)
+    except Exception:
+        return None
+    identity = Hit(target.type, target.name, target.label, target.rect)
+    found = [e for e in tree.items if _listed_as(e, identity)]
+    if len(found) != 1:
+        return None
+    return tuple(b for b in found[0].covered_by if b.kind in COVERING_BARS)
 
 
 def button_background_points(source: str | None, target: Element, hit: Hit, bundle: str,
-                             screen: tuple[float, float]) -> list[tuple[float, float]]:
+                             screen: tuple[float, float], *, diagnostic: dict | None = None) -> list[tuple[float, float]]:
     """At most four inset points to *hit-test*, never permission to touch by geometry alone.
 
     XCTest can hit-test a button's private icon/text although the application snapshot omits that node. Only an
-    otherwise current native button and a same-app, unplaced passive hit qualify. A later live hit must identify
-    the button itself before any candidate may be used; known overlays and nested actions never qualify.
+    otherwise current native button and a same-app passive hit qualify. A flattened sibling is not treated as a
+    descendant: only a later live hit on the exact button can authorize a different point outside that content.
+    A child may carry one part of a compound accessibility label ("Language, English" -> "English").
     """
-    if (hit.bundle != bundle or hit.type not in ("Other", "StaticText")
-            or (hit.label and not _same_label(hit.label, target.label))
-            or (hit.name and hit.name not in (hit.label, target.name))
-            or not current_button(source, target, bundle)
-            or hit_relation(source, target, hit) != "unplaced"):
+    def fail(reason: str) -> list[tuple[float, float]]:
+        if diagnostic is not None:
+            diagnostic["recovery"] = reason
         return []
+
+    if not hit.bundle or not bundle or hit.bundle != bundle:
+        return fail("hit_owner")
+    if hit.type not in ("Other", "StaticText"):
+        return fail("hit_kind")
+    if hit.label and not (_same_label(hit.label, target.label)
+                          or any(_same_label(hit.label, part.strip()) for part in target.label.split(",")
+                                 if part.strip())):
+        return fail("hit_label")
+    if hit.name and hit.name not in (hit.label, target.name):
+        return fail("hit_name")
+    source_check = button_source_check(source, target, bundle)
+    if source_check != "current":
+        return fail(source_check)
+    if hit_relation(source, target, hit) not in ("unplaced", "other"):
+        return fail("hit_relation")
+    fresh_bars = current_button_bars(source, target, screen)
+    if fresh_bars is None:
+        return fail("source_target_hidden")
     tx, ty, tw, th = target.rect
     hx, hy, hw, hh = hit.rect
     if (min(tw, th) < 24 or min(hw, hh) <= 0 or not _holds(hit.rect, target.center)
             or hx < tx or hy < ty or hx + hw > tx + tw or hy + hh > ty + th):
-        return []
+        return fail("content_geometry")
     # Stay three points inside the visible button and two away from its unplaced content. Every cover remains
     # excluded: this helper never clears one of the tree's guesses, a real bar, the keyboard or the status bar.
-    visible = visible_part(target.rect, target.covered_by, screen)
+    visible = visible_part(target.rect, (*target.covered_by, *fresh_bars), screen)
     x, y, w, h = _overlap(visible, (tx + 3, ty + 3, tw - 6, th - 6))
     strips = ((x, y, min(x + w, hx - 2) - x, h),
               (max(x, hx + hw + 2), y, x + w - max(x, hx + hw + 2), h),
               (x, y, w, min(y + h, hy - 2) - y),
               (x, max(y, hy + hh + 2), w, y + h - max(y, hy + hh + 2)))
     areas = sorted((r for r in strips if min(r[2:]) >= 4), key=lambda r: r[2] * r[3], reverse=True)
+    if diagnostic is not None:
+        diagnostic["recovery"] = "probing" if areas else "no_background"
+        diagnostic["candidates"] = len(areas)
     return [(rx + rw / 2, ry + rh / 2) for rx, ry, rw, rh in areas]
 
 

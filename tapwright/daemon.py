@@ -2156,6 +2156,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             "target": target,
             "element": scrub(element) if isinstance(element, str) else element, "ok": error is None, "code": error.code if error is not None else None,
             "reason": reason, "ms": round((time.monotonic() - started) * 1000), "via": _VIA.get(),
+            "hit_check": error.hit_check if error is not None else None,
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "answer_chars": len(said) if isinstance(said, str) else None,
             "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
@@ -6953,6 +6954,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 source = None
             if not ui.current_button(source, element, app or ""):
                 raise Refused("stale", "the button changed before its background could be touched; look again.")
+            fresh_bars = ui.current_button_bars(source, element, self.session.screen)
+            width, height = self.session.screen
+            if (fresh_bars is None or any(ui._holds(b.rect, at) for b in fresh_bars)
+                    or (height > width and at[1] < STATUS_BAR)):
+                raise Refused("not_actionable", "covered: the checked button background is no longer clear of "
+                                               "the current bars or keyboard; look again.")
         hit = await self.session.hit_at(*at)
         if exact:
             relation = ui.hit_relation(None, element, hit) if hit is not None else None
@@ -6965,23 +6972,40 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if hit is None:
             return
         relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
-        if relation == "unplaced":
-            # the hit isn't in the read the list came from: something drawn after it, or a part of the target the read
-            # left out. Only the tree proves which (Codex, PR #12 cycle 1, M1): it is read again, and a hit it still can't
-            # place under the target counts as covering it
+        diagnostic = {"initial_relation": relation, "relation": relation, "recovery": "not_eligible", "probes": 0}
+        sibling_probe = (relocate and at == element.center and relation == "other"
+                         and hit.bundle == app and hit.type in ("Other", "StaticText"))
+        if relation == "unplaced" or sibling_probe:
+            # A private child may be omitted or flattened beside its button. Refresh without treating either as
+            # ancestry. If it still is not inside, only an exact live hit on the original button at a different
+            # point may recover the tap; the original centre stays refused (Codex, PR #12 cycle 1, M1).
             reread = getattr(self.session, "read_source", None)
             try:
                 source = await reread() if reread is not None else None
             except Exception:  # noqa: BLE001 - no read: nothing proves the hit is the target's
                 source = None
             relation = ui.hit_relation(source, element, hit) if source else "other"
-            if relation == "unplaced":
+            diagnostic["relation"] = relation
+            # Newly admitted sibling recovery must never turn into an ordinary centre tap after a hierarchy
+            # change. A new inside/ancestor relationship needs a new look, not weaker delivery checks.
+            if relation in ("unplaced", "other") or sibling_probe:
                 if relocate and at == element.center:
-                    for point in ui.button_background_points(source, element, hit, app or "", self.session.screen):
+                    probe = copy.copy(element)
+                    width, height = self.session.screen
+                    if height > width and element.y < STATUS_BAR:
+                        probe.covered_by = (*probe.covered_by,
+                                            ui.Bar("StatusBar", (0.0, 0.0, width, STATUS_BAR), "the status bar"))
+                    for point in ui.button_background_points(source, probe, hit, app or "", self.session.screen,
+                                                              diagnostic=diagnostic):
+                        diagnostic["probes"] += 1
                         answer = await self.session.hit_at(*point)
                         if answer is None:
+                            diagnostic["probe_relation"] = "unanswered"
                             continue  # an unanswered probe never authorizes its point
                         found = ui.hit_relation(source, element, answer)
+                        diagnostic["probe_relation"] = found
+                        diagnostic["probe_owner"] = ("same" if answer.bundle == app else
+                                                      "foreign" if answer.bundle else "unknown")
                         if answer.bundle == app and ui.hit_relation(None, element, answer) == "same":
                             trace.note("hit", "button background")
                             return point
@@ -7016,8 +7040,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if relation == "other":
             shown = ui.hit_line(hit, self.session.items) if hit.bundle == app or ui.listed(hit, self.session.items) \
                 else ui.foreign_hit_line(hit)  # (an app that can't be told is never named by its words)
-            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind {shown}; move or close "
-                                            "it first.")
+            error = Refused("not_actionable", f"covered: {element.line(actions=False)} is behind {shown}; move or close "
+                                               "it first.")
+            error.hit_check = diagnostic
+            raise error
 
     async def _last_checks(self, tool: str, a: dict, element: "ui.Element | None", *, hit: bool = True, police: bool = True,
                            aim: "Callable[[ui.Element], tuple[float, float] | None] | None" = None,
@@ -7045,12 +7071,34 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         relocated = False
         # A stress double tap repeats a raw point; that second touch cannot borrow this single-touch proof.
         relocate = tool == "tap" and not _DOUBLE.get()
+
+        async def checked_aim(current: ui.Element) -> tuple[ui.Element, tuple[float, float] | None, bool]:
+            current = await self._hit_clears(current)
+            try:
+                aimed = aim(current) if aim is not None else None
+            except Refused:
+                # A guessed sibling rectangle can leave too little visible area before the private-content
+                # recovery is reached (e.g. a browser address field overlapping its Cancel button). Probe on a
+                # copy without only those guesses. Real bars, the status bar and every remaining cover still
+                # apply, and only an exact live button hit may authorize a point through a guessed rectangle.
+                guesses = tuple(b for b in current.covered_by
+                                if b.kind not in ui.COVERING_BARS and ui._holds(b.rect, current.center))
+                if not relocate or not guesses:
+                    raise
+                probe = copy.copy(current)
+                probe.covered_by = tuple(b for b in current.covered_by if b not in guesses)
+                remaining = aim(probe) if aim is not None else None
+                if remaining is not None and remaining != probe.center:
+                    raise  # no alternate point around a real bar may borrow the centre's recovery
+                replacement = await self._refuse_hit(probe, probe.center, relocate=True)
+                if replacement is None:
+                    raise  # a holder/unanswered/ordinary accepted hit is not the required background proof
+                return current, replacement, True
+            replacement = await self._refuse_hit(current, aimed or current.center, relocate=relocate)
+            return current, replacement if replacement is not None else aimed, replacement is not None
+
         if element is not None and hit:
-            element = await self._hit_clears(element)
-            point = aim(element) if aim is not None else None
-            replacement = await self._refuse_hit(element, point or element.center, relocate=relocate)
-            if replacement is not None:
-                point, relocated = replacement, True
+            element, point, relocated = await checked_aim(element)
         said = ""
         if police:
             aimed_with = s.items
@@ -7058,12 +7106,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if s.items is not aimed_with and again is not None:  # the policy waited for a person's OK and read again
                 element = again()
                 if element is not None and hit:
-                    element = await self._hit_clears(element)
-                    point = aim(element) if aim is not None else None
-                    replacement = await self._refuse_hit(element, point or element.center, relocate=relocate)
-                    relocated = replacement is not None
-                    if replacement is not None:
-                        point = replacement
+                    required_exact = relocated
+                    element, point, recovered = await checked_aim(element)
+                    # The same call may wait inline for confirmation. Once it required exact recovery proof,
+                    # a refreshed ordinary centre/holder/unanswered hit cannot downgrade delivery. A newly
+                    # usable centre is allowed only with the same stronger proof, retained through the POST.
+                    if required_exact and not recovered:
+                        await self._refuse_hit(element, point or element.center, exact=True)
+                    relocated = required_exact or recovered
         # Session invokes this immediately before the actual input POST, after every potentially delaying step
         # (banner clearing, Tapline notification, ensure and fast-route probing). Recheck the existing authorization;
         # never claim another approval or grant slot. A failed fast endpoint keeps the check for the W3C fallback.

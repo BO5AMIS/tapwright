@@ -50,6 +50,8 @@ class Refused(Exception):
         super().__init__(message)
         self.code = code
         self.draft = draft  # INTERNAL: the touch stopped at a draft (21.3); the daemon's error JSON carries it for a schedule run, no agent sees it
+        # INTERNAL: fixed gate codes/counts only, for failed hit checks in the action log (never UI content).
+        self.hit_check: dict | None = None
 
 
 @dataclass
