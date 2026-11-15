@@ -588,6 +588,59 @@ def hit_line(hit: Hit, items: list[Element]) -> str:
                    type=hit.type, name=hit.name).line(ref=False, actions=False)
 
 
+def current_button(source: str | None, target: Element, bundle: str) -> bool:
+    """A fresh compact read still contains this one enabled button in this app, with no alert.
+
+    Used only for the bounded background-hit recovery, whose extra proof is stricter than an ordinary tap.
+    Missing app ownership, duplicate nodes, an unreadable tree or a changed/disabled target prove nothing.
+    """
+    if not source or not bundle or target.type != "Button" or target.role not in ("button", "tab") or not target.enabled:
+        return False
+    try:
+        root = ET.fromstring(_clean(source))
+    except ET.ParseError:
+        return False
+    apps = [n for n in root.iter() if _kind(n) == "Application"]
+    if len(apps) != 1 or _text(apps[0].get("bundleId")) != bundle:
+        return False
+    if any(_kind(n) == "Alert" for n in root.iter()):
+        return False
+    found = [n for n in root.iter() if _is_node(n, target.type, target.rect, target.name, target.label)]
+    return len(found) == 1 and found[0].get("enabled", "true") != "false" and "NotEnabled" not in {
+        t.strip() for t in (found[0].get("traits") or "").split(",")}
+
+
+def button_background_points(source: str | None, target: Element, hit: Hit, bundle: str,
+                             screen: tuple[float, float]) -> list[tuple[float, float]]:
+    """At most four inset points to *hit-test*, never permission to touch by geometry alone.
+
+    XCTest can hit-test a button's private icon/text although the application snapshot omits that node. Only an
+    otherwise current native button and a same-app, unplaced passive hit qualify. A later live hit must identify
+    the button itself before any candidate may be used; known overlays and nested actions never qualify.
+    """
+    if (hit.bundle != bundle or hit.type not in ("Other", "StaticText")
+            or (hit.label and not _same_label(hit.label, target.label))
+            or (hit.name and hit.name not in (hit.label, target.name))
+            or not current_button(source, target, bundle)
+            or hit_relation(source, target, hit) != "unplaced"):
+        return []
+    tx, ty, tw, th = target.rect
+    hx, hy, hw, hh = hit.rect
+    if (min(tw, th) < 24 or min(hw, hh) <= 0 or not _holds(hit.rect, target.center)
+            or hx < tx or hy < ty or hx + hw > tx + tw or hy + hh > ty + th):
+        return []
+    # Stay three points inside the visible button and two away from its unplaced content. Every cover remains
+    # excluded: this helper never clears one of the tree's guesses, a real bar, the keyboard or the status bar.
+    visible = visible_part(target.rect, target.covered_by, screen)
+    x, y, w, h = _overlap(visible, (tx + 3, ty + 3, tw - 6, th - 6))
+    strips = ((x, y, min(x + w, hx - 2) - x, h),
+              (max(x, hx + hw + 2), y, x + w - max(x, hx + hw + 2), h),
+              (x, y, w, min(y + h, hy - 2) - y),
+              (x, max(y, hy + hh + 2), w, y + h - max(y, hy + hh + 2)))
+    areas = sorted((r for r in strips if min(r[2:]) >= 4), key=lambda r: r[2] * r[3], reverse=True)
+    return [(rx + rw / 2, ry + rh / 2) for rx, ry, rw, rh in areas]
+
+
 def _listed_as(e: Element, hit: Hit) -> bool:
     return e.type == hit.type and e.name == hit.name and _same_rect(e.rect, hit.rect) and _same_label(hit.label, e.label)
 

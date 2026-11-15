@@ -95,7 +95,7 @@ def test_enums_are_literals():
     def enum(tool, arg):
         prop = tools[tool].input_schema["properties"][arg]
         return set(prop.get("enum") or [v for part in prop.get("anyOf", []) for v in part.get("enum", [])])
-    assert enum("alert", "action") == {"accept", "dismiss", "text"}
+    assert enum("alert", "action") == {"accept", "dismiss", "text", "cancel"}
     assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
     assert enum("scroll", "direction") == {"up", "down", "left", "right"}
     assert enum("scroll", "to") == {"start", "end", "target"}

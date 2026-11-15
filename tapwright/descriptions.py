@@ -312,10 +312,10 @@ EXTRA = {
         'a clean run.'
     ),
     'alert': (
-        "Answer the system alert on screen: `accept` (the default or allow button), `dismiss` (cancel or don't "
-        'allow), or `text` (read it). Answers what changed. Without an alert, `not_found`. In personal mode it '
-        'also answers an alert another app draws about one of yours (Settings asking Delete “MyApp”?); `accept` '
-        "on a policy word needs a person's OK."
+        "`accept` (main button), `dismiss` (cancel/deny), or `text` (read): answers alerts about your apps; "
+        "policy words need OK. No alert: `not_found`. Only if the owner explicitly asks, `cancel` presses exact "
+        "English Cancel on an unrelated iOS alert over an allowed app, withholding private text/screenshots. "
+        "Standalone interactive calls only, outside recordings/journeys/schedules. Then `open_app`."
     ),
     'press_button': (
         'Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; '

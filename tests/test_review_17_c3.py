@@ -314,6 +314,8 @@ TOUCHES = {
     ("daemon", "Daemon._toggle", "tap"): "checked",
     ("daemon", "Daemon._type_text", "type_text"): "checked",  # its focusing tap (typing itself: §11.1, Return guarded)
     ("daemon", "Daemon._alert", "ACTIONS"): "checked",  # iOS's alert button through WebDriverAgent's alert route
+    ("daemon", "Daemon._cancel_system_alert", "alert"): "checked",  # exact Cancel, with private identity rechecked
+    ("daemon", "ACTIONS", "alert"): "checked by Daemon._alert",
     ("daemon", "Daemon._swipe", "ACTIONS"): "checked",  # a short swipe is a touch where it starts; a full one asks
     ("daemon", "ACTIONS", "swipe"): "checked by Daemon._swipe",
     ("daemon", "ACTIONS", "press_button"): "hardware button: home, volume, lock (no element)",
@@ -346,7 +348,7 @@ TOUCHES = {
     ("unlock", "PhoneLockScreen.press_keys", "_call"): "the lock screen's passcode keys (serve --phone, §18.6)",
     ("unlock", "PhoneLockScreen.type_secret", "_call"): "the lock screen's passcode, typed (serve --phone, §18.6)",
 }
-PRIMITIVES = {"tap", "swipe", "scroll", "path", "key", "type_text", "press_button", "long_press", "_press"}
+PRIMITIVES = {"tap", "swipe", "scroll", "path", "key", "type_text", "press_button", "long_press", "_press", "alert"}
 RECEIVERS = {"s", "session"}
 
 

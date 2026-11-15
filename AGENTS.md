@@ -67,7 +67,11 @@ Apple account. Follow [docs/setup.md](docs/setup.md).
    with `alert` the way the test needs, usually as a new user would. In personal mode this works
    for a permission prompt of an app you were given; after the answer the call waits for the app
    to come back.
-10. Start a fresh run with `close_app` then `open_app`.
+10. If an unrelated system alert blocks the app and the owner explicitly asks to cancel it, use a standalone
+    `alert {"action":"cancel"}`. It only presses a verified enabled button labelled exactly `Cancel`, exposes no
+    private alert content, and leaves the app list in force. Then `open_app` the tested app and inspect its fresh
+    screen. If cancellation is refused, report the reason; do not substitute another button.
+    Start a fresh run with `close_app` then `open_app`.
 11. When you know the next two or more steps, send them as one `run`: its `steps` are ordinary
     calls, each with an optional `expect` (`{"text": "Saved"}`) that must hold after it; put one on
     the steps that matter. It stops at the first that fails and says which.

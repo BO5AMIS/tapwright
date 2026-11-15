@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.1 (2026-11-15)
+
+- A tap on a button can recover when the runner hits passive icon/text content that the accessibility tree cannot
+  place. It tries a small number of inset points and uses one only when a fresh hit test identifies the exact same
+  button. The chosen point is checked again before delivery. Changed actions, other apps, known overlays and nested
+  actionable controls still refuse; policy and confirmation checks still apply to the button.
+- `alert {"action":"cancel"}` provides explicit recovery from a system alert when the owner asks to cancel it.
+  It requires a unique enabled Cancel button and verifies the alert again immediately before pressing that button
+  by name. In personal mode, an allowed app must still be in the foreground beneath SpringBoard. It returns no
+  private alert text or screenshot and never accepts the alert, enters a password, or opens its settings.
+  Use it as a standalone call, then `open_app` to return to the app under test.
+- Recovery guidance now describes the human live viewer accurately and explains how to recover without moving
+  the viewer's private key into another browser or weakening the app list.
+
 ## 1.7.0, "the Control Update" (2026-11-14)
 
 Tapwright can now be trusted with more of the phone, for longer, with the owner in control. Shared interface:
