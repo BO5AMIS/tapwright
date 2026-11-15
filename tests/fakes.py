@@ -556,6 +556,8 @@ class FakeSession:
             hit = ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
             self.last_point = at or (hit if isinstance(hit, tuple) else hit.center)  # where the focusing tap went
         self._record("type_text")
+        if target is not None and isinstance(hit, ui.Element) and hit.role == "input":
+            self.focused = hit.identifier or hit.label  # successful targeted typing has acquired this field's focus
         self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"
 
@@ -626,7 +628,7 @@ class FakeSession:
         self.terminated.append(bundle_id)
         return f"closed {bundle_id}"
 
-    async def alert(self, action):
+    async def alert(self, action, *, name=None):
         self._record("alert")
         return f"alert {action}ed"
 

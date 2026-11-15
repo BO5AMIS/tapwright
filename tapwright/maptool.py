@@ -137,11 +137,6 @@ def _reflex(data: dict, ctx: Context, raw: dict) -> dict:
         target = ui.parse_target(do.get("target"))  # bad_params, with an example of a target
         if target.kind not in ("id", "label", "text"):
             raise Refused("bad_params", "a reflex's target is an id, label or text: a ref doesn't outlive the screen it came from")
-        word = _target_text(do)
-        flagged = ctx.policy.check(ctx.app, word)
-        if flagged is not None:
-            raise Refused("not_allowed", f'{do["tool"]} "{word}" is flagged by the safety policy ({flagged[0]} word '
-                                         f'"{flagged[1]}"), and a reflex never does that.')
     elif set(do) != {"tool"}:
         raise Refused("bad_params", 'a back reflex is {"tool": "back"}')
     limit = raw.get("max", 1)

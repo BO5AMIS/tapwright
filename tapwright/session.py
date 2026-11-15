@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 
+from . import device as device_module
 from . import store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
@@ -71,7 +72,8 @@ FRONT_REFUSED = "tapwright front:"  # how the fork's tap starts its refusal: ano
 # TAPWRIGHT_HIT_CHECK=0 turns the check off.
 HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
 HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
-HIT_WAIT = 3.0  # seconds: the runner waits at most 0.3 s for the element and 2 s for its values
+HIT_IDENTITY_REFUSED = "tapwright hit: identity_unproven"  # terminal: the snapshot couldn't be bound to the AX hit
+HIT_WAIT = 5.0  # point lookup (0.3 s), direct attributes (2 s), then exact-identity app fallback (2 s)
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -134,6 +136,7 @@ class Session:
         # A one-use authorization check installed by the daemon. It runs at HTTP dispatch, after banner waits,
         # touch_hook, session setup and runner probing, and is retained across a refused fast-route fallback.
         self.before_input = None
+        self.execution_guard = None  # persistent ownership check for every mutation in an agent turn
         self.input_point: tuple[float, float] | None = None
         self.banner_guard = False  # set by the daemon for the agent's actions: see _clear_of_banner
         # whether one of the agent's touches since the daemon last cleared it began where a banner comes down: a
@@ -270,6 +273,9 @@ class Session:
 
     async def _timed(self, method: str, path: str, full: str, payload: dict | None, timeout: float) -> dict:
         """device.http, with the timing trace (trace.py) noting a touch's or a tree read's request and answer."""
+        guard = getattr(self, "execution_guard", None)
+        if method == "POST" and guard is not None:
+            await guard()
         input_request = method == "POST" and (path in (FAST_TAP_PATH, FAST_DRAG_PATH,
             "/session/{sid}/actions", "/session/{sid}/wda/keys", "/session/{sid}/alert/accept",
             "/session/{sid}/alert/dismiss") or path.endswith("/clear"))
@@ -277,12 +283,15 @@ class Session:
         if validate is not None:
             await validate(self.input_point)
         pending = trace.request(method, path)
+        token = device_module.BEFORE_SEND.set(guard if method == "POST" else None)
         try:
             answer = await self.device.http(method, full, payload, timeout)
         except BaseException:
             if pending is not None:
                 trace.response(pending, ok=False)
             raise
+        finally:
+            device_module.BEFORE_SEND.reset(token)
         if validate is not None and self.before_input is validate:
             self.before_input = None
         if pending is not None:
@@ -655,9 +664,21 @@ class Session:
         if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return None
         await self.ensure()
-        await self._fast_routes()
+        def unproven(gate: str) -> Refused:
+            refused = Refused("not_actionable", "covered: the runner could not verify the touch recipient; "
+                                               "nothing was touched. Look again before another action.")
+            refused.hit_check = {"gate": gate, "phase": "runner", "probes": 0}
+            return refused
+
+        try:
+            await self._fast_routes(strict=True)
+        except ConnectionLost:
+            raise
+        except Exception:
+            raise unproven("capability_unproven") from None
         if self.tw_version < 5:
             return None
+        strict_proof = self.tw_version >= 6
         began = time.monotonic()
         try:
             # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again)
@@ -665,6 +686,12 @@ class Session:
         except ConnectionLost:
             raise
         except Exception as e:  # noqa: BLE001 - whatever stopped the check, the touch goes unchecked
+            if isinstance(e, DeviceError) and HIT_IDENTITY_REFUSED in str(e):
+                raise unproven("identity_unproven") from None
+            if strict_proof:
+                # Version 6 binds attributes to the AX hit. Every failed attempted proof is terminal, including
+                # Unanswered (the runner stayed alive after a timeout), rather than an unchecked ordinary tap.
+                raise unproven("hit_timeout" if isinstance(e, Unanswered) else "hit_request_failed") from None
             getattr(self.device, "log", lambda *a: None)(f"hit test refused ({e}): the touch goes unchecked")
             trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
             return None
@@ -673,7 +700,10 @@ class Session:
         if isinstance(value, dict) and isinstance(value.get("ms"), dict):
             trace.note("hit_wda_ms", {k: v for k, v in value["ms"].items()
                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
-        return ui.hit_of(value)
+        hit = ui.hit_of(value)
+        if strict_proof and (hit is None or value.get("identity") != "verified"):
+            raise unproven("invalid_hit_proof")
+        return hit
 
     def front_by_touch(self) -> bool:
         """Can the next tap check the app in front itself (personal mode, FRONT_IN_TAP)? Only when it would go through
@@ -683,7 +713,7 @@ class Session:
 
     async def _fast_routes(self, strict: bool = False) -> None:
         """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none). Only an
-        answer that says the route is not there (or one without a version) is remembered as version 0. A probe that
+        answer that says the route is not there is remembered as version 0. A malformed answer or a probe that
         failed for another reason (a timeout, a dropped line) is not remembered (CodeRabbit, PR #7): a touch goes on
         through W3C actions this time and asks again next time, and with `strict` the failure is raised."""
         if self.fast_tap is not None:
@@ -696,10 +726,14 @@ class Session:
                 if strict:
                     raise
                 return  # fast_tap stays None: no fast route for this call, and the next one asks again
-            answer = {}
-        value = answer.get("value")
+            self.fast_tap, self.fast_drag, self.tw_version = False, False, 0
+            return
+        value = answer.get("value") if isinstance(answer, dict) else None
         version = value.get("tapwright") if isinstance(value, dict) else None
-        version = version if isinstance(version, int) and not isinstance(version, bool) else 0
+        if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+            if strict:
+                raise DeviceError("tapwright runner: capability_unproven")
+            return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
         self.tw_version = version
 
@@ -984,26 +1018,28 @@ class Session:
         return bool((await self._call("GET", "/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value"))
 
     async def alert(self, action: str, *, name: str | None = None) -> str:
-        """The system alert: accept/dismiss/text, or the daemon's checked, exact named Cancel recovery."""
+        """Read or answer the system alert, optionally selecting an exact localized button."""
         if action not in ("accept", "dismiss", "text", "cancel"):
             raise Refused("bad_params", f"action must be one of accept, dismiss, text, cancel, not {action!r}")
-        if action == "cancel" and name != "Cancel":
-            raise Refused("bad_params", "system alert cancellation requires the exact Cancel button")
+        if name is not None and (not isinstance(name, str) or not name.strip() or action == "text"):
+            raise Refused("bad_params", "name must identify an alert button for accept, dismiss or cancel")
         if action != "text":
             self.typed_into = None
         try:
             if action == "text":
                 return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
             await self._touching(TAP_MS)
-            if action == "cancel":
-                await self._call("POST", "/session/{sid}/alert/dismiss", {"name": name}, again=False)
-            else:
-                await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
+            chosen = "dismiss" if action == "cancel" else action
+            button = (name or "Cancel") if action == "cancel" else name
+            await self._call("POST", f"/session/{{sid}}/alert/{chosen}",
+                             {"name": button} if button is not None else {}, again=False)
         except DeviceError as e:
             if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
                 raise Refused("not_found", "no alert on screen.") from e
             raise
-        return f"alert {action}ed"
+        # The runner acknowledges the button request, not the resulting screen state.
+        named = f" for {ui.quoted(button)}" if button is not None else ""
+        return f"Sent alert {action} request{named}. Check the screen to confirm the result."
 
     # ---- apps ----
     async def apps(self) -> list[dict]:

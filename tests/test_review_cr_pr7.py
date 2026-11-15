@@ -21,30 +21,6 @@ def home(tmp_path, monkeypatch):
 
 
 # ---- 1. ux_check: another app comes forward after the personal-mode check ----
-def test_ux_check_refuses_a_screen_of_an_app_that_came_forward_during_the_read_and_files_nothing(monkeypatch):
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        s = d.session
-        s.tree = [button("e1", "", "gear", rect=(340, 60, 44, 44))]
-        s.foreground = APP
-        kept, filed = [], []
-        real_check = uxcheck.check
-        monkeypatch.setattr(uxcheck, "check", lambda *a, **k: kept.append(a) or real_check(*a, **k))
-        monkeypatch.setattr(uxcheck, "tell_journey", lambda *a, **k: filed.append(a))
-        real_refresh = s.refresh
-
-        async def refresh_then_switch(timeout=None):
-            tree = await real_refresh(timeout)
-            s.foreground, s.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")  # after _within asked
-            return tree
-        s.refresh = refresh_then_switch
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "ux_check", {}, scope=Scope((APP,)))
-        assert e.value.code == "not_allowed" and "outside_apps" in str(e.value) and "mobilesafari" in str(e.value)
-        assert kept == [] and filed == []  # nothing of the other app was checked, remembered or filed
-        await finish(stop, task)
-    run(go)
 
 
 def test_ux_check_checks_nothing_of_an_app_that_was_in_front_for_the_read_and_left_before_the_check(monkeypatch):
@@ -152,12 +128,12 @@ def test_ux_check_files_its_findings_on_the_journey_screen_it_read_not_on_the_cu
         prompt = jr.current
         assert prompt is not None and any(t == '"Allow"' for _, t in prompt.signature)
 
-        async def slow_list():  # meanwhile the journey moves on to another screen of the app
+        async def slow_audit(asked):  # meanwhile the journey moves on to another screen of the app
             jr.see(chr(10).join(['Screen 400x800 pt · 2 elements', 'e1 button "Settings" @10,100 100x40',
                                  'e2 button "Profile" @10,200 100x40']))
             await asyncio.sleep(0.01)
-            return [APP]
-        s.device.foreground_apps = slow_list
+            return list(s.audit_issues)
+        s.audit = slow_audit
         await d.run_tool("a", "ux_check", {}, scope=mine)
         assert jr.current is not prompt  # the journey did move on
         icon = [f for f in jr.findings if f.get("kind") == "icon_only"]
@@ -198,34 +174,6 @@ def test_a_stop_during_a_network_stress_while_a_recording_starts_does_not_deadlo
 
 
 # ---- 2. double_tap: the second touch is refused after the first went out ----
-def test_a_double_tap_refused_at_the_second_touch_still_advances_the_screen_generation():
-    class Linking(DescribingSession):
-        async def tap(self, target, hold_ms=60):
-            done = await super().tap(target, hold_ms)
-            self.foreground, self.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")
-            return done
-
-    async def go():
-        session = Linking()
-        session.tree = [button("e1", "Log meal", "log-meal")]
-        session.foreground = APP
-        d = make(session)
-        stop, task = await started(d)
-        scope = Scope((APP,))
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
-        await d.run_tool("b", "look", {"screenshot": False})  # another agent (given every app) sees the app's screen
-        session.tap_points.clear()
-        before = d.control.generation
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 200, "y": 500}}, scope=scope)
-        assert e.value.code == "not_allowed" and len(session.tap_points) == 1  # one touch went out
-        assert d.control.generation > before  # so every client's refs from before it are stale
-        # Codex, PR #7 cycle 2: the other agent's ref from before the touch is not used on what is in front now
-        with pytest.raises(Refused) as late:
-            await d.run_tool("b", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert late.value.code == "stale" and len(session.tap_points) == 1
-        await finish(stop, task)
-    run(go)
 
 
 # ---- 3. a failed version probe is not "an older runner" ----

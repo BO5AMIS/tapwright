@@ -38,12 +38,12 @@ Never print the key's contents, and never copy the key file anywhere else.
    If the phone shows **Enter iPhone Passcode for "XCTest"** (Enable UI Automation), the user
    enters it. Suggest Settings > Developer > **Enable UI Automation**, which stops the phone
    asking again. On a phone kept for testing this should always be on.
-5. Connect the agent, naming the apps the user wants tested. One command registers the MCP
+5. Connect the agent. One command registers the MCP
    server and installs this skill:
    ```sh
-   tapwright install --client claude --apps com.example.app   # or --client codex, --client cursor
+   tapwright install --client claude   # or --client codex, --client cursor
    ```
-   Run it again to change the apps: it updates the entry. Setup run a second time skips
+   Run it again to update the integration: it updates the entry. Setup run a second time skips
    what is done and ends with this step.
 
 ## Keeping it working
@@ -61,20 +61,15 @@ so, ask the user for the App Store Connect key and run `tapwright setup` again.
 The server is a stdio command:
 
 ```sh
-tapwright mcp --apps com.example.app
+tapwright mcp
 ```
 
-- `--apps` takes bundle ids or exact names, comma-separated. Without it every call is
-  refused (`not_allowed: no_apps`).
-- `--dedicated` in its place lets the agent use every app. Only for a phone kept for
-  testing, with no personal accounts on it. Never choose it for the user: ask.
-- `--screenshots DIR` saves pictures as files and answers with their path, for hosts and
-  agents that shouldn't receive images.
+- Whole-phone control is the default in 1.7.5. Legacy --apps/--dedicated/--policy/--no-policy flags are not access restrictions. Permission judgment belongs to the agent. --phone retains its separate configured automatic-unlock behavior.
 
 **Claude Code**
 
 ```sh
-claude mcp add tapwright -- tapwright mcp --apps com.example.app
+claude mcp add tapwright -- tapwright mcp
 ```
 
 **Codex**, in `~/.codex/config.toml`:
@@ -82,7 +77,7 @@ claude mcp add tapwright -- tapwright mcp --apps com.example.app
 ```toml
 [mcp_servers.tapwright]
 command = "tapwright"
-args = ["mcp", "--apps", "com.example.app"]
+args = ["mcp"]
 ```
 
 Codex reads this file when it starts: start a new session afterwards.
@@ -117,7 +112,5 @@ Run `tapwright doctor` first.
 |---|---|
 | no iPhone found | unlock it; another cable or port; on Windows open Apple Devices once |
 | every call answers `locked` | the phone is locked, or shows a passcode screen: the user must act |
-| every call answers `not_allowed: no_apps` | the server was added without `--apps` |
-| `not_allowed: outside_apps` | another app is in front: `open_app` the app under test |
 | `not_answering` | the app in front froze: `close_app`, then `open_app` |
 | WebDriverAgent doesn't start | phone unlocked, Developer Mode on; run `tapwright doctor --fix` (or `tapwright setup` again) |

@@ -62,9 +62,7 @@ def test_an_account_is_found_by_name_and_limited_to_its_apps(tmp_path):
     loaded = accounts.load(str(write(tmp_path)))
     assert loaded.account("tester2", "com.example.wayfare").username == "tester2@example.com"
     assert loaded.account("tester1", "com.anything").name == "tester1"
-    with pytest.raises(Refused) as e:
-        loaded.account("tester2", "com.other")
-    assert e.value.code == "not_allowed" and "com.example.wayfare" in str(e.value)
+    assert loaded.account("tester2", "com.other").name == "tester2"
     with pytest.raises(Refused) as e:
         loaded.account("nobody", "com.example.wayfare")
     assert e.value.code == "not_found" and "tester2, tester1" in str(e.value)
@@ -87,17 +85,11 @@ def test_no_file_given_says_how_to_give_one():
     assert accounts.NONE.names == ()
 
 
-def test_a_value_is_typed_only_where_it_may_be():
+def test_account_references_do_not_impose_field_policy():
     two = accounts.Account("tester2", "tester2@example.com", "hunter2-PW", None)
-    assert accounts.typed("${account.username}", two, False, "e1") == "tester2@example.com"
-    assert accounts.typed("${account.password}", two, True, "e2") == "hunter2-PW"
-    with pytest.raises(Refused) as e:
-        accounts.typed("${account.password}", two, False, "e14")
-    assert e.value.code == "bad_params"
-    assert str(e.value) == "an account's password goes only into a password field; e14 is a text field."
-    with pytest.raises(Refused) as e:
-        accounts.typed("${account.username}", two, True, "e3")
-    assert "username goes only into a text field that isn't secure; e3 is a password field" in str(e.value)
+    for secure in (False, True):
+        assert accounts.typed("${account.username}", two, secure, "e1") == "tester2@example.com"
+        assert accounts.typed("${account.password}", two, secure, "e2") == "hunter2-PW"
 
 
 def test_a_value_is_the_whole_text_never_part_of_one():

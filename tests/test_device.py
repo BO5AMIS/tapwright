@@ -568,3 +568,84 @@ def test_starts_behind_the_passcode_screen_thin_out_unless_someone_asks_for_the_
         await d.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("code", ["paused", "busy"])
+def test_mutation_rechecks_ownership_after_connection_setup(keep, code):
+    from tapwright.control import Refused
+    from tapwright.session import Session
+
+    async def go():
+        conn = Conn(answer(None))
+        d = device({8100: conn})
+        d.keep = keep
+        s = Session(d)
+        stopped, opened = False, 0
+
+        async def connect(port):
+            nonlocal stopped, opened
+            opened += 1
+            await asyncio.sleep(0)
+            stopped = True
+            return conn
+
+        async def guard():
+            if stopped:
+                raise Refused(code, "ownership changed during connection setup")
+
+        d.rsd.create_service_connection = connect
+        s.execution_guard = guard
+        with pytest.raises(Refused) as error:
+            await s._timed("POST", "/wda/homescreen", "/wda/homescreen", {}, 1)
+        assert error.value.code == code
+        assert opened == 1 and conn.sent == b"" and conn.closed
+        assert device_module.BEFORE_SEND.get() is None
+        # A following request outside the guarded turn is not contaminated.
+        s.execution_guard = None
+        next_conn = Conn(answer(None))
+        d.rsd = Rsd({8100: next_conn})
+        await s._timed("POST", "/wda/homescreen", "/wda/homescreen", {}, 1)
+        assert next_conn.sent.startswith(b"POST ")
+    asyncio.run(go())
+
+
+def test_native_kill_rechecks_after_process_lookup_and_between_processes(monkeypatch):
+    import pymobiledevice3.services.dvt.instruments.device_info as device_info
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dvt_provider
+    import pymobiledevice3.services.dvt.instruments.process_control as process_control
+    from tapwright.control import Refused
+
+    async def go(stop_during_lookup):
+        paused, killed = False, []
+
+        class Info(_Ctx):
+            async def proclist(self):
+                nonlocal paused
+                await asyncio.sleep(0)
+                paused = stop_during_lookup
+                return [{"pid": p, "bundleIdentifier": "app"} for p in [1, 2]]
+
+        class Control(_Ctx):
+            async def kill(self, pid):
+                nonlocal paused
+                killed.append(pid)
+                paused = True
+
+        async def guard():
+            if paused:
+                raise Refused("paused", "paused")
+
+        monkeypatch.setattr(dvt_provider, "DvtProvider", _Ctx)
+        monkeypatch.setattr(device_info, "DeviceInfo", Info)
+        monkeypatch.setattr(process_control, "ProcessControl", Control)
+        d = device({})
+        token = device_module.BEFORE_SEND.set(guard)
+        try:
+            with pytest.raises(Refused):
+                await d.kill_app("app")
+            assert killed == ([] if stop_during_lookup else [1])
+        finally:
+            device_module.BEFORE_SEND.reset(token)
+    asyncio.run(go(True))
+    asyncio.run(go(False))

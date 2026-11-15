@@ -1,6 +1,6 @@
 # Tapwright
 
-**Playwright-style testing on your real iPhone, driven by AI agents. From Windows, Linux or macOS.**
+**Real iPhone control for AI agents: QA, research and mobile workflows. From Windows, Linux or macOS.**
 
 Tapwright gives an agent (Claude, Codex, anything that speaks MCP) eyes and hands on your
 iPhone: it sees the screen as a list of elements plus a screenshot, and taps, types,
@@ -17,8 +17,8 @@ permission prompt. Real time, with the agent's thinking pauses shortened;
 <a href="https://github.com/bo5amis/tapwright/blob/main/docs/media/hero-landscape.mp4">with the live view around it</a>.</sub></p>
 
 > [!NOTE]
-> Version 1 is for testing and QA on a **test phone that sits next to your computer**, over
-> USB or the same Wi-Fi. It is measured on one phone (an iPhone 14 Pro Max on iOS 26) from
+> Connect a real iPhone over USB or the same Wi-Fi. Hardware measurements so far use
+> one phone (an iPhone 14 Pro Max on iOS 26) from
 > one Windows PC; see [Status](#status).
 
 ## How it works
@@ -84,28 +84,21 @@ Run setup again any time: it skips what is done and ends with the next two comma
 it working, `tapwright doctor` warns 30 days before the signing runs out, and
 `tapwright doctor --fix` (phone on USB) repairs what it can.
 
-**Give it to your agent**, naming the apps it may use. One command registers the MCP server
-with your agent and installs the skill and the driver agent (`--client claude`, `codex` or `cursor`; run it again to
-change the apps, it never adds a second entry):
+**Give it to your agent.** One command registers the MCP server and installs its guidance:
 
 ```sh
-tapwright install --client claude --apps com.yourcompany.yourapp
+tapwright install --client claude  # or codex / cursor
 ```
 
-By hand, for Claude Code:
+For a manual Claude Code registration:
 
 ```sh
-claude mcp add tapwright -- tapwright mcp --apps com.yourcompany.yourapp
+claude mcp add tapwright -- tapwright mcp
 ```
 
-- `--apps` takes bundle ids or exact names, comma-separated. The agent is refused every
-  other app (`not_allowed`) and is never shown another app's screen, except a permission
-  prompt one of your apps raises, which it can see and answer.
-- On a phone kept for testing, with no personal accounts on it, use `--dedicated` instead:
-  the agent may then use every app, the Home screen and system prompts.
-- With neither, the agent can do nothing. That is deliberate: the phone may be yours.
+Tapwright 1.7.5 provides whole-phone control by default. Apps, Home, Settings, system alerts and cross-app workflows are available. Permission judgment belongs to the agent and the user's instructions. Existing `--apps`, `--dedicated`, `--policy` and `--no-policy` options are compatibility inputs, not access restrictions. See the [1.7.5 migration contract](docs/agent-directed-control.md).
 
-Other MCP clients: register `tapwright mcp --apps …` (stdio). Then ask, for example: *"Open MyApp
+Other MCP clients: register `tapwright mcp` (stdio). Then ask, for example: *"Open MyApp
 on my phone, sign up with a test email, and tell me if anything looks broken."*
 [AGENTS.md](https://github.com/bo5amis/tapwright/blob/main/AGENTS.md) is the agent's guide; point your agent at it.
 [docs/quickstart.md](https://github.com/bo5amis/tapwright/blob/main/docs/quickstart.md) walks through a first test.
@@ -138,22 +131,22 @@ repository too.
 | `alert` | accept, dismiss or read permitted alerts; `action: "cancel"` explicitly presses a verified Cancel button to recover from a system obstruction when the owner requests it, without showing private alert content |
 | `press_button` | home, volume |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
-| `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). A safety policy with `network` in its `block` list refuses it (`normal` always works). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
+| `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |
 | `open_url` | deep links |
 | `viewer` | opens the live view in a browser on this computer, for you (the agent never gets the link: its key could approve a held-back touch) |
 | `run` | several steps in one call, each with an optional check (`"expect": {"text": "Saved"}`); stops at the first that fails and answers once. A step may carry `if` (run it only when that is on screen) and `optional` (skip it when its own target isn't there), so one call covers a flow with a maybe-screen in it |
-| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE --apps ID` runs it in CI with no agent (exit code, `--junit`). `record` with `route: "<name>"` saves a route for `drive` instead: it starts from a named place, and a `type_text` with `as` is saved as a variable |
+| `record`, `replay` | save what the agent does as a script, and run it again; `tapwright replay FILE` runs it in CI with no agent (exit code, `--junit`). `record` with `route: "<name>"` saves a route for `drive` instead: it starts from a named place, and a `type_text` with `as` is saved as a variable |
 | `logs`, `crash` | the app's own log (level, grep, since) and its crash reports, read from the phone; a failed `run` step adds the log lines from that step, and a call the app crashed in ends with a note |
 | `audit` | an accessibility check of the screen, by Apple's own XCTest audit: low contrast, tap targets under 44x44 pt, missing labels, clipped text, text that doesn't scale, wrong traits, duplicate ids; each issue names the element and the fix |
 | `performance` | memory, CPU and frame rate of the app's own process while it waits, around a tap, or from a cold start to the first settled screen (`launch`); `run` and scripts can hold it to limits with `expect.under` |
 | `ux_check` | one screen against the usability basics, as measured facts first (each names its element and its basis): too many competing choices, no one clear main action, the main action out of thumb reach, icon-only buttons with no label, cut-off text, low contrast and small targets (from `audit`), the same action named differently on screens you saw earlier, an error or empty state that doesn't say what to do next. Your house rules (`tapwright mcp --ux-rules FILE`: text rules you judge, `{"max_taps_to_goal": 4}` and `{"way_back": true}` the tool checks) are included |
-| `media` | puts test pictures (jpeg, png, heic, up to 20 MB each) in the phone's photo library for an app's photo picker: `add` with their paths and `confirm: true` (ask your user first); `remove: true` deletes only what it added. Needs the runner with the photo routes (iOS asks you once to let it add photos, and once more, with a confirmation for each delete, to remove them) |
+| `media` | puts test pictures (jpeg, png, heic, up to 20 MB each) in the phone's photo library for an app's photo picker: `add` with their paths (`confirm` is a compatibility argument); `remove: true` deletes only what it added. Needs the runner with the photo routes (iOS asks you once to let it add photos, and once more, with a confirmation for each delete, to remove them) |
 | `session_report` | where this session's calls went (the same from the shell: `tapwright report [--since TIME] [--client ID]`): calls per tool, failures by code, and waste to cut, each with its call numbers: looks right after an answer that had the changes, retries after `not_found`, scroll hunts, runs of actions that could have been one `run`; and the seconds, not only the calls: the agent's thinking time between calls, the tool's own time, by tool, and a line when calls came one process each (load the MCP server once) |
-| `drive` | go to a place the map knows (`to`), or run a saved route (`route`), at the tool's own speed: a link when the place has one, else the shortest chain of proven roads, each move through the same scope, policy and confirmation as a single call. `with` fills a link's params, `then` adds `run` steps after arriving, `by` is `any`, `taps` or `link`, `dry_run` says the way, `account` names a test account (`--accounts FILE`: the tool types its username and password, the agent never sees them). One answer: `Arrived at language by 3 taps in 1.9 s (settings > general > language).` A road whose target is missing is repaired by another name or the only closest match, then planned again from a known place (twice at most), else `off_route`: nothing more is touched |
+| `drive` | go to a place the map knows (`to`), or run a saved route (`route`), at the tool's own speed: a link when the place has one, else the shortest chain of proven roads, each move through the same execution queue as a single call. `with` fills a link's params, `then` adds `run` steps after arriving, `by` is `any`, `taps` or `link`, `dry_run` says the way, `account` names a test account (`--accounts FILE`: the tool types its username and password, the agent never sees them). One answer: `Arrived at language by 3 taps in 1.9 s (settings > general > language).` A road whose target is missing is repaired by another name or the only closest match, then planned again from a known place (twice at most), else `off_route`: nothing more is touched |
 | `map` | the app's map, learned as you drive: the places Tapwright recognised, the roads (moves) between them, saved routes and reflexes, one line each, and where the app is now; `to` shows the shortest known way to a place and whether each road is proven on this build, `name` names the current place, `link` adds the link that reaches a place, `reflex` / `forget_reflex` and `forget` edit it. The file is `~/.tapwright/maps/<bundle id>/map.json` (`--maps DIR` on `serve`, `mcp` and `call` keeps it with a project); list-row text, typed text and secure values are never in it, and a navigation title only as a hash |
 | `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
 | `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
-| `notifications` | your apps' notifications in Notification Center (every app's with `--dedicated` or `--phone`), newest first, at most 20; `open: n` opens one. Notification Center is on the phone's screen for about a second while it is read; every other app's notification is dropped before anything leaves the reader, and one-time codes are hidden |
+| `notifications` | notifications from the whole phone's Notification Center, newest first, at most 20; `open: n` opens one. Notification Center is on the phone's screen for about a second while it is read; one-time codes are hidden |
 | `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
@@ -173,17 +166,12 @@ step with the check that proves it worked:
 ]}
 ```
 
-With `record`, what it does is saved in that same format. `tapwright replay sign-up.json --apps
-com.example.app --junit out.xml` runs the file again on the phone with no agent (`--apps` names the apps
-the script may use, or `--dedicated` on a phone kept for testing; the script's own `app` doesn't widen
-it, and without either it refuses): it reopens the app, stops at the first step
-that fails and says which, and exits 0, 1 (a step failed) or 2 (it couldn't start). Tapline runs the
-same files inside your app.
+With `record`, actions are saved in the same format. `tapwright replay sign-up.json --junit out.xml` runs the file again without an agent. Review scripts before executing them: app and policy flags do not limit their device access.
 
 **Checks of how it looks, too.** `"expect": {"matches": "trip-saved"}` on a step (or a `compare_screen`
 step) holds when the screen matches the reference picture of that name. `record` keeps the pictures next to the
 script, in `sign-up.references/`, so they travel together. After an intended design change, `tapwright replay
-sign-up.json --apps com.example.app --update-references` saves the new look; a failed check writes its picture
+sign-up.json --update-references` saves the new look; a failed check writes its picture
 with the changes in red to `sign-up.diff/`. Reference pictures and those two folders are written whole or not at
 all, and never through a link; on Windows that narrows, but can't close, the window for a folder that another process
 of the same user swaps at that very moment. With `--screenshots DIR`, filmstrips and the difference picture an agent
@@ -197,8 +185,8 @@ agent's fastest small model (Claude Code: `.claude/agents/phone-driver.md` on Ha
 `.codex/agents/phone-driver.toml`; `--driver-model NAME` changes it) that sends several moves in one call and saves
 what it learns. No model runs inside Tapwright and no API key is asked for. Test accounts stay on your computer
 (`--accounts FILE`): the agent says `tester2`, the tool types the password, and no answer, log or map holds it.
-`brief: true` (or `tapwright mcp --brief`) shortens answers; `tapwright call look --apps ID` makes a call without an
-MCP connection, to the running `tapwright serve` (`serve --apps` sets the widest scope any call may ask for); and a
+`brief: true` (or `tapwright mcp --brief`) shortens answers; `tapwright call look` makes a call without an
+MCP connection, to the running `tapwright serve` (whole-phone control by default); and a
 person's OK can be given in your chat, through the host's dialog, as well as in the live view (`--no-dialog` turns
 that off).
 
@@ -243,67 +231,35 @@ Reaching the phone from another network (a VPN such as Tailscale, or cellular) i
 of version 1. `tapwright probe --host <address> --watch` exists to try it; treat it as
 experimental.
 
-## Safety
+## Agent judgment and user control
 
-A touch on a button or switch whose own label or text holds a policy word (Buy, Purchase, Subscribe,
-Pay, Delete, Remove, Send, Post, Publish, Sign out, Log out, Erase; whole words, any case, never a
-testID) needs a person's OK. The agent's call answers `not_allowed: needs_confirmation`, the live view
-asks you (Allow once / Don't allow), and after an allow the agent repeats the same call once. `force`
-doesn't skip it, and `alert` answers are never checked. `tapwright mcp --policy FILE` sets your own
-words as JSON: `confirm` and `block` lists, and per app lists that replace them for that app (a block
-is final: `not_allowed: blocked`); `--no-policy` turns the check off, for a test phone with test data.
-`dry_run: true` on a touch tool says what it would do, policy included, and touches nothing.
-The policy guards against mistakes, not against an agent set on getting around it: the live view's
-link, and with it the Allow button, are on the same computer the agent runs on. Only the live view page
-can answer (a request carries a random id, and an answer from anything but the page is ignored), but an
-agent with a shell could still forge one, by reading the key from `~/.tapwright`. The agent's `viewer` tool
-opens the page for you and never sees its link, and after you decline, the same touch isn't asked again for a
-minute. Use a test phone with test data for agents you don't trust.
+Tapwright provides device capabilities without app allowlists, label-based confirmations or grants. The agent follows your task and existing authorization. It should clarify consequential work outside that scope, without asking permission for each item in an authorized bulk operation. QA, competitor research, mobile social workflows and personal cleanup use the same tools.
 
-**Keep `~/.tapwright/serve.json` private.** It holds the daemon's key. Every process of your user that can read it is
-trusted like you are: it can answer the approval dialog (Allow, and the offer to make a grant), so it can create a
-standing grant; it can ask for one-time codes (`/otp`); and it can ask the daemon to unlock the phone. An agent that
-can run shell commands as you can read it. Don't share the file, don't copy it to another account or machine, and
-on a phone that matters run agents you don't trust only where they can't read your home folder.
+Authentication and host checks protect the local control service. Keep its key private. Pause in the live view stops agent input; human input takes priority. Fresh targets, clear errors, dry-run and result verification remain part of reliable automation. `dry_run: true` on supported actions sends no input.
 
-A touch by position (`{x, y}`) is refused as `stale` when the picture around the point changed since
-the agent's last look: a sheet or a banner that came in meanwhile would take the touch.
+A delivered tap is not proof the app completed the intended action. Read the response and inspect the screen when needed. On timeout, check whether it happened before repeating it.
 
-Every action, the agent's and yours, is one line in `~/.tapwright/log/actions-<date>.jsonl` (the tool,
-its target, the element, the result, how long it took). Typed text is never written, only its length;
-files older than two weeks are deleted. `tapwright serve --no-log` turns it off.
+Actions are logged in `~/.tapwright/log/actions-<date>.jsonl`. Typed text is not logged; stored credentials remain redacted from routine text logs and recorded script text. `tapwright serve --no-log` disables the action log.
+
+Screenshots, live view, video and saved `--screenshots` images show actual screen pixels; Tapwright does not mask them. A password typed into a nonsecure field or revealed by the app can appear in those images. Keep credential images private and omit them from shared reports.
 
 ## Limits
 
 - Apple's automation sees what accessibility sees. Give important views accessibility
   identifiers (`testID` in React Native) and labels. Games and custom-drawn screens show
   little beyond their screenshot; `look` with `ocr: true` reads their text from the picture.
-- Face ID, Touch ID and the passcode can't be automated; unlock the phone yourself.
+- Face ID and Touch ID require the person. Configured ordinary phone unlock is available with `tapwright serve --phone`; genuine XCTest passcode prompts still require the person.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
   on a test device, or an unattended run stops there.
-- A test phone is the intended setup. If you use a phone with your own accounts on it, an
-  agent gets only the apps you name, and that is enforced; inside those apps, the agent guide
-  tells agents to stay away from purchases, sending, deleting and account changes unless you
-  asked for exactly that: this part is guidance, not enforcement.
-- Notification banners cover the top of the screen for a few seconds. Tapwright waits them
-  out and won't touch under one, which can slow a run on a phone that gets notifications.
-  Don't silence them with a Focus: iOS shares a Focus with your other devices. On a test phone,
-  switch off Allow Notifications per app in Settings > Notifications instead; that stays on the
-  one phone.
-- Landscape: `rotate` turns the phone; the live view, screenshots and touches follow it (checked
-  on both sides: taps, typing, scrolling, the keyboard, a live-view tap).
-- AssistiveTouch: with a mouse or other pointer connected, iOS shows a cursor, and a tap on
-  that cursor opens the AssistiveTouch menu (Home, Notification Center, ...). Neither the cursor
-  nor the menu is in what Tapwright reads, so a tap there looks like "No visible change", and the
-  next tap only closes the menu. On a test phone, disconnect the pointer or turn AssistiveTouch
-  off while an agent drives it.
+- Whole-phone access does not override Apple's signing, pairing, trust or XCTest passcode requirements.
+- System UI may be missing from accessibility. Use a fresh screenshot and coordinates when needed; verify the result.
 
 ## Status
 
 | | |
 |---|---|
-| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; the app list (`--apps`) and `--dedicated`; landscape, on both sides |
+| Works on our phone | setup from Windows; USB and Wi-Fi; every tool; the live view as JPEG frames and as video; app navigation; landscape, on both sides |
 | Measured over USB | a tap, with its answer: 0.65 s; a look: 0.14 s; a toggle 0.66 s; typing 0.73 s; a scroll 1.46 s; a person's tap in the live view shows after 0.23 s; the reliability suite with no misses |
 | Measured over Wi-Fi | slower: a tap 1.0 s, a look 0.4 s, typing 1.3 s; the reliability suite with no misses |
 | Agents | a first-time agent with the skill tested the whole lab charter in 44 calls (40 with Tapline connected too) |

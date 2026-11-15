@@ -44,40 +44,8 @@ def test_recording_never_saves_text_typed_into_a_secure_field_that_was_off_scree
 
 
 # ---- P1: `network` checks the policy against the app in front now ----
-def test_network_checks_the_per_app_policy_against_the_app_in_front_now():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        p = policy.parse({"apps": {"com.blocked.app": {"block": ["network"]}}})
-        await d.run_tool("a", "look", {"screenshot": False})  # the last read: com.example.app
-        d.session.foreground = "com.blocked.app"  # a person put the blocked app in front since
-        d.session.app_names["com.blocked.app"] = "Blocked"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "network", {"mode": "offline"}, policy=p)
-        assert e.value.code == "not_allowed" and "blocks network for" in str(e.value)
-        assert d.session.device.network_calls == [] and d._network is None
-        d.session.foreground = "com.example.app"
-        assert (await d.run_tool("a", "network", {"mode": "3g"}, policy=p))["text"].startswith("Network: 3g")
-        await finish(stop, task)
-    run(go)
 
 
-def test_network_fails_closed_when_the_front_app_cannot_be_read_and_a_policy_blocks_it_per_app():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        p = policy.parse({"apps": {"com.blocked.app": {"block": ["network"]}}})
-
-        async def broken():
-            raise RuntimeError("no answer")
-        d.session.foreground_bundle_id = broken
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "network", {"mode": "3g"}, policy=p)
-        assert e.value.code == "not_allowed" and d.session.device.network_calls == []
-        # no per-app word anywhere: nothing depends on the front app, so it still works
-        assert (await d.run_tool("a", "network", {"mode": "3g"}))["text"].startswith("Network: 3g")
-        await finish(stop, task)
-    run(go)
 
 
 # ---- P2: a plain open_app after one with overrides starts the app again with the defaults ----

@@ -659,19 +659,6 @@ def test_stress_with_done_only_checks_what_survives():
     run(go)
 
 
-def test_a_stress_moment_in_personal_mode_goes_through_the_app_check():
-    async def go():
-        d = daemon()
-        stop, task = await started(d)
-        scope = Scope(("com.example.app",))
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
-        d.session.foreground = "com.other.app"
-        d.session.app = ("Other", "com.other.app")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"text": "Log meal"}}, scope=scope)
-        assert e.value.code == "not_allowed"
-        await finish(stop, task)
-    run(go)
 
 
 # ---- findings API for ux_check ----
@@ -1117,28 +1104,6 @@ def test_a_journey_within_the_rule_keeps_it_and_one_that_missed_its_goal_is_not_
 SPRINGBOARD = "com.apple.springboard"
 
 
-def test_h1_a_frame_is_kept_in_personal_mode_only_while_a_given_app_is_in_front(reports):
-    async def go():
-        d = daemon()
-        stop, task = await started(d)
-        scope = Scope(("com.example.app",))
-        d.session.foreground = "com.example.app"
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
-        jr = d._journeys["a"]
-        assert len(jr.frames) == 1
-        d.session.tree = list(FOOD)
-        await d.run_tool("a", "tap", {"target": {"text": "Log meal"}}, scope=scope)
-        assert len(jr.frames) == 2 and jr.left_out == 0
-        # the tap opened Safari: the answer is withheld (outside_apps) and no picture is kept
-        d.session.app = ("Safari", "com.apple.mobilesafari")
-        d.session.tree = list(HOME)
-        r = await d.run_tool("a", "tap", {"target": {"text": "Save"}}, scope=scope)
-        assert "outside_apps" in r["text"]
-        assert len(jr.frames) == 2 and jr.left_out == 1
-        await d.run_tool("a", "journey", {"stop": True, "reached": False}, scope=scope)
-        assert "1 frame left out: another app was in front." in (only_folder(reports) / "report.md").read_text("utf-8")
-        await finish(stop, task)
-    run(go)
 
 
 def test_h1_a_frame_is_kept_in_dedicated_mode_only_for_the_journeys_app(reports):
@@ -1159,59 +1124,8 @@ def test_h1_a_frame_is_kept_in_dedicated_mode_only_for_the_journeys_app(reports)
     run(go)
 
 
-def test_m5_the_naming_memory_skips_a_withheld_look_and_is_scoped_to_the_journey(reports):
-    from tapwright import uxcheck
-
-    async def go():
-        d = daemon()
-        stop, task = await started(d)
-        scope = Scope(("com.example.app",))
-        uxcheck.note_screen("a", HOME)  # left over from before the journey
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
-        assert len(uxcheck.screens_seen("a")) == 1  # (the start's own look), the old one is gone
-        before = list(uxcheck.screens_seen("a"))
-        d.session.app, d.session.foreground = ("Other", "com.other.app"), "com.other.app"
-        d.session.tree = list(OTHER)
-        with pytest.raises(Refused):
-            await d.run_tool("a", "look", {"screenshot": False}, scope=scope)
-        assert uxcheck.screens_seen("a") == before
-        await d.run_tool("a", "journey", {"stop": True, "reached": False}, scope=scope)
-        assert uxcheck.screens_seen("a") == []
-        await finish(stop, task)
-    run(go)
 
 
-def test_m3_double_tap_is_refused_on_what_the_policy_holds_and_a_changed_control_gets_no_second_touch(reports):
-    class Swapping(DescribingSession):
-        swap: list | None = None
-
-        async def tap(self, target, hold_ms=60):
-            done = await super().tap(target, hold_ms)
-            if self.swap is not None:
-                self.tree, self.swap = self.swap, None
-            return done
-
-    async def go():
-        session = Swapping()
-        session.tree = [button("e1", "Buy now", "buy"), el("e2", "text", "Today")]
-        d = make(session)
-        stop, task = await started(d)
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"})
-        session.tap_points.clear()
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"text": "Buy now"}})
-        assert e.value.code == "not_allowed" and "double_tap on an element the safety policy holds" in str(e.value)
-        assert session.tap_points == []
-        # a harmless button; the first touch brings a "Delete" under the finger: the second touch is not sent
-        session.tree = [button("e1", "Log meal", "log"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
-        session.swap = [button("e1", "Delete all", "del"), el("e2", "text", "Today", rect=(10, 400, 100, 40))]
-        session.tap_points.clear()
-        r = await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 60, "y": 120}})
-        # (1.13.1, item 6: a second touch needs the same control, so the policy is never asked about the new one)
-        assert "changed after the first tap" in r["text"].splitlines()[0] and 'button "Delete all"' in r["text"].splitlines()[0]
-        assert len(session.tap_points) == 1
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_double_taps_second_touch_needs_the_same_control_or_it_answers_changed(reports):
@@ -1328,29 +1242,6 @@ def test_lows_a_cancelled_start_leaves_no_journey_and_no_folder(reports):
     run(go)
 
 
-def test_codex_pr7_c1_double_tap_does_not_touch_again_in_an_app_the_agent_was_not_given(reports):
-    """The first touch opens a link in Safari: the second touch is not made, in personal mode scoped to another app."""
-    class Linking(DescribingSession):
-        async def tap(self, target, hold_ms=60):
-            done = await super().tap(target, hold_ms)
-            self.foreground, self.app = "com.apple.mobilesafari", ("Safari", "com.apple.mobilesafari")
-            return done
-
-    async def go():
-        session = Linking()
-        session.tree = list(HOME)
-        session.foreground = "com.example.app"
-        d = make(session)
-        stop, task = await started(d)
-        scope = Scope(("com.example.app",))
-        await d.run_tool("a", "journey", {"start": True, "goal": "g"}, scope=scope)
-        session.tap_points.clear()
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "journey", {"stress": "double_tap", "target": {"x": 200, "y": 500}}, scope=scope)
-        assert e.value.code == "not_allowed" and "outside_apps" in str(e.value) and "com.apple.mobilesafari" in str(e.value)
-        assert len(session.tap_points) == 1
-        await finish(stop, task)
-    run(go)
 
 
 def test_codex_pr7_c1_a_picture_taken_while_the_app_in_front_changes_is_not_kept(reports):

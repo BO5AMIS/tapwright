@@ -1,0 +1,440 @@
+{
+  "reason": "Tests asserting removed app-scope, label-approval and exact-hit authorization are replaced by tests/test_agent_directed_control.py. Existing execution, authentication and platform tests remain active. Shared test builders remain for regression reuse.",
+  "tests": {
+    "tests/test_171_button_content.py": [
+      "test_private_content_uses_only_a_proven_button_background_and_dispatches_that_point",
+      "test_descendant_uses_center_but_passive_sibling_needs_exact_background_proof",
+      "test_disallowed_center_hits_never_probe_background",
+      "test_a_background_probe_never_accepts_weaker_proof",
+      "test_recovered_point_is_checked_again_after_touch_notification_before_actual_post",
+      "test_recovery_preserves_confirmation_drafts_disabled_and_tool_restrictions",
+      "test_recovered_signout_still_waits_for_its_own_confirmation_before_dispatch",
+      "test_recovered_post_still_stops_a_drafts_only_route_even_without_policy_words",
+      "test_refresh_must_prove_current_unique_enabled_button_before_any_probe",
+      "test_background_candidates_stay_in_visible_inset_regions_and_need_room",
+      "test_only_native_buttons_qualify_for_background_recovery",
+      "test_double_tap_stress_never_recovers_an_unplaced_button_background"
+    ],
+    "tests/test_171_system_cancel.py": [
+      "test_cancel_uses_exact_named_runner_action_and_never_exposes_the_foreign_screen",
+      "test_every_changed_alert_or_scope_proof_is_rechecked_after_the_touch_hook",
+      "test_unsafe_or_unattended_context_is_refused_without_any_input",
+      "test_empty_scope_and_a_policy_block_still_refuse_cancel",
+      "test_named_runner_failure_never_returns_the_foreign_alert_text_or_retries",
+      "test_dispatch_checks_after_delayed_connection_or_scope_reads",
+      "test_automated_contexts_never_reach_alert_reads_or_input",
+      "test_custom_cancel_confirmation_keeps_private_context_out_and_binds_alert_identity",
+      "test_custom_cancel_dialog_does_not_offer_a_grant_or_show_private_context",
+      "test_default_alert_operations_do_not_gain_access",
+      "test_cancel_losing_its_turn_preserves_the_current_actions_final_guard"
+    ],
+    "tests/test_button_content_followup.py": [
+      "test_passive_content_recovers_only_at_an_exact_button_background",
+      "test_refresh_may_place_previously_omitted_content_as_a_sibling_without_authorizing_it",
+      "test_sibling_and_composite_words_never_relax_ownership_identity_or_action_guards",
+      "test_sibling_recovery_never_accepts_a_different_background_recipient",
+      "test_matching_sibling_text_inside_a_separate_action_does_not_authorize_that_action",
+      "test_sibling_background_proof_must_survive_until_the_actual_post",
+      "test_sibling_recovery_never_searches_through_full_content_or_hard_covers",
+      "test_recovered_sibling_signout_still_needs_its_own_confirmation",
+      "test_recovered_sibling_post_still_stops_at_the_drafts_only_guard"
+    ],
+    "tests/test_button_recovery_review.py": [
+      "test_sibling_becoming_a_descendant_never_escapes_exact_recovery",
+      "test_inline_confirmation_cannot_downgrade_recovery_proof",
+      "test_new_hard_cover_blocks_even_an_exact_button_hit"
+    ],
+    "tests/test_guessed_button_cover.py": [
+      "test_fractional_navbar_cover_recovers_only_a_proven_background_and_rechecks_it_at_dispatch",
+      "test_cancel_recovery_dry_run_probes_but_never_sends_input",
+      "test_a_real_bar_still_blocks_recovery",
+      "test_recovery_candidates_keep_real_bars_away_from_the_center_excluded",
+      "test_an_unproven_center_recipient_never_probes_background",
+      "test_background_candidates_must_hit_the_exact_current_button",
+      "test_recovered_background_requires_fresh_exact_proof_after_touch_notification",
+      "test_fresh_source_must_still_prove_the_button_before_any_background_probe",
+      "test_policy_confirmation_and_its_reread_preserve_background_proof",
+      "test_recovery_keeps_tool_and_drafts_restrictions"
+    ],
+    "tests/test_daemon_grants.py": [
+      "test_a_covered_tap_goes_through_with_its_note_audit_and_log",
+      "test_the_note_comes_before_the_persons_ok_and_an_approval_is_audited",
+      "test_a_dry_run_says_the_grant_and_counts_nothing",
+      "test_a_failed_audit_write_asks_a_person",
+      "test_no_grant_covers_a_touch_without_an_audit_log",
+      "test_a_route_grant_covers_only_inside_that_route",
+      "test_a_refused_grant_is_said_in_the_first_answer",
+      "test_revoke_all_stops_a_running_batch_between_moves",
+      "test_a_pause_stops_but_doesnt_revoke",
+      "test_a_thin_calls_grants_file_is_never_in_force",
+      "test_revoke_all_stops_a_drive_between_moves"
+    ],
+    "tests/test_grants_dialog.py": [
+      "test_after_a_persons_ok_in_chat_the_host_is_offered_a_grant_in_the_specs_words",
+      "test_yes_to_the_second_question_writes_drafts_only_false_and_nothing_else_does",
+      "test_a_word_that_reaches_nobody_has_one_question_and_the_caption_has_no_drafts_part",
+      "test_the_live_views_ok_is_followed_by_the_offer_too",
+      "test_no_offer_without_a_persons_ok",
+      "test_no_offer_when_the_host_has_no_dialog",
+      "test_never_grantable_words_are_never_offered",
+      "test_a_settings_touch_is_never_offered",
+      "test_once_per_app_and_word_in_a_session_whatever_the_answer",
+      "test_inside_a_route_the_grant_is_scoped_to_it_and_the_caption_says_so",
+      "test_no_new_grant_is_offered_where_a_grant_matched_and_ran_out",
+      "test_the_policy_file_is_written_under_the_edit_lock_and_a_name_in_use_is_not_taken",
+      "test_a_held_lock_writes_nothing_and_the_touch_still_goes_through",
+      "test_only_the_agent_whose_call_waits_can_answer_the_question",
+      "test_only_a_plain_allow_creates_anything",
+      "test_no_tool_argument_or_header_creates_edits_or_lifts_a_grant",
+      "test_the_wording_of_the_caption_says_everything_the_grant_allows"
+    ],
+    "tests/test_button_hit_diagnostics.py": [
+      "test_refused_probes_are_logged_without_a_sent_phase_or_private_hit_words",
+      "test_failed_candidates_record_counts_and_relations_not_payloads",
+      "test_foreign_refusal_has_sanitized_gate_and_point_diagnostics"
+    ],
+    "tests/test_hit_identity_proof.py": [
+      "test_identity_refusal_prevents_input_and_retains_diagnostic",
+      "test_failed_capability_discovery_never_disables_hit_proof"
+    ],
+    "tests/test_drafts.py": [
+      "test_a_draftsonly_grant_stops_at_a_draft_and_send_makes_the_touch",
+      "test_dont_post_refuses_with_the_specs_words_and_touches_nothing",
+      "test_with_no_dialog_the_draft_is_in_the_live_views_request_and_the_retry_goes_through",
+      "test_a_route_that_is_draftsonly_stops_with_or_without_a_grant",
+      "test_a_word_that_doesnt_reach_people_is_an_ordinary_ask_even_in_a_draftsonly_route",
+      "test_the_draft_is_redacted_before_the_cut_and_cut_at_500_with_a_count",
+      "test_a_vault_value_in_the_draft_shows_its_placeholder_in_the_dialog_caption",
+      "test_the_field_is_the_one_the_agent_last_typed_into_else_the_only_filled_one",
+      "test_a_dry_run_says_it_would_stop_at_a_draft"
+    ],
+    "tests/test_policy.py": [
+      "test_mcp_refuses_to_start_with_a_bad_policy_file",
+      "test_a_block_word_refuses_with_the_words_of_the_spec_and_never_asks_a_person",
+      "test_a_confirm_word_asks_the_live_view_and_the_retry_after_an_allow_passes_once",
+      "test_an_allow_is_for_the_same_tool_and_the_same_element_only",
+      "test_a_decline_and_an_expiry_are_said_on_the_retry_and_it_asks_again",
+      "test_force_does_not_skip_the_policy",
+      "test_a_point_over_a_delete_button_is_checked_as_the_button",
+      "test_a_switch_is_checked_too_and_a_toggle_to_where_it_is_asks_nothing",
+      "test_each_call_has_the_policy_it_came_with",
+      "test_a_dry_run_names_the_touch_and_the_policy_and_touches_nothing",
+      "test_a_dry_run_does_not_use_up_a_persons_ok",
+      "test_the_server_reads_the_header_and_refuses_a_bad_one",
+      "test_a_viewer_that_connects_while_a_request_is_open_is_sent_it",
+      "test_an_alerts_policy_word_button_and_a_swipe_that_is_a_touch_go_through_the_policy"
+    ],
+    "tests/test_daemon.py": [
+      "test_personal_mode_without_an_app_list_runs_nothing",
+      "test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused",
+      "test_personal_mode_keeps_the_agent_in_the_apps_it_was_given",
+      "test_an_answer_in_personal_mode_never_shows_another_apps_screen",
+      "test_a_points_tap_reads_the_screen_only_when_a_policy_has_words",
+      "test_close_app_outside_the_given_apps_ends_nothing",
+      "test_the_first_tap_after_open_app_reads_the_screen_again_and_aims_at_the_part_the_search_field_leaves",
+      "test_a_look_after_open_app_is_the_list_a_touch_uses_with_no_second_read",
+      "test_a_button_fully_under_a_later_element_is_refused",
+      "test_a_button_partly_under_a_later_element_is_touched_where_it_shows",
+      "test_in_personal_mode_a_given_apps_permission_prompt_can_be_seen_and_answered",
+      "test_an_ios_alert_over_everything_is_named_as_one_in_personal_mode",
+      "test_tap_scope_comes_from_the_read_when_it_names_a_given_app",
+      "test_tap_is_refused_when_its_read_names_another_app_and_nothing_is_touched",
+      "test_tap_asks_separately_when_the_read_names_no_app_or_the_home_screen_or_an_alert",
+      "test_tap_with_a_current_list_or_by_ref_keeps_the_separate_check",
+      "test_a_loading_wait_that_reads_another_app_touches_nothing_there",
+      "test_a_loading_wait_that_ends_in_the_given_app_still_taps_and_hands_the_runner_the_check",
+      "test_a_touch_on_the_way_to_the_tap_is_checked_against_the_read_before_it",
+      "test_tap_lets_the_runner_check_the_app_in_front_and_asks_nothing_first",
+      "test_tap_the_runner_refuses_touches_nothing_and_gets_todays_outside_apps_answer",
+      "test_a_runner_refusal_on_a_given_apps_own_prompt_still_lets_the_tap_through_by_the_question"
+    ],
+    "tests/test_dialog.py": [
+      "test_a_call_with_a_dialog_waits_and_an_allow_in_chat_lets_it_through",
+      "test_the_live_view_answering_first_closes_the_dialog_and_the_note_says_so",
+      "test_the_dialog_answering_first_wins_over_a_later_live_view_answer",
+      "test_only_allow_allows",
+      "test_after_a_refusal_the_same_touch_asks_no_one_for_a_minute",
+      "test_nobody_answering_ends_it_after_the_limit_and_closes_the_dialog",
+      "test_an_allow_is_checked_again_and_a_changed_screen_asks_again",
+      "test_the_element_must_be_the_same_and_still_touchable_after_the_wait",
+      "test_another_app_in_front_after_the_wait_asks_again",
+      "test_a_pause_while_the_ok_is_awaited_is_honoured_when_it_comes",
+      "test_the_live_view_can_use_the_phone_while_the_ok_is_awaited",
+      "test_one_ok_is_used_by_one_call_when_two_wait_on_the_same_request",
+      "test_an_ok_taken_by_a_call_without_a_dialog_is_not_used_again_by_the_one_that_waited",
+      "test_after_the_wait_the_touch_goes_to_the_element_as_the_new_read_has_it",
+      "test_an_ok_is_for_the_controls_words_too_not_only_its_id",
+      "test_a_live_view_ok_is_not_used_by_the_same_id_with_other_words",
+      "test_a_blocked_touch_never_reaches_a_dialog",
+      "test_a_call_without_a_dialog_answers_at_once_and_asks_the_host_nothing",
+      "test_an_answer_needs_the_client_the_request_was_for",
+      "test_a_dialog_that_vanishes_leaves_the_live_view_able_to_answer",
+      "test_an_accounts_value_is_scrubbed_from_the_request_the_live_view_and_the_dialog_are_sent",
+      "test_each_ok_names_where_it_came_from_in_the_action_log",
+      "test_a_journey_counts_the_oks_and_its_report_names_where_they_came_from",
+      "test_the_caption_is_the_tools_own_words_with_the_apps_text_quoted_clipped_and_cleaned"
+    ],
+    "tests/test_daemon_places.py": [
+      "test_a_move_that_needed_a_persons_ok_is_not_a_road_and_the_answer_says_so",
+      "test_an_app_the_agent_was_not_given_is_never_mapped"
+    ],
+    "tests/test_daemon_reflex.py": [
+      "test_a_reflex_whose_target_carries_a_policy_word_now_does_not_fire_and_asks_no_one"
+    ],
+    "tests/test_review_17a.py": [
+      "test_a_draft_that_holds_a_one_time_code_says_so",
+      "test_a_code_is_never_read_or_typed_into_a_field_that_isnt_a_code_field"
+    ],
+    "tests/test_review_17_c1.py": [
+      "test_h3_a_draft_changed_after_the_live_view_allow_is_asked_again",
+      "test_h1_alert_accept_in_an_account_deletion_alert_asks_a_person_whatever_the_delete_grant",
+      "test_h1_a_tap_on_the_delete_button_of_an_account_deletion_alert_asks_a_person",
+      "test_h1_an_account_deletion_screen_keeps_its_confirm_from_any_grant_and_from_the_offer",
+      "test_h1_an_ordinary_delete_alert_is_still_covered",
+      "test_h2_an_unrestricted_grant_never_lifts_a_routes_draftsonly",
+      "test_h3_a_draft_changed_while_the_dialog_waits_is_not_sent",
+      "test_m1_an_unplaced_hit_within_the_targets_frame_is_covered",
+      "test_cr_a_draft_stop_inside_a_driven_route_keeps_its_draft_flag",
+      "test_cr_a_grant_made_while_a_recording_stops_keeps_its_route"
+    ],
+    "tests/test_review_17_c2.py": [
+      "test_h1_the_draft_shown_is_the_draft_the_ok_is_for_even_when_the_app_changes_it_right_after_the_read",
+      "test_h1_a_conversation_that_changed_hands_is_asked_again_though_the_composer_is_the_same",
+      "test_h2_a_stricter_call_policy_never_frees_a_route_the_daemons_grant_names",
+      "test_h3_a_line_break_in_the_text_is_refused_where_submit_is",
+      "test_h3_a_vault_value_with_a_line_break_is_refused_without_showing_it",
+      "test_h4_a_bare_confirm_on_an_account_deletion_screen_asks_a_person",
+      "test_h4_accepting_an_account_deletion_alert_whose_button_says_confirm_asks_a_person",
+      "test_h5_a_send_grant_never_covers_send_money",
+      "test_m1_a_hit_with_the_targets_id_and_frame_but_other_words_is_stale",
+      "test_m2_a_banner_of_another_app_over_the_target_is_named_without_its_words",
+      "test_m5_otp_refuses_an_app_outside_serves_apps"
+    ],
+    "tests/test_review_17_c3.py": [
+      "test_h1_a_scroll_never_sends_a_draft_the_person_wasnt_shown",
+      "test_h2_a_recipient_picker_that_changed_its_value_is_asked_again",
+      "test_h3_a_stricter_call_policy_keeps_the_daemons_drafts_only_return_guard",
+      "test_h4_text_that_takes_a_tap_and_an_own_delete_account_ask_a_person_whatever_the_policy",
+      "test_h4_a_reflex_never_touches_what_the_policy_would_hold_whatever_the_policy_file",
+      "test_h5_a_send_money_navigation_title_read_from_the_tree_protects_a_bare_confirm",
+      "test_m2_a_toggle_and_a_focusing_tap_under_another_control_are_refused_covered"
+    ],
+    "tests/test_review_17_c4_daemon.py": [
+      "test_localized_starter_send_stops_at_a_draft_by_stable_identifier"
+    ],
+    "tests/test_review_17_c4_touches.py": [
+      "test_h1_actionable_related_hit_is_never_authorized_as_harmless_target",
+      "test_h2_banner_wait_revalidates_draft_or_claimed_grant"
+    ],
+    "tests/test_review_17_safety.py": [
+      "test_a_draftsonly_route_stops_at_the_draft_whatever_the_policy_says",
+      "test_a_draftsonly_grant_stops_at_the_draft_when_the_policy_has_no_such_word",
+      "test_submit_is_refused_where_a_send_stops_at_a_draft",
+      "test_a_pending_plain_request_is_never_reused_for_a_draft",
+      "test_a_full_swipe_across_a_list_row_needs_a_persons_ok_and_a_short_one_doesnt",
+      "test_a_full_row_swipe_is_never_made_in_a_draftsonly_route_or_a_scheduled_run"
+    ],
+    "tests/test_account_values_raw_inside.py": [
+      "test_a_password_that_is_a_policy_word_still_holds_the_button_back",
+      "test_a_password_that_is_a_policy_word_still_holds_an_alerts_accept_back"
+    ],
+    "tests/test_alert_of_given.py": [
+      "test_dismiss_answers_it_without_a_persons_ok_and_says_where_the_app_is",
+      "test_accepting_a_delete_needs_a_persons_ok_and_then_goes_through",
+      "test_a_policy_block_still_blocks",
+      "test_an_alert_that_names_another_app_is_not_a_given_apps",
+      "test_without_an_alert_settings_in_front_is_refused_as_before",
+      "test_only_alert_gets_through_every_other_call_is_still_outside_apps"
+    ],
+    "tests/test_batch.py": [
+      "test_in_personal_mode_a_batch_needs_an_app_list_and_never_shows_another_apps_screen"
+    ],
+    "tests/test_ceiling.py": [
+      "test_a_call_may_name_the_apps_of_the_ceiling_or_fewer",
+      "test_a_call_naming_an_app_outside_the_ceiling_is_refused_and_the_message_names_the_ceiling",
+      "test_a_call_asking_for_dedicated_under_an_apps_ceiling_is_refused",
+      "test_a_call_naming_no_apps_under_a_ceiling_gets_none_as_before",
+      "test_a_daemon_started_without_a_ceiling_behaves_as_it_always_did",
+      "test_a_call_with_no_policy_works_under_the_daemons_policy",
+      "test_a_call_may_add_words_to_the_daemons_policy",
+      "test_a_call_may_not_remove_a_word_of_the_daemons_policy",
+      "test_a_word_may_move_from_confirm_to_block_but_not_the_other_way",
+      "test_an_apps_own_words_are_held_to_the_daemons_for_that_app",
+      "test_a_daemon_without_a_policy_leaves_a_calls_policy_alone",
+      "test_a_policy_the_daemon_cannot_read_is_still_bad_params",
+      "test_serve_hands_the_flags_to_the_server_as_a_ceiling",
+      "test_serve_refuses_apps_with_dedicated_and_a_policy_it_cannot_read",
+      "test_a_thin_call_never_brings_a_grants_file_but_the_mcp_server_does"
+    ],
+    "tests/test_cli_replay.py": [
+      "test_without_apps_or_dedicated_it_refuses_with_2"
+    ],
+    "tests/test_compare_screen.py": [
+      "test_in_personal_mode_only_a_given_apps_screen_is_compared_or_saved",
+      "test_an_app_that_leaves_while_the_picture_is_taken_saves_nothing",
+      "test_a_batch_in_personal_mode_compares_only_a_given_apps_screen"
+    ],
+    "tests/test_conditions.py": [
+      "test_personal_mode_still_gives_only_the_given_apps"
+    ],
+    "tests/test_daemon_accounts.py": [
+      "test_a_password_goes_only_into_a_secure_field_and_a_username_only_into_a_plain_one",
+      "test_an_accounts_value_is_not_typed_into_an_app_it_isnt_for_even_after_a_step_switched_apps",
+      "test_the_account_is_checked_before_anything_is_touched"
+    ],
+    "tests/test_daemon_drive.py": [
+      "test_a_flagged_move_stops_the_drive_with_the_usual_error_and_what_was_done",
+      "test_a_stop_always_carries_the_screen_whatever_look_says",
+      "test_personal_mode_only_in_a_given_app"
+    ],
+    "tests/test_daemon_map.py": [
+      "test_map_needs_the_app_in_scope_like_every_call"
+    ],
+    "tests/test_daemon_vault.py": [
+      "test_a_card_is_typed_only_with_a_persons_ok_every_time_and_never_offered_as_a_grant",
+      "test_without_a_dialog_a_card_asks_the_live_view_and_types_nothing"
+    ],
+    "tests/test_diagnostics.py": [
+      "test_personal_mode_reads_only_a_given_apps_log",
+      "test_performance_refuses_an_app_that_came_to_the_front_after_the_check"
+    ],
+    "tests/test_filmstrip.py": [
+      "test_a_tap_the_policy_holds_back_answers_its_own_error_and_no_strip",
+      "test_personal_mode_shows_the_strip_only_while_a_given_app_is_in_front",
+      "test_an_app_that_comes_and_goes_inside_the_strip_stops_it",
+      "test_in_personal_mode_the_tap_inside_has_its_own_checks"
+    ],
+    "tests/test_journey.py": [
+      "test_a_stress_moment_in_personal_mode_goes_through_the_app_check",
+      "test_h1_a_frame_is_kept_in_personal_mode_only_while_a_given_app_is_in_front",
+      "test_m5_the_naming_memory_skips_a_withheld_look_and_is_scoped_to_the_journey",
+      "test_m3_double_tap_is_refused_on_what_the_policy_holds_and_a_changed_control_gets_no_second_touch",
+      "test_codex_pr7_c1_double_tap_does_not_touch_again_in_an_app_the_agent_was_not_given"
+    ],
+    "tests/test_maptool.py": [
+      "test_a_reflex_the_policy_flags_is_refused_when_it_is_added"
+    ],
+    "tests/test_needs_dialog.py": [
+      "test_an_ios_alert_over_the_phone_asks_and_the_touch_goes_on_when_it_is_gone",
+      "test_an_ios_alert_with_cant_now_is_the_usual_refusal"
+    ],
+    "tests/test_performance.py": [
+      "test_a_tap_goes_through_the_ordinary_tool_and_so_through_the_policy",
+      "test_personal_mode_measures_only_an_app_it_was_given"
+    ],
+    "tests/test_reach.py": [
+      "test_the_policy_has_its_say_before_the_scroll_and_an_allow_is_used_once",
+      "test_a_block_word_refuses_before_any_scroll"
+    ],
+    "tests/test_review2_pr6.py": [
+      "test_network_refuses_when_the_front_app_is_unknown_and_a_policy_blocks_it_per_app",
+      "test_a_scroll_that_brings_another_element_on_screen_is_checked_by_the_policy_again"
+    ],
+    "tests/test_review_14.py": [
+      "test_a_global_block_word_network_refuses_every_mode_but_normal",
+      "test_a_block_word_in_the_front_apps_own_list_names_the_app",
+      "test_session_report_with_no_app_list_is_refused_in_personal_mode"
+    ],
+    "tests/test_review_17_c4_storage.py": [
+      "test_h3_a_known_unreadable_grants_file_never_lifts_draft_restrictions"
+    ],
+    "tests/test_review_17_w144.py": [
+      "test_b_m5_a_guessed_cover_stands_when_the_hit_is_only_the_window",
+      "test_b_m5_a_hit_in_another_process_is_covered_unless_its_the_target_or_the_keyboard",
+      "test_a_m4_a_ceiling_name_two_apps_share_admits_neither_and_ids_are_compared",
+      "test_a_l2_revoke_all_stops_a_run_that_began_with_no_active_grant",
+      "test_a_l1_no_grant_line_for_a_use_that_then_asked_a_person"
+    ],
+    "tests/test_review_cr_pr7.py": [
+      "test_ux_check_refuses_a_screen_of_an_app_that_came_forward_during_the_read_and_files_nothing",
+      "test_a_double_tap_refused_at_the_second_touch_still_advances_the_screen_generation"
+    ],
+    "tests/test_review_pr6.py": [
+      "test_network_checks_the_per_app_policy_against_the_app_in_front_now",
+      "test_network_fails_closed_when_the_front_app_cannot_be_read_and_a_policy_blocks_it_per_app"
+    ],
+    "tests/test_runner_v5.py": [
+      "test_a_tap_on_a_target_a_bar_covers_is_refused_and_touches_nothing",
+      "test_a_cover_the_tree_only_guesses_is_dropped_when_the_hit_lands_on_the_target"
+    ],
+    "tests/test_server.py": [
+      "test_a_caller_gets_only_the_apps_it_names_and_none_when_it_names_none"
+    ],
+    "tests/test_speed_regressions.py": [
+      "test_a_tap_whose_read_names_no_app_asks_once_before_and_once_after"
+    ],
+    "tests/test_unattended_17.py": [
+      "test_phone_mode_is_a_ceiling_a_call_may_narrow_but_never_widen",
+      "test_personal_mode_stays_the_default",
+      "test_never_grantable_screens_still_ask_a_person_in_phone_mode"
+    ],
+    "tests/test_uxcheck.py": [
+      "test_ux_check_is_a_read_in_personal_mode_and_refused_outside_the_given_apps"
+    ],
+    "tests/test_media.py": [
+      "test_media_works_in_personal_mode_and_shows_nothing_of_another_app",
+      "test_in_personal_mode_the_runners_prompt_can_be_read_but_never_answered_by_the_tool"
+    ],
+    "tests/test_notifications.py": [
+      "test_personal_mode_reads_only_the_given_apps_and_the_others_are_in_no_output",
+      "test_personal_mode_reads_nothing_while_another_app_is_in_front",
+      "test_the_check_route_is_within_the_apps_ceiling"
+    ]
+  },
+  "renamed_or_replaced": {
+    "tests/test_accounts.py": {
+      "old_names": [
+        "test_a_value_is_typed_only_where_it_may_be"
+      ],
+      "replacement_names": [
+        "test_account_references_do_not_impose_field_policy"
+      ]
+    },
+    "tests/test_connect.py": {
+      "old_names": [
+        "test_it_refuses_without_apps_or_dedicated",
+        "test_the_command_refuses_and_prints"
+      ],
+      "replacement_names": [
+        "test_install_command_accepts_no_app_list",
+        "test_install_needs_no_app_allowlist"
+      ]
+    },
+    "tests/test_daemon_reflex.py": {
+      "old_names": [
+        "test_a_permission_prompt_is_never_a_reflex"
+      ],
+      "replacement_names": [
+        "test_declared_reflex_does_not_tap_underneath_a_real_alert"
+      ]
+    },
+    "tests/test_descriptions.py": {
+      "old_names": [
+        "test_the_docs_name_only_the_shared_tool_set",
+        "test_the_instructions_are_the_shared_core_then_what_tapwright_adds"
+      ],
+      "replacement_names": [
+        "test_current_docs_name_real_tools_and_current_control_contract",
+        "test_instructions_describe_agent_directed_whole_phone_control"
+      ]
+    },
+    "tests/test_descriptions_16.py": {
+      "old_names": [
+        "test_brief_is_a_parameter_of_every_action_and_the_instructions_say_what_it_does",
+        "test_the_agreed_texts_around_the_1_6_ones_are_unchanged"
+      ],
+      "replacement_names": [
+        "test_batch_and_recording_descriptions_preserve_execution_contract",
+        "test_brief_is_documented_on_actions_and_batches"
+      ]
+    },
+    "tests/test_driver.py": {
+      "old_names": [
+        "test_the_handbook_is_short_and_says_what_the_plan_asks"
+      ],
+      "replacement_names": [
+        "test_handbook_describes_the_current_control_contract"
+      ]
+    }
+  }
+}

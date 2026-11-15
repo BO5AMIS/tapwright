@@ -125,20 +125,9 @@ def test_a_reflex_with_a_place_fires_only_there(tmp_path):
     run(go)
 
 
-def test_a_reflex_whose_target_carries_a_policy_word_now_does_not_fire_and_asks_no_one(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await ready(d)
-        await show(d, "labelled")  # the same id, but the button now says Delete account
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "settings-btn"}}]})
-        assert e.value.code == "not_found" and d.session.tap_points == [] and d._confirms == {}
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_permission_prompt_is_never_a_reflex(tmp_path):
+def test_declared_reflex_does_not_tap_underneath_a_real_alert(tmp_path):
     async def go():
         d = mapped(tmp_path)
         stop, task = await started(d)

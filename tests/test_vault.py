@@ -126,17 +126,11 @@ def test_a_vault_reference_types_its_value_by_name(tmp_path):
 
 @pytest.mark.parametrize("text, secure, bundle, code, words", [
     ("hi ${vault.home.street}", False, "x", "bad_params", "the whole text of a step"),
-    ("${vault.tester2.password}", False, "com.example.wayfare", "bad_params",
-     "an account's password goes only into a password field; e7 is a text field."),
-    ("${vault.tester2.username}", True, "com.example.wayfare", "bad_params", "goes only into a text field that isn't secure"),
-    ("${vault.tester2.username}", False, "com.other", "not_allowed", "may be typed only in com.example.wayfare"),
-    ("${vault.trip_data.destination}", True, "x", "bad_params", "never goes into a password field"),
     ("${vault.nobody.street}", False, "x", "not_found", 'no vault entry "nobody"'),
     ("${vault.home.number}", False, "x", "bad_params", "its fields are street, city, postcode, country"),
     ("${vault.phone.passcode}", False, "x", "bad_params", "only on the lock screen's keypad"),
     ("${vault.me.street}", False, "x", "bad_params", "an identity; its fields are name, phone, email, birthday"),
     ("${otp.com.example.wayfare} now", False, "com.example.wayfare", "bad_params", "a one-time code is the whole text"),
-    ("${otp.com.example.wayfare}", False, "com.other", "not_allowed", "typed only into com.example.wayfare"),
     ("${otp.com.other}", False, "com.other", "bad_params", "one-time codes are off for com.other"),
 ])
 def test_the_field_rules(tmp_path, text, secure, bundle, code, words):
@@ -145,6 +139,18 @@ def test_the_field_rules(tmp_path, text, secure, bundle, code, words):
         v.reference(text, None, secure, "e7", bundle)
     assert e.value.code == code and words in str(e.value)
     assert "Synthetic" not in str(e.value) and "Lisbon" not in str(e.value)
+
+
+@pytest.mark.parametrize("text, secure, bundle", [
+    ("${vault.tester2.password}", False, "com.example.wayfare"),
+    ("${vault.tester2.username}", True, "com.example.wayfare"),
+    ("${vault.tester2.username}", False, "com.other"),
+    ("${vault.trip_data.destination}", True, "x"),
+    ("${otp.com.example.wayfare}", False, "com.other"),
+])
+def test_explicit_references_do_not_enforce_app_or_field_labels(tmp_path, text, secure, bundle):
+    got = load(tmp_path).reference(text, None, secure, "e7", bundle)
+    assert got is not None and (got.value or got.otp_app)
 
 
 def test_a_card_comes_back_as_a_card_for_the_daemon_to_ask(tmp_path):

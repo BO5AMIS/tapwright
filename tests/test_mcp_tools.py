@@ -25,7 +25,7 @@ EXPECTED = {
     "network": {"mode"},
     "viewer": set(),
     "close_app": {"app"},
-    "alert": {"action", "look", "screenshot", "brief"},
+    "alert": {"action", "look", "screenshot", "brief", "name", "dry_run"},
     "press_button": {"name", "look", "screenshot", "brief"},
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
     "rotate": {"to", "look", "screenshot", "brief"},

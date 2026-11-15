@@ -132,8 +132,8 @@ def test_a_traced_tap_and_a_read_write_ordered_lines(tmp_path):
     assert tap["kind"] == "touch" and tap["touches"] == 1 and tap["wda_value"] == {"queued": 1, "played_ms": 20.5}
     phases = tap["phases"]
     # a point target needs no read: the front-end phases are the ones every touch passes
-    assert set(phases) == {"scope", "act", "resolved", "policy", "sent", "wda", "frame", "settled", "returned"}
-    ordered(phases, ["scope", "act", "resolved", "policy", "sent", "wda", "settled", "returned"])
+    assert set(phases) == {"scope", "act", "resolved", "sent", "wda", "frame", "settled", "returned"}
+    ordered(phases, ["scope", "act", "resolved", "sent", "wda", "settled", "returned"])
     assert phases["sent"] <= phases["frame"] <= phases["settled"]  # the frame that differs came after the touch went out
     assert found.index(tap) > found.index(reads[0]) and tap["t0"] >= reads[0]["t0"]  # monotonic clock
 
@@ -157,7 +157,7 @@ def test_a_tap_by_id_after_an_unlooked_action_splits_its_time_before_the_touch(t
     taps = [x for x in lines(path) if x["tool"] == "tap"]
     assert len(taps) == 2
     phases = taps[1]["phases"]
-    ordered(phases, ["scope", "act", "still", "read", "resolved", "policy", "sent", "wda", "returned"])
+    ordered(phases, ["scope", "act", "still", "read", "resolved", "sent", "wda", "returned"])
     assert "still" not in taps[0]["phases"]  # a point needs no read
 
 

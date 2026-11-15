@@ -163,22 +163,6 @@ def test_without_a_tap_nothing_is_touched_and_the_strip_is_logged(tmp_path):
     assert entry["tool"] == "filmstrip" and entry["frames"] == 2 and "target" not in entry
 
 
-def test_a_tap_the_policy_holds_back_answers_its_own_error_and_no_strip(tmp_path):
-    async def go():
-        s = FakeSession()
-        s.tree = [button("e1", "Delete trip", "trip-delete")]
-        d = make(s, actions=ActionLog(tmp_path), shot_wait=0.5)
-        stop, task = await started(d)
-        feed = reel(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "filmstrip", {"frames": 3, "interval_ms": 100, "tap": {"label": "Delete trip"}})
-        assert e.value.code == "not_allowed" and str(e.value).startswith("needs_confirmation: ")
-        assert s.tap_points == []
-        await feed_stop(feed)
-        await finish(stop, task)
-    run(go)
-    entries = [json.loads(line) for f in tmp_path.glob("actions-*.jsonl") for line in f.read_text().splitlines()]
-    assert [(e["tool"], e["ok"]) for e in entries] == [("tap", False), ("filmstrip", False)]
 
 
 def test_a_missing_tap_target_is_the_taps_error():
@@ -194,79 +178,10 @@ def test_a_missing_tap_target_is_the_taps_error():
     run(go)
 
 
-def test_personal_mode_shows_the_strip_only_while_a_given_app_is_in_front():
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s, shot_wait=0.5)
-        stop, task = await started(d)
-        feed = reel(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.example.app"
-        r = await d.run_tool("a", "filmstrip", {"frames": 2, "interval_ms": 100}, scope=mine)
-        assert r["image"] and HEAD.fullmatch(r["text"])
-        s.foreground = "com.example.mail"  # another app in front: nothing is filmed
-        shots = s.calls.count("screenshot")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "filmstrip", {"frames": 2, "interval_ms": 100}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: com.example.mail is in front")
-        s.foreground = "com.example.app"
-        asked = []
-
-        async def leaves():  # in front when asked first, gone to another app by the time it was filmed
-            asked.append(1)
-            return "com.example.app" if len(asked) == 1 else "com.example.mail"
-        s.foreground_bundle_id = leaves
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "filmstrip", {"frames": 2, "interval_ms": 100}, scope=mine)
-        assert e.value.code == "not_allowed" and "image" not in str(e.value) and "outside_apps" in str(e.value)
-        assert s.calls.count("screenshot") == shots
-        with pytest.raises(Refused) as e:  # no app list: nothing runs
-            await d.run_tool("a", "filmstrip", {"frames": 2, "interval_ms": 100}, scope=Scope(()))
-        assert e.value.code == "not_allowed"
-        await feed_stop(feed)
-        await finish(stop, task)
-    run(go)
 
 
-def test_an_app_that_comes_and_goes_inside_the_strip_stops_it():
-    """Review 2026-11-12 (M2): the front app is watched while filming, so another app that is in front for a moment
-    in the middle (and gone again by the end) never shows in the strip."""
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s, shot_wait=0.5)
-        stop, task = await started(d)
-        feed = reel(d)
-        asked = []
-
-        async def visits():  # Mail is in front for the 3rd to 5th questions only
-            asked.append(1)
-            return "com.example.mail" if 3 <= len(asked) <= 5 else "com.example.app"
-        s.foreground_bundle_id = visits
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "filmstrip", {"frames": 12, "interval_ms": 200}, scope=Scope(("com.example.app",)))
-        assert e.value.code == "not_allowed" and "outside_apps: com.example.mail" in str(e.value)
-        await feed_stop(feed)
-        await finish(stop, task)
-    run(go)
 
 
-def test_in_personal_mode_the_tap_inside_has_its_own_checks():
-    async def go():
-        s = FakeSession()
-        s.tree = [button("e1", "Delete trip", "trip-delete")]
-        d = make(s, shot_wait=0.5)
-        stop, task = await started(d)
-        feed = reel(d)
-        s.foreground = "com.example.app"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "filmstrip", {"interval_ms": 100, "tap": {"label": "Delete trip"}},
-                             scope=Scope(("com.example.app",)))
-        assert str(e.value).startswith("needs_confirmation: ") and s.tap_points == []
-        await feed_stop(feed)
-        await finish(stop, task)
-    run(go)
 
 
 def test_without_a_stream_each_frame_is_a_screenshot_and_nothing_more_is_said():

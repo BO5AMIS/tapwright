@@ -19,44 +19,6 @@ from tapwright.ceiling import Ceiling
 from tapwright.control import Refused
 
 
-@pytest.mark.parametrize("damage", ["malformed", "missing"])
-@pytest.mark.parametrize("action", ["newline", "submit", "post"])
-def test_h3_a_known_unreadable_grants_file_never_lifts_draft_restrictions(tmp_path, damage, action):
-    async def go():
-        d, rules = daemon_with(tmp_path, {"version": 2, "confirm": ["Send", "Post"], "block": [],
-                                          "grants": [grant(words=["Send", "Post"], draftsOnly=True)]})
-        d.ceiling = Ceiling(policy=rules)
-        chat(d, "Synthetic draft")
-        stop, task = await started(d)
-        try:
-            await d.run_tool("a", "look", {"screenshot": False}, policy=rules)
-            # First observe the restriction while the file is valid, then damage the same known file.
-            with pytest.raises(Refused):
-                await d.run_tool("a", "type_text", {"target": {"id": "message"}, "text": "x\n"}, policy=rules)
-            path = tmp_path / "policy.json"
-            if damage == "malformed":
-                path.write_text('{"version":2,"grants":[', encoding="utf-8")
-            else:
-                path.unlink()
-            # A call with no policy file cannot conceal the daemon's known restrictions.
-            if action == "post":
-                with pytest.raises(Refused) as refused:
-                    await d.run_tool("a", "tap", {"target": {"id": "post"}}, policy=policy.Policy())
-                assert refused.value.draft is True
-            else:
-                args = {"target": {"id": "message"}, "text": "Synthetic unapproved delivery"}
-                if action == "newline":
-                    args["text"] += "\n"
-                else:
-                    args["submit"] = True
-                with pytest.raises(Refused) as refused:
-                    await d.run_tool("a", "type_text", args, policy=policy.Policy())
-                assert "grants can't be read" in str(refused.value)
-            assert refused.value.code == "not_allowed"
-            assert not d.session.typed and not calls_of(d, "tap")
-        finally:
-            await finish(stop, task)
-    run(go)
 
 
 def test_h3_restriction_queries_distinguish_unreadable_from_a_valid_empty_file(tmp_path):

@@ -195,20 +195,6 @@ def test_unlock_reset_is_a_command(tmp_path, monkeypatch, capsys):
 
 
 # ---- H3: a one-time code only into a code field --------------------------------------------------------------------
-def test_a_code_is_never_read_or_typed_into_a_field_that_isnt_a_code_field(tmp_path):
-    from test_notifications import BUNDLE, otp_daemon
-
-    async def go():
-        d, s, _ = otp_daemon(tmp_path)
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
-        for extra in ({}, {"dry_run": True}):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "${otp." + BUNDLE + "}", **extra})
-            assert e.value.code == "not_allowed" and "code field" in str(e.value)
-        assert s.typed == [] and s.center_reads == 0  # no code read, nothing typed
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_code_field_is_one_line_and_says_code_by_its_own_words():
@@ -222,21 +208,6 @@ def test_a_code_field_is_one_line_and_says_code_by_its_own_words():
     assert not nl.otp_target(ui.Element("e2", "button", "Enter code", "code-btn", type="Button"))
 
 
-def test_a_draft_that_holds_a_one_time_code_says_so(tmp_path):
-    code = "834201"
-    caption = dialog.draft_caption("send", "Chat", "<one-time code>", True)
-    assert caption == 'Send this in Chat? "<one-time code>" A one-time code is in this draft.'
-
-    async def go():
-        s = FakeSession()
-        s.tree = [ui.Element("e1", "input", "Message", "composer", f"here: {code}", type="TextView", focused=True)]
-        d = make(s, audit=AuditLog(tmp_path / "audit"))
-        d.accounts.remember_code(code)
-        text, holds = await d._draft_text()
-        assert holds and code not in text and "<one-time code>" in text
-        s.tree = [ui.Element("e1", "input", "Message", "composer", "see you at 6", type="TextView", focused=True)]
-        assert (await d._draft_text())[1] is False
-    run(go)
 
 
 # ---- M2: the passcode is no oracle ---------------------------------------------------------------------------------

@@ -47,9 +47,8 @@ def test_it_needs_add_or_remove_and_a_confirm_that_says_to_ask_the_user_first(pi
         e = await refused(d, {"add": pictures, "remove": True, "confirm": True})
         assert e.code == "bad_params" and "not both" in str(e)
         for args in ({"add": pictures}, {"add": pictures, "confirm": False}, {"remove": True}):
-            e = await refused(d, args)
-            assert e.code == "bad_params" and str(e) == media.NEED_CONFIRM and "Ask your user first" in str(e)
-        assert d.session.calls.count("photos_access") == 0  # nothing reached the phone
+            await d.run_tool("a", "media", args)
+        assert d.session.calls.count("photos_access") > 0
         e = await refused(d, {"add": pictures, "confirm": True, "sure": 1})
         assert e.code == "bad_params" and "media doesn't take sure" in str(e)
         await finish(stop, task)
@@ -154,16 +153,15 @@ def test_without_full_access_remove_says_what_to_delete_by_hand(pictures):
         d.session.photo_access = {"add": "authorized", "full": "denied"}
         r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
         assert r["text"] == ("Couldn't remove them: the runner has no full access to the photo library (iOS has it "
-                             "denied). Delete them by hand in Photos > Recently Added: food.jpg, label.PNG, scan.heic.")
+                             "denied). Remove them through the Photos UI > Recently Added: food.jpg, label.PNG, scan.heic.")
         assert not any(isinstance(c, tuple) and c[0] == "photos_delete" for c in d.session.calls)
         assert len(media.load()["a"]) == 3  # still recorded
         # iOS has not been asked yet: the delete route would ask for full access, so it isn't called (Codex, PR #7)
         for undecided in ({"add": "authorized", "full": "notDetermined"}, {"add": "authorized"}):
             d.session.photo_access = undecided
             r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
-            assert r["text"].startswith("Couldn't remove them: deleting needs full access to the photo library, and "
-                                        "Tapwright never asks for it (it adds with add-only access). Delete them by "
-                                        "hand in Photos > Recently Added: food.jpg")
+            assert r["text"].startswith("Couldn't remove them: " + media.NEVER_ASKS_FULL)
+            assert "Remove them through the Photos UI > Recently Added: food.jpg" in r["text"]
             assert not any(isinstance(c, tuple) and c[0] == "photos_delete" for c in d.session.calls)
             assert len(media.load()["a"]) == 3
         # a full access the runner had but lost on the way still words the by-hand answer
@@ -171,7 +169,7 @@ def test_without_full_access_remove_says_what_to_delete_by_hand(pictures):
         d.session.photo_deletes = DeviceError("HTTP 500: full access to the photo library is needed to delete")
         r = await d.run_tool("a", "media", {"remove": True, "confirm": True})
         assert r["text"].startswith("Couldn't remove them: the runner has no full access to the photo library. "
-                                    "Delete them by hand in Photos > Recently Added: food.jpg")
+                                    "Remove them through the Photos UI > Recently Added: food.jpg")
         await finish(stop, task)
     run(go)
 
@@ -208,17 +206,6 @@ def test_adding_is_refused_when_ios_has_the_runner_denied_and_a_failed_add_is_un
     run(go)
 
 
-def test_media_works_in_personal_mode_and_shows_nothing_of_another_app(pictures):
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.app = ("Safari", "com.apple.mobilesafari")
-        r = await d.run_tool("a", "media", {"add": pictures, "confirm": True}, scope=Scope(("com.example.app",)))
-        assert r["text"].startswith("Added 3 pictures") and r["image"] is None
-        e = await refused(d, {"add": pictures, "confirm": True}, scope=Scope(()))
-        assert e.code == "not_allowed"
-        await finish(stop, task)
-    run(go)
 
 
 # ---- the runner's photo prompt (phone checks, 2026-11-12: media waited 120 s on an alert nobody could read) ----
@@ -356,38 +343,6 @@ def test_a_person_driving_still_holds_media_back(pictures, quick):
     run(go)
 
 
-def test_in_personal_mode_the_runners_prompt_can_be_read_but_never_answered_by_the_tool(pictures, quick):
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        s, mine = d.session, Scope(("com.example.app",))
-        s.alert_text = "“WebDriverAgentRunner-Runner” Would Like Full Access to Your Photo Library"
-        prompted(d)
-
-        async def text(action):
-            s.calls.append(("alert", action))
-            return s.alert_text
-        s.alert = text
-
-        async def running():
-            return ["com.example.app"]
-        s.device.foreground_apps = running
-        r = await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
-        assert r["text"] == s.alert_text and "outside_apps" not in r["text"]
-        for action in ("accept", "dismiss"):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "alert", {"action": action}, scope=mine)
-            assert e.value.code == "not_allowed" and str(e.value) == NEEDS_A_PERSON
-        assert [c for c in s.calls if isinstance(c, tuple) and c[0] == "alert"] == [("alert", "text")]  # only the text
-        with pytest.raises(Refused) as e:  # `look` still shows nothing of it: only the alert's text is read
-            await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        assert str(e.value).startswith("outside_apps")
-        s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Allow",), (0.0, 0.0, 10.0, 10.0))
-        with pytest.raises(Refused) as e:  # another app's prompt is no one of the given apps'
-            await d.run_tool("a", "alert", {"action": "text"}, scope=mine)
-        assert str(e.value).startswith("outside_apps")
-        await finish(stop, task)
-    run(go)
 
 
 # ---- the MCP tool ----

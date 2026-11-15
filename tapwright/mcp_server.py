@@ -473,8 +473,10 @@ async def close_app(app: str) -> CallToolResult:
 
 @server.tool(description=describe("alert"), structured_output=False)
 async def alert(action: Literal["accept", "dismiss", "text", "cancel"], look: bool = True,
-                screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
-    return await _tool("alert", action=action, look=look, screenshot=screenshot, brief=brief)
+                screenshot: bool = False, brief: bool | None = None, name: str | None = None,
+                dry_run: bool = False) -> CallToolResult:
+    return await _tool("alert", action=action, look=look, screenshot=screenshot, brief=brief,
+                       **({"name": name} if name is not None else {}), dry_run=dry_run)
 
 
 @server.tool(description=describe("press_button"), structured_output=False)
@@ -517,6 +519,8 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
     global BRIEF_DEFAULT
     BRIEF_DEFAULT = brief
     DIALOGS.enabled = dialog
+    if apps or dedicated or rules is not None:
+        logger.warning('Tapwright 1.7.5 provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.')
     client.set_scope(apps, dedicated, phone)
     client.set_policy(rules)
     client.set_ux_rules(ux_rules)

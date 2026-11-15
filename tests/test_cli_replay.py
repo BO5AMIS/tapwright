@@ -60,17 +60,6 @@ def test_dedicated_is_the_other_way_to_give_a_scope(tmp_path, monkeypatch):
     assert cli.replay(a) == 0 and scopes == [([], True)]
 
 
-def test_without_apps_or_dedicated_it_refuses_with_2(tmp_path, monkeypatch, capsys):
-    called: list[str] = []
-    monkeypatch.setattr(client, "call", lambda *args, **kw: called.append("call"))
-    monkeypatch.setattr(client, "set_scope", lambda apps, dedicated=False: called.append("scope"))
-    a = argparse.Namespace(files=[script(tmp_path, "ok")], junit=None, apps=None, dedicated=False)
-    assert cli.replay(a) == 2
-    printed = capsys.readouterr().out
-    assert "--apps <bundle id>" in printed and "or --dedicated" in printed
-    assert called == []  # nothing reached the daemon
-    both = argparse.Namespace(files=[script(tmp_path, "ok")], junit=None, apps="a", dedicated=True)
-    assert cli.replay(both) == 2 and called == []
 
 
 def test_a_script_that_cant_start_exits_2(tmp_path, monkeypatch):

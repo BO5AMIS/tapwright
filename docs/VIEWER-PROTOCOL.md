@@ -1,5 +1,7 @@
 # Live viewer protocol
 
+Tapwright 1.7.5 no longer generates label-policy confirmations or grants. Their messages below remain a legacy wire-format reference; pause and human input remain active. See [current control behavior](agent-directed-control.md).
+
 Shared by Tapline and Tapwright, so one viewer page (and later an adapter for T3 Code's
 Device panel) can show either tool's live picture of a phone, with an overlay of the
 elements and input from a person. Version 1, agreed between the two projects; not

@@ -200,50 +200,8 @@ def test_the_parameters_are_checked_before_the_phone_is_touched(tmp_path):
     run(go)
 
 
-def test_in_personal_mode_only_a_given_apps_screen_is_compared_or_saved(tmp_path):
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s)
-        stop, task = await ready(d)
-        show(d)
-        mine = Scope(("com.example.app",))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "compare_screen", {"name": "home"}, scope=Scope(()))
-        assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps")
-        s.foreground = "com.example.app"
-        assert (await d.run_tool("a", "compare_screen", {"name": "home"}, scope=mine))["text"].startswith("Saved")
-        s.foreground, s.app = "com.example.mail", ("Mail box", "com.example.mail")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "compare_screen", {"name": "mail"}, scope=mine)
-        assert e.value.code == "not_allowed" and "outside_apps: " in str(e.value)
-        assert not stored(tmp_path, "mail", "com.example.mail").exists()
-        await finish(stop, task)
-    run(go)
 
 
-def test_an_app_that_leaves_while_the_picture_is_taken_saves_nothing(tmp_path):
-    """Review 2026-11-12 (M1): the question before the call can't see an app that changes during it, so the front app
-    is asked again once the picture is taken."""
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s)
-        stop, task = await ready(d)
-        show(d)
-        taken = d.session.screenshot_png
-
-        async def shot_then_leave():
-            png = await taken()
-            s.foreground = "com.example.mail"  # the picture may be of Mail by now
-            return png
-        s.foreground, d.session.screenshot_png = "com.example.app", shot_then_leave
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "compare_screen", {"name": "home"}, scope=Scope(("com.example.app",)))
-        assert e.value.code == "not_allowed" and "outside_apps: com.example.mail" in str(e.value)
-        assert not stored(tmp_path, "home").exists() and not stored(tmp_path, "home", "com.example.mail").exists()
-        await finish(stop, task)
-    run(go)
 
 
 @pytest.mark.parametrize("name", ["home\n", "../up", ".hidden", "a/b", "x" * 62])
@@ -364,26 +322,6 @@ def test_matches_with_no_reference_says_so(tmp_path):
     run(go)
 
 
-def test_a_batch_in_personal_mode_compares_only_a_given_apps_screen(tmp_path):
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s)
-        stop, task = await ready(d)
-        show(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.example.app"
-        await d.run_tool("a", "compare_screen", {"name": "home"}, scope=mine)
-        r = await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1, "expect": {"matches": "home"}}]},
-                             scope=mine)
-        assert r["text"].startswith("Ran 1 of 1 steps")
-        s.foreground, s.app = "com.example.mail", ("Mail box", "com.example.mail")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "run", {"steps": [{"tool": "wait", "seconds": 0.1, "expect": {"matches": "home"}}]},
-                             scope=mine)
-        assert e.value.code == "not_allowed"
-        await finish(stop, task)
-    run(go)
 
 
 # ---- record ----

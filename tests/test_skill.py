@@ -47,7 +47,7 @@ def test_the_skill_names_only_tools_and_codes_the_tool_has():
     called = set(re.findall(r"`(look|tap|long_press|type_text|scroll|toggle|back|open_url|wait|wait_for|apps|open_app"
                             r"|viewer|close_app|alert|press_button|swipe|logs|reload|pair|record|replay)`", text))
     assert called <= tools, called - tools
-    table = text.split("## 5. Errors")[1].split("## 6.")[0]
+    table = text.split("## Errors")[1].split("## Judgment")[0]
     named = set(re.findall(r"`([a-z_]+)`", "\n".join(line.split("|")[1] for line in table.splitlines() if line.startswith("| `"))))
     assert named <= set(CODES), named - set(CODES)
     assert set(CODES) - named <= {"not_connected", "unsupported"}  # (said in setup.md's table and by the message)
@@ -73,7 +73,7 @@ def test_install_writes_both_homes_and_replaces_only_its_own_folder(tmp_path, ca
     assert out[1] == "  " + str(tmp_path / ".claude" / "skills" / "tapwright")
     assert out[2] == "  " + str(tmp_path / ".agents" / "skills" / "tapwright")
     assert out[3] == "" and out[4].startswith("Claude Code reads the first (type /tapwright)")
-    assert any("[mcp_servers.tapwright]" in line and "--apps" in line for line in out[5:])  # never without the app list
+    assert any("[mcp_servers.tapwright]" in line and 'args = ["mcp"]' in line for line in out[5:])
 
 
 def test_install_leaves_a_folder_of_that_name_that_is_not_the_skill(tmp_path, capsys, monkeypatch):
