@@ -9,6 +9,7 @@ over:
     without mDNS. Whether iOS accepts that over a VPN is what `tapwright probe` measures.
 """
 import asyncio
+import contextvars
 import dataclasses
 import json
 import os
@@ -19,7 +20,19 @@ import time
 
 from . import aio, store, trace
 from . import diagnostics
+from .control import Refused
 from .diagnostics import CRASH_MAX_MB, CrashSearch, crash_pattern, only_mine
+
+# Request-local ownership check, carried through connection setup without changing
+# device/fake method signatures or sharing a guard with viewer/background requests.
+BEFORE_SEND = contextvars.ContextVar("before_device_send", default=None)
+
+
+async def check_before_send() -> None:
+    guard = BEFORE_SEND.get()
+    if guard is not None:
+        await guard()
+
 
 WDA_PORT = 8100
 MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
@@ -351,6 +364,7 @@ class Device:
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
             pids = [p["pid"] for p in await info.proclist() if p.get("bundleIdentifier") == bundle_id]
             for pid in pids:
+                await check_before_send()
                 await control.kill(pid)
         return len(pids)
 
@@ -554,7 +568,7 @@ class Device:
                 raise ConnectionLost(f"can't reach WebDriverAgent: {e}") from e
             try:
                 status, rest = await self._exchange(conn, request(False))
-            except DeviceError:
+            except (DeviceError, Refused):
                 raise
             except Exception as e:  # reset, closed, or cut off mid-answer
                 raise ConnectionLost(f"the connection to WebDriverAgent dropped: {e}") from e
@@ -609,7 +623,7 @@ class Device:
             except BaseException as e:  # also a timeout's cancellation: the answer may be half-read
                 if held is not None:
                     await asyncio.shield(self._close(held[1]))
-                if isinstance(e, DeviceError) and not isinstance(e, ConnectionLost):
+                if isinstance(e, Refused) or (isinstance(e, DeviceError) and not isinstance(e, ConnectionLost)):
                     raise
                 if reused and again and isinstance(e, Exception):
                     return None  # the phone had dropped it: ask on a connection of its own
@@ -623,6 +637,8 @@ class Device:
     async def _exchange(conn, request: bytes, keep: bool = False) -> tuple[int, bytes]:
         """Send one HTTP request; the status code and the body. With `keep` the answer must say how long it is
         (one read to the end of the connection would never return)."""
+        if request.startswith(b"POST "):
+            await check_before_send()
         await conn.sendall(request)
         raw = b""
         while b"\r\n\r\n" not in raw:

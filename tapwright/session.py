@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 
+from . import device as device_module
 from . import store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
@@ -282,12 +283,15 @@ class Session:
         if validate is not None:
             await validate(self.input_point)
         pending = trace.request(method, path)
+        token = device_module.BEFORE_SEND.set(guard if method == "POST" else None)
         try:
             answer = await self.device.http(method, full, payload, timeout)
         except BaseException:
             if pending is not None:
                 trace.response(pending, ok=False)
             raise
+        finally:
+            device_module.BEFORE_SEND.reset(token)
         if validate is not None and self.before_input is validate:
             self.before_input = None
         if pending is not None:

@@ -93,8 +93,8 @@ SHARED = {
         "only when that is on screen: `text`, `id` or `label`, `gone: true` for when it isn't) and `optional: "
         "true` (skip it when its own target isn't there). Both look once, with no wait: put a `wait_for` first "
         "for a load. `brief: true` shortens the answer.\nA step's `text` may be `${account.username}` or "
-        '`${account.password}` of a test account from --accounts: the tool types it, a password only into a '
-        'secure field. A password stays out of pictures only while its field is secure, and the accounts file '
+        '`${account.password}` of a test account from --accounts: the tool types it into the selected field. '
+        'Screenshots and video show actual pixels without masking: a nonsecure or revealed password can appear. The accounts file '
         'belongs outside the folders the agent may read.'
     ),
     'audit': (

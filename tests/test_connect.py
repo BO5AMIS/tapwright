@@ -302,3 +302,22 @@ def test_install_keeps_and_replaces_the_ux_rules_file(tmp_path):
     assert codex_args(config)[-1] == str(other.resolve()) and any("replaced the earlier --ux-rules" in x for x in lines)
     with pytest.raises(connect.ConnectError, match="ux rules file"):
         connect.install("codex", ["a"], False, home=home(tmp_path), ux_rules=str(tmp_path / "missing.json"))
+
+
+
+def test_default_install_command_has_no_empty_app_argument(tmp_path):
+    args = connect.mcp_args([], False)
+    assert args == ["mcp"]
+    with pytest.raises(connect.ConnectError) as error:
+        connect.install_claude(args, None, which=lambda n: None)
+    assert str(error.value).endswith("claude mcp add --scope user tapwright -- tapwright mcp")
+
+
+def test_copyable_commands_preserve_empty_values_and_special_paths():
+    args = ["claude", "", "C:/User's Files/$screenshots"]
+    rendered = connect.command_text(args)
+    if connect.os.name == "nt":
+        assert rendered == "claude '' 'C:/User''s Files/$screenshots'"
+    else:
+        import shlex
+        assert shlex.split(rendered) == args

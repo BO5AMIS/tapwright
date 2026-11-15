@@ -20,7 +20,9 @@ Start a new MCP integration with `tapwright mcp`; register it with `tapwright in
 
 Daemon authentication and host checks protect the control service. Explicit pause, human-input priority, device ownership and serialization prevent concurrent input collisions. Invalid, missing, ambiguous, stale or disabled targets still produce useful errors. dry_run and expectation failures retain their execution semantics. A timeout never justifies automatically repeating a possibly delivered action.
 
-Apple signing, pairing, trust, biometrics and XCTest passcode requirements remain platform constraints. Removing Tapwright authorization gates does not bypass them. Stored secrets remain redacted from routine logs and recordings.
+Apple signing, pairing, trust, biometrics and XCTest passcode requirements remain platform constraints. Removing Tapwright authorization gates does not bypass them. Stored secrets remain redacted from routine text logs and recorded script text.
+
+Screenshots, live view, video and saved `--screenshots` images show actual screen pixels; Tapwright does not mask them. A password typed into a nonsecure field or revealed by the app can appear in those images. Keep credential images private and omit them from shared reports.
 
 ## Agent guidance
 

@@ -66,7 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     scope.add_argument("--dedicated", action="store_true",
                        help='Deprecated compatibility flag; whole-phone control is the default.')
     scope.add_argument("--phone", action="store_true",
-                       help='Enable configured automatic unlock at call start; whole-phone access already works without this flag.')
+                       help='Compatibility mode metadata; configure automatic unlock on the daemon with tapwright serve --phone.')
     ap.add_argument("--policy", metavar="FILE", help='Deprecated compatibility option; policies and grants no longer restrict actions.')
     ap.add_argument("--ux-rules", metavar="FILE", help="the user's house rules for ux_check and journeys")
     ap.add_argument("--maps", metavar="DIR", help="where the per-app maps (<DIR>/<bundle id>/map.json) are kept, to share "

@@ -219,3 +219,134 @@ def test_http_legacy_headers_and_daemon_policy_do_not_limit_access():
         assert response.status_code == 200
         assert seen.calls[-1]["scope"] is None and seen.calls[-1]["policy"] is None
         assert client.post("/api/look", json={}).status_code == 401
+
+
+@pytest.mark.parametrize("change,code", [("pause", "paused"), ("person", "busy")])
+def test_second_tap_refusal_invalidates_first_taps_refs(change, code, monkeypatch):
+    from tapwright import daemon as daemon_module
+
+    async def go():
+        d, target, _, _ = setup()
+        stop, task = await started(d)
+        token = daemon_module._DOUBLE.set(True)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            s = real_dispatch(d.session)
+            before = d.control.generation
+            notices = 0
+
+            async def notify(ms):
+                nonlocal notices
+                notices += 1
+                if notices == 2:
+                    if change == "pause":
+                        d.control.paused = True
+                    else:
+                        d.control.person_generation += 1
+            monkeypatch.setattr(d._agent_touches, "notify", notify)
+            with pytest.raises(Refused) as error:
+                await d.run_tool("a", "tap", {"target": {"id": "control"}, "look": False})
+            assert error.value.code == code
+            assert len(s.dispatched) == 1
+            assert d.control.generation > before
+            assert s.execution_guard is None
+        finally:
+            daemon_module._DOUBLE.reset(token)
+            await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("change", ["pause_after_clear", "person_before_retype"])
+def test_automatic_retype_retains_original_turn_ownership(change):
+    from fakes import el
+    from test_daemon import looked
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        try:
+            field = el("e1", "input", "Email", "email", value="a", rect=(25, 450, 380, 50))
+            await looked(d, [field])
+            s = real_dispatch(d.session)
+            s.retype = types.MethodType(Session.retype, s)
+            original_http = s.device.http
+
+            async def http(method, path, payload=None, timeout=30):
+                result = await original_http(method, path, payload, timeout)
+                if path.endswith("/clear"):
+                    d.control.paused = True
+                return result
+
+            async def wrong(result, text):
+                if change == "person_before_retype":
+                    d.control.person_generation += 1
+                return True
+
+            async def landed(*args):
+                return None
+
+            s.device.http, d._typed_wrong, d._typed_landed = http, wrong, landed
+            with pytest.raises(Refused) as error:
+                await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "abc"})
+            assert error.value.code == ("paused" if change == "pause_after_clear" else "busy")
+            assert [path.rsplit("/", 1)[-1] for path, _ in s.dispatched] == (
+                ["clear"] if change == "pause_after_clear" else [])
+            assert s.execution_guard is None
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("native_refuses", [False, True])
+def test_native_close_preserves_pause_refusal_without_wda_fallback(native_refuses):
+    from tapwright import device as device_module
+
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        try:
+            async def guard():
+                raise Refused("paused", "paused before kill")
+
+            async def kill(bundle):
+                raise Refused("busy", "person took over during native setup")
+
+            if native_refuses:
+                d.session.device.kill_app = kill
+            else:
+                d.session.execution_guard = guard
+            with pytest.raises(Refused) as error:
+                await d._end_app("com.example.app")
+            assert error.value.code == ("busy" if native_refuses else "paused")
+            assert not d.session.device.killed and not d.session.closed
+            assert device_module.BEFORE_SEND.get() is None
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("change,code", [("pause", "paused"), ("person", "busy")])
+def test_frozen_app_close_keeps_ownership_during_native_setup(change, code):
+    from tapwright import device as device_module
+    from tapwright.device import AppNotAnswering
+
+    async def go():
+        d = make()
+        d.stuck = AppNotAnswering("com.example.lab", "Lab")
+        sent = []
+
+        async def kill(bundle):
+            assert d.control.holds_turn()
+            if change == "pause":
+                d.control.paused = True
+            else:
+                d.control.person_generation += 1
+            await device_module.check_before_send()
+            sent.append(bundle)
+
+        d.session.device.kill_app = kill
+        with pytest.raises(Refused) as error:
+            await d._close_stuck(d.stuck, "Lab", [])
+        assert error.value.code == code and not sent
+        assert device_module.BEFORE_SEND.get() is None
+    run(go)

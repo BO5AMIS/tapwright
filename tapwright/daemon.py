@@ -33,6 +33,7 @@ from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
 from .actionlog import ActionLog
+from . import device as device_module
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
@@ -3759,7 +3760,19 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
                     fresh[0] = False
 
+        execution_guard = None
+
+        async def guarded_retype(text):
+            previous = self.session.execution_guard
+            self.session.execution_guard = execution_guard
+            try:
+                await execution_guard()
+                return await self.session.retype(text)
+            finally:
+                self.session.execution_guard = previous
+
         async def act_as_agent():
+            nonlocal execution_guard
             # the touches inside are the agent's: Tapline is told before each one (tapline.py). Set only here, so a
             # person's input from the live view, queued separately, is never announced as the agent's
             notify = self._agent_touches.notify
@@ -3877,7 +3890,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             typed = result.typed if result.typed is not None else args["text"]
             landed = await self._typed_landed(view, result, typed)
             if landed is None and not result.field.secure and await self._typed_wrong(result, typed) and \
-                    await self.control.agent(lambda: self.session.retype(typed)):
+                    await self.control.agent(lambda: guarded_retype(typed)):
                 # the field doesn't hold what was typed: keys went missing (iOS swapping in another keyboard as
                 # the field took focus, seen on the phone 2026-11-11: "abc" landed as "a", and the retry with the
                 # caret at the start made it "abca"). Cleared and typed once more, and the answer says so.
@@ -4518,12 +4531,20 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return way + " (TAPWRIGHT_CLOSE=wda)", 0
         if device.rsd is None:
             return way + " (no tunnel)", 0
+        guard = getattr(self.session, "execution_guard", None)
+        token = device_module.BEFORE_SEND.set(guard)
         try:
+            if guard is not None:
+                await guard()
             found = await asyncio.wait_for(device.kill_app(bundle_id), CLOSE_KILL_CAP)
+        except Refused:
+            raise
         except asyncio.TimeoutError:
             return way + f" (iOS process control took over {CLOSE_KILL_CAP:g} s)", 0
         except Exception as e:
             return way + f" (iOS process control failed: {e})", 0
+        finally:
+            device_module.BEFORE_SEND.reset(token)
         return ("iOS process control", found) if found else (way + " (iOS process control found no process)", 0)
 
     async def _tell_runner_closed(self, bundle_id: str) -> bool:
@@ -4552,7 +4573,25 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         device = self.session.device
         if device.rsd is None:
             raise self._not_connected()
-        await device.kill_app(stuck.bundle_id)
+        generation = self.control.person_generation
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if self.stuck is not stuck or self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def close():
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                await device.kill_app(stuck.bundle_id)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        await self.control.agent(close)
         self.log(f"closed {stuck.bundle_id}, which wasn't answering")
         self.stuck = None
         self._wake.set()
@@ -6232,10 +6271,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                         box.append(f"{said} is {now}")
                     return done
                 await self._last_checks("tap", {}, under, hit=False, bundle=front)  # (a raw second touch: no hit test)
+                await self.session.tap(target, hold_ms=hold_ms)
             except Refused:
                 self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
                 raise
-            await self.session.tap(target, hold_ms=hold_ms)
         return done
 
     def _double_aim(self, target: ui.Target, items: list[ui.Element]) -> ui.Element | None:

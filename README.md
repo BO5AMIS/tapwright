@@ -239,14 +239,16 @@ Authentication and host checks protect the local control service. Keep its key p
 
 A delivered tap is not proof the app completed the intended action. Read the response and inspect the screen when needed. On timeout, check whether it happened before repeating it.
 
-Actions are logged in `~/.tapwright/log/actions-<date>.jsonl`. Typed text is not logged; stored credentials remain redacted from routine logs and recordings. `tapwright serve --no-log` disables the action log.
+Actions are logged in `~/.tapwright/log/actions-<date>.jsonl`. Typed text is not logged; stored credentials remain redacted from routine text logs and recorded script text. `tapwright serve --no-log` disables the action log.
+
+Screenshots, live view, video and saved `--screenshots` images show actual screen pixels; Tapwright does not mask them. A password typed into a nonsecure field or revealed by the app can appear in those images. Keep credential images private and omit them from shared reports.
 
 ## Limits
 
 - Apple's automation sees what accessibility sees. Give important views accessibility
   identifiers (`testID` in React Native) and labels. Games and custom-drawn screens show
   little beyond their screenshot; `look` with `ocr: true` reads their text from the picture.
-- Face ID, Touch ID and the passcode can't be automated; unlock the phone yourself.
+- Face ID and Touch ID require the person. Configured ordinary phone unlock is available with `tapwright serve --phone`; genuine XCTest passcode prompts still require the person.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
   on a test device, or an unattended run stops there.

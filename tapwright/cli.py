@@ -976,7 +976,7 @@ def main() -> int:
     q = ss.add_parser("unlock", help="remove a stuck run lock, or with --phone the phone lock (refused while its holder is "
                                      "alive)")
     q.add_argument("name", nargs="?")
-    q.add_argument("--phone", action="store_true", help='Enable configured automatic unlock at call start; whole-phone access already works without this flag.')
+    q.add_argument("--phone", action="store_true", help="Remove the stale schedule phone lock; does not unlock the iPhone.")
     p = sub.add_parser("run-schedule", help="one run of a schedule, now (what the system's scheduler starts)")
     p.add_argument("name")
     p.add_argument("--if-triggered", action="store_true",

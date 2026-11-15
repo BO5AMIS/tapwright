@@ -11,6 +11,7 @@ every other server in the file.
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -31,7 +32,7 @@ def mcp_args(apps: list[str], dedicated: bool, policy: str | None = None, no_pol
              screenshots: str | None = None, ux_rules: str | None = None, phone: bool = False) -> list[str]:
     """The arguments after `tapwright`: `mcp --apps a,b`, `mcp --dedicated` or `mcp --phone`, then the policy,
     screenshot and ux-rules flags."""
-    args = ["mcp", "--phone"] if phone else ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)]
+    args = ["mcp", "--phone"] if phone else ["mcp", "--dedicated"] if dedicated else ["mcp", "--apps", ",".join(apps)] if apps else ["mcp"]
     if policy:
         args += ["--policy", policy]
     if no_policy:
@@ -159,6 +160,14 @@ def _run(cmd: list[str], cwd: Path | None) -> "subprocess.CompletedProcess[str]"
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
 
 
+def command_text(args: list[str]) -> str:
+    """A copyable command for the host shell, including empty values and spaced paths."""
+    if os.name != "nt":
+        return shlex.join(args)
+    # PowerShell: single quotes preserve literal $, backticks and double quotes.
+    return " ".join(a if re.fullmatch(r"[\w./:\\-]+", a) else "'" + a.replace("'", "''") + "'" for a in args)
+
+
 def install_claude(args: list[str], project: str | None, runner: Runner = _run,
                    which: Callable[[str], str | None] = shutil.which) -> str:
     """Register with Claude Code. Without `claude` on the PATH, say the exact command instead."""
@@ -167,12 +176,12 @@ def install_claude(args: list[str], project: str | None, runner: Runner = _run,
     exe = which("claude")
     if exe is None:
         raise ConnectError("`claude` isn't on the PATH, so nothing was registered. Run this where Claude Code is "
-                           "installed:\n  " + " ".join(["claude", *add]))
+                           "installed:\n  " + command_text(["claude", *add]))
     runner([exe, *remove], cwd)  # fails when there is no entry yet: fine
     done = runner([exe, *add], cwd)
     if done.returncode != 0:
         raise ConnectError(f"`claude mcp add` failed: {(done.stderr or done.stdout).strip()[-400:]}\n"
-                           "The command was:\n  " + " ".join(["claude", *add]))
+                           "The command was:\n  " + command_text(["claude", *add]))
     where = f"{cwd / '.mcp.json'}" if cwd else "your Claude Code settings (user scope)"
     return f"Claude Code: registered the tapwright server in {where} with `claude mcp add`."
 
@@ -336,7 +345,7 @@ def install(client: str, apps: list[str], dedicated: bool, project: str | None =
     else:
         raise ConnectError(f"unknown client {client!r}; the clients are {', '.join(CLIENTS)}")
     args = chosen[0]
-    lines.append(f"  server command: tapwright {' '.join(args)}")
+    lines.append(f"  server command: {command_text(['tapwright', *args])}")
     lines.extend(f"  note: {n}" for n in notes)
     if project and client == "codex":
         lines.append("  (Codex reads one config, in your home folder, so --project only decides where the skill goes.)")
