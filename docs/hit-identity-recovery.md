@@ -1,4 +1,6 @@
-# Hit-test identity correction under validation
+# Historical hit-test identity investigation (1.7.2 candidates)
+
+This is a historical record, superseded by the [1.7.5 control contract](agent-directed-control.md). Its scope/confirmation rules, runtime status and trial instructions are not current guidance. Version 1.7.5 does not require hit-identity proof for ordinary listed controls. The runner endpoint remains available for legacy diagnostics.
 
 The 1.7.2rc1 live authentication-browser trial stopped at a normal dry-run. No input was sent. The latest action record (2026-11-15T12:27:07.538Z) had `not_actionable` but no `hit_check` field. Its reported wording identifies the foreign-recipient branch: a known owner differed from the scoped app, and the result did not qualify as the exact target, a permitted passive descendant, or a keyboard host.
 
