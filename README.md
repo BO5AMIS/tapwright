@@ -135,7 +135,7 @@ repository too.
 | `type_text` | into a field (clearing it first by default, or pressing return after) |
 | `scroll`, `swipe`, `back` | lists and pages, to the start, the end, or straight to an element; drags between points; up one screen (an open sheet closes first) |
 | `wait`, `wait_for` | a fixed delay, or until some text, id or label shows up or goes |
-| `alert` | accept, dismiss or read system alerts (permission prompts) |
+| `alert` | accept, dismiss or read permitted alerts; `action: "cancel"` explicitly presses a verified Cancel button to recover from a system obstruction when the owner requests it, without showing private alert content |
 | `press_button` | home, volume |
 | `rotate` | turn the phone to portrait or either landscape side, to test an app's landscape layout |
 | `network` | make the whole phone's network `offline`, `3g` or `lossy` (Apple's developer network conditions) to see an app's errors and loading states, or `normal` to restore it; every answer says the condition while it is on, and it ends with the session (or after 10 minutes without a call from the agent that set it, or 30 minutes at most). A safety policy with `network` in its `block` list refuses it (`normal` always works). Over Wi-Fi only `3g` and `normal` (the other two would cut Tapwright's own link) |

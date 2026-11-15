@@ -983,17 +983,22 @@ class Session:
     async def locked(self) -> bool:
         return bool((await self._call("GET", "/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value"))
 
-    async def alert(self, action: str) -> str:
-        """accept, dismiss, or text: the system alert on screen (permission prompts and the like)."""
-        if action not in ("accept", "dismiss", "text"):
-            raise Refused("bad_params", f"action must be one of accept, dismiss, text, not {action!r}")
+    async def alert(self, action: str, *, name: str | None = None) -> str:
+        """The system alert: accept/dismiss/text, or the daemon's checked, exact named Cancel recovery."""
+        if action not in ("accept", "dismiss", "text", "cancel"):
+            raise Refused("bad_params", f"action must be one of accept, dismiss, text, cancel, not {action!r}")
+        if action == "cancel" and name != "Cancel":
+            raise Refused("bad_params", "system alert cancellation requires the exact Cancel button")
         if action != "text":
             self.typed_into = None
         try:
             if action == "text":
                 return (await self._call("GET", "/session/{sid}/alert/text")).get("value") or "(no alert)"
             await self._touching(TAP_MS)
-            await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
+            if action == "cancel":
+                await self._call("POST", "/session/{sid}/alert/dismiss", {"name": name}, again=False)
+            else:
+                await self._call("POST", f"/session/{{sid}}/alert/{action}", {})
         except DeviceError as e:
             if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
                 raise Refused("not_found", "no alert on screen.") from e

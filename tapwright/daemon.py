@@ -75,7 +75,7 @@ IN_USE_S = 90.0  # for a schedule's busy test only: a client's call, or a person
 SCHEDULE_FREE = frozenset({"look", "wait", "wait_for", "audit", "ux_check", "logs", "crash", "apps", "session_report",
                            "viewer", "filmstrip", "compare_screen"})  # what other agents may still do during a scheduled run
 SCHEDULED_BUSY = "a scheduled run is using the phone; try again when it ends"
-ALERT_ACTIONS = ("accept", "dismiss", "text")  # what `alert` takes (AGENT-TOOLS §4)
+ALERT_ACTIONS = ("accept", "dismiss", "text", "cancel")  # what `alert` takes (AGENT-TOOLS §4)
 DISMISS_WORDS = {"cancel", "don't allow", "not now", "close", "no", "later", "dismiss", "ask app not to track"}
 # what str.splitlines() breaks a line at: each is Return to a text field (Codex, PR #12 cycle 2, H3)
 LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85  ")
@@ -244,7 +244,9 @@ APP_LINE = re.compile(r"^App: (.+) \(([^()\s]+)\)$", re.M)  # the header line of
 def _outside(bundle: str | None, name: str | None, given: str, alert: bool = False) -> str:
     if alert and bundle == SPRINGBOARD:  # SpringBoard is in front because iOS put up an alert of its own
         return ("outside_apps: an iOS system alert is in front (not a prompt of one of your apps), so nothing of it "
-                "is shown or touched. Ask the user to answer it on the phone, then go back with open_app.")
+                "is shown or touched. Ask the user to answer it on the phone or in the human live view. "
+                "If the owner explicitly asks to cancel it, use alert with action: cancel (exact Cancel only), "
+                "then go back with open_app.")
     front = "the phone can't say which app" if not bundle else f"{name} ({bundle})" if name else bundle
     return (f"outside_apps: {front} is in front and isn't one of the apps you were given ({given}), so nothing of it is shown or "
             "touched. Go back with open_app.")
@@ -1828,6 +1830,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
                                 policy: "safety.Policy | None", ux_rules: "uxcheck.Rules | None", via: str | None,
                                 maps: str | None, dialog: bool, accounts: str | None) -> dict:
+        if name == "alert" and args.get("action") == "cancel":
+            self._cancel_context(client_id)  # before a recording or journey can inspect or retain this call
         vtoken = _VIA.set(via) if via is not None else None  # how the call came, for the log (session_report)
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
@@ -3559,6 +3563,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise Refused("not_allowed", NO_APPS)
         given = await self._given(scope)
         names = ", ".join(given.values())
+        if name == "alert" and args.get("action") == "cancel":
+            # A separate, explicitly requested recovery operation, not permission to read SpringBoard or
+            # answer its other buttons. The handler proves the scoped app underneath and the exact Cancel.
+            token = _GIVEN.set(given)
+            try:
+                return await self._run_tool(client_id, name, args)
+            finally:
+                _GIVEN.reset(token)
         if name == "notifications":
             # §24.2: only the given apps' notifications come out, and only from one of them: a swipe from the top over
             # another app would be a touch of it. The answer is that list, never a screen, so nothing is withheld after.
@@ -3706,6 +3718,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # with no hint (2026-11-12). Taken where it was meant to go.
             args = {**{k: v for k, v in args.items() if k != "index"}, "target": {**args["target"], "index": args["index"]}}
         args = _checked(name, args)
+        if name == "alert" and args.get("action") == "cancel":
+            # A foreign alert's text and the screen beneath it never leave this operation, even if requested.
+            args = {**args, "look": False, "screenshot": False}
         shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
@@ -3774,6 +3789,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         async def act():
             trace.mark("act")  # (the queue's turn came)
+            if name == "alert" and args.get("action") == "cancel":
+                # This recovery owns every read: normal settling/mapping must not collect a foreign alert.
+                return await self._alert(view, args)
             self._require_connected()
             await self._quicken()
             s = self.session
@@ -3930,6 +3948,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise
         if isinstance(result, Noted) and result.note:
             notes = [*notes, result.note]
+        if name == "alert" and args.get("action") == "cancel":
+            self.unsettled = True
+            view.moved, view.place = True, None
+            view.unlooked += 1
+            self._announce("agent", "alert", caption="Cancel system alert")
+            return _answer([str(result)], [])
         # The keyboard note is given only when the keyboard is still closed as the call answers (AGENT-TOOLS
         # v1.4): type_text focuses its input, so the keyboard is up again and the note would contradict the header
         closed_first = box.get("note") if name != "type_text" else None
@@ -6077,7 +6101,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         held_draft = None if reach is None or route_draft else self._drafts_grant(app, draft_name)
         must_draft = route_draft or held_draft is not None
         book = self._book()
-        alert_words, screen_words, titles = self._never_context(tool, element)
+        recovery = tool == "alert" and a.get("action") == "cancel"
+        alert_words, screen_words, titles = ((), (), ()) if recovery else self._never_context(tool, element)
         touch = (grantlib.Touch(app, name, _ROUTES.get(), tool, alert_words, screen_words, titles)
                  if book is not None else None)
         if hit is None and not grantlib.leaves(name) and (
@@ -6107,6 +6132,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if before_scroll and must_draft and not dry:
             return ""  # the draft is read, shown and fingerprinted at the touch, after the scroll (H1)
         key = self._police_key(element)
+        if recovery:
+            key = (SPRINGBOARD, *key[1:])  # the private alert fingerprint is the synthetic element's identifier
         if self._policed == (tool, key) and not must_draft and not dry:
             # a person allowed this very touch before the scroll (§16.2): once. Never a draft's (H1)
             self._policed = None
@@ -6165,7 +6192,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             shown_draft, has_code = self._draft_text_of(items)
             drafted = (stopped or "", shown_draft, has_code, self._draft_digest_of(app, items, title))
             word = reach or word  # (the draft's question names the word that sends: `Send this in Mail?`)
-        message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted)
+        message, request = self._ask(tool, a, key, element, word, what, now, drafted=drafted,
+                                     caption="Allow Cancel on this system alert?" if recovery else None)
         if request is None:
             raise Refused("not_allowed", message, draft=drafted is not None)
         taken = (f"needs_confirmation: {what} needs a person's OK (policy word \"{word}\"), and the OK given was used by "
@@ -6905,14 +6933,35 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         cleared.covered_by = tuple(b for b in element.covered_by if b not in guessed)
         return cleared
 
-    async def _refuse_hit(self, element: ui.Element, at: tuple[float, float]) -> None:
+    async def _refuse_hit(self, element: ui.Element, at: tuple[float, float], *, relocate: bool = False,
+                          exact: bool = False) -> tuple[float, float] | None:
         """QUALITY-BAR 2.5 R3 (`lab-behind-bar`): before a touch on an element, ask the runner what iOS would deliver a
         touch at that point to (Session.hit_at, route version 5) and refuse `covered` when it is something other than
         the element, one inside it, or one holding it. No answer (an older runner, landscape, an error), or a holder that
         proves nothing (a Window, the Application, a full-screen view: ui.hit_relation) leaves the touch as in 1.6. A hit
         in another process than the app read (a banner, a share sheet in SpringBoard's) is covered unless it is the
-        target or inside it (a remote view the app's tree lists) or the keyboard's own process."""
+        target or inside it (a remote view the app's tree lists) or the keyboard's own process.
+        `relocate`: a tap may try inset button background points when private content cannot be placed; only a new
+        same-app hit on the exact button authorizes that point. `exact` revalidates that stronger proof at dispatch,
+        without selecting another point. No other tool relocates its target."""
+        app = self._app_bundle()
+        if exact:
+            reread = getattr(self.session, "read_source", None)
+            try:
+                source = await reread() if reread is not None else None
+            except Exception:  # no fresh proof: never deliver a recovered touch
+                source = None
+            if not ui.current_button(source, element, app or ""):
+                raise Refused("stale", "the button changed before its background could be touched; look again.")
         hit = await self.session.hit_at(*at)
+        if exact:
+            relation = ui.hit_relation(None, element, hit) if hit is not None else None
+            if relation == "changed":
+                raise Refused("stale", "the button's words changed before delivery; look again.")
+            if hit is None or hit.bundle != app or relation != "same":
+                raise Refused("not_actionable", "covered: the checked button background no longer reaches that "
+                                               "button; look again.")
+            return None
         if hit is None:
             return
         relation = ui.hit_relation(getattr(self.session, "last_source", None), element, hit)
@@ -6927,8 +6976,19 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 source = None
             relation = ui.hit_relation(source, element, hit) if source else "other"
             if relation == "unplaced":
+                if relocate and at == element.center:
+                    for point in ui.button_background_points(source, element, hit, app or "", self.session.screen):
+                        answer = await self.session.hit_at(*point)
+                        if answer is None:
+                            continue  # an unanswered probe never authorizes its point
+                        found = ui.hit_relation(source, element, answer)
+                        if answer.bundle == app and ui.hit_relation(None, element, answer) == "same":
+                            trace.note("hit", "button background")
+                            return point
+                        if (answer.bundle != app or found not in ("unplaced", "inside")
+                                or answer.type not in ("Other", "StaticText")):
+                            break  # a foreign/changed/actionable recipient or known overlay stops the search
                 relation = "other"
-        app = self._app_bundle()
         if hit.bundle and app and hit.bundle != app:
             trace.note("hit", "other app")
             if hit.bundle in ui.KEYBOARD_HOSTS or relation == "same":
@@ -6982,10 +7042,15 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if holder is not None:
             holder.confirmed, holder.grant_touch = None, None
         point: tuple[float, float] | None = None
+        relocated = False
+        # A stress double tap repeats a raw point; that second touch cannot borrow this single-touch proof.
+        relocate = tool == "tap" and not _DOUBLE.get()
         if element is not None and hit:
             element = await self._hit_clears(element)
             point = aim(element) if aim is not None else None
-            await self._refuse_hit(element, point or element.center)
+            replacement = await self._refuse_hit(element, point or element.center, relocate=relocate)
+            if replacement is not None:
+                point, relocated = replacement, True
         said = ""
         if police:
             aimed_with = s.items
@@ -6995,7 +7060,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if element is not None and hit:
                     element = await self._hit_clears(element)
                     point = aim(element) if aim is not None else None
-                    await self._refuse_hit(element, point or element.center)
+                    replacement = await self._refuse_hit(element, point or element.center, relocate=relocate)
+                    relocated = replacement is not None
+                    if replacement is not None:
+                        point = replacement
         # Session invokes this immediately before the actual input POST, after every potentially delaying step
         # (banner clearing, Tapline notification, ensure and fast-route probing). Recheck the existing authorization;
         # never claim another approval or grant slot. A failed fast endpoint keeps the check for the W3C fallback.
@@ -7011,7 +7079,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if element is not None and hit and actual is not None:
                     if actual != checked_point:
                         raise Refused("stale", "the touch point changed after its check; look again.")
-                    await self._refuse_hit(element, actual)
+                    await self._refuse_hit(element, actual, exact=relocated)
                 if confirmed is not None:
                     if confirmed.until < self.control.clock():
                         raise Refused("not_allowed", "needs_confirmation: the OK expired before delivery; ask again.",
@@ -7205,6 +7273,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         """`alert`: `accept` presses an alert's main button. An app's own alert ("Delete trip?" [Cancel] [Delete]) is
         an alert too, so a button with a policy word goes through the policy, as a tap on it would (safety review
         H3). Permission prompts' Allow carries none. `dismiss` and `text` are never held back."""
+        if a.get("action") == "cancel":
+            return await self._cancel_system_alert(a)
         if a.get("action") == "accept":
             alert = getattr(self.session, "last_alert", None)
             for button in (alert.buttons if alert is not None else ()):
@@ -7212,6 +7282,119 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                     # (iOS's own alert button, pressed by WebDriverAgent's alert route: no point to hit-test)
                     await self._last_checks("alert", a, ui.Element(ref="", role="button", label=button), hit=False)
         return await ACTIONS["alert"][0](self.session, a)
+
+    def _cancel_context(self, caller: str) -> None:
+        """A recovery is explicit interactive input, never an automated step or a recorded selector."""
+        if (not self._top_level() or scheduled(caller) or caller in self._recording
+                or caller in self._journeys or _DRAFTS_ROUTE.get()):
+            raise Refused("not_allowed", "system alert cancellation needs an explicit, top-level interactive call; "
+                                        "it cannot run in a recording, route, journey or schedule.")
+
+    async def _cancel_system_alert(self, a: dict) -> str:
+        """An owner-requested Cancel on an obstructing iOS alert, without revealing its private contents.
+
+        This deliberately does not interpret a failed look as authorization, nor select WDA's positional
+        dismiss button (which can be Edit Settings). The caller must explicitly request this operation.
+        It is unavailable to unattended/recorded work and never accepts an alert or changes its settings.
+        """
+        self._cancel_context(_CALLER.get() or "")
+        s = self.session
+        given = _GIVEN.get()
+        unavailable = "outside_apps: no safe Cancel on an iOS alert over an allowed app; use the human live view."
+
+        async def current():
+            self._require_connected()
+            if await s.foreground_bundle_id() != SPRINGBOARD:
+                raise Refused("not_allowed", unavailable)
+            try:
+                running = set(await asyncio.wait_for(s.device.foreground_apps(), 5))
+            except Exception:
+                raise Refused("not_allowed", unavailable) from None
+            underneath = running & set(given) if given is not None else running - {SPRINGBOARD}
+            if not underneath:
+                raise Refused("not_allowed", unavailable)
+            # The potentially slow process/scope questions come first. The tree is the last awaited
+            # proof, so replacing the alert during those questions cannot pass with the old identity.
+            tree = await s.peek_tree()
+            alert = tree.alert
+            if tree.app is None or tree.app[1] != SPRINGBOARD or alert is None:
+                raise Refused("not_allowed", unavailable)
+            words = (alert.title + "\n" + alert.message).casefold()
+            if (RUNNER_NAME.casefold() in words or any(word in words for word in
+                    ("xctest", "passcode", "developer mode", "trust this computer", "رمز الدخول"))
+                    or any(e.in_alert and e.role == "input" for e in tree.items)):
+                raise Refused("not_allowed", "this iOS prompt needs a person; it cannot be cancelled by this tool.")
+            candidates = [e for e in tree.items if e.in_alert and e.role == "button" and e.label == "Cancel"]
+            if alert.buttons.count("Cancel") != 1 or len(candidates) != 1 or not candidates[0].enabled:
+                raise Refused("not_allowed", unavailable)
+            button = candidates[0]
+            cx, cy = button.center
+            x, y, w, h = ui.visible_part(button.rect, button.covered_by, s.screen)
+            ax, ay, aw, ah = alert.rect
+            if (w <= 0 or h <= 0 or not (x <= cx < x + w and y <= cy < y + h)
+                    or not (ax <= cx < ax + aw and ay <= cy < ay + ah)):
+                raise Refused("not_allowed", unavailable)
+            key = (_alert_key(alert), alert.rect, button.type, button.name, button.label,
+                   button.identifier, button.value, button.rect)
+            return key, button
+
+        # Keep the foreign identity private and bind the action to it across every delayed dispatch step.
+        try:
+            people = self.control.person_generation
+            key, button = await current()
+            # Only Cancel goes through policy and confirmation UI; neither a button's value/identifier nor
+            # the surrounding private alert does. The opaque identity also prevents reusing an earlier
+            # Cancel confirmation for a different alert, while preserving the policy's normal block/confirm.
+            fingerprint = hashlib.sha256(repr(key).encode("utf-8")).hexdigest()
+            safe_button = ui.Element(ref="", role="button", label="Cancel", identifier=fingerprint)
+            await self._last_checks("alert", a, safe_button, hit=False, bundle=SPRINGBOARD)
+            checked = s.before_input
+
+            async def before_input(point):
+                now, _ = await current()
+                if now != key:
+                    raise Refused("stale", "the system alert changed before Cancel; nothing was touched.")
+                if checked is not None:
+                    await checked(point)
+                self._require_connected()
+                if self.state == "locked":
+                    raise Refused("locked", "the phone is locked; ask the user to unlock it")
+                if self.control.paused:
+                    raise Refused("paused", "the phone is paused; ask the user to resume it")
+                if self.control.person_generation != people or self.control.person_active():
+                    raise Refused("busy", "a person is using the phone; wait before retrying")
+
+            s.before_input = before_input
+            await s.alert("cancel", name=button.label)
+        except Refused as e:
+            # Refused can also originate in a read/transport or in the post-confirmation refresh. Never
+            # relay its details: the runner may put the foreign alert or a private account in any error.
+            if e.code == "not_allowed" and str(e).startswith("blocked:"):
+                said = "blocked: Cancel is blocked by the policy; don't try another way."
+            elif e.code == "not_allowed" and str(e).startswith("needs_confirmation:"):
+                said = "needs_confirmation: Cancel needs a person's OK; the live view asks them."
+            else:
+                said = {"stale": "the system alert changed before Cancel; nothing was touched.",
+                        "locked": "the phone is locked; ask the user to unlock it",
+                        "paused": "the phone is paused; ask the user to resume it",
+                        "busy": "the phone is in use; wait before retrying system alert cancellation",
+                        "not_allowed": unavailable}.get(e.code, "the system alert could not be cancelled; "
+                            "check its current state before retrying.")
+            raise Refused(e.code, said) from None
+        except PhoneLocked:
+            raise Refused("locked", "the phone is locked; ask the user to unlock it") from None
+        except Unanswered:
+            raise Refused("timeout", "the phone did not answer system alert cancellation; the action may have "
+                                    "happened. Check its current state before retrying.") from None
+        except ConnectionLost:
+            raise ConnectionLost("the connection dropped during system alert cancellation; check the phone before retrying") from None
+        except Exception:
+            # WDA's named-button failure can embed the entire foreign alert (including account details).
+            raise Refused("not_actionable", "the system alert could not be cancelled; check its current state before retrying.") from None
+        finally:
+            if self.control.holds_turn():  # an approval wait may have yielded to another action
+                s.before_input = None
+        return "Cancelled system alert. Go back to your app with open_app."
 
     async def _swipe(self, view, a: dict) -> str:
         """`swipe`: a drag that barely moves is a touch where it starts, so it goes through the policy as a tap there

@@ -472,7 +472,7 @@ async def close_app(app: str) -> CallToolResult:
 
 
 @server.tool(description=describe("alert"), structured_output=False)
-async def alert(action: Literal["accept", "dismiss", "text"], look: bool = True,
+async def alert(action: Literal["accept", "dismiss", "text", "cancel"], look: bool = True,
                 screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("alert", action=action, look=look, screenshot=screenshot, brief=brief)
 

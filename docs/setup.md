@@ -316,9 +316,28 @@ tapwright serve --video
 | works on USB, not on Wi-Fi | same network, no client isolation; run `tapwright probe` with the phone on the Wi-Fi |
 | actions do nothing on a screen | look again: the screen may have changed; system alerts need `alert` |
 | "tapwright serve is running and owns the phone" | `smoke` and `probe` need the phone to themselves: `tapwright serve --stop` |
-| the live view says "missing or wrong token" | open the link `tapwright view` prints; `tapwright serve --new-token` makes a new one |
+| the live view says "missing or wrong token" or "This link has no valid key" | run `tapwright view` on the attached computer; it opens the authenticated page in its browser without printing the key. Opening just `localhost:8417`, or a masked copy of its URL in another browser, does not authenticate it |
 | port 8417 in use | the daemon takes a free port by itself; `tapwright view` finds it |
 | "another tapwright serve is starting or stuck" | wait a minute and retry; if it stays, see `~/.tapwright/serve.log`, end the stuck process, then `tapwright serve` |
+
+### A system alert blocks an unattended test
+
+An unrelated iOS account reminder can sit over the tested app. Personal mode withholds its text and picture;
+`look` and ordinary `alert` calls can therefore return `outside_apps`. Home followed by `open_app` may leave a
+persistent alert in place. Repeating those calls or using `force` does not authorize its buttons.
+
+When the owner explicitly asks to **cancel** the obstruction, Tapwright 1.7.1 supports a standalone
+`alert {"action":"cancel"}` call through the normal scoped client. It only presses an unambiguous enabled button
+labelled exactly `Cancel` (English), by name, after checking the current alert twice. The tested app must still be in the foreground
+beneath the system alert. The answer is generic: private account names, alert text and screenshots stay withheld.
+It does not accept permissions or enter credentials. Then use `open_app` for the tested app and read its fresh
+screen. If there is no supported Cancel button, the alert changes, or the phone is locked, the call refuses.
+This recovery is not available inside a batch, replay, scheduled run or recording.
+
+The human live viewer can also answer an alert on the attached computer, including through an existing authorized
+remote-desktop session. It uses the person's control channel. Do not extract its key or move it to a different
+browser to work around an agent's refusal. A browser host that cannot authorize the private viewer URL is separate
+from the scoped `alert` recovery command; repairing the alert does not require changing browser access checks.
 
 ## Undo
 
