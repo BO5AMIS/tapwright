@@ -71,7 +71,8 @@ FRONT_REFUSED = "tapwright front:"  # how the fork's tap starts its refusal: ano
 # TAPWRIGHT_HIT_CHECK=0 turns the check off.
 HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
 HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
-HIT_WAIT = 3.0  # seconds: the runner waits at most 0.3 s for the element and 2 s for its values
+HIT_IDENTITY_REFUSED = "tapwright hit: identity_unproven"  # terminal: the snapshot couldn't be bound to the AX hit
+HIT_WAIT = 5.0  # point lookup (0.3 s), direct attributes (2 s), then exact-identity app fallback (2 s)
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
 
@@ -655,9 +656,21 @@ class Session:
         if HIT_CHECK == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return None
         await self.ensure()
-        await self._fast_routes()
+        def unproven(gate: str) -> Refused:
+            refused = Refused("not_actionable", "covered: the runner could not verify the touch recipient; "
+                                               "nothing was touched. Look again before another action.")
+            refused.hit_check = {"gate": gate, "phase": "runner", "probes": 0}
+            return refused
+
+        try:
+            await self._fast_routes(strict=True)
+        except ConnectionLost:
+            raise
+        except Exception:
+            raise unproven("capability_unproven") from None
         if self.tw_version < 5:
             return None
+        strict_proof = self.tw_version >= 6
         began = time.monotonic()
         try:
             # (not asked twice when it gets no answer: a stalled check is skipped, Unanswered, not waited on again)
@@ -665,6 +678,12 @@ class Session:
         except ConnectionLost:
             raise
         except Exception as e:  # noqa: BLE001 - whatever stopped the check, the touch goes unchecked
+            if isinstance(e, DeviceError) and HIT_IDENTITY_REFUSED in str(e):
+                raise unproven("identity_unproven") from None
+            if strict_proof:
+                # Version 6 binds attributes to the AX hit. Every failed attempted proof is terminal, including
+                # Unanswered (the runner stayed alive after a timeout), rather than an unchecked ordinary tap.
+                raise unproven("hit_timeout" if isinstance(e, Unanswered) else "hit_request_failed") from None
             getattr(self.device, "log", lambda *a: None)(f"hit test refused ({e}): the touch goes unchecked")
             trace.note("hit_ms", round((time.monotonic() - began) * 1000, 1))
             return None
@@ -673,7 +692,10 @@ class Session:
         if isinstance(value, dict) and isinstance(value.get("ms"), dict):
             trace.note("hit_wda_ms", {k: v for k, v in value["ms"].items()
                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
-        return ui.hit_of(value)
+        hit = ui.hit_of(value)
+        if strict_proof and (hit is None or value.get("identity") != "verified"):
+            raise unproven("invalid_hit_proof")
+        return hit
 
     def front_by_touch(self) -> bool:
         """Can the next tap check the app in front itself (personal mode, FRONT_IN_TAP)? Only when it would go through
@@ -683,7 +705,7 @@ class Session:
 
     async def _fast_routes(self, strict: bool = False) -> None:
         """Ask the runner once per session which of the fork's fast routes it has (Appium's build: none). Only an
-        answer that says the route is not there (or one without a version) is remembered as version 0. A probe that
+        answer that says the route is not there is remembered as version 0. A malformed answer or a probe that
         failed for another reason (a timeout, a dropped line) is not remembered (CodeRabbit, PR #7): a touch goes on
         through W3C actions this time and asks again next time, and with `strict` the failure is raised."""
         if self.fast_tap is not None:
@@ -696,10 +718,14 @@ class Session:
                 if strict:
                     raise
                 return  # fast_tap stays None: no fast route for this call, and the next one asks again
-            answer = {}
-        value = answer.get("value")
+            self.fast_tap, self.fast_drag, self.tw_version = False, False, 0
+            return
+        value = answer.get("value") if isinstance(answer, dict) else None
         version = value.get("tapwright") if isinstance(value, dict) else None
-        version = version if isinstance(version, int) and not isinstance(version, bool) else 0
+        if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+            if strict:
+                raise DeviceError("tapwright runner: capability_unproven")
+            return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
         self.tw_version = version
 

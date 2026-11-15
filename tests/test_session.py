@@ -52,6 +52,8 @@ class Recorder:
             return {"value": {"width": 430, "height": 932}}
         if path.endswith("/wda/locked"):
             return {"value": self.locked}
+        if path.endswith("/wda/tw/version"):
+            raise DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")  # legacy Appium runner
         return {"value": None}
 
 

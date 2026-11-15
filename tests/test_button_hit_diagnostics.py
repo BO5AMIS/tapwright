@@ -82,3 +82,32 @@ def test_failed_candidates_record_counts_and_relations_not_payloads(tmp_path):
         finally:
             await finish(stop, task)
     run(go)
+
+
+@pytest.mark.parametrize("contains_point", [False, True])
+def test_foreign_refusal_has_sanitized_gate_and_point_diagnostics(tmp_path, contains_point):
+    async def go():
+        d, target, passive, _ = setup()
+        d.actions = ActionLog(tmp_path)
+        private = "UNRELATED-SAVED-IDENTITY@example.invalid"
+        rect = passive.rect if contains_point else (87, 93, 272, 23)
+        d.session.center_answer = dataclasses.replace(passive, name=private, label=private,
+                                                      bundle="com.private.other", rect=rect)
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            s = real_dispatch(d.session)
+            with pytest.raises(Refused) as error:
+                await d.run_tool("a", "tap", {"target": {"ref": target.ref}, "dry_run": True,
+                                                "screenshot": False})
+            assert not s.dispatched
+            detail = error.value.hit_check
+            assert detail["gate"] == "foreign_recipient" and detail["owner"] == "foreign"
+            assert detail["point"] == "center" and detail["hit_contains_point"] is contains_point
+            assert detail["probes"] == 0
+            logs = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("actions-*.jsonl"))
+            assert json.loads(logs.splitlines()[-1])["hit_check"] == detail
+            assert private not in logs and "com.private.other" not in logs
+        finally:
+            await finish(stop, task)
+    run(go)

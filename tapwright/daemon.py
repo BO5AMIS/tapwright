@@ -7021,8 +7021,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 return
             # another app's words never go into an answer, the log or a report (personal mode, §21; Codex, PR #12 cycle
             # 2, M2): what covers the target is said by its kind and frame only
-            raise Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "
-                                            f"{ui.foreign_hit_line(hit)}; wait for it to go, then look again.")
+            error = Refused("not_actionable", f"covered: {element.line(actions=False)} is behind "
+                                             f"{ui.foreign_hit_line(hit)}; wait for it to go, then look again.")
+            diagnostic.update(gate="foreign_recipient", owner="foreign",
+                              point="center" if at == element.center else "offset",
+                              hit_contains_point=ui._holds(hit.rect, at))
+            error.hit_check = diagnostic
+            raise error
         trace.note("hit", relation)
         if relation in ("ancestor", "inside") and hit.type in ui.INTERACTIVE:
             # Structural membership is not authorization: a Ready label inside Post, or a Post control inside a
