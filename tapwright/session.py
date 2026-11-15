@@ -1037,7 +1037,9 @@ class Session:
             if "no such alert" in str(e).lower() and not isinstance(e, ConnectionLost):
                 raise Refused("not_found", "no alert on screen.") from e
             raise
-        return f"alert {action}ed"
+        # The runner acknowledges the button request, not the resulting screen state.
+        named = f" for {ui.quoted(button)}" if button is not None else ""
+        return f"Sent alert {action} request{named}. Check the screen to confirm the result."
 
     # ---- apps ----
     async def apps(self) -> list[dict]:

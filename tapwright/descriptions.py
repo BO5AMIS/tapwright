@@ -251,7 +251,7 @@ EXTRA = {
         'a clean run.'
     ),
     'alert': (
-        'Read or answer any current alert: text reads; accept/dismiss uses the default button; name selects an exact visible button label. cancel defaults to Cancel. Supports dry_run and run steps. No alert: not_found.'
+        'Read or answer any current alert: text reads; accept/dismiss uses the default button; name selects an exact visible button label. cancel defaults to Cancel. Supports dry_run and run steps. Success acknowledges the button request, not that the alert disappeared; verify with a fresh look. No alert: not_found.'
     ),
     'press_button': (
         'Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; '

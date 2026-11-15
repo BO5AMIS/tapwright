@@ -79,11 +79,15 @@ def test_an_indexed_off_screen_target_without_an_identifier_is_scrolled_into_vie
         stop, task = await started(d)
         _screen(d, before, after)
         await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("observer", "look", {"screenshot": False})
+        observer = d.control.client("observer")
+        assert observer.seen == d.control.generation
         taps = len(d.session.tap_points)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"label": "Account", "index": index}, "look": False})
         assert e.value.code == "stale" and "wasn't touched" in str(e.value) and "by its ref" in str(e.value)
         assert len(d.session.tap_points) == taps
+        assert d.session.scrolls and observer.seen < d.control.generation
         await finish(stop, task)
     run(go)
 
@@ -166,11 +170,15 @@ def test_an_element_followed_by_its_identifier_that_is_gone_after_the_scroll_is_
             return r
         d.session.scroll = scroll
         await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("observer", "look", {"screenshot": False})
+        observer = d.control.client("observer")
+        assert observer.seen == d.control.generation
         taps, typed = len(d.session.tap_points), len(d.session.typed)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", tool, {**args, "look": False})
         assert e.value.code == "stale" and "nothing was touched" in str(e.value)
         assert len(d.session.tap_points) == taps and len(d.session.typed) == typed
+        assert d.session.scrolls and observer.seen < d.control.generation
         await finish(stop, task)
     run(go)
 

@@ -804,6 +804,7 @@ class Typed(Noted):
 
 class Scrolled(Noted):
     """`scroll`'s result, with a note for the answer when it stopped early."""
+    drags: int = 0  # completed input, even when a caller refuses its next action
 
 
 # What `open_app "Settings"` means: the built-in apps aren't in the installed list.
@@ -5460,6 +5461,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 self.control.touched()
             raise
         done = Scrolled(f"Scrolled {area.line(actions=False, place=False) if area else 'the screen'} {direction}.")
+        done.drags = swipes
         done.note = note
         return done
 
@@ -5570,6 +5572,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if clear and not seen:  # nothing was dragged: "Scrolled" would read as if the layout had moved
             return Scrolled(f"{line} is already on screen.")
         done = Scrolled(f"Scrolled {where} to {line}." if clear else f"Scrolled {where} toward {line}.")
+        done.drags = len(seen)
         done.note = note
         return done
 
@@ -5826,6 +5829,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if hit.identifier and sum(e.identifier == hit.identifier for e in tree) == 1:
                 follow = ui.Target(id=hit.identifier)
         done = await self._scroll_to(view, follow, together=True)
+        if done.drags:
+            # This preparatory input already moved the screen. Any later target check or action
+            # can refuse, which skips Controller.agent's normal generation increment.
+            view.moved = True
+            self.control.touched()
         if target.index is not None and follow is target:
             raise Refused("stale", f"scrolled {hit.line(ref=False, actions=False)} into view, but index "
                                    f"{target.index} can't be sure to name it after a scroll (it has no identifier of "
