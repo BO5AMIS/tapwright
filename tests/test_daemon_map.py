@@ -103,7 +103,13 @@ def test_a_link_a_reflex_and_forgetting(tmp_path):
         assert (await d.run_tool("a", "map", {"reflex": {**rate, "do": {"tool": "tap", "target": {"text": "Delete account"}}}}))["text"] == "Reflex added: rate_prompt."
         await d.run_tool("a", "map", {"forget_reflex": "rate_prompt"})
         assert (await d.run_tool("a", "map", {"forget": "home"}))["text"] == "Forgot home."
-        assert file_of(tmp_path)["places"] == {} and file_of(tmp_path)["reflexes"] == []
+        # Each map call observes the screen and queues a save. Wait for its merge/tombstone
+        # cleanup; the still-visible screen may be learned again under a new generated name.
+        await d.maps.flush()
+        saved = file_of(tmp_path)
+        assert "home" not in saved["places"] and saved["reflexes"] == []
+        assert "home" not in d.maps.data(None, BUNDLE)["places"]
+        assert d.maps.data(None, BUNDLE)["reflexes"] == []
         await finish(stop, task)
     run(go)
 
