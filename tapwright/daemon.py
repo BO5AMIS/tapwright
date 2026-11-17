@@ -3849,12 +3849,18 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             people = self.control.person_generation
             await self._last_checks(name, args, None, hit=False)
             try:
-                return await (handler(view, use) if handler else call(s, use))
+                out = await (handler(view, use) if handler else call(s, use))
+                box["input"] = True  # (it ended: its answer says what it did)
+                return out
             finally:
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
                     fresh[0] = False
-                if name in KEYBOARD_TOOLS and not dry and isinstance(box["app"], tuple):
-                    view.aimed_app = box["app"]  # the app this touch was meant for (1.7.8, X item 4)
+                if (name in KEYBOARD_TOOLS and not dry and isinstance(box["app"], tuple)
+                        and box.get("input")):
+                    # the app this touch was meant for (1.7.8, X item 4). A refusal before any input (typing
+                    # without a target while another app is in front) keeps the old one: a retry the same way is
+                    # refused again, not typed into the app that came forward (CodeRabbit, PR #18)
+                    view.aimed_app = box["app"]
 
         execution_guard = None
 
@@ -3890,6 +3896,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self.session.execution_guard = execution_guard
 
             async def touching(ms: float) -> None:
+                box["input"] = True  # an input of this call is going out (the aimed app is kept then: act)
                 if grant_call is not None:
                     grant_call.touched = True  # (a grant's use is never given back once a touch went out: A-L1)
                 if by_read:
@@ -5438,7 +5445,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         target = a.get("target")
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
-            front = self.session.app if isinstance(self.session.app, tuple) else None
+            # the app this very read names (the session's own `app` is the last snapshot's, from before a switch:
+            # CodeRabbit, PR #18); a read whose root names none falls back to it
+            read_app = (self._read_root or (None, False))[0]
+            front = read_app if isinstance(read_app, tuple) else (
+                self.session.app if isinstance(self.session.app, tuple) else None)
             if (view.aimed_app is not None and front is not None and front[1] != view.aimed_app[1]
                     and view.alert_now is None):  # (an OS alert's own field is typed into over any app)
                 # (1.7.8, X item 4) another app came to the front since the agent's last touch or open_app (Safari, after
@@ -5673,6 +5684,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 # phone: 7 s for a list of 14 rows, 2026-11-13).
                 runs = self._drags_to_the_end(direction, bounds, length) if beyond else 1
                 for _ in range(max(1, min(runs, MAX_SCROLL_SWIPES - swipes))):
+                    if swipes and area is not None and area.placed:
+                        # a drag can move or close a hosted view: each later drag is proven where it starts too
+                        # (CodeRabbit, PR #18)
+                        await self._hosted_proof(area, (x0, y0))
                     await s.scroll(x0, y0, x1, y1)
                     swipes += 1
                     if not to:
@@ -6503,8 +6518,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         point = aim(element) if element is not None and hit and aim is not None else None
         return element, point, ""
 
-    async def _press(self, target: ui.Target, hold_ms: int) -> str:
-        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
+    async def _press(self, target: ui.Target, hold_ms: int, proven: bool = False) -> str:
+        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4).
+        `proven`: the point target is an element's visible part, proven like the element (_hosted_proof)."""
         double = _DOUBLE.get()
         was = self._double_aim(target, self.session.items) if double else None
         done = await self.session.tap(target, hold_ms=hold_ms)
@@ -6541,6 +6557,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                         box.append(f"{said} is {now}")
                     return done
                 await self._last_checks("tap", {}, under, hit=False, bundle=front)  # (a raw second touch: no hit test)
+                if under is not None and (target.kind != "point" or proven):
+                    # an element another process draws is proven again where the second touch goes: the first touch
+                    # may have moved it, and the same name proves no place (CodeRabbit, PR #18)
+                    await self._hosted_proof(under, target.point or under.center)
                 await self.session.tap(target, hold_ms=hold_ms)
             except Refused:
                 self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
@@ -6604,7 +6624,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._touching(found)
         if point is None:
             return ui.without_place(await self._press(target, hold_ms))
-        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
+        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms, proven=True)
         return f"{verb} {found.line(actions=False, place=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     def _moved_under(self, view, x: float, y: float) -> bool:
