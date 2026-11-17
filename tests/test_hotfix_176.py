@@ -107,7 +107,7 @@ def test_a_button_laid_on_the_bar_that_isnt_back_is_never_taken_for_back():
     tree = ui.read(_bar_screen("BAR" + _button("ProfileAvatar", "Your profile")), (430.0, 932.0))
     assert tree.back is not None and tree.back.bar and tree.back.point is None
     avatar = next(e for e in tree.items if e.identifier == "ProfileAvatar")
-    assert not any(b.kind == "NavigationBar" for b in avatar.covered_by)  # (laid on the bar: tappable)
+    assert any(b.kind == "NavigationBar" for b in avatar.covered_by)  # (only a Back control's cover is lifted)
 
 
 def test_content_listed_before_a_see_through_bar_is_still_covered():
@@ -118,11 +118,15 @@ def test_content_listed_before_a_see_through_bar_is_still_covered():
     assert tree.back.point is None  # (a button under the bar is never its Back)
 
 
-def test_a_control_laid_on_a_toolbar_is_not_covered_by_it_and_one_under_it_is():
-    on = ui.read(_bar_screen("BAR" + _button("share", "Share", y=828), "Toolbar"), (430.0, 932.0))
-    under = ui.read(_bar_screen(_button("share", "Share", y=828) + "BAR", "Toolbar"), (430.0, 932.0))
-    assert not next(e for e in on.items if e.identifier == "share").covered_by
-    assert any(b.kind == "Toolbar" for b in next(e for e in under.items if e.identifier == "share").covered_by)
+def test_a_static_control_after_a_bar_keeps_its_cover():
+    """Opus review 2 of 1.7.6: real trees list the bar first and the content under it after, so order proves nothing; only
+    a Back control's cover is lifted. A Share button after a toolbar, a header's button after a navigation bar: covered."""
+    tool = ui.read(_bar_screen("BAR" + _button("share", "Share", y=828), "Toolbar"), (430.0, 932.0))
+    head = ui.read(_bar_screen("BAR" + _button("compose", "Compose", x=360)), (430.0, 932.0))
+    assert any(b.kind == "Toolbar" for b in next(e for e in tool.items if e.identifier == "share").covered_by)
+    assert any(b.kind == "NavigationBar" for b in next(e for e in head.items if e.identifier == "compose").covered_by)
+    back_to_top = ui.read(_bar_screen("BAR" + _button("Back to top", "Back to top")), (430.0, 932.0))
+    assert back_to_top.back.point is None
 
 
 def test_a_log_entry_that_isnt_json_is_skipped_never_raised(tmp_path):

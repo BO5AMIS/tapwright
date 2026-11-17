@@ -1085,8 +1085,8 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     for e, number, inside in shown[:MAX_ELEMENTS]:
         node = numbered.get(number)
         bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)
-                     and not (bar.kind in ON_BAR_KINDS and node is not None and number >= ends.get(n, number + 1)
-                              and _on_bar(node, bar.rect, parents))]
+                     and not (bar.kind in ON_BAR_KINDS and node is not None and _is_back(node)
+                              and number >= ends.get(n, number + 1) and _on_bar(node, bar.rect, parents))]
         over = {n for n, _ in bars_over}
         # then every later listed element that is neither its descendant nor a layer, nor part of a bar over it
         later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in ahead
@@ -1696,10 +1696,18 @@ def _on_bar(node: ET.Element, bar: tuple[float, float, float, float], parents: d
 
 
 def _says_back(name: str) -> bool:
-    """Does an identifier name a Back button: "back" as a word of it (`NavigationBackButton`, `nav-back-button`,
-    `BackButton`), never inside another word (`FeedbackButton`, `backgroundView`)?"""
-    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)
-    return any(w.lower() == "back" for w in words)
+    """Does an identifier name a Back button: it ends in the word Back, or Back Button (`NavigationBackButton`,
+    `nav-back-button`, `BackButton`, `Back`), never "back" inside another word (`FeedbackButton`, `backgroundView`) or
+    leading other words (`Back to top`)?"""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
+    return words[-1:] == ["back"] or words[-2:] == ["back", "button"]
+
+
+def _is_back(node: ET.Element) -> bool:
+    """A Back control by its own id or label (_says_back): the only control a bar's cover is lifted from (_on_bar). The
+    tree's order can't tell a control laid on a bar from content under it (both come after the bar in real trees), so
+    the exception stays this narrow (Opus review of 1.7.6)."""
+    return _kind(node) == "Button" and (_says_back(_text(node.get("name"))) or _text(node.get("label")).lower() == "back")
 
 
 def _back_of(root: ET.Element, screen: tuple[float, float],
@@ -1731,7 +1739,7 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     parents = parents if parents is not None else {child: up for up in root.iter() for child in up}
     for n in root.iter():
         if (_kind(n) == "Button" and order[n] > after and on_screen(_rect(n)) and _on_bar(n, _rect(bar), parents)
-                and (_says_back(_text(n.get("name"))) or _text(n.get("label")).lower() == "back")):
+                and _is_back(n)):
             return Back(True, centre(n))
     left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
     left.sort(key=lambda n: centre(n)[0])
