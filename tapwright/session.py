@@ -151,6 +151,8 @@ class Session:
         self.scale_read = False  # whether that read has happened, so an unknown scale isn't asked for again
         self.items: list[ui.Element] = []
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
+        # (name, bundle id) the newest read of any kind names (a tree-only read's root; None: it named none)
+        self.read_app: tuple[str, str] | None = None
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
         self.last_tree: ui.Tree | None = None  # the tree of the last read, for the places the daemon recognises
@@ -263,7 +265,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
-        self.scale = self.app = None
+        self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
         self.typed_into = None
@@ -543,7 +545,7 @@ class Session:
         request a tree-only read leaves out."""
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = await self._app(tree.app)
+        self.app = self.read_app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
         self._seen_tree(tree)
@@ -607,6 +609,7 @@ class Session:
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self.read_app = tree.app
         self._seen_tree(tree)
         return tree
 

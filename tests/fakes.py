@@ -308,6 +308,7 @@ class FakeSession:
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
         self.tree_app: tuple[str, str] | None = None  # the root Application a read names (None: it names none)
+        self.read_app: tuple[str, str] | None = None  # what the newest read named (Session.read_app)
         self.front_asks = 0  # how many times foreground_bundle_id (the separate activeAppInfo question) was asked
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
@@ -423,7 +424,7 @@ class FakeSession:
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
-        self.items = list(self.tree)
+        self.items, self.read_app = list(self.tree), self.app
         return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
 
     async def read_scale(self, refresh=False):
@@ -479,6 +480,7 @@ class FakeSession:
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
         tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        self.read_app = self.tree_app
         if getattr(self, "on_tree", None) is not None:  # (as the real Session's reads do)
             self.on_tree(tree)
         return tree
@@ -486,6 +488,7 @@ class FakeSession:
     async def snapshot_from(self, tree):
         """The foreground app for a tree that was already read: the one extra request a final answer needs."""
         self._record("app")
+        self.read_app = self.app
         return Snapshot(tree, self.app, 3.0)
 
     async def apps(self):
@@ -689,7 +692,7 @@ class DescribingSession(FakeSession):
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
-        self.items = list(self.tree)
+        self.items, self.read_app = list(self.tree), self.app
         tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, above=self.above, below=self.below)
         return Snapshot(tree, self.app, 3.0)
 

@@ -214,6 +214,11 @@ def _hit_is(hit: ui.Hit, element: ui.Element, source: str | None = None) -> bool
             and ui.hit_relation(source, dataclasses.replace(element, rect=raw), hit) == "inside")
 
 
+def _near_rect(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    """The same frame, to 2 points (the slack a re-read gives)."""
+    return all(abs(p - q) <= 2.0 for p, q in zip(a, b))
+
+
 def _same_control(a: ui.Element, b: ui.Element) -> bool:
     """The control a double tap's second touch lands on is the one its first touch landed on: the same id, label and text."""
     return (a.identifier, a.label, a.text) == (b.identifier, b.label, b.text)
@@ -3817,9 +3822,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                             aim = pinned  # the element that came on screen, by its ref
             use = args if aim is target else {**args, "target": aim}
             # a person would close the keyboard before the touch
+            spot = aim.point if isinstance(aim, ui.Target) else None  # an agent's point: a raw touch, no hit test
+            under_before = self._control_at(spot, s.items) if spot is not None else None
             box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, aim))
+            if box["note"] and spot is not None and not args.get("force"):
+                self._point_kept(view, spot, under_before)
             s.last_point = None
-            box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
+            # the app the touch is meant for (see _taken_away): the newest read's, the reflex's or a target's own read
+            # included, before the touch goes out (CodeRabbit, PR #18 cycle 2); else the last snapshot's
+            read_app = getattr(s, "read_app", None)
+            box["app"], s.top_touch = (read_app if isinstance(read_app, tuple) else s.app), False
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             trace.baseline(box["mark"][1])
             trace.mark("resolved")
@@ -6169,6 +6181,29 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         """For a dry run: stop here with what would be done (docs/AGENT-TOOLS.md 11.4). Nothing was sent."""
         if a.get("dry_run"):
             raise DryRun(line)
+
+    @staticmethod
+    def _control_at(point: tuple[float, float], items: list[ui.Element]) -> ui.Element | None:
+        """The front-most element under the point that takes a touch (a scroll view's drag doesn't count), or None."""
+        x, y = point
+        return next((e for e in reversed(items) if e.actions and e.role != "scroll"
+                     and e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
+
+    def _point_kept(self, view, point: tuple[float, float], before: ui.Element | None) -> None:
+        """After the keyboard reflex touched the screen (a blank touch, a drag of the form): the agent's point must hold
+        what it held when the agent aimed it, by the read the reflex made. A control the reflex moved under the point
+        (a drag scrolled a button there) is stale, so a passive touch never becomes a control's (CodeRabbit, PR #18
+        cycle 2). `force` touches there anyway."""
+        now = self._control_at(point, self.session.items)
+        if now is None or (before is not None and _same_control(before, now)
+                           and _near_rect(before.rect, now.rect)):
+            return
+        view.moved = True
+        self.control.touched()
+        x, y = (round(c) for c in point)
+        raise Refused("stale", f"closing the keyboard moved {now.line(ref=False, actions=False, place=False)} under "
+                               f"({x}, {y}); nothing else was touched: look again, or pass force: true to touch there "
+                               "anyway.")
 
     def _element_at(self, point: tuple[float, float], items: list[ui.Element] | None = None) -> ui.Element | None:
         """The front-most element of the agent's list (or of `items`) whose rect contains the point (a later one is
