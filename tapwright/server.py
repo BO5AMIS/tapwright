@@ -46,6 +46,7 @@ NO_KEY_PAGE = (
 WHOLE_PHONE = ("dedicated", "phone")  # the X-Tapwright-Mode values that mean every app (--dedicated, --phone)
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 DEFAULT_PORT = 8417
+RECORDING_KEEPALIVE = 5.0  # seconds: how long a recording's stream may be silent before it sends a picture-less part
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
 
 
@@ -398,20 +399,44 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if problem is not None:
             return problem
 
+        # `?for=recording` (tapwright record-video): no frame from while Notification Center was open for a read
+        hide = request.query_params.get("for") == "recording"
+        wait = RECORDING_KEEPALIVE if hide else 15
+
+        def keepalive(hidden: bool) -> bytes:
+            """A part with no picture, so a recorder sees the line is alive while nothing is sent (a still screen, or
+            frames that are left out), and is told when frames are being left out."""
+            note = "X-Hidden: notification-center\r\n" if hidden else ""
+            return (f"Content-Type: image/jpeg\r\nContent-Length: 0\r\nX-Keepalive: 1\r\n{note}\r\n"
+                    "\r\n--frame\r\n").encode()
+
         async def parts():
             async with daemon.pump.watching() as hub:
-                seq, sent = 0, None
+                seq, sent, told, last_out = 0, None, 0.0, time.monotonic()
                 yield b"--frame\r\n"  # each part then ends with the next boundary, so a browser shows it at once
                 while True:
-                    frame = await hub.next_after(seq, timeout=15)
+                    frame = await hub.next_after(seq, timeout=wait)
                     if frame is None:
                         if hub.closed:
                             return
+                        if hide:
+                            last_out = time.monotonic()
+                            yield keepalive(daemon.center_covers(hub.mono()))
                         continue
                     seq = frame.seq
+                    if hide and daemon.recording_hides(hub, frame):
+                        if time.monotonic() - told >= 1.0:
+                            told = last_out = time.monotonic()
+                            yield keepalive(True)
+                        continue
                     picture = getattr(frame, "picture", None)
                     if picture is not None and picture is sent:
-                        continue  # a still screen's picture, published again for the settle: the viewer has it
+                        # a still screen's picture, published again for the settle: the viewer has it. A recorder still
+                        # needs to hear that the line is alive (the copies come faster than the idle wait ends)
+                        if hide and time.monotonic() - last_out >= RECORDING_KEEPALIVE:
+                            last_out = time.monotonic()
+                            yield keepalive(daemon.center_covers(hub.mono()))
+                        continue
                     sent = picture
                     w, h = daemon.session.screen
                     try:
@@ -421,13 +446,19 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                     turn = getattr(daemon.session, "turn", 0)
                     if turn and picture is None:  # landscape: the WebDriverAgent frame comes as captured, portrait
                         jpeg = await daemon.turned(frame.seq, jpeg, turn)
+                    mono = ""
+                    if hide and (arrived := hub.arrival_of(frame.seq)) is not None:
+                        mono = f"X-Mono-Ms: {round(arrived * 1000)}\r\n"  # arrival on a clock a wall-clock step can't move
                     head = (f"Content-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n"
-                            f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\nX-Coverage: screen\r\n"
+                            f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\n{mono}X-Coverage: screen\r\n"
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")
+                    last_out = time.monotonic()
                     yield head.encode() + jpeg + b"\r\n--frame\r\n"
 
-        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame",
-                                 headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store"}
+        if hide:
+            headers["X-Hides"] = "notification-center"  # the recorder refuses a daemon that doesn't say this
+        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame", headers=headers)
 
     async def ws_allowed(websocket: WebSocket) -> bool:
         """The checks both WebSockets share: token (header or same-origin cookie), Host and Origin."""

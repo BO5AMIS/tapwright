@@ -33,6 +33,26 @@
   the page that was open (same tab, same page, same text). Before, it answered "opened" while Safari stayed on a video.
   A redirect to another host (a short link) gets no note.
 
+## 1.7.7 (2026-11-17)
+
+- New: `tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]` records the live view as an H.264 MP4 in real
+  time (needs `pip install "tapwright[video]"`), until Ctrl+C or `--seconds`, and finishes the file either way. Frames
+  keep their capture times (variable frame rate), so a still screen lasts as long as it did. `FILE.frames.json` gives
+  each frame's `seq`, capture time in epoch ms and in the action log's ISO form, and its place in the video, so a frame
+  lines up with `~/.tapwright/log/actions-*.jsonl`. A recording shows whatever is on the phone's screen: record test data.
+- The recording leaves out Notification Center: `GET /stream?for=recording` sends no frame from while a notification
+  read may have had it open (the live view itself is unchanged), and says so in an `X-Hides` header; the command
+  refuses an older `tapwright serve`. It fails closed: from before the swipe until 3 s after the close was confirmed
+  (open-ended when closing wasn't shown to work), no frame, none whose arrival the daemon can't tell, and never the
+  picture that was newest at the end of a read. A recording of a quiet screen no longer ends after 30 s (keep-alive
+  parts), a Ctrl+C never lands inside the encoder, queued frames are written on stop and the queue is bounded, an
+  encoder that can't open for a file is skipped, and the video and its frame list appear together or not at all.
+  It is a command only: no new agent tool.
+- Checked on an iPhone (USB, iOS 26): a 30 s recording at 1290x2796, 584 frames, decodes cleanly, and a Notification
+  Center read during it left a gap from before the swipe to 3 s after it.
+- Known limit: with the AirPlay video feed (`serve --video`), a still screen next to a Notification Center read stays
+  hidden, so a recording started just after one may begin with no picture until the screen changes.
+
 ## 1.7.6 (2026-11-17)
 
 - A call whose target isn't an object (`"target": "Workouts"`) is refused as `bad_params` again, naming the target
