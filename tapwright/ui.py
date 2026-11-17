@@ -1053,7 +1053,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
             if e.role in fromothers.MARKED_ROLES and numbered.get(number) in theirs:
                 e.others = True
     tree.structure = _structure(root, screen_rect)
-    tree.back = _back_of(root, screen) if screen else None
+    tree.back = _back_of(root, screen, parents) if screen else None
 
     # The field iOS says has the keyboard focus is in front: a layer that would hide it is no layer there (seen on the
     # phone 2026-11-14: Calendar's search results, a full-screen container that starts with an empty full-screen view
@@ -1083,7 +1083,10 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     area = screen[0] * screen[1] if screen else math.inf
     ahead = [(o, m, set(within)) for o, m, within in shown]
     for e, number, inside in shown[:MAX_ELEMENTS]:
-        bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)]
+        node = numbered.get(number)
+        bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)
+                     and not (bar.kind in ON_BAR_KINDS and node is not None and _is_back(node)
+                              and number >= ends.get(n, number + 1) and _on_bar(node, bar.rect, parents))]
         over = {n for n, _ in bars_over}
         # then every later listed element that is neither its descendant nor a layer, nor part of a bar over it
         later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in ahead
@@ -1669,7 +1672,46 @@ def is_back(element: Element, back: Back | None) -> bool:
             and abs(element.center[0] - back.point[0]) < 1 and abs(element.center[1] - back.point[1]) < 1)
 
 
-def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
+ON_BAR_KINDS = ("NavigationBar", "Toolbar")  # bars an app may lay its own controls on, as siblings (see _on_bar)
+SCROLLING_KINDS = ("ScrollView", "Table", "CollectionView", "Cell", "WebView")
+
+
+def _on_bar(node: ET.Element, bar: tuple[float, float, float, float], parents: dict[ET.Element, ET.Element]) -> bool:
+    """Is this control laid on the bar rather than under it? The caller checks that the tree lists it after the bar (what
+    is under a bar comes before it); here: wholly within the bar's frame, and not scrolling content (a scroll view, a
+    table, a collection view, a cell or a web view, itself or an ancestor). Seen on the phone 2026-11-16: X draws its
+    Back button as a sibling over its navigation bar, not inside it."""
+    x, y, w, h = _rect(node)
+    bx, by, bw, bh = bar
+    if w <= 0 or h <= 0 or x < bx - 1 or y < by - 1 or x + w > bx + bw + 1 or y + h > by + bh + 1:
+        return False
+    if _kind(node) in SCROLLING_KINDS:  # (a row itself is content)
+        return False
+    up = parents.get(node)
+    while up is not None:
+        if _kind(up) in SCROLLING_KINDS:
+            return False
+        up = parents.get(up)
+    return True
+
+
+def _says_back(name: str) -> bool:
+    """Does an identifier name a Back button: it ends in the word Back, or Back Button (`NavigationBackButton`,
+    `nav-back-button`, `BackButton`, `Back`), never "back" inside another word (`FeedbackButton`, `backgroundView`) or
+    leading other words (`Back to top`)?"""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
+    return words[-1:] == ["back"] or words[-2:] == ["back", "button"]
+
+
+def _is_back(node: ET.Element) -> bool:
+    """A Back control by its own id or label (_says_back): the only control a bar's cover is lifted from (_on_bar). The
+    tree's order can't tell a control laid on a bar from content under it (both come after the bar in real trees), so
+    the exception stays this narrow (Opus review of 1.7.6)."""
+    return _kind(node) == "Button" and (_says_back(_text(node.get("name"))) or _text(node.get("label")).lower() == "back")
+
+
+def _back_of(root: ET.Element, screen: tuple[float, float],
+             parents: "dict[ET.Element, ET.Element] | None" = None) -> Back:
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect
         return w > 0 and h > 0 and 0 <= x + w / 2 < screen[0] and 0 <= y + h / 2 < screen[1]
@@ -1689,6 +1731,15 @@ def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
 
     for n in buttons:
         if _text(n.get("name")) == "BackButton" or _text(n.get("label")).lower() == "back":
+            return Back(True, centre(n))
+    # A Back button the app lays on the bar as a sibling (X's profile page): listed after the bar, wholly on it, not
+    # scrolling content (_on_bar), and told by its own name or label only: never a left-most guess (an avatar)
+    order = {n: i for i, n in enumerate(root.iter())}
+    after = max(order[n] for n in bar.iter())
+    parents = parents if parents is not None else {child: up for up in root.iter() for child in up}
+    for n in root.iter():
+        if (_kind(n) == "Button" and order[n] > after and on_screen(_rect(n)) and _on_bar(n, _rect(bar), parents)
+                and _is_back(n)):
             return Back(True, centre(n))
     left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
     left.sort(key=lambda n: centre(n)[0])

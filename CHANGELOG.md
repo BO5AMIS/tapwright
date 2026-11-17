@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.6 (2026-11-17)
+
+- A call whose target isn't an object (`"target": "Workouts"`) is refused as `bad_params` again, naming the target
+  forms. In 1.7.5 its action-log line failed and the agent got `internal`. A log line that can't be written no longer
+  replaces any refusal.
+- A Back button an app lays on its navigation bar as a sibling (X's profile page) is the bar's Back: `back` finds it,
+  and a tap on it is no longer refused as covered by its own bar. Content scrolled under a bar is still covered.
+- The agent guide and the skill say how to press Home: `press_button {"name": "home"}`.
+
 ## 1.7.1 (2026-11-15)
 
 - A tap on a button can recover when the runner hits passive icon/text content that the accessibility tree cannot

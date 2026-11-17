@@ -2031,7 +2031,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 result = await self._run_tool_inner(client_id, name, args, scope)
             except Refused as e:
                 self._give_back(said, e)
-                self._log_action(name, args, started, e, client=client_id, known_off=known, grants=said)
+                try:
+                    self._log_action(name, args, started, e, client=client_id, known_off=known, grants=said)
+                except Exception as log_error:  # (the refusal is the answer: a log line that fails never replaces it)
+                    self.log(f"the action log skipped a refused {name} ({type(log_error).__name__})")
                 raise
             finally:
                 _TYPED_SECURE.reset(secure_token)

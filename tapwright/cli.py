@@ -1128,7 +1128,7 @@ def main() -> int:
         apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
         try:
             if a.policy:
-                print('Tapwright 1.7.5 provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
+                print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
             chosen = None
             ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
@@ -1225,7 +1225,7 @@ def main() -> int:
         from .ceiling import Ceiling
         try:
             if a.policy:
-                print('Tapwright 1.7.5 provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
+                print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
             chosen = None
         except ValueError as e:
             raise SystemExit(f"tapwright serve: {e}") from e
