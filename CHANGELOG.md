@@ -41,7 +41,8 @@
   `not_found` by that label.
 - `type_text` without a target types only into the app the agent's last touch or `open_app` went to. When another app
   came to the front since (Safari, after a tap in Files), it answers `stale` and types nothing; a `look` clears it.
-  `open_app` also drops the field typed into last.
+  `open_app` also drops the field typed into last. The app in front is the one the typing's own read names, and the
+  refusal keeps the app the last touch went to, so the same call again is refused again.
 - `type_text`'s answer gives a field's value only as a read after the typing shows it. After a submit Safari's address
   field is another element, and the answer gave the address from before the submit as if it were the new one.
 - Forgetting a reflex or a place always wins over a map save under way: an edit no longer takes a forgotten reflex
@@ -50,7 +51,16 @@
   the screen, proves it open (it has no title and no scroll view there). A banner or the home screen still proves
   nothing.
 - The agent guide and the skill say how to close the keyboard with the tools there are, and that X disables the
-  composer's Photo library button while the text holds a link (attach media first, then add the link).
+  composer's Photo library button while the text holds a link (attach media first, then add the link). They don't
+  suggest `submit` to close the keyboard: what Return does is up to the app (it can submit a form or send).
+- Content another app draws (see above) is proven again where each touch goes: every later drag of a `scroll`, and a
+  double tap's second touch. The keyboard reflex never drags a scroll view in such content, `back` never presses a
+  Back button of it inside an ordinary bar, and an element of it below the screen keeps its mark, so `scroll` with
+  `to: "target"` refuses one whose place can't be told.
+- Typing again without a tap also checks that the focused element is still where the field is listed (an automatic
+  scroll can carry it off and bring another field with its identifier to its place). `replace` after a focusing tap,
+  with an identifier only one field has, clears it only where it is still under the tap, or where the content around
+  it moved with it (the keyboard scrolled the form); otherwise `stale`.
 
 ## 1.7.7 (2026-11-17)
 
