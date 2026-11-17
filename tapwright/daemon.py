@@ -392,6 +392,9 @@ NOTE_TAKEN_SYSTEM = ("{other} came to the front after the touch: a notification 
 SYSTEM_IN_FRONT = "the home screen, Notification Center or Control Center"
 RECHECK_WITHIN = 5.0  # seconds: a banner's theft shows within about one; later, the agent or a person moved on
 NOTE_KEYBOARD = "closed the keyboard first."
+REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't tell another screen from this one
+# (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
+NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -3722,6 +3725,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if args.get("ocr") and not ocr.available():
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
+            view.aimed_app = None  # the agent sees what is in front now (1.7.8, X item 4)
             answer = await self._look(view, shot, [], notes)
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
             if given is None or (self.session.app or (None, None))[1] in given:
@@ -3849,6 +3853,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             finally:
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
                     fresh[0] = False
+                if name in KEYBOARD_TOOLS and not dry and isinstance(box["app"], tuple):
+                    view.aimed_app = box["app"]  # the app this touch was meant for (1.7.8, X item 4)
 
         execution_guard = None
 
@@ -4030,7 +4036,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                    snap=landed[0] if landed is not None else None,
                                    hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
                                    watched=time.monotonic() - box["began"], touch=touch_name(name))
-        if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
+        if closed_first == NOTE_KEYBOARD and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
             # say only what the new list shows; if the switch can't be found again, claim nothing
@@ -4580,6 +4586,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
         view.opened = True
+        # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
+        # target goes only to it, and no field of the app before is typed into again
+        view.aimed_app, view.typed_field = (shown, bundle_id), None
+        self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
         elif not resume:  # (an app brought back as it is keeps the language it runs in)
@@ -5428,6 +5438,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         target = a.get("target")
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
+            front = self.session.app if isinstance(self.session.app, tuple) else None
+            if (view.aimed_app is not None and front is not None and front[1] != view.aimed_app[1]
+                    and view.alert_now is None):  # (an OS alert's own field is typed into over any app)
+                # (1.7.8, X item 4) another app came to the front since the agent's last touch or open_app (Safari, after
+                # a tap in Files): its only input is no field the agent chose
+                raise Refused("stale", f"{front[0]} ({front[1]}) is in front now, not {view.aimed_app[0]} "
+                                       f"({view.aimed_app[1]}), where your last touch went. Nothing was typed; look, "
+                                       "then pass a target.")
             inputs = [e for e in view.items if e.role == "input"]
             if not inputs:
                 raise Refused("not_found", "No input on screen")
@@ -5533,7 +5551,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             await checked_again(reread=True)
             await typed()
         view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
-        done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
+        # the field's line without the value it had before the keys (1.7.8, X item 5): the answer gives the value only as
+        # a read after the typing shows it (Typed.verdict). Safari's address field is another element once the page
+        # loads, and its old address read as if it were the new one
+        done = Typed(f"Typed into {dataclasses.replace(field, value='').line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         done.typed = real
@@ -5848,7 +5869,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _dismiss_keyboard_now(self, view) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
-        dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else ""."""
+        dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else
+        NOTE_KEYBOARD_STAYED: the answer says so."""
         s = self.session
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
@@ -5863,6 +5885,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # keyboard's own dismiss key, the touch last; the app is remembered, and the way that worked is said.
         order = ("drag", "dismiss", "blank") if app in self._outside_ignored else ("blank", "drag", "dismiss")
         tried = 0
+        before = [(e.role, e.label, e.identifier) for e in view.items]
         for step in order:
             if not view.read_keyboard:
                 break
@@ -5872,9 +5895,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 await self._silent_read(view)
                 if view.read_keyboard and app is not None:
                     self._outside_ignored.add(app)
-            elif step == "drag" and (drag := self._dismiss_drag(view.items, top, bottom)) is not None:
+            elif step == "drag" and (drag := ui.dismiss_drag([*view.items, *hidden], s.screen, top, bottom)) is not None:
                 # many lists close the keyboard when dragged (keyboardDismissMode on-drag, as a person flicks a list
-                # down to hide it); a short pull down at its top moves the content at most a little, and back
+                # down to hide it); a short pull down on passive content moves it at most a little, and back. It never
+                # starts or ends on a control (1.7.8, X item 1: one opened X's photo picker)
                 await s.swipe(*drag, duration_ms=250)
                 await self._silent_read(view)
                 how = "dragged the form a little"
@@ -5893,17 +5917,23 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if (earned := _REFLEXED.get()) is not None:
                     earned.append(reflex.keyboard(how))
             tried += 1
-        return "" if view.read_keyboard else NOTE_KEYBOARD
+            if self._reflex_opened(before, view.items):
+                # (1.7.8, X item 1) the reflex's own touch opened something (X's photo picker took the place of the
+                # keyboard): the touch the agent asked for would land on that, so nothing more goes out
+                view.moved = True
+                self.control.touched()
+                raise Refused("stale", "closing the keyboard opened another screen; nothing else was touched: look "
+                                       "again.")
+        return NOTE_KEYBOARD_STAYED if view.read_keyboard else NOTE_KEYBOARD
 
     @staticmethod
-    def _dismiss_drag(items: list[ui.Element], top: float, bottom: float) -> tuple[float, float, float, float] | None:
-        """A short pull down near the top of the biggest scroll view above the keyboard (x0, y0, x1, y1), or None."""
-        views = [e for e in items if e.role == "scroll" and not e.in_alert and e.y + 60 < bottom and e.y + e.height > top]
-        if not views:
-            return None
-        v = max(views, key=lambda e: e.width * e.height)
-        x, y = v.x + v.width / 2, max(v.y, top) + 20
-        return x, y, x, min(y + 40, bottom - 10)
+    def _reflex_opened(before: list[tuple[str, str, str]], after: list[ui.Element]) -> bool:
+        """Did a touch meant only to close the keyboard bring another screen? Fewer than half of what was listed
+        (role, label, identifier) is still listed. Closing the keyboard alone shows more, and takes nothing away."""
+        if len(before) < REFLEX_SCREEN_MIN:
+            return False
+        now = {(e.role, e.label, e.identifier) for e in after}
+        return sum(key in now for key in before) < len(before) / 2
 
     def _under_keyboard(self, target: ui.Target) -> bool:
         """Is the target an element the last read found past its scroll view's edge but still on the phone's

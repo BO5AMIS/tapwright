@@ -1606,7 +1606,10 @@ MAX_CANDIDATES = 5
 
 
 def _norm(text: str) -> str:
-    return text.strip().casefold()
+    """A selector's text and the screen's as they are compared: casefolded, every run of white space (a no-break or
+    narrow no-break space too: iOS writes U+202F before "PM") one plain space, as an element's line shows it. Otherwise
+    exact (1.7.8, X item 3: a photo cell's label as listed was not_found)."""
+    return " ".join(text.split()).casefold()
 
 
 def _inside(inner: Element, outer: Element) -> bool:
@@ -1959,6 +1962,58 @@ def sheet_pull(box: tuple[float, float, float, float],
     return across, start, across, min(start + max(SHEET_PULL * h, SHEET_PULL_MIN), screen[1] - 2)
 
 
+DRAG_CLEAR = 12.0  # how far the keyboard reflex's drag keeps from anything that takes a touch (1.7.8, X item 1)
+DRAG_LENGTH = 40.0  # the keyboard reflex's pull down, in points
+DRAG_MIN = 20.0  # a shorter pull than this isn't tried
+
+
+def _touch_blocks(items: list[Element]) -> list[tuple[float, float, float, float]]:
+    """The frames a touch meant to do nothing must keep out of: what takes an action (a scroll view's empty area
+    does nothing), the text edit menu's items, and the bars that cover content."""
+    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
+    # the text edit menu over a field (Select, Paste) lists its items as `menuitem`, with no action: a touch on one
+    # selects or pastes (blank_point picked "Select" on the phone 2026-11-11, both orientations)
+    blocks += [e.rect for e in items if e.role == "menuitem" and not e.in_alert]
+    blocks += [e.rect for e in items if e.type in COVERING_BARS]
+    blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+    return blocks
+
+
+def _clearance(x: float, y: float, rects: list[tuple[float, float, float, float]]) -> float:
+    """How far the point is from the nearest of `rects` (0 inside one)."""
+    return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
+                for r in rects), default=math.inf)
+
+
+def dismiss_drag(items: list[Element], screen: tuple[float, float], top: float,
+                 bottom: float) -> tuple[float, float, float, float] | None:
+    """The keyboard reflex's short pull down in a scroll view above the keyboard (x0, y0, x1, y1), on passive content
+    only: every point of it at least DRAG_CLEAR from what takes a touch and BLANK_CLEAR from any image (a floating
+    button can show as only its icon). A short drag can land as a tap, so it must never start or end on a control:
+    in X's reply composer one opened the photo picker (2026-11-17). Near the top of the biggest such view first, then
+    across it and lower down; None when no such line fits, and the reflex doesn't drag."""
+    blocks, icons = _touch_blocks(items), [e.rect for e in items if e.role == "image" and not e.in_alert]
+    views = sorted((e for e in items if e.role == "scroll" and not e.in_alert and e.y + 60 < bottom
+                    and e.y + e.height > top), key=lambda e: e.width * e.height, reverse=True)
+
+    def passive(x: float, y: float, view: Element) -> bool:
+        return (view.x <= x < view.x + view.width and view.y <= y < view.y + view.height
+                and 0 <= x < screen[0] and top <= y < bottom
+                and _clearance(x, y, blocks) >= DRAG_CLEAR and _clearance(x, y, icons) >= BLANK_CLEAR)
+    for v in views:
+        middle = v.x + v.width / 2
+        xs = sorted({min(max(v.x + DRAG_CLEAR + i * BLANK_GRID / 2, v.x), v.x + v.width - 1)
+                     for i in range(int(v.width // (BLANK_GRID / 2)) + 1)} | {middle}, key=lambda x: abs(x - middle))
+        y0 = max(v.y, top) + 20
+        while y0 + DRAG_MIN <= min(v.y + v.height, bottom - 10):
+            y1 = min(y0 + DRAG_LENGTH, bottom - 10, v.y + v.height - 1)
+            for x in xs:
+                if y1 - y0 >= DRAG_MIN and all(passive(x, y0 + (y1 - y0) * k / 8, v) for k in range(9)):
+                    return x, y0, x, y1
+            y0 += BLANK_GRID / 2
+    return None
+
+
 def blank_point(items: list[Element], screen: tuple[float, float], top: float,
                 bottom: float) -> tuple[float, float] | None:
     """A point to touch that does nothing but take focus away from a text field: between `top` and `bottom` (the
@@ -1968,21 +2023,12 @@ def blank_point(items: list[Element], screen: tuple[float, float], top: float,
     the free point of a coarse grid farthest from what takes a touch, images and the band's edges (floating
     buttons sit near edges and corners), else None. A scroll view doesn't count as one that takes a touch: its
     empty area does nothing, and one often fills the whole screen."""
-    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
-    # the text edit menu over a field (Select, Paste) lists its items as `menuitem`, with no action: a touch on one
-    # selects or pastes (blank_point picked "Select" on the phone 2026-11-11, both orientations)
-    blocks += [e.rect for e in items if e.role == "menuitem" and not e.in_alert]
-    blocks += [e.rect for e in items if e.type in COVERING_BARS]
-    blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+    blocks = _touch_blocks(items)
     icons = [e.rect for e in items if e.role == "image" and not e.in_alert]
 
     def free(x: float, y: float) -> bool:
         return (0 <= x < screen[0] and top <= y < bottom and not any(_holds(r, (x, y)) for r in blocks))
-
-    def clearance(x: float, y: float, rects: list[tuple[float, float, float, float]]) -> float:
-        """How far the point is from the nearest of `rects`."""
-        return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
-                    for r in rects), default=math.inf)
+    clearance = _clearance
     # a touch inside a scroll view closes the keyboard in React Native (keyboardShouldPersistTaps defaults to
     # "never"); one on a header outside it often does nothing (seen on the phone 2026-11-12: 4 s lost each time)
     scrolls = [e.rect for e in items if e.role == "scroll" and not e.in_alert]

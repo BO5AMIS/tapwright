@@ -32,6 +32,25 @@
 - `open_url` into Safari says when the link didn't show: Safari's address field shows another host, or Safari kept
   the page that was open (same tab, same page, same text). Before, it answered "opened" while Safari stayed on a video.
   A redirect to another host (a short link) gets no note.
+- The keyboard reflex's short drag runs only on passive content, every point of it at least 12 pt from anything that
+  takes a touch; with no such place it doesn't drag. When its touch opened another screen (X's photo picker took the
+  keyboard's place, and the agent's Post, Cancel or point tap then landed on the picker), the call stops with `stale`
+  and nothing else is touched. When nothing closed the keyboard, the answer says "couldn't close the keyboard first".
+- A label matches as the list shows it: a no-break or narrow no-break space (iOS writes one before "PM") or a run of
+  spaces counts as one plain space. A photo picker cell listed as "Video, twelve seconds, 17 November, 7:19 PM" was
+  `not_found` by that label.
+- `type_text` without a target types only into the app the agent's last touch or `open_app` went to. When another app
+  came to the front since (Safari, after a tap in Files), it answers `stale` and types nothing; a `look` clears it.
+  `open_app` also drops the field typed into last.
+- `type_text`'s answer gives a field's value only as a read after the typing shows it. After a submit Safari's address
+  field is another element, and the answer gave the address from before the submit as if it were the new one.
+- Forgetting a reflex or a place always wins over a map save under way: an edit no longer takes a forgotten reflex
+  that the save had written back into the file for one it wants (the flaky CI test on ubuntu, Python 3.10).
+- Notification Center as iOS 26 shows it is recognised: a notification in a `ListCell`, or the cover sheet's date on
+  the screen, proves it open (it has no title and no scroll view there). A banner or the home screen still proves
+  nothing.
+- The agent guide and the skill say how to close the keyboard with the tools there are, and that X disables the
+  composer's Photo library button while the text holds a link (attach media first, then add the link).
 
 ## 1.7.7 (2026-11-17)
 
