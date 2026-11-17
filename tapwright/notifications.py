@@ -333,8 +333,9 @@ def is_center(source: str) -> bool:
         if node.get("name") == COVER_DATE:
             # the cover sheet's date, drawn on the screen (a frame left off screen or with no size proves nothing)
             x, y, w, h = _rect(node)
-            if (w > 0 and h > 0 and 0 <= y < (screen[3] or float("inf")) and x + w > 0
-                    and x < (screen[2] or float("inf"))):  # (past the right edge too: CodeRabbit, PR #18)
+            # (any part of it on the screen: past the right edge, or above the top, proves nothing; CodeRabbit, PR #18)
+            if (w > 0 and h > 0 and y + h > 0 and y < (screen[3] or float("inf")) and x + w > 0
+                    and x < (screen[2] or float("inf"))):
                 return True
     parents = {c: up for up in root.iter() for c in up}
     for node in root.iter():
