@@ -200,6 +200,11 @@ an agent can share one phone. Agent tools start it by themselves. To watch:
 tapwright view      # opens the live view in your browser
 ```
 
+To keep real-time footage of the live view: `tapwright record-video --out demo.mp4 [--seconds N] [--fps N]` writes an
+H.264 MP4 (`pip install "tapwright[video]"`) and `demo.frames.json`, each frame's capture time on the action log's
+clock. A recording shows whatever is on the phone's screen, so record test data
+([docs/setup.md](docs/setup.md#recording-the-live-view-as-a-video)).
+
 <p align="center"><img src="https://raw.githubusercontent.com/bo5amis/tapwright/main/docs/media/still-prompt.png" width="720" alt="The live view: the phone's screen in a drawn phone, iOS asking whether Wayfare may send notifications, and the agent's step captioned under the phone."></p>
 
 You see the phone's screen live and can drive it: click to tap, hold to long-press, drag to

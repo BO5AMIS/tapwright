@@ -398,6 +398,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if problem is not None:
             return problem
 
+        # `?for=recording` (tapwright record-video): no frame from while Notification Center was open for a read
+        hide = request.query_params.get("for") == "recording"
+
         async def parts():
             async with daemon.pump.watching() as hub:
                 seq, sent = 0, None
@@ -409,6 +412,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                             return
                         continue
                     seq = frame.seq
+                    if hide and daemon.center_hidden(frame.at):
+                        continue
                     picture = getattr(frame, "picture", None)
                     if picture is not None and picture is sent:
                         continue  # a still screen's picture, published again for the settle: the viewer has it
@@ -426,8 +431,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")
                     yield head.encode() + jpeg + b"\r\n--frame\r\n"
 
-        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame",
-                                 headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store"}
+        if hide:
+            headers["X-Hides"] = "notification-center"  # the recorder refuses a daemon that doesn't say this
+        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame", headers=headers)
 
     async def ws_allowed(websocket: WebSocket) -> bool:
         """The checks both WebSockets share: token (header or same-origin cookie), Host and Origin."""

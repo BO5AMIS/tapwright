@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.7 (unreleased)
+
+- New: `tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]` records the live view as an H.264 MP4 in real
+  time (needs `pip install "tapwright[video]"`), until Ctrl+C or `--seconds`, and finishes the file either way. Frames
+  keep their capture times (variable frame rate), so a still screen lasts as long as it did. `FILE.frames.json` gives
+  each frame's `seq`, capture time in epoch ms and in the action log's ISO form, and its place in the video, so a frame
+  lines up with `~/.tapwright/log/actions-*.jsonl`. A recording shows whatever is on the phone's screen: record test data.
+- The recording leaves out Notification Center: `GET /stream?for=recording` sends no frame from while a notification
+  read had it open (the live view itself is unchanged), and says so in an `X-Hides` header; the command refuses an
+  older `tapwright serve`. It is a command only: no new agent tool.
+
 ## 1.7.6 (2026-11-17)
 
 - A call whose target isn't an object (`"target": "Workouts"`) is refused as `bad_params` again, naming the target
