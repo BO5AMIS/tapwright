@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from collections.abc import Callable
 
 from . import notifications as notes_lib, otp as otplib, ui
@@ -74,13 +75,22 @@ class CenterTools:
         """Closed (or its app opened): the span ends CENTER_HIDE_AFTER_S later. Not shown closed: it stays open, so no
         frame is recorded. Either way the picture that is newest now never reaches a recording."""
         spans = self.__dict__.setdefault("_center_spans", [])
-        picture = getattr(self.hub.latest, "picture", None)
-        if picture is not None:
-            self.__dict__["_center_pictures"] = [picture]
+        if spans:  # every picture that arrived since the span began, and the one that is newest now, is excluded for good
+            start = spans[-1][0]
+            for arrived, frame in self.hub.recent():
+                if arrived >= start:
+                    self._exclude_picture(getattr(frame, "picture", None))
+        self._exclude_picture(getattr(self.hub.latest, "picture", None))
         if closed and spans and spans[-1][1] is None:
             spans[-1][1] = self.hub.mono() + CENTER_HIDE_AFTER_S
         cut = self.hub.mono() - 3600.0
         spans[:] = [s for s in spans if s[1] is None or s[1] >= cut]
+
+    def _exclude_picture(self, picture) -> None:
+        """A picture of Notification Center never reaches a recording, however often a feeder publishes it again and
+        whenever that is: the exclusion follows the picture itself (weakly: a picture nobody holds can't come back)."""
+        if picture is not None:
+            self.__dict__.setdefault("_center_pictures", weakref.WeakSet()).add(picture)
 
     def center_covers(self, mono: float) -> bool:
         """Was Notification Center possibly on the phone's screen at `mono` (the hub's monotonic seconds)?"""
@@ -95,9 +105,12 @@ class CenterTools:
         if arrived is None:
             return True
         picture = getattr(frame, "picture", None)
-        if picture is not None and any(picture is p for p in self.__dict__.get("_center_pictures", ())):
+        if picture is not None and picture in self.__dict__.get("_center_pictures", ()):
             return True
-        return self.center_covers(arrived)
+        if self.center_covers(arrived):
+            self._exclude_picture(picture)  # (a picture that came while it was open stays out when it comes again)
+            return True
+        return False
 
     # ---- the read ----
     async def _on_phone(self, fn):

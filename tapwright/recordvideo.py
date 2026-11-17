@@ -31,6 +31,7 @@ import os
 import queue
 import secrets
 import signal
+import socket
 import sys
 import threading
 import time
@@ -50,6 +51,7 @@ MAX_HEAD = 64 * 1024  # bytes: a part's header block is never this long
 MAX_PART = 64 * 1024 * 1024  # bytes: nor a picture
 QUEUE_MAX = 60  # parts waiting for the encoder; when it falls behind the oldest are dropped (and counted)
 HIDES = "notification-center"  # the daemon's X-Hides answer: it leaves out the frames of a Notification Center read
+SILENCE_LIMIT = 30.0  # seconds the line may give nothing, not even a keep-alive (every 5 s), before it counts as broken
 NO_FRAME_NOTE = 20.0  # seconds without a first frame before a note is printed (the phone may not be connected)
 TIME_BASE = Fraction(1, 1000)  # video time is in ms, as the stream's times are
 
@@ -132,26 +134,26 @@ class Recorder:
     the last one waits, a newer one replaces it, and it is written when the gap has passed (or at the end), so the final
     picture of a burst is never lost."""
 
-    def __init__(self, writer, start_ms: int, fps: int | None = None, sink: Callable[[dict], None] | None = None) -> None:
+    def __init__(self, writer, start_ms: int, fps: int | None = None, sink: Callable[[dict], None] | None = None,
+                 start_mono_ms: int | None = None) -> None:
         self.writer, self.start_ms, self.sink = writer, start_ms, sink
+        self.start_mono_ms = start_mono_ms  # this computer's monotonic clock (ms) when the recording began
         self.gap = 1000 / fps if fps else 0.0
         self.entries: list[dict] = []
         self.count = 0
         self.last_ms: int | None = None
         self.pending: tuple[Part, int, int] | None = None  # part, video ms it would have, wall ms
-        self.anchor: tuple[int, int] | None = None  # (wall ms, monotonic ms) of the first part that has both
         self.dropped = 0  # frames left out by --fps
         self.unreadable = 0  # parts that were not a picture
         self.hidden_seen = False  # the daemon has said it left frames out
 
-    def _wall_ms(self, part: Part, now_ms: int) -> int:
-        """When the part's picture came, on the wall clock stepped along the monotonic one, so a step of the wall clock
-        after the first frame doesn't reach video time."""
-        if part.mono_ms is not None and part.at is not None:
-            if self.anchor is None:
-                self.anchor = (part.at, part.mono_ms)
-            return self.anchor[0] + (part.mono_ms - self.anchor[1])
-        return part.at if part.at is not None else now_ms
+    def _video_ms(self, part: Part, now_ms: int) -> int:
+        """Where the part's picture goes in the video, before the zero clamp. With the daemon's monotonic arrival it is
+        measured from the recording's own monotonic start, so no step of the wall clock, before the first picture or
+        after, reaches video time; without it, from the wall clock."""
+        if part.mono_ms is not None and self.start_mono_ms is not None:
+            return part.mono_ms - self.start_mono_ms
+        return (part.at if part.at is not None else now_ms) - self.start_ms
 
     def add(self, part: Part, now_ms: int) -> None:
         if part.hidden:
@@ -160,19 +162,18 @@ class Recorder:
             return
         if part.coverage not in (None, "screen"):
             return  # only the screen's own pictures
-        wall = self._wall_ms(part, now_ms)
-        vms = max(0, wall - self.start_ms)  # a picture that was already there when the recording began starts it
+        vms = max(0, self._video_ms(part, now_ms))  # a picture that was already there when the recording began starts it
         if self.last_ms is not None:
             vms = max(vms, self.last_ms + 1)  # times only go forward
             if self.gap and vms < self.last_ms + self.gap:
                 if self.pending is not None:
                     self.dropped += 1
-                self.pending = (part, vms, wall)
+                self.pending = (part, vms, 0)
                 return
         if self.pending is not None:
             self.dropped += 1  # this one is newer and a whole gap after the last
             self.pending = None
-        self._write(part, part.at if part.at is not None else wall, vms)
+        self._write(part, part.at if part.at is not None else self.start_ms + vms, vms)
 
     def _due(self) -> int:
         assert self.last_ms is not None
@@ -386,11 +387,13 @@ class Source:
     """The daemon's stream, read by a thread that puts the parts in a bounded queue: when the encoder falls behind, the
     oldest are dropped and counted (None at the end, an exception when the line broke)."""
 
-    def __init__(self, conn: http.client.HTTPConnection, reply: http.client.HTTPResponse) -> None:
-        self.conn, self.reply = conn, reply
+    def __init__(self, conn: http.client.HTTPConnection, reply: http.client.HTTPResponse,
+                 sock: socket.socket | None = None) -> None:
+        self.conn, self.reply, self.sock = conn, reply, sock  # (conn.sock is None once a response took the line over)
         self.items: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
         self.dropped = 0
         self._stop = threading.Event()
+        self.last_data = time.monotonic()  # when the line last gave anything, a keep-alive too
         self._thread = threading.Thread(target=self._run, name="record-video-reader", daemon=True)
 
     def start(self) -> None:
@@ -413,12 +416,10 @@ class Source:
         parser = StreamParser()
         try:
             while not self._stop.is_set():
-                try:
-                    chunk = self.reply.read1(65536)
-                except TimeoutError:  # nothing came for a while: a still screen is not a broken line
-                    continue
+                chunk = self.reply.read1(65536)  # (no socket timeout: see connect)
                 if not chunk:
                     break
+                self.last_data = time.monotonic()
                 for part in parser.feed(chunk):
                     self._put(part)
         except Exception as e:  # noqa: BLE001 - handed to the reader of the queue
@@ -428,7 +429,19 @@ class Source:
         self._put(None)
 
     def close(self) -> None:
+        """Stop reading, even a read that is blocked in the reader thread. A shutdown wakes it on Linux and macOS; on
+        Windows only really closing the socket does, and socket.close() waits while the response's reader still holds it
+        (hence the private _real_close)."""
         self._stop.set()
+        if self.sock is not None:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                getattr(self.sock, "_real_close", self.sock.close)()
+            except OSError:
+                pass
         try:
             self.conn.close()
         except Exception:  # noqa: BLE001
@@ -448,6 +461,7 @@ def connect(timeout: float = 10.0) -> Source:
         raise RuntimeError(str(e)) from None
     except (OSError, http.client.HTTPException) as e:
         raise RuntimeError(f"can't reach tapwright serve ({type(e).__name__}); start it with `tapwright serve`.") from None
+    sock = conn.sock  # (kept: a response that ends with the line closing takes it from the connection)
     try:
         conn.request("GET", "/stream?for=recording", headers={"Authorization": f"Bearer {info['token']}"})
         reply = conn.getresponse()
@@ -461,9 +475,12 @@ def connect(timeout: float = 10.0) -> Source:
         conn.close()
         raise RuntimeError("this tapwright serve can't leave Notification Center out of a recording (it is older): "
                            "stop it with `tapwright serve --stop` and start it again, then record")
-    if conn.sock is not None:
-        conn.sock.settimeout(30.0)
-    return Source(conn, reply)
+    if sock is not None:
+        # No read timeout. On Python 3.10 a buffered HTTP response whose read timed out can never be read again, so a
+        # timeout can't be used to poll: the daemon's keep-alives show the line is alive (Source.last_data, and the
+        # silence limit in run), and closing the line stops a read that is blocked.
+        sock.settimeout(None)
+    return Source(conn, reply, sock)
 
 
 # ---- the command ----
@@ -556,7 +573,7 @@ def run(out: str, seconds: float | None = None, fps: int | None = None, *,
         except OSError as e:
             print(f"tapwright record-video: can't start the files ({_why(e)}); nothing was saved", file=sys.stderr)
             return 1
-        recorder = Recorder(writer, started, fps, sink=sidecar.add)
+        recorder = Recorder(writer, started, fps, sink=sidecar.add, start_mono_ms=round(started_mono * 1000))
         if on_main:  # Ctrl+C asks the loop to stop: it never lands inside the encoder, nor in the finishing
             previous = signal.signal(signal.SIGINT, lambda *_: stop.set())
         source.start()
@@ -577,6 +594,10 @@ def run(out: str, seconds: float | None = None, fps: int | None = None, *,
                     item = source.items.get(timeout=wait)
                 except queue.Empty:
                     recorder.tick(started + elapsed_ms())
+                    heard = getattr(source, "last_data", None)
+                    if heard is not None and time.monotonic() - heard > SILENCE_LIMIT:
+                        failure = TimeoutError("the live view's stream went silent")
+                        break
                     if not told_none and not recorder.count and mono() > first_note:
                         told_none = True
                         print("tapwright record-video: no picture yet (is the phone connected, and the screen shown?)",

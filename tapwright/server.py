@@ -412,7 +412,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
 
         async def parts():
             async with daemon.pump.watching() as hub:
-                seq, sent, told = 0, None, 0.0
+                seq, sent, told, last_out = 0, None, 0.0, time.monotonic()
                 yield b"--frame\r\n"  # each part then ends with the next boundary, so a browser shows it at once
                 while True:
                     frame = await hub.next_after(seq, timeout=wait)
@@ -420,17 +420,23 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                         if hub.closed:
                             return
                         if hide:
+                            last_out = time.monotonic()
                             yield keepalive(daemon.center_covers(hub.mono()))
                         continue
                     seq = frame.seq
                     if hide and daemon.recording_hides(hub, frame):
                         if time.monotonic() - told >= 1.0:
-                            told = time.monotonic()
+                            told = last_out = time.monotonic()
                             yield keepalive(True)
                         continue
                     picture = getattr(frame, "picture", None)
                     if picture is not None and picture is sent:
-                        continue  # a still screen's picture, published again for the settle: the viewer has it
+                        # a still screen's picture, published again for the settle: the viewer has it. A recorder still
+                        # needs to hear that the line is alive (the copies come faster than the idle wait ends)
+                        if hide and time.monotonic() - last_out >= RECORDING_KEEPALIVE:
+                            last_out = time.monotonic()
+                            yield keepalive(daemon.center_covers(hub.mono()))
+                        continue
                     sent = picture
                     w, h = daemon.session.screen
                     try:
@@ -446,6 +452,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                     head = (f"Content-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n"
                             f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\n{mono}X-Coverage: screen\r\n"
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")
+                    last_out = time.monotonic()
                     yield head.encode() + jpeg + b"\r\n--frame\r\n"
 
         headers = {"Cache-Control": "no-store"}

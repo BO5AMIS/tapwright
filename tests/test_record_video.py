@@ -343,7 +343,7 @@ def test_without_pyav_it_says_how_to_install_it(tmp_path, monkeypatch, capsys):
 class FakeDaemon:
     """A server that proves the token as tapwright serve does, and streams two parts."""
 
-    def __init__(self, hides: bool = True) -> None:
+    def __init__(self, hides: bool = True, hold: float = 0.0, late: bytes = b"") -> None:
         self.seen: list[tuple[str, str, str | None]] = []  # method, path, Authorization
         daemon = self
         pics = stream_bytes([(jpeg(), 1, int(time.time() * 1000)), (jpeg((10, 90, 10)), 2, int(time.time() * 1000) + 120)])
@@ -377,8 +377,16 @@ class FakeDaemon:
                 self.end_headers()
                 self.wfile.write(pics)
                 self.wfile.flush()
+                if hold:
+                    time.sleep(hold)  # a quiet screen
+                    try:
+                        self.wfile.write(late)
+                        self.wfile.flush()
+                    except OSError:
+                        pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -626,30 +634,6 @@ def test_L5_keep_alives_say_when_frames_are_being_left_out():
     assert not any(p.hidden for p in got)
 
 
-def test_M1_a_read_that_times_out_is_not_a_broken_line():
-    """Fails on a2eb644: a TimeoutError of the socket ended the recording."""
-    data = stream_bytes([(jpeg(), 1, 1000)])
-
-    class Reply:
-        def __init__(self):
-            self.script = [TimeoutError(), TimeoutError(), data, b""]
-
-        def read1(self, n):
-            item = self.script.pop(0)
-            if isinstance(item, BaseException):
-                raise item
-            return item
-
-    class Conn:
-        def close(self):
-            pass
-
-    source = recordvideo.Source(Conn(), Reply())
-    source.start()
-    first = source.items.get(timeout=5)
-    assert first.seq == 1 and source.items.get(timeout=5) is None
-
-
 def test_the_recorder_tells_the_user_when_frames_are_left_out(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(video, "available", lambda: True)
     parts_ = [Part(b"", None, None, None, keepalive=True, hidden=True), Part(b"ok", 1, 50, "screen")]
@@ -798,7 +782,7 @@ def test_L2_a_second_run_with_the_same_name_does_not_touch_the_first(tmp_path, m
 def test_L3_a_step_of_the_wall_clock_does_not_move_video_time():
     """Fails on a2eb644: after the wall clock stepped back every frame was one ms after the one before."""
     w = FakeWriter()
-    r = Recorder(w, start_ms=10_000)
+    r = Recorder(w, start_ms=10_000, start_mono_ms=5_000)
     spec = [(10_000, 5_000), (10_100, 5_100), (4_000, 7_000), (4_100, 7_100)]  # wall ms stepped back; monotonic ms
     for i, (at, mono_ms) in enumerate(spec):
         r.add(Part(b"j", i + 1, at, "screen", mono_ms), now_ms=at)
@@ -831,3 +815,151 @@ def test_L4_a_waiting_picture_is_written_at_the_end_not_a_gap_later():
         r.add(p, now_ms=p.at)
     r.finish(end_ms=0)  # never before the one it follows
     assert [t for _, t in w.written] == [0, 1]
+
+
+# ---- CodeRabbit, PR #17 ----
+def test_CR1_center_center_a_picture_stays_out_when_a_feeder_publishes_it_again():
+    """center_tool.py. Fails on e831a96: only the one picture that was newest at the end was remembered, so an earlier
+    picture of the read, published again after the margin, was recorded."""
+    app, d, now = app_and_daemon()
+    before, a, b = a_picture((7, 7, 7)), a_picture((1, 1, 1)), a_picture((2, 2, 2))
+    d.hub.publish_frame(before)  # on the screen before the read
+    now[0] += 1
+    d._center_begin()
+    now[0] += 0.1
+    d.hub.publish_frame(a)
+    now[0] += 0.1
+    d.hub.publish_frame(b)  # the newest at the end
+    d._center_end(True)
+    now[0] += 10.0
+    d.hub.publish_frame(a)  # the feeder sends the older picture of the read again
+    d.hub.close()
+    assert pictures(stream_parts(app, "/stream?for=recording")[0]) == []
+    assert d.recording_hides(d.hub, d.hub.latest)
+    now[0] += 1
+    again = d.hub.publish_frame(b)
+    assert d.recording_hides(d.hub, again)  # however often, whenever
+    again = d.hub.publish_frame(before)  # a picture from before the read is not Notification Center
+    assert not d.recording_hides(d.hub, again)
+    fresh = d.hub.publish_frame(a_picture((3, 3, 3)))  # a new picture after the margin is recorded
+    assert not d.recording_hides(d.hub, fresh)
+
+
+def test_CR1_a_picture_that_came_while_it_was_open_is_excluded_when_seen_hidden():
+    app, d, now = app_and_daemon()
+    shade = a_picture((5, 5, 5))
+    d._center_begin()
+    f = d.hub.publish_frame(shade)
+    assert d.recording_hides(d.hub, f)  # inside the span
+    d._center_end(False)
+    d._center_begin()
+    d._center_end(True)
+    now[0] += 20
+    assert d.recording_hides(d.hub, d.hub.publish_frame(shade))
+
+
+def test_CR2_a_clock_step_before_the_first_picture_does_not_stretch_the_video():
+    """recordvideo.py. Fails on e831a96: the first frame anchored on the wall clock, so +1 h gave video_ms 3,601,000
+    (and the signature had no monotonic start)."""
+    w = FakeWriter()
+    r = Recorder(w, start_ms=1_000_000, start_mono_ms=500_000)
+    hour = 3_600_000
+    r.add(Part(b"a", 1, 1_000_000 + hour + 50, "screen", 500_050), now_ms=1_000_000 + hour)  # the wall clock stepped +1 h
+    r.add(Part(b"b", 2, 1_000_000 + hour + 400, "screen", 500_400), now_ms=1_000_000 + hour)
+    r.add(Part(b"c", 3, 1_000_000 - 30, "screen", 500_900), now_ms=1_000_000)  # and back again
+    assert [t for _, t in w.written] == [50, 400, 900]
+    old = Recorder(FakeWriter(), start_ms=1_000_000, start_mono_ms=500_000)
+    old.add(Part(b"z", 1, 1_000_000, "screen", 499_000), now_ms=1_000_000)  # a picture from before the recording
+    assert old.writer.written[0][1] == 0  # the zero clamp stays
+
+
+def test_CR3_the_line_has_no_read_timeout_and_a_quiet_screen_is_not_a_break(monkeypatch):
+    """recordvideo.py. Fails on e831a96: connect() set a 30 s socket timeout, and on Python 3.10 a buffered response
+    whose read timed out can never be read again. The model below fails the same way: once a timeout fires, every
+    read after it raises."""
+    late = part_bytes(jpeg((3, 3, 3)), 3, int(time.time() * 1000) + 900)
+    fake = FakeDaemon(hold=1.0, late=late)
+    try:
+        monkeypatch.setattr(store, "read_serve_info", lambda: {"port": fake.port, "token": SECRET})
+        source = recordvideo.connect()
+        assert source.sock.gettimeout() is None
+        real, poisoned = source.reply.read1, [False]
+
+        def read1(n):
+            if poisoned[0]:
+                raise OSError("cannot read from timed out object")
+            if source.sock.gettimeout() is not None:  # a timeout would fire while the screen is quiet
+                time.sleep(0.3)
+                poisoned[0] = True
+                raise TimeoutError("timed out")
+            return real(n)
+
+        source.reply.read1 = read1
+        source.start()
+        seqs = []
+        while True:
+            item = source.items.get(timeout=10)
+            assert not isinstance(item, Exception) and item is not None
+            if item.jpeg:
+                seqs.append(item.seq)
+            if 3 in seqs:
+                break
+        assert seqs == [1, 2, 3]
+        source.close()
+    finally:
+        fake.stop()
+
+
+def test_CR3_stopping_interrupts_a_blocked_read(monkeypatch):
+    fake = FakeDaemon(hold=5.0)
+    try:
+        monkeypatch.setattr(store, "read_serve_info", lambda: {"port": fake.port, "token": SECRET})
+        source = recordvideo.connect()
+        source.start()
+        assert source.items.get(timeout=5).seq == 1
+        time.sleep(0.2)  # the reader is blocked in a read now
+        began = time.monotonic()
+        source.close()
+        source._thread.join(3)
+        assert not source._thread.is_alive() and time.monotonic() - began < 3
+    finally:
+        fake.stop()
+
+
+def test_CR3_a_line_that_gives_nothing_for_too_long_ends_the_recording_with_what_it_has(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(video, "available", lambda: True)
+    source = FakeSource([Part(b"a", 1, 5, "screen")], end=False)
+    source.last_data = time.monotonic() - recordvideo.SILENCE_LIMIT - 1
+    w = FakeWriter()
+    assert recordvideo.run(str(tmp_path / "q.mp4"), connect_fn=lambda: source, writer_factory=lambda p: w,
+                           clock=Now(0), mono=Now(0.0)) == 0
+    assert "went silent" in capsys.readouterr().err and w.committed and len(w.written) == 1
+
+
+def test_CR4_a_still_airplay_picture_that_is_sent_again_still_gets_keep_alives(monkeypatch):
+    """server.py. Fails on e831a96: the copies of a still picture (new seqs, the same picture) came faster than the idle
+    wait ended, the duplicate branch sent nothing, and the recorder starved."""
+    from tapwright import server
+    monkeypatch.setattr(server, "RECORDING_KEEPALIVE", 0.02)
+    app, d, now = app_and_daemon()
+    still = a_picture((120, 120, 120))
+    frames = [d.hub.publish_frame(still) for _ in range(6)]
+    queue_ = list(frames)
+
+    async def next_after(seq, timeout=None):
+        if not queue_:
+            d.hub.close()
+            return None
+        time.sleep(0.03)  # longer than the keep-alive interval, shorter than the idle wait
+        return queue_.pop(0)
+
+    d.hub.next_after = next_after
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert len(pictures(got)) == 1  # the copies are not sent again
+    assert len([p for p in got if p.keepalive]) >= 3  # but the line is kept alive
+    app, d, now = app_and_daemon()
+    frames = [d.hub.publish_frame(still) for _ in range(3)]
+    queue_ = list(frames)
+    d.hub.next_after = next_after
+    got, _ = stream_parts(app, "/stream")  # the live view's own stream is as it was
+    assert len(pictures(got)) == 1 and not [p for p in got if p.keepalive]
