@@ -1326,10 +1326,12 @@ def _plain(node: ET.Element) -> Element | None:
     if not worth or w <= 0 or h <= 0 or kind in ("Alert", "Keyboard"):
         return None
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
+    placed, raw = _placed(node)
     return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
                    loose.checked if loose else (value == "1") if role == "switch" else None,
                    ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, _has_focus(node, role), name,
-                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")), no_trait=loose is not None)
+                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")),
+                   no_trait=loose is not None, placed=placed, raw_rect=raw)  # (a hosted one keeps its mark: CodeRabbit, PR #18)
 
 
 def _offscreen(node: ET.Element, out: list[Element], over: Element | None = None) -> None:
@@ -1843,9 +1845,14 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
         x, y, w, h = _rect(n)
         return x + w / 2, y + h / 2
 
+    def chosen(n: ET.Element) -> Back:
+        # a button of a hosted view inside an ordinary bar: its frame isn't the screen's, never pressed by it
+        # (CodeRabbit, PR #18)
+        return Back(True, None, hosted=True) if n.get(PLACED_ATTR) else Back(True, centre(n))
+
     for n in buttons:
         if _text(n.get("name")) == "BackButton" or _text(n.get("label")).lower() == "back":
-            return Back(True, centre(n))
+            return chosen(n)
     # A Back button the app lays on the bar as a sibling (X's profile page): listed after the bar, wholly on it, not
     # scrolling content (_on_bar), and told by its own name or label only: never a left-most guess (an avatar)
     order = {n: i for i, n in enumerate(root.iter())}
@@ -1859,7 +1866,7 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     left.sort(key=lambda n: centre(n)[0])
     for n in left[:1]:
         if (_text(n.get("label")) or _text(n.get("name"))).lower() not in NOT_BACK:
-            return Back(True, centre(n))
+            return chosen(n)
     return Back(True, None)
 
 
@@ -1993,7 +2000,9 @@ def dismiss_drag(items: list[Element], screen: tuple[float, float], top: float,
     in X's reply composer one opened the photo picker (2026-11-17). Near the top of the biggest such view first, then
     across it and lower down; None when no such line fits, and the reflex doesn't drag."""
     blocks, icons = _touch_blocks(items), [e.rect for e in items if e.role == "image" and not e.in_alert]
-    views = sorted((e for e in items if e.role == "scroll" and not e.in_alert and e.y + 60 < bottom
+    # (a view another process draws is left out: the drag has no hit test, and an unknown one's frame isn't the
+    # screen's: CodeRabbit, PR #18)
+    views = sorted((e for e in items if e.role == "scroll" and not e.in_alert and not e.placed and e.y + 60 < bottom
                     and e.y + e.height > top), key=lambda e: e.width * e.height, reverse=True)
 
     def passive(x: float, y: float, view: Element) -> bool:
