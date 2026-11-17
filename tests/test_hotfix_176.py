@@ -40,7 +40,10 @@ def test_a_failing_log_line_never_replaces_the_refusal(monkeypatch):
         d = make()
         stop, task = await started(d)
 
+        called: list = []
+
         def broken(*a, **k):
+            called.append(a[0])
             raise TypeError("not serialisable")
         monkeypatch.setattr(d, "_log_action", broken)
         try:
@@ -48,6 +51,7 @@ def test_a_failing_log_line_never_replaces_the_refusal(monkeypatch):
             raise AssertionError("not refused")
         except Refused as e:
             assert e.code == "bad_params"
+        assert called == ["tap"]  # (the log was reached, failed, and the refusal still came through)
         await finish(stop, task)
     run(go)
 
@@ -81,3 +85,51 @@ def test_content_scrolled_under_the_bar_is_still_covered():
     tree = ui.read(_profile(content_button=True), (430.0, 932.0))
     follow = next(e for e in tree.items if e.identifier == "follow")
     assert any(b.kind == "NavigationBar" for b in follow.covered_by)
+
+
+def _bar_screen(children: str, bar: str = "NavigationBar") -> str:
+    return ('<AppiumAUT><XCUIElementTypeApplication type="XCUIElementTypeApplication" name="X" label="X" '
+            'bundleId="com.example.x" x="0" y="0" width="430" height="932">'
+            '<XCUIElementTypeWindow type="XCUIElementTypeWindow" x="0" y="0" width="430" height="932">'
+            f'<XCUIElementTypeOther type="XCUIElementTypeOther" x="0" y="0" width="430" height="932">'
+            + children.replace("BAR", f'<XCUIElementType{bar} type="XCUIElementType{bar}" name="bar" '
+                                      f'x="0" y="{59 if bar == "NavigationBar" else 820}" width="430" height="56"/>')
+            + '</XCUIElementTypeOther></XCUIElementTypeWindow></XCUIElementTypeApplication></AppiumAUT>')
+
+
+def _button(name: str, label: str, y: int = 67, x: int = 16) -> str:
+    return (f'<XCUIElementTypeButton type="XCUIElementTypeButton" name="{name}" label="{label}" x="{x}" y="{y}" '
+            f'width="40" height="40"/>')
+
+
+def test_a_button_laid_on_the_bar_that_isnt_back_is_never_taken_for_back():
+    """Opus review M1: X's home screen lays its avatar on the bar; with no Back there, back must say so."""
+    tree = ui.read(_bar_screen("BAR" + _button("ProfileAvatar", "Your profile")), (430.0, 932.0))
+    assert tree.back is not None and tree.back.bar and tree.back.point is None
+    avatar = next(e for e in tree.items if e.identifier == "ProfileAvatar")
+    assert not any(b.kind == "NavigationBar" for b in avatar.covered_by)  # (laid on the bar: tappable)
+
+
+def test_content_listed_before_a_see_through_bar_is_still_covered():
+    """Opus review M2: a map pin under a translucent bar isn't in a scroll view, but it comes before the bar."""
+    tree = ui.read(_bar_screen(_button("pin", "Pin") + "BAR"), (430.0, 932.0))
+    pin = next(e for e in tree.items if e.identifier == "pin")
+    assert any(b.kind == "NavigationBar" for b in pin.covered_by)
+    assert tree.back.point is None  # (a button under the bar is never its Back)
+
+
+def test_a_control_laid_on_a_toolbar_is_not_covered_by_it_and_one_under_it_is():
+    on = ui.read(_bar_screen("BAR" + _button("share", "Share", y=828), "Toolbar"), (430.0, 932.0))
+    under = ui.read(_bar_screen(_button("share", "Share", y=828) + "BAR", "Toolbar"), (430.0, 932.0))
+    assert not next(e for e in on.items if e.identifier == "share").covered_by
+    assert any(b.kind == "Toolbar" for b in next(e for e in under.items if e.identifier == "share").covered_by)
+
+
+def test_a_log_entry_that_isnt_json_is_skipped_never_raised(tmp_path):
+    from tapwright.actionlog import ActionLog
+    said: list = []
+    log = ActionLog(tmp_path / "log", report=said.append)
+    log.write({"tool": "tap", "target": {"index": str.index}})  # (as 1.7.5 built it for a string target)
+    assert said and "skipped" in said[0]
+    log.write({"tool": "tap", "ok": True})
+    assert any(p.read_text("utf-8") for p in (tmp_path / "log").glob("*.jsonl"))
