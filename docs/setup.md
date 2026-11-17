@@ -232,6 +232,45 @@ tapwright serve --video
 - While the screen is still, the phone sends nothing. Under constant animation mirroring
   costs the phone about two thirds of one CPU core.
 
+### Recording the live view as a video
+
+```sh
+pip install "tapwright[video]"
+tapwright record-video --out demo.mp4 --seconds 60
+```
+
+It records what the live view shows, in real time, until Ctrl+C or `--seconds`, and finishes the file either way.
+It prints the file, its length and the number of frames. `tapwright serve` must be running (an agent's tool or
+`tapwright view` starts it); the command never starts it, and needs no token from you.
+
+- Options: `--out FILE.mp4` (required; the file must not exist), `--seconds N` (default: until Ctrl+C), `--fps N`
+  (the most frames written a second, 1 to 60; default: every frame the live view sends, about 15 a second while the
+  screen moves; a still screen sends few or none, and with the AirPlay `--video` feed none). If a burst is cut by
+  `--fps`, its last picture is kept and lasts until the next one. If encoding falls behind, the oldest waiting frames
+  are dropped (the command says how many) and the rest keep their real times.
+- Timing: variable frame rate. Each picture is shown from the moment it was captured, so a still screen lasts as long
+  as it really did and the last picture is held until you stop. Video time follows a clock a change of the computer's
+  clock can't move. The picture's size is the first one's (full
+  resolution, cut to even numbers); a rotated screen is fitted into it on black.
+- `demo.frames.json` lists every frame: `seq`, `captured_ms` (epoch ms on this computer's clock), `captured_at` (the same
+  moment as the action log writes it, `2026-11-17T15:23:31.916Z`) and `video_ms` (where it is in the video). The
+  action log `~/.tapwright/log/actions-*.jsonl` uses the same clock, so a tap's `t` gives its place in the video:
+  `video_ms` is its `t` minus the sidecar's `started_at`, or find the nearest frame by `captured_at`. A frame that was already on the screen
+  when you started is at `video_ms` 0, with its real capture time.
+- Ctrl+C is safe at any moment: the command finishes the file, with the frames still waiting. The video and
+  `demo.frames.json` appear together, or not at all: if the file can't be finished (the disk is full) both are deleted
+  and it says so; if an error cuts the recording short, what was recorded is saved and the error is said.
+- Without PyAV the command stops with `pip install "tapwright[video]"` and records nothing (there is no fallback file).
+- Privacy: **a recording shows whatever is on the phone's screen**: notifications, other apps, anything. Record test
+  data, and look at the file before you share it. Only Tapwright's own reads of Notification Center (the
+  `notifications` tool and notification triggers) are left out: a person or an agent who swipes it down by hand is
+  recorded. The recording fails closed: from before the read until 3 seconds after its close was confirmed (or, when
+  closing it could not be shown to work, until the next read closes it), it gets no frame, and none of a picture that
+  was on screen at the end of the read; the video holds the last picture from before, and the command says
+  "leaving frames out". It refuses to run against an older `tapwright serve` that can't do this (stop it with
+  `tapwright serve --stop`). The token is read from the daemon's address file, goes only to a process that proved it
+  holds it, and is never printed or written into the video or the sidecar.
+
 ## Troubleshooting
 
 | Symptom | Fix |

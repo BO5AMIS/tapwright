@@ -16,6 +16,9 @@
                      browser, the agent tools and an HTTP API. Agent tools start it by
                      themselves; it stops after 30 minutes unused (--keep-alive: never)
   tapwright view     open the live view in your browser (starts the daemon if needed)
+  tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]
+                     record the live view as an H.264 MP4 in real time, with FILE.frames.json (each frame's
+                     capture time, on the action log's clock); needs `pip install "tapwright[video]"`
   tapwright report [--since TIME] [--client ID]
                      where an agent's calls went, from the action log: calls per tool, failures,
                      and waste to cut (the agent tool session_report answers the same)
@@ -1040,6 +1043,14 @@ def main() -> int:
     sub.add_parser("call", add_help=False,
                    help="run one tool in the running daemon and print its answer (standard library only: "
                         "tapwright call --help)")
+    p = sub.add_parser("record-video", help="record the live view as an MP4 in real time, with each frame's time "
+                                            "(needs tapwright[video]; it shows whatever is on the phone's screen)")
+    p.add_argument("--out", required=True, metavar="FILE.mp4", help="the video to write (it must not exist yet); "
+                   "FILE.frames.json is written next to it")
+    p.add_argument("--seconds", type=float, metavar="N", help="stop after N seconds (default: until Ctrl+C)")
+    p.add_argument("--fps", type=int, metavar="N",
+                   help="write at most N frames a second (default: every frame the live view sends, about 15 while "
+                        "the screen moves). The video keeps real time either way")
     p = sub.add_parser("report",help="where an agent's calls went, from the action log (no phone needed)")
     p.add_argument("--since", metavar="TIME",
                    help="epoch ms, an ISO time or how long ago (30m, 2h, 1d); default: the start of the agent's session")
@@ -1140,6 +1151,9 @@ def main() -> int:
         return view()
     if a.cmd == "report":
         return report(a)
+    if a.cmd == "record-video":
+        from . import recordvideo
+        return recordvideo.main(a)
     if a.cmd == "grants":
         from . import grantscmd
         if a.action == "unlock":

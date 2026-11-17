@@ -11,6 +11,12 @@ Privacy (decided for 1.7, W134):
   while it is open, no picture in any answer of this tool, and the caption says only `Read notifications`. Every answer
   says Notification Center was on screen. A person who doesn't want that pauses the live view (`paused`), and nothing
   is read; a person or an agent using the phone makes the trigger's check wait.
+- A video recording of the live view (`tapwright record-video`, 1.7.7) leaves those moments out, failing closed: the
+  daemon notes, on the hub's monotonic clock, when Notification Center may be open (`_center_spans`: from before the
+  swipe until the close is shown to have worked, plus CENTER_HIDE_AFTER_S for late and re-sent frames), and
+  `GET /stream?for=recording` sends no frame that arrived inside one, none whose arrival it can't tell, and never the
+  picture that was newest when the span ended (a feeder that sends it again). The recording holds the last picture
+  from before instead.
 - A one-time code is never shown: every code a source app's matching notification holds joins the redactor the moment it
   is read, before any text is made, so the `notifications` tool shows `<one-time code>` too.
 """
@@ -18,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from collections.abc import Callable
 
 from . import notifications as notes_lib, otp as otplib, ui
@@ -29,6 +36,8 @@ CENTER_PULL = 0.6  # how far down the swipe goes, in screen heights
 CENTER_SWIPE_MS = 300
 CENTER_OPEN_WAIT = 0.6  # seconds for Notification Center to come down before its tree is read
 CENTER_CLOSE_WAIT = 0.4  # seconds for it to go up again before the app in front is asked
+CENTER_HIDE_AFTER_S = 3.0  # a recording leaves out frames this long after Notification Center's close was confirmed: it
+# slides up, WebDriverAgent's frames queue on a slow link, and AirPlay sends pictures again
 OPEN_WAIT = 1.0  # seconds for an opened notification's app to come to the front
 FIELD_MARGIN = 5.0  # seconds: a code field this daemon didn't see counts from 2 minutes ago less this (the read's own time)
 NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a second while it was read (the live view "
@@ -55,6 +64,53 @@ class CenterTools:
         # the same strict test as typing's (otp_target): a one-line field that says code by its own words, never an
         # input whose typed text says "code" (Codex, PR #12 cycle 1, M3)
         self.code_fields.seen(app, any(notes_lib.otp_target(e) for e in tree.items))
+
+    # ---- when Notification Center may be on screen (a recording of the live view leaves those frames out) ----
+    def _center_begin(self) -> None:
+        spans = self.__dict__.setdefault("_center_spans", [])
+        if not spans or spans[-1][1] is not None:  # (a span still open from a close that failed goes on)
+            spans.append([self.hub.mono(), None])
+
+    def _center_end(self, closed: bool) -> None:
+        """Closed (or its app opened): the span ends CENTER_HIDE_AFTER_S later. Not shown closed: it stays open, so no
+        frame is recorded. Either way the picture that is newest now never reaches a recording."""
+        spans = self.__dict__.setdefault("_center_spans", [])
+        if spans:  # every picture that arrived since the span began, and the one that is newest now, is excluded for good
+            start = spans[-1][0]
+            for arrived, frame in self.hub.recent():
+                if arrived >= start:
+                    self._exclude_picture(getattr(frame, "picture", None))
+        self._exclude_picture(getattr(self.hub.latest, "picture", None))
+        if closed and spans and spans[-1][1] is None:
+            spans[-1][1] = self.hub.mono() + CENTER_HIDE_AFTER_S
+        cut = self.hub.mono() - 3600.0
+        spans[:] = [s for s in spans if s[1] is None or s[1] >= cut]
+
+    def _exclude_picture(self, picture) -> None:
+        """A picture of Notification Center never reaches a recording, however often a feeder publishes it again and
+        whenever that is: the exclusion follows the picture itself (weakly: a picture nobody holds can't come back)."""
+        if picture is not None:
+            self.__dict__.setdefault("_center_pictures", weakref.WeakSet()).add(picture)
+
+    def center_covers(self, mono: float) -> bool:
+        """Was Notification Center possibly on the phone's screen at `mono` (the hub's monotonic seconds)?"""
+        return any(start <= mono and (end is None or mono <= end)
+                   for start, end in self.__dict__.get("_center_spans", ()))
+
+    def recording_hides(self, hub, frame) -> bool:
+        """Must a recording of the live view leave `frame` out? Yes when it arrived while Notification Center may have
+        been open, when the hub can't say when it arrived, and when it is the picture that was newest at the end of a
+        read (a feeder sends a still picture again, with a new arrival time)."""
+        arrived = hub.arrival_of(frame.seq)
+        if arrived is None:
+            return True
+        picture = getattr(frame, "picture", None)
+        if picture is not None and picture in self.__dict__.get("_center_pictures", ()):
+            return True
+        if self.center_covers(arrived):
+            self._exclude_picture(picture)  # (a picture that came while it was open stays out when it comes again)
+            return True
+        return False
 
     # ---- the read ----
     async def _on_phone(self, fn):
@@ -91,6 +147,7 @@ class CenterTools:
         self.broadcast({"type": "action", "by": "agent", "kind": "notifications", "at": int(time.time() * 1000),
                         "ok": True, "caption": caption})
         opened: notes_lib.Notification | None = None
+        self._center_begin()
         try:
             # (inside the try: a cancelled call, or a swipe that raised after the gesture went out, still closes it)
             await s.swipe(w * CENTER_X, 1.0, w * CENTER_X, h * CENTER_PULL, duration_ms=CENTER_SWIPE_MS)
@@ -120,8 +177,13 @@ class CenterTools:
                                                f"Open {chosen.app} with open_app instead.")
                 opened = chosen
         finally:
-            if opened is None:
-                await self._close_center(before, home_ok)
+            shown_closed = False
+            try:
+                if opened is None:
+                    await self._close_center(before, home_ok)
+                shown_closed = True
+            finally:
+                self._center_end(shown_closed)
         return found, opened
 
     async def _same_notification(self, chosen: "notes_lib.Notification", n: int, names: dict[str, str],
