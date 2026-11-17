@@ -155,7 +155,20 @@ class Runner(V4Runner):
         if "/attribute/name" in route:
             self.requests.append((method, path, payload))
             return {"value": self.active_name}
+        if route.endswith(f"/element/{self.active}/rect"):  # (1.7.8: a clear is proven by the field's place)
+            self.requests.append((method, path, payload))
+            found = _named(self.tree, self.active_name)
+            if found is None:
+                raise DeviceError("WebDriverAgent: no such element")
+            x, y, w, h = found["r"]
+            return {"value": {"x": x, "y": y, "width": w, "height": h}}
         return await super().http(method, path, payload, timeout)
+
+
+def _named(n: dict, name: str) -> dict | None:
+    if n.get("n") == name:
+        return n
+    return next((found for c in n.get("c", ()) if (found := _named(c, name)) is not None), None)
 
 
 def _without_f(n: dict) -> dict:
