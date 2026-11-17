@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.7 (unreleased)
+## 1.7.7 (2026-11-17)
 
 - New: `tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]` records the live view as an H.264 MP4 in real
   time (needs `pip install "tapwright[video]"`), until Ctrl+C or `--seconds`, and finishes the file either way. Frames
@@ -15,6 +15,10 @@
   parts), a Ctrl+C never lands inside the encoder, queued frames are written on stop and the queue is bounded, an
   encoder that can't open for a file is skipped, and the video and its frame list appear together or not at all.
   It is a command only: no new agent tool.
+- Checked on an iPhone (USB, iOS 26): a 30 s recording at 1290x2796, 584 frames, decodes cleanly, and a Notification
+  Center read during it left a gap from before the swipe to 3 s after it.
+- Known limit: with the AirPlay video feed (`serve --video`), a still screen next to a Notification Center read stays
+  hidden, so a recording started just after one may begin with no picture until the screen changes.
 
 ## 1.7.6 (2026-11-17)
 
