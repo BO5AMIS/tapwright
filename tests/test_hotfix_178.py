@@ -283,3 +283,68 @@ def test_no_tap_refuses_stale_when_the_focus_moved_off_the_field(monkeypatch):
         asyncio.run(s.type_text("x", target=ui.Target(ref="e40"), no_tap=True))
     assert e.value.code == "stale"
     assert not any(p.endswith(("/tap", "/wda/keys", "/clear")) or "actions" in p for _, p, _ in phone.requests)
+
+
+# Bug 7: open_url while Safari shows a video kept the old tab and answered "opened".
+
+TAB = "TabDocument?IsLoadedUsingDesktopUserAgent=false&InReaderMode=false&UUID={uuid}&IsPrivate=false&IsPageLoaded=true"
+
+
+def _safari_tab(uuid: str, host: str, page: list | None = None) -> list:
+    import dataclasses
+    from fakes import button, el
+    address = dataclasses.replace(el("e35", "input", "Address", "TabBarItemTitle", rect=(145, 861, 140, 26)), value=host)
+    return [el("e20", "other", "", TAB.format(uuid=uuid), rect=(0, 0, 430, 932)),
+            *(page if page is not None else [button("e25", "Play", rect=(158, 411, 119, 60)),
+                                             el("e26", "text", "Elapsed: 52 seconds", rect=(8, 538, 36, 16))]),
+            address]
+
+
+async def _open_in_safari(before: list, after: list, url: str) -> str:
+    from fakes import FakeSession
+    s = FakeSession()
+    s.app = ("Safari", "com.apple.mobilesafari")
+    s.tree = before
+    d = make(s)
+    stop, task = await started(d)
+    try:
+        await d.run_tool("a", "look", {"screenshot": False})
+        s.tree = after
+        return (await d.run_tool("a", "open_url", {"url": url}))["text"]
+    finally:
+        await finish(stop, task)
+
+
+def test_open_url_says_when_safari_kept_the_open_page():
+    async def go():
+        page = _safari_tab("9A3F", "192.168.100.67")
+        text = await _open_in_safari(page, list(page), "http://192.168.100.67:19005/index.html?x=2")
+        assert text.startswith("opened ") and "Note: Safari kept the open page; the link may not have loaded." in text
+    run(go)
+
+
+def test_open_url_says_when_safari_shows_another_host():
+    async def go():
+        from fakes import el
+        before = _safari_tab("9A3F", "192.168.100.148")
+        after = _safari_tab("9A3F", "192.168.100.148", [el("e30", "text", "Elapsed: 53 seconds", rect=(8, 538, 36, 16))])
+        text = await _open_in_safari(before, after, "http://192.168.100.67:19005/index.html")
+        assert "Note: Safari shows 192.168.100.148, not 192.168.100.67; the link may not have loaded." in text
+    run(go)
+
+
+@pytest.mark.parametrize("change", ["new tab", "new page", "www"])
+def test_open_url_that_loaded_has_no_note(change):
+    async def go():
+        from fakes import el
+        before = _safari_tab("9A3F", "192.168.100.67")
+        if change == "new tab":
+            after, url = _safari_tab("F1E5", "192.168.100.67"), "http://192.168.100.67:19005/index.html"
+        elif change == "new page":
+            after = _safari_tab("9A3F", "192.168.100.67", [el("e40", "link", "Download video", rect=(20, 200, 200, 40))])
+            url = "http://192.168.100.67:19005/index.html"
+        else:
+            after, url = _safari_tab("F1E5", "example.com"), "https://www.example.com/"
+        text = await _open_in_safari(before, after, url)
+        assert "may not have loaded" not in text
+    run(go)

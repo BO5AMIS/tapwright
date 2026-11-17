@@ -15,6 +15,8 @@
   try the focusing tap again and the field didn't survive the new read, the answer is `stale`, not `not_found`.
 - The field that has the keyboard's focus is typed into even when the keyboard's accessory area is drawn over it
   (Safari's address field). No tap is made on it; if the focus has moved meanwhile, the answer is `stale`.
+- `open_url` into Safari says when the link didn't show: Safari's address field shows another host, or Safari kept
+  the page that was open (same tab, same page). Before, it answered "opened" while Safari stayed on a video.
 
 ## 1.7.6 (2026-11-17)
 

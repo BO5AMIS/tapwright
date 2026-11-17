@@ -18,6 +18,7 @@ import re
 import secrets
 import time
 import unicodedata
+import urllib.parse
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, nullcontext
@@ -131,6 +132,46 @@ _RESUME: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_resume
 _DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
 # what the double tap found changed under its second touch (1.13.1, item 6), for the journey's stress line
 _DOUBLE_CHANGED: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("tapwright_double_changed", default=None)
+
+
+SAFARI = "com.apple.mobilesafari"
+SAFARI_ADDRESS = ("TabBarItemTitle", "URL")  # the identifiers of Safari's address field (iOS 26's capsule bar; older bars)
+URL_NOT_LOADED = ("Safari {shows}; the link may not have loaded. Type it into the address bar (type_text with "
+                  "submit: true).")
+
+
+def _safari_page(items: list) -> tuple[str | None, str | None, frozenset]:
+    """Safari's address field's text, its open tab (TabDocument's UUID), and what the page shows (each element's role,
+    identifier and label; no values, which a playing video changes by itself)."""
+    address = next((e.value for e in items if e.role == "input" and e.identifier in SAFARI_ADDRESS
+                    and e.value and e.value != e.placeholder), None)
+    tab = next((m.group(1) for e in items if e.identifier.startswith("TabDocument?")
+                and (m := re.search(r"[?&]UUID=([^&]+)", e.identifier))), None)
+    page = frozenset((e.role, e.identifier, e.label) for e in items
+                     if not e.identifier.startswith(("TabDocument?", "SafariWindow?")) and e.role not in ("text", "slider"))
+    return address, tab, page
+
+
+def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | None", unchanged: bool) -> str | None:
+    """open_url into Safari: a note when Safari doesn't show the link (1.7.8, bug 7: with a video open, Safari kept its
+    tab and the call said "opened"). Its address field must show the link's host; with the host already open, the tab
+    must have changed or the page with it. None when it shows, or when it can't be told (another app, no address)."""
+    url = str(args.get("url") or "")
+    host = (urllib.parse.urlsplit(url).hostname or "") if url.lower().startswith(("http://", "https://")) else ""
+    if not host or (app or (None, None))[1] != SAFARI:
+        return None
+    address, tab, page = _safari_page(items)
+    if address is None:
+        return None
+    if host.lower().removeprefix("www.") not in address.lower():  # (Safari leaves www. out)
+        return URL_NOT_LOADED.format(shows=f"shows {address}, not {host}")
+    before, before_app = box.get("url_before") or ([], None)
+    if before_app != SAFARI:
+        return None
+    _, tab_before, page_before = _safari_page(before)
+    if unchanged or (tab is not None and tab == tab_before and page == page_before):
+        return URL_NOT_LOADED.format(shows="kept the open page")
+    return None
 
 
 def _same_control(a: ui.Element, b: ui.Element) -> bool:
@@ -3745,6 +3786,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from
                 if aimed_at is not None and aimed_at[1] is not None and aimed_at[0] is not None and aimed_at[0].kind != "point":
                     touched.append((aimed_at[1], aimed_at[2]))
+            if name == "open_url":  # (1.7.8, bug 7) what Safari showed before, to tell whether the link loaded
+                box["url_before"] = (list(s.items), (view.app or (None, None))[1])
             box["back"] = getattr(getattr(s, "last_tree", None), "back", None)  # what `back` would press, before the touch
             box["title_before"] = _title_of(getattr(s, "last_tree", None))  # the title the screen showed before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
@@ -3934,6 +3977,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 notes = [*notes, NOTE_HEALTH]
             elif box.get("hint"):
                 notes = [*notes, NOTE_DELIVERED.format(touch=touch_name(name), seconds=time.monotonic() - box["began"], hint=box["hint"])]
+            if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=True)):
+                notes = [*notes, said]
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -3964,6 +4009,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                        alike_fields[0] if len(alike_fields) == 1 else None)  # renumbered in a first full list
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
+        if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=False)):
+            answer = {**answer, "text": f"{answer['text']}\nNote: {said}"}
         taken = await self._taken_away(view, box.get("app"), read=self.session.app)
         self._recheck_later(client_id, box.get("app"), taken)
         if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
