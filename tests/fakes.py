@@ -551,7 +551,8 @@ class FakeSession:
         self._maybe_taken(hit.center)
         return f"Tapped {hit.line(actions=False)}."
 
-    async def type_text(self, text, replace=False, submit=False, target=None, at=None):
+    async def type_text(self, text, replace=False, submit=False, target=None, at=None, no_tap=False):
+        self.no_tap = no_tap  # (1.7.8) the daemon said the field has focus and no focusing tap may be made
         if target is not None:
             hit = ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
             self.last_point = at or (hit if isinstance(hit, tuple) else hit.center)  # where the focusing tap went

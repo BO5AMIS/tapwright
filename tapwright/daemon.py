@@ -5351,12 +5351,21 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if (typed_secure := _TYPED_SECURE.get()) is not None:
             typed_secure.append(bool(field.secure))  # the field this call types into, for a recording
         forced, at = "", None
+        # 1.7.8 (bug 6): a point is where the agent saw the field, and the focusing tap goes there, never to the field's
+        # centre (X's composer: its centre was under the app's floating toolbar, and the tap opened the GIF picker)
+        point = target.point if target is not None and target.point is not None else None
+        # 1.7.8 (bug 5): the runner says this field has the keyboard's focus, so no tap is made (Session types into it
+        # as it is): whatever is drawn over it (the keyboard's accessory area, over Safari's address field) is no reason
+        # to refuse. Session is told not to tap: if the focus moved meanwhile, it refuses instead.
+        no_tap = bool(field.focused) and self.session.tw_version >= 5
         if a.get("force"):
             forced = self._forced(view, field)
+            at = point
         else:
             self._guard(view, field)
             # the focusing tap's hit test (Codex, PR #12 cycle 3, M2): typing isn't policed (§11.1), the touch is checked
-            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=self._touch_point)
+            aim = None if no_tap else self._typing_aim(point) if point is not None else self._touch_point
+            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=aim)
             field = checked if checked is not None else field
             at = at or field.center  # an explicit checked point: Session must not choose its right-edge shortcut
         active = _ACCOUNT.get()
@@ -5375,11 +5384,21 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
         aimed = [at]
 
-        async def checked_again() -> None:
+        async def checked_again(reread: bool = False) -> None:
             # A code lookup or keyboard dismissal may have changed the field's visible geometry.
+            now = next((e for e in self.session.items if field.ref and e.ref == field.ref), None)  # (as listed now)
+            if now is None and reread:
+                # the field didn't survive the new read (X's composer lays itself out again and again while the
+                # keyboard is up): its ref names nothing now, and its old place proves nothing (1.7.8, bug 6)
+                raise Refused("stale", f"{field.line(actions=False)} moved as the keyboard closed; look again. "
+                                       "Nothing was typed.")
+            now = now or field
+            if point is not None and not ui._holds(now.rect, point):
+                raise Refused("stale", f"{now.line(actions=False)} is no longer under ({round(point[0])}, "
+                                       f"{round(point[1])}); look again. Nothing was typed.")
             if not a.get("force"):
-                now = next((e for e in self.session.items if field.ref and e.ref == field.ref), field)  # (as listed now)
-                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=self._touch_point)
+                aim = self._typing_aim(point) if point is not None else self._touch_point
+                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=aim)
                 aimed[0] = aimed[0] or now.center
         if using is not None and (using.kind == accountlib.CARD or using.otp_app is not None):
             await checked_again()
@@ -5387,8 +5406,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._touching(field)
 
         async def typed() -> None:
+            more = {"no_tap": True} if no_tap else {}
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
-                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0])
+                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0],
+                                         **more)
         try:
             await typed()
         except Refused as e:
@@ -5397,7 +5418,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if not (view.read_keyboard and "didn't take focus" in str(e)):
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
-            await checked_again()
+            await checked_again(reread=True)
             await typed()
         view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
         done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
@@ -5409,6 +5430,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return done
 
 
+
+    def _typing_aim(self, point: tuple[float, float]) -> "Callable[[ui.Element], tuple[float, float]]":
+        """The focusing tap of a type_text at a point: at that point, unless a bar (the keyboard) is drawn over it."""
+        def aim(field: ui.Element) -> tuple[float, float]:
+            over = next((b for b in field.covered_by if b.kind in ui.COVERING_BARS and ui._holds(b.rect, point)), None)
+            if over is not None:
+                raise Refused("not_actionable", f"covered: ({round(point[0])}, {round(point[1])}) is under "
+                                                f"{over.line}; aim at the part of {field.line(actions=False)} that shows.")
+            return point
+        return aim
 
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""

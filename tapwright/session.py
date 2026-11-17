@@ -801,17 +801,19 @@ class Session:
         return True
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False,
-                        target: ui.Target | None = None, at: tuple[float, float] | None = None) -> str:
+                        target: ui.Target | None = None, at: tuple[float, float] | None = None,
+                        no_tap: bool = False) -> str:
         """Type into the target (tapped first to focus it, at `at` when given: the part of it that shows),
         or into whatever has focus. A point names the input under it, not a touch: with none there,
-        nothing is typed."""
+        nothing is typed. `no_tap`: the read said the target has the focus, and no focusing tap may be made (something
+        is drawn over it); if the focus is elsewhere now, nothing is done."""
         if target is not None and target.point is not None:
             field = ui.at_point(self.items, target.point, "input")
             if field is None:
                 x, y = target.point
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
-        element, hit, again, at_end = None, None, False, False
+        element, hit, again, at_end, what = None, None, False, False, "the field"
         # with the keyboard already up, the focusing tap moves focus from another field, and iOS may swap in that
         # field's keyboard as the keys go out: some went missing on the phone ("abc" landed as "a", 2026-11-11)
         switched = self.last_keyboard
@@ -832,6 +834,8 @@ class Session:
                 # have moved the focus since the read, and a clear and the keys would go to another field, a value
                 # of the vault with them (CodeRabbit, PR #12, session.py)
                 switched = False
+            elif no_tap:
+                raise Refused("stale", f"the focus moved off {what} since the last read; look again. Nothing was typed.")
             else:
                 element = None  # (a focused element that isn't the field is never typed into: focus it first)
                 # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
@@ -857,6 +861,12 @@ class Session:
             keys = "\b" * len(field.value) + keys  # the cursor is at the end of the old text: delete it
         elif replace:
             element = element or await self._active_element()
+            if element and field is not None and not field.identifier and not await self._is_field(element, field, strict=True):
+                # 1.7.8 (bug 6): the clear wipes a field's text, so the field it goes to is proven right before it. An
+                # identifier was compared exactly on the way here; without one, a label may be another field's too
+                # (two posts of a thread), so the field's place in a fresh read must be the element's
+                raise Refused("stale", f"the focused field isn't {what} any more; look again. Nothing was cleared "
+                                       "or typed.")
             if element:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
@@ -940,9 +950,11 @@ class Session:
                 return None
             await asyncio.sleep(FOCUS_POLL)
 
-    async def _is_field(self, element: str, field: ui.Element) -> bool:
+    async def _is_field(self, element: str, field: ui.Element, strict: bool = False) -> bool:
+        """Is WebDriverAgent's element the listed field: its identifier, else its label, else its place in a fresh read.
+        `strict`: a label alone doesn't prove it (two fields without identifiers may share a label): the place must."""
         wanted = field.identifier or field.label
-        if wanted:
+        if wanted and not (strict and not field.identifier):
             got = await self._attribute(element, "name") if field.identifier else None
             if got is None and not field.identifier:
                 got = await self._attribute(element, "label")
@@ -951,7 +963,17 @@ class Session:
         now = await self._field_now(field)
         if now is None:
             return False
-        box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
+        try:
+            box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            if "stale" in str(e).lower():
+                # the element WebDriverAgent named a moment ago is gone (the app redrew its view: X's composer opened its
+                # GIF picker, 2026-11-17); nothing was typed. Was `internal` (1.7.8, bug 6)
+                raise Refused("stale", "the focused field went away while it was checked (the app redrew it); look "
+                                       "again. Nothing was typed.") from None
+            return False
         got_rect = tuple(box.get(k, float("inf")) for k in ("x", "y", "width", "height"))
         return all(abs(a - b) <= 2 for a, b in zip(got_rect, now))
 

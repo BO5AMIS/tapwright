@@ -5,6 +5,16 @@
 - While the app in front isn't answering, `close_app` closes it at once. Before, a reconnect attempt in the meantime
   made it answer `reconnecting: … look before acting` again and again (2 min 40 s with X). `press_button home` also
   gets through: it asks the runner for the home screen without a session, once, with a 10 s cap.
+- `type_text` at a point focuses the field at that point, with or without `force`. Before, it tapped the field's
+  centre, which in X's composer was under the app's floating toolbar, and the GIF picker opened. A point under the
+  keyboard is refused `covered`.
+- `type_text` with `replace` proves the field right before clearing it. A field without an identifier must be found at
+  its place in a fresh read, since another field (another post of a thread) may have the same label. Otherwise the
+  answer is `stale` and nothing is cleared or typed.
+- A field that goes away while its focus is checked answers `stale`, not `internal`. When the keyboard was closed to
+  try the focusing tap again and the field didn't survive the new read, the answer is `stale`, not `not_found`.
+- The field that has the keyboard's focus is typed into even when the keyboard's accessory area is drawn over it
+  (Safari's address field). No tap is made on it; if the focus has moved meanwhile, the answer is `stale`.
 
 ## 1.7.6 (2026-11-17)
 
