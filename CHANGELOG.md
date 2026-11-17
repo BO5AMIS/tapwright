@@ -65,6 +65,14 @@
   under the point that wasn't there when the agent aimed (the reflex's drag scrolled it there), the answer is `stale`
   and nothing else is touched; `force` touches there anyway. The app a touch is meant for is the one the newest read
   before it names, and a cover-sheet date partly above the screen's top still proves Notification Center open.
+- A field the keyboard moves is typed into on the first try again (a chat composer with no label that rises with the
+  keyboard, a search field that narrows as Cancel comes in): when it is the only input on the screen before and after
+  the focusing tap and moved only up or down, it is the tapped one. With another input on the screen the proof by place
+  stands.
+- `back` with a sheet in front whose frames can't be placed is refused `covered` instead of touching beside it. While
+  such a frame is listed, the keyboard reflex uses only the keyboard's own dismiss key, and a target whose place can't
+  be told doesn't close the keyboard first. A refusal after a touch on the way (the reflex, a scroll to the target)
+  says "nothing else was touched". `look` and `open_url` set the app that typing without a target goes to.
 
 ## 1.7.7 (2026-11-17)
 

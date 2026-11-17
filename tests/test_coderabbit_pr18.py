@@ -156,9 +156,15 @@ def _title(y: float) -> str:
 LONG = "old text " * 10
 
 
+# (another input stays put: with a single input on the screen before and after, the last Opus review's M1 takes the
+# one there for the tapped one)
+SUBJECT = ('<XCUIElementTypeTextField type="XCUIElementTypeTextField" label="Subject" value="s" enabled="true" x="16" '
+           'y="780" width="398" height="36"/>')
+
+
 def _replace_after_tap(after_y: float, title_after: float):
-    before = APP_HEAD + _title(250) + _text_view(125, LONG, name="postText") + APP_TAIL
-    after = APP_HEAD + _title(title_after) + _text_view(after_y, LONG, name="postText") + APP_TAIL
+    before = APP_HEAD + _title(250) + _text_view(125, LONG, name="postText") + SUBJECT + APP_TAIL
+    after = APP_HEAD + _title(title_after) + _text_view(after_y, LONG, name="postText") + SUBJECT + APP_TAIL
     phone = _phone(after, "pX", {("pX", "name"): "postText"}, {"pX": (56, after_y, 334, 100)})
     s = Session(phone)
 
@@ -166,7 +172,7 @@ def _replace_after_tap(after_y: float, title_after: float):
         await s.ensure()
         s.tw_version = 5
         s.items = ui.read(before, (430.0, 932.0)).items
-        field = next(e for e in s.items if e.role == "input")
+        field = next(e for e in s.items if e.identifier == "postText")
         await s.type_text("WORLD", replace=True, target=ui.Target(ref=field.ref))
     return phone, go
 
@@ -327,3 +333,197 @@ def test_c2_3_a_partly_visible_date_proves_the_sheet():
     from tapwright import notifications as nl
     assert nl.is_center(_springboard(DATE.format(y=-20, h=80)))
     assert not nl.is_center(_springboard(DATE.format(y=-80, h=80)))
+
+
+# ---- the last Opus review (at 703e50c) ----
+
+def _n(kind, rect, label="", value="", name=""):
+    x, y, w, h = rect
+    a = (f' label="{label}"' if label else "") + (f' name="{name}"' if name else "") + (f' value="{value}"' if value else "")
+    return f'<XCUIElementType{kind} type="XCUIElementType{kind}"{a} enabled="true" x="{x}" y="{y}" width="{w}" height="{h}"/>'
+
+
+def _typed_after_lift(before: str, after: str, rect, attrs=None, replace=False):
+    """type_text through the focusing tap at the field's centre; the keyboard moved the field to `rect`."""
+    phone = _phone(APP_HEAD + after + APP_TAIL, "f1", attrs or {}, {"f1": rect})
+    s = Session(phone)
+
+    async def go():
+        await s.ensure()
+        s.tw_version = 5
+        s.items = ui.read(APP_HEAD + before + APP_TAIL, (430.0, 932.0)).items
+        field = max((e for e in s.items if e.role == "input"), key=lambda e: e.y)  # the composer at the bottom
+        return await s.type_text("hello", replace=replace, target=ui.Target(ref=field.ref), at=field.center)
+    return phone, go
+
+
+# M1 a: an unlabelled composer the keyboard lifts takes the first type_text
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_m1_an_unlabelled_composer_the_keyboard_lifts_is_typed_into(quick, replace):
+    before = (_n("StaticText", (16, 200, 200, 30), "Hi there") + _n("TextView", (16, 860, 330, 40))
+              + _n("Button", (356, 860, 60, 40), "Send"))
+    after = (_n("StaticText", (16, 200, 200, 30), "Hi there") + _n("TextView", (16, 520, 330, 40))
+             + _n("Button", (356, 520, 60, 40), "Send"))
+    phone, go = _typed_after_lift(before, after, (16, 520, 330, 40), replace=replace)
+    asyncio.run(go())
+    assert [p for p, _ in _sent(phone)][-1] == "/session/S/wda/keys"
+
+
+def test_m1_with_two_unlabelled_inputs_a_lifted_field_is_still_refused(quick):
+    other = _n("TextField", (16, 100, 398, 36))
+    before = _n("TextView", (16, 860, 330, 40)) + other  # (the composer is the target)
+    after = _n("TextView", (16, 520, 330, 40)) + other
+    phone, go = _typed_after_lift(before, after, (16, 520, 330, 40))
+    with pytest.raises(Refused):
+        asyncio.run(go())
+    assert _sent(phone) == []
+
+
+# M1 b: replace into a field the keyboard moves, with nothing named moving along
+
+@pytest.mark.parametrize("before, after, rect, label", [
+    (_n("StaticText", (16, 200, 300, 30), "Hi there") + _n("TextView", (16, 860, 330, 40), "Message", "draft")
+     + _n("Button", (356, 860, 60, 40)),
+     _n("StaticText", (16, 200, 300, 30), "Hi there") + _n("TextView", (16, 520, 330, 40), "Message", "draft")
+     + _n("Button", (356, 520, 60, 40)), (16, 520, 330, 40), "Message"),
+    (_n("StaticText", (16, 100, 200, 40), "Settings") + _n("SearchField", (16, 150, 398, 36), "Search", "wifi")
+     + _n("Cell", (16, 220, 398, 44), "Wi-Fi"),
+     _n("SearchField", (16, 98, 330, 36), "Search", "wifi") + _n("Button", (354, 98, 60, 36), "Cancel")
+     + _n("Cell", (16, 168, 398, 44), "Wi-Fi"), (16, 98, 330, 36), "Search"),
+], ids=["composer with an unnamed send icon", "search field narrows and rises"])
+def test_m1_replace_into_the_only_field_the_keyboard_moved_clears_it(quick, before, after, rect, label):
+    phone, go = _typed_after_lift(before, after, rect, {("f1", "label"): label}, replace=True)
+    asyncio.run(go())
+    assert [p.rsplit("/", 1)[-1] for p, _ in _sent(phone)] == ["clear", "keys"]
+
+
+def test_m1_replace_with_another_input_on_screen_stays_refused(quick):
+    other = _n("TextField", (16, 300, 398, 36), "Subject", "x")
+    before = _n("TextView", (16, 860, 330, 40), "Message", "draft") + other  # (the composer is the target)
+    after = _n("TextView", (16, 520, 330, 40), "Message", "draft") + other
+    phone, go = _typed_after_lift(before, after, (16, 520, 330, 40), {("f1", "label"): "Message"}, replace=True)
+    with pytest.raises(Refused) as e:
+        asyncio.run(go())
+    assert e.value.code == "stale" and _sent(phone) == []
+
+
+# M2 a: back never works out a sheet's box from frames that can't be placed
+
+def test_m2_back_refuses_on_a_sheet_whose_frames_cant_be_placed():
+    from fakes import FakeSession
+
+    async def go():
+        s = FakeSession()
+        d = make(s)
+        grid = el("e2", "scroll", "", "grid", rect=(0, 0, 430, 663), placed="unknown", raw_rect=(0, 0, 430, 663))
+        bar = el("e1", "other", "Photos", "bar", rect=(0, 20, 430, 96), placed="unknown", raw_rect=(0, 20, 430, 96))
+        s.items = s.front_items = [bar, grid]
+        s.behind = [(button("e9", "Post", "post", rect=(16, 100, 80, 40)), bar)]
+
+        async def still():
+            return ui.Back(False, None)
+        d._still_back = still
+        view = type("V", (), {"items": [bar, grid]})()
+        with pytest.raises(Refused) as e:
+            await d._back(view, {})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("covered: ")
+        assert "tap" not in s.calls and "swipe" not in s.calls
+    run(go)
+
+
+# M2 b: the keyboard reflex never touches by frames that can't be placed
+
+def _hosted_button(label, placed, rect=(300, 230, 80, 40)):
+    return button("e9", label, label.lower(), rect=rect, placed=placed, raw_rect=(10, 10, 80, 40))
+
+
+def test_m2_a_tap_on_an_unknown_hosted_target_with_the_keyboard_up_touches_nothing():
+    from test_daemon import keyboard_up
+
+    async def go():
+        d, stop, task = await keyboard_up()
+        s = d.session
+        s.tree = [*s.tree, _hosted_button("Done", "unknown")]
+        await d.run_tool("a", "look", {"screenshot": False})
+        try:
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": {"label": "Done"}})
+            assert e.value.code == "not_actionable" and "nothing was touched" in str(e.value)
+            assert s.tap_points == [] and "swipe" not in s.calls
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+def test_m2_with_an_unknown_frame_listed_the_reflex_uses_only_the_dismiss_key():
+    from test_daemon import keyboard_up
+
+    async def go():
+        d, stop, task = await keyboard_up()
+        s = d.session
+        s.tree = [*s.tree, _hosted_button("Done", "unknown")]
+        await d.run_tool("a", "look", {"screenshot": False})
+        try:
+            await d.run_tool("a", "tap", {"target": {"id": "save"}})
+            assert s.tap_points == [(60.0, 320.0)] and "swipe" not in s.calls and "dismiss_keyboard" in s.calls
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+def test_m2_a_refusal_after_a_reflex_touch_never_says_nothing_was_touched():
+    from test_daemon import keyboard_up
+
+    async def go():
+        d, stop, task = await keyboard_up(calls_touch_hook=True)
+        s = d.session
+        s.tree = [*s.tree, _hosted_button("Done", "moved")]  # the phone's hit test confirms nothing (hit_answer None)
+        await d.run_tool("a", "look", {"screenshot": False})
+        try:
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": {"label": "Done"}})
+            assert s.tap_points  # the reflex's blank touch went out
+            assert "nothing was touched" not in str(e.value) and "nothing else was touched" in str(e.value)
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+# L: the targetless-typing app check after a look and after open_url
+
+def test_l_after_a_look_typing_never_goes_into_an_app_that_came_forward():
+    async def go():
+        d, s = _files_then_safari()
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            _safari_now(s, snapshot_too=True)
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "type_text", {"text": "x"})
+            assert e.value.code == "stale" and s.typed == []
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+def test_l_after_open_url_typing_goes_into_the_app_the_link_opened():
+    async def go():
+        d, s = _files_then_safari()
+        stop, task = await started(d)
+        real = s.open_url
+
+        async def open_url(url):
+            out = await real(url)
+            _safari_now(s, snapshot_too=True)  # the link opened in Safari
+            return out
+        s.open_url = open_url
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            await d.run_tool("a", "tap", {"target": {"label": "Search"}})
+            await d.run_tool("a", "open_url", {"url": "https://example.com"})
+            await d.run_tool("a", "type_text", {"text": "x"})
+            assert len(s.typed) == 1
+        finally:
+            await finish(stop, task)
+    run(go)
