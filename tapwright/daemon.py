@@ -193,6 +193,8 @@ HOSTED_UNKNOWN = ("covered: {line} is in a view another app draws (a share sheet
 HOSTED_BACK = ("covered: a navigation bar on screen is in a view another app draws (a share sheet, a picker), so where "
                "back would touch can't be told; nothing was touched. Tap the back button you mean by label (the phone "
                "confirms where that lands) or by point.")
+HOSTED_SHEET = ("covered: the sheet in front is in a view another app draws (a share sheet, a picker), and where it is on "
+                "the screen can't be told; nothing was touched. Close it by its own button (by label), or by point.")
 HOSTED_UNPROVEN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and the phone couldn't "
                    "confirm that a touch at ({x}, {y}) lands on it; nothing was touched. Look with screenshot: true, then "
                    "tap it by point.")
@@ -3730,8 +3732,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if args.get("ocr") and not ocr.available():
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
-            view.aimed_app = None  # the agent sees what is in front now (1.7.8, X item 4)
             answer = await self._look(view, shot, [], notes)
+            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
+            # another app that comes forward after the look (last Opus review, L)
+            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
             if given is None or (self.session.app or (None, None))[1] in given:
                 uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
@@ -3860,10 +3864,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             handler = self._handlers.get(name)
             people = self.control.person_generation
             await self._last_checks(name, args, None, hit=False)
+            touched_first = bool(box.get("input"))  # the keyboard reflex or a scroll to the target touched already
             try:
                 out = await (handler(view, use) if handler else call(s, use))
                 box["input"] = True  # (it ended: its answer says what it did)
                 return out
+            except Refused as e:
+                if touched_first and "nothing was touched" in str(e):
+                    # (last Opus review, M2) a touch on the way went out: the answer never says nothing was touched
+                    e.args = (str(e).replace("nothing was touched", "nothing else was touched"),)
+                raise
             finally:
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
                     fresh[0] = False
@@ -4044,6 +4054,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 notes = [*notes, NOTE_DELIVERED.format(touch=touch_name(name), seconds=time.monotonic() - box["began"], hint=box["hint"])]
             if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=True)):
                 notes = [*notes, said]
+            if name == "open_url" and isinstance(view.app, tuple):
+                view.aimed_app = view.app  # where the link went: the app its answer shows (last Opus review, L)
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -4076,6 +4088,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
         if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=False)):
             answer = {**answer, "text": f"{answer['text']}\nNote: {said}"}
+        if name == "open_url" and isinstance(view.app, tuple):
+            view.aimed_app = view.app  # where the link went: the app its answer shows (last Opus review, L)
         taken = await self._taken_away(view, box.get("app"), read=self.session.app)
         self._recheck_later(client_id, box.get("app"), taken)
         if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
@@ -5868,8 +5882,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 field = ui.resolve(items, target)
             except Refused:
                 return False
-            if isinstance(field, tuple) or field.in_alert:
-                return False
+            if isinstance(field, tuple) or field.in_alert or field.placed == "unknown":
+                return False  # (an unknown place: _hosted_proof refuses it, nothing is touched; last Opus review, M2)
         if name == "type_text" and (field is None or field.role != "input"):
             return False  # it refuses typing into this itself
         if name == "type_text" and not shown_inputs and keyboard_top - field.y >= MIN_VISIBLE:
@@ -5913,9 +5927,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         order = ("drag", "dismiss", "blank") if app in self._outside_ignored else ("blank", "drag", "dismiss")
         tried = 0
         before = [(e.role, e.label, e.identifier) for e in view.items]
+        # a frame that can't be placed (a hosted view's own space) is no screen place: no blank touch or drag is worked
+        # out while one is listed, only the keyboard's own dismiss key (last Opus review, M2)
+        unplaced = any(e.placed == "unknown" for e in [*view.items, *hidden])
         for step in order:
             if not view.read_keyboard:
                 break
+            if unplaced and step != "dismiss":
+                continue
             how = None
             if step == "blank" and blank is not None:
                 await s.tap(ui.Target(x=blank[0], y=blank[1]))
@@ -6841,6 +6860,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
         # sheet open); one that shows is the sheet's own and is tapped as usual.
         if behind and not (back.point is not None and not any(ui._holds(e.rect, back.point) for e, _ in behind)):
+            if any(e.placed == "unknown" for e in (getattr(s, "front_items", None) or view.items)):
+                # the sheet's own frames aren't the screen's: beside it or its top edge can't be told (last Opus
+                # review, M2)
+                raise Refused("not_actionable", HOSTED_SHEET)
             self._dry(a, "Would close the sheet in front.")
             return await self._close_sheet(view)
         if back.hosted:
