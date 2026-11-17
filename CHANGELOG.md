@@ -2,6 +2,14 @@
 
 ## 1.7.8 (unreleased)
 
+- Content another app draws inside the app in front (Safari's share sheet, X's photo picker) is listed where it is on
+  the screen. XCTest gives its frames in the host view's own space, so "View More" was listed 531 points too high, and
+  a tap on it opened the video behind while answering "Tapped". Frames are moved only when the tree shows it plainly:
+  a child with the host's size at (0, 0), every frame inside the host's own space, and some outside its place on the
+  screen. A tap, toggle, long press or focusing tap on such an element goes out only when the runner's hit test
+  (route version 6) names that element at the touch point; otherwise it is refused `covered` and nothing is touched.
+  Where the frames can't be placed, elements in that view are never touched by their frame, even with `force`; a tap
+  by point still works.
 - While the app in front isn't answering, `close_app` closes it at once. Before, a reconnect attempt in the meantime
   made it answer `reconnecting: … look before acting` again and again (2 min 40 s with X). `press_button home` also
   gets through: it asks the runner for the home screen without a session, once, with a 10 s cap.

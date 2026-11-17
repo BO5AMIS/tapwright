@@ -174,6 +174,21 @@ def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | N
     return None
 
 
+HOSTED_UNKNOWN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and where it is on the "
+                  "screen can't be told; nothing was touched. Look with screenshot: true, then tap it by point.")
+HOSTED_UNPROVEN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and the phone couldn't "
+                   "confirm that a touch at ({x}, {y}) lands on it; nothing was touched. Look with screenshot: true, then "
+                   "tap it by point.")
+
+
+def _hit_is(hit: ui.Hit, element: ui.Element) -> bool:
+    """The hit test names this element: its type, name and label, and the frame XCTest gives it (a hosted view's own
+    space, as in the tree before it was placed)."""
+    raw = element.raw_rect
+    return (raw is not None and hit.type == element.type and hit.name == element.name and hit.label == element.label
+            and all(abs(a - b) <= 1 for a, b in zip(hit.rect, raw)))
+
+
 def _same_control(a: ui.Element, b: ui.Element) -> bool:
     """The control a double tap's second touch lands on is the one its first touch landed on: the same id, label and text."""
     return (a.identifier, a.label, a.text) == (b.identifier, b.label, b.text)
@@ -5453,6 +5468,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._touching(field)
 
         async def typed() -> None:
+            if not no_tap and field.placed:  # (the focusing tap: at a place the phone confirms, never the right-end shortcut)
+                aimed[0] = aimed[0] or field.center
+                await self._hosted_proof(next((e for e in self.session.items if e.ref == field.ref), field), aimed[0])
             more = {"no_tap": True} if no_tap else {}
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
                                          submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0],
@@ -5487,6 +5505,24 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                                 f"{over.line}; aim at the part of {field.line(actions=False)} that shows.")
             return point
         return aim
+
+    async def _hosted_proof(self, element: ui.Element, at: tuple[float, float]) -> None:
+        """An element in a view another process draws (ui._place_hosted) is touched only where the phone confirms it
+        (1.7.8, bug 3: a share sheet's "View More" was listed 531 points off, and the tap opened the video behind with a
+        "Tapped" answer). Its frame was put on the screen by its host's place: the runner's hit test (route version 6,
+        which proves the element it names) must answer this very element at the touch point, with the frame XCTest
+        gives it. One whose place isn't known is never touched by its frame. Nothing to do for an ordinary element."""
+        if not element.placed:
+            return
+        line = element.line(actions=False)
+        if element.placed != "moved" or element.raw_rect is None:
+            raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=line))
+        try:
+            hit = await self.session.hit_at(*at)
+        except Refused:
+            hit = None
+        if hit is None or self.session.tw_version < 6 or not _hit_is(hit, element):
+            raise Refused("not_actionable", HOSTED_UNPROVEN.format(line=line, x=round(at[0]), y=round(at[1])))
 
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
@@ -5527,6 +5563,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
+            if area.placed == "unknown":
+                raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=area.line(actions=False)))
             self._touching(hit if isinstance(hit, ui.Element) else None)
         direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
         top, bottom = s.last_insets
@@ -6463,6 +6501,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if a.get("force"):
             # `force` skips the checks above and the hit test, never the policy
             _, _, said = await self._last_checks(tool, a, found, hit=False)
+            await self._hosted_proof(found, found.center)  # (`force` never touches a place that isn't known)
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
             self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
@@ -6472,6 +6511,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         found, point, said = await self._last_checks(tool, a, found, aim=self._touch_point)
         at = point or found.center
+        await self._hosted_proof(found, at)
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
         if point is None:
@@ -6606,6 +6646,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if not force:
             point, shown = aimed, self._touch_point(found)
         at = point or found.center
+        await self._hosted_proof(found, at)
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))

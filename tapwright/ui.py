@@ -161,6 +161,11 @@ class Element:
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
     no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
     others: bool = False  # text the tool knows other people wrote (AGENT-TOOLS §21.1, fromothers.py); False claims nothing
+    # (1.7.8) inside a view another process draws (a share sheet, a photo picker), whose frames XCTest gives in that
+    # view's own space: "moved" (put on the screen by its host's place, see _place_hosted; `raw_rect` is the frame as
+    # XCTest gave it, which the hit test answers too), "unknown" (where it is can't be told), "" (an ordinary element)
+    placed: str = ""
+    raw_rect: tuple[float, float, float, float] | None = None
 
     @property
     def x(self) -> float:
@@ -803,7 +808,85 @@ def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
     trace.parsed()
     if screen is not None and screen[0] > screen[1]:
         _upright_keyboard(root, screen)
+    _place_hosted(root)
     return root
+
+
+HOSTED_SLACK = 2.0  # points a frame may be off from where it is checked (WebDriverAgent rounds frames)
+PLACED_ATTR, RAW_ATTR = "tw-placed", "tw-raw"  # what _place_hosted marks a node with
+
+
+def _place_hosted(root: ET.Element) -> None:
+    """Content another process draws (Safari's share sheet: ShareSheet.RemoteContainerView; X's photo picker) comes
+    with frames in its host view's own space, not the screen's: the share sheet at (9, 531) lists its content view at
+    (0, 0) with the host's own size, and "View More" 531 points above where it is (2026-11-17: the tap opened the video
+    behind). Those frames are put on the screen here, in place, only on strong evidence; a host that shows the tell
+    and fails the rest is marked "unknown", and nothing in it is touched by its frame (Daemon._hosted_proof).
+
+    A node C away from (0, 0) is such a host when, among its descendants' frames (with area; a scroll view's content
+    is left out, since it runs past the view):
+    - one is about C's own size at about (0, 0): the tell, which no screen-space child has;
+    - all fit inside (0, 0, C's width, C's height);
+    - one lies outside C's frame on the screen (else nothing says the frames aren't the screen's).
+    Bottom-up: an inner host is placed in its parent's space first, so an outer one sees screen frames, or its own
+    space's when it is a host too."""
+    slack = HOSTED_SLACK
+
+    def frames(node: ET.Element) -> list[tuple[ET.Element, tuple[float, float, float, float]]]:
+        out, stack = [], list(node)
+        while stack:
+            n = stack.pop()
+            r = _rect(n)
+            if r[2] > 0 and r[3] > 0:
+                out.append((n, r))
+            if _kind(n) not in CLIPPING:
+                stack.extend(n)
+        return out
+
+    def mark(node: ET.Element, placed: str, dx: float = 0.0, dy: float = 0.0) -> None:
+        for n in node.iter():
+            if n is node:
+                continue
+            if n.get(RAW_ATTR) is None:
+                n.set(RAW_ATTR, ",".join(repr(v) for v in _rect(n)))
+            if n.get(PLACED_ATTR) != "unknown":
+                n.set(PLACED_ATTR, placed)
+            if dx or dy:
+                x, y, _, _ = _rect(n)
+                n.set("x", repr(x + dx))
+                n.set("y", repr(y + dy))
+
+    def visit(node: ET.Element) -> None:
+        for child in node:
+            visit(child)
+        x, y, w, h = _rect(node)
+        if not len(node) or w <= 0 or h <= 0 or (abs(x) <= 1 and abs(y) <= 1) or _kind(node) == "Application":
+            return
+        inner = frames(node)
+        if not any(abs(r[0]) <= slack and abs(r[1]) <= slack and abs(r[2] - w) <= slack and abs(r[3] - h) <= slack
+                   for _, r in inner):
+            return
+        fits = all(r[0] >= -slack and r[1] >= -slack and r[0] + r[2] <= w + slack and r[1] + r[3] <= h + slack
+                   for _, r in inner)
+        outside = any(r[0] < x - slack or r[1] < y - slack or r[0] + r[2] > x + w + slack or r[1] + r[3] > y + h + slack
+                      for _, r in inner)
+        if fits and outside:
+            mark(node, "moved", x, y)
+        else:
+            mark(node, "unknown")
+    visit(root)
+
+
+def _placed(node: ET.Element) -> tuple[str, tuple[float, float, float, float] | None]:
+    """What _place_hosted found for a node: its mark and the frame XCTest gave."""
+    placed, raw = node.get(PLACED_ATTR, ""), node.get(RAW_ATTR)
+    if not placed or raw is None:
+        return "", None
+    try:
+        values = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        return "unknown", None
+    return placed, (values if len(values) == 4 else None)  # type: ignore[return-value]
 
 
 def _upright_keyboard(root: ET.Element, screen: tuple[float, float]) -> None:
@@ -992,6 +1075,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 placeholder=_text(node.get("placeholderValue")),
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
+            candidate.placed, candidate.raw_rect = _placed(node)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had

@@ -348,3 +348,173 @@ def test_open_url_that_loaded_has_no_note(change):
         text = await _open_in_safari(before, after, url)
         assert "may not have loaded" not in text
     run(go)
+
+
+# Bug 3: content another process draws (a share sheet, a photo picker) is listed with its host view's own frames.
+
+def _node(kind: str, rect, children: str = "", name: str = "", label: str = "") -> str:
+    x, y, w, h = rect
+    attrs = (f' name="{name}"' if name else "") + (f' label="{label}"' if label else "")
+    head = f'<XCUIElementType{kind} type="XCUIElementType{kind}"{attrs} enabled="true" x="{x}" y="{y}" width="{w}" height="{h}"'
+    return f"{head}>{children}</XCUIElementType{kind}>" if children else f"{head}/>"
+
+
+def _app(children: str, label: str = "Safari") -> str:
+    return ("<AppiumAUT>" + _node("Application", (0, 0, 430, 932), _node("Window", (0, 0, 430, 932), children),
+                                  label=label) + "</AppiumAUT>")
+
+
+def _share_sheet(host_child_extra: str = "") -> str:
+    """Safari's share sheet as post1/19 lists it: the host at (9, 531), its content at (0, 0) with the host's size."""
+    cells = _node("ScrollView", (22, 239, 368, 154),
+                  _node("Cell", (22, 239, 83, 154), name="actionGroupCell", label="Copy")
+                  + _node("Cell", (306, 239, 83, 154), name="actionGroupCell", label="View More"))
+    content = _node("Other", (0, 0, 412, 393), _node("CollectionView", (0, 0, 412, 393), cells, name="activityCollectionView"),
+                    name="shareSheet.activity.contentView")
+    bar = _node("NavigationBar", (0, 0, 412, 107), _node("Image", (26, 26, 65, 65), label="safari"),
+                name="UIActivityContentView")
+    remote = _node("Other", (9, 531, 412, 393), bar + content + host_child_extra, name="ShareSheet.RemoteContainerView")
+    return _app(_node("Other", (0, 0, 430, 932), name="PopoverDismissRegion", label="dismiss popup")
+                + _node("Image", (-141, 381, 712, 693))
+                + _node("Other", (9, 531, 412, 393), remote, name="ActivityListView"))
+
+
+def _photo_picker() -> str:
+    """X's photo picker as post2/25 lists it: TUINativePhotoPicker at (0, 69), its scroll view at (0, 0) 430x863."""
+    bar = _node("NavigationBar", (0, 20, 430, 96), _node("Button", (24, 58, 36, 36), label="Cancel")
+                + _node("Button", (370, 58, 36, 36), name="Add", label="Done"), name="Photos")
+    grid = _node("ScrollView", (0, 0, 430, 863), _node("Image", (-1, 106, 144, 143), name="PXGGridLayout-Info",
+                                                          label="Video, fifty-two seconds"),
+                 name="photosView_content_scroll_view")
+    return _app(_node("Image", (-150, -81, 730, 1163)) + _node("Other", (0, 69, 430, 863), bar + grid,
+                                                                 name="TUINativePhotoPicker"), label="X")
+
+
+def _items(xml: str):
+    from tapwright import ui
+    return ui.read(xml, (430.0, 932.0)).items
+
+
+def _one(items, label):
+    [e] = [e for e in items if e.label == label]
+    return e
+
+
+def test_a_share_sheets_content_is_put_on_the_screen_by_its_hosts_place():
+    items = _items(_share_sheet())
+    more = _one(items, "View More")
+    assert more.rect == (315, 770, 83, 154) and more.center == (356.5, 847)  # the report's real centre
+    assert more.placed == "moved" and more.raw_rect == (306, 239, 83, 154)
+    host = next(e for e in items if e.identifier == "ShareSheet.RemoteContainerView")
+    outer = next(e for e in items if e.identifier == "ActivityListView")
+    assert host.rect == outer.rect == (9, 531, 412, 393) and not host.placed and not outer.placed  # the hosts stay
+    assert _one(items, "safari").rect == (35, 557, 65, 65)
+
+
+def test_the_photo_pickers_done_is_put_where_it_is():
+    items = _items(_photo_picker())
+    done = _one(items, "Done")
+    assert done.center == (388, 145) and done.placed == "moved" and done.raw_rect == (370, 58, 36, 36)
+    assert not next(e for e in items if e.identifier == "TUINativePhotoPicker").placed
+
+
+def test_ordinary_screens_are_left_as_they_are():
+    from tapwright import ui
+    # a sheet at (0, 100) whose children are in the screen's space; a modal over a full-screen dimming view
+    sheet = _node("Other", (0, 100, 430, 700), _node("Button", (20, 120, 100, 44), label="Close")
+                  + _node("Other", (0, 100, 430, 700), _node("StaticText", (20, 200, 300, 20), label="Title")),
+                  name="sheet")
+    modal = _node("Other", (20, 200, 390, 400), _node("Other", (0, 0, 430, 932), name="dim")
+                  + _node("Button", (40, 500, 100, 44), label="OK"), name="modal")
+    for xml in (_app(sheet), _app(modal)):
+        items = ui.read(xml, (430.0, 932.0)).items
+        assert items and all(not e.placed and e.raw_rect is None for e in items)
+    assert _one(ui.read(_app(sheet), (430.0, 932.0)).items, "Close").rect == (20, 120, 100, 44)
+
+
+def test_a_host_whose_frames_dont_all_fit_is_unknown_not_moved():
+    """The tell (a child at (0, 0) with the host's size) with a frame that can't be in the host's own space: no
+    translation, and every element in it is marked unknown, listed where XCTest put it."""
+    stray = _node("Button", (300, 600, 100, 44), label="Stray")
+    items = _items(_share_sheet(host_child_extra=stray))
+    for label in ("Copy", "Stray"):
+        assert _one(items, label).placed == "unknown"
+    assert _one(items, "Copy").rect == (22, 239, 83, 154)
+
+
+def _hosted_session(xml: str, version: int = 6):
+    from fakes import FakeSession
+    s = FakeSession()
+    s.app = ("Safari", "com.apple.mobilesafari")
+    s.tree = _items(xml)
+    s.tw_version = version
+    return s
+
+
+def _hit_of(e, raw=None):
+    from tapwright import ui
+    return ui.Hit(e.type, e.name, e.label, raw or e.raw_rect, "com.apple.mobilesafari")
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_hosted_element_is_touched_where_the_phone_confirms_it(force):
+    async def go():
+        s = _hosted_session(_share_sheet())
+        s.hit_answer = _hit_of(_one(s.tree, "View More"))
+        d = make(s)
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            answer = await d.run_tool("a", "tap", {"target": {"label": "View More"}, "force": force, "look": False})
+            assert answer["text"].startswith("Tapped") and s.hit_asks == [(356.5, 847)]
+            assert s.last_point == (356.5, 847)
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("case", ["another element", "no answer", "older runner"])
+def test_a_hosted_element_the_phone_doesnt_confirm_is_not_touched(case):
+    """post1/20: the tap aimed at "View More"'s listed frame landed on the video behind and answered "Tapped"."""
+    import dataclasses
+
+    async def go():
+        s = _hosted_session(_share_sheet(), version=5 if case == "older runner" else 6)
+        more = _one(s.tree, "View More")
+        if case == "another element":
+            s.hit_answer = dataclasses.replace(_hit_of(more), label="Copy", rect=(22, 239, 83, 154))
+        elif case == "older runner":
+            s.hit_answer = _hit_of(more)
+        d = make(s)
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            with pytest.raises(Refused) as e:
+                await d.run_tool("a", "tap", {"target": {"label": "View More"}, "look": False})
+            assert e.value.code == "not_actionable" and str(e.value).startswith("covered: ")
+            assert "nothing was touched" in str(e.value) and "tap it by point" in str(e.value)
+            assert "tap" not in s.calls
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+def test_an_element_whose_place_is_unknown_is_never_touched_by_its_frame_even_with_force():
+    async def go():
+        s = _hosted_session(_share_sheet(host_child_extra=_node("Button", (300, 600, 100, 44), label="Stray")))
+        copy = _one(s.tree, "Copy")
+        s.hit_answer = _hit_of(copy, raw=copy.rect)  # even a hit that seems to agree proves nothing here
+        d = make(s)
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            for force in (False, True):
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": {"label": "Copy"}, "force": force, "look": False})
+                assert e.value.code == "not_actionable" and "can't be told" in str(e.value)
+            assert "tap" not in s.calls
+            await d.run_tool("a", "tap", {"target": {"x": 356, "y": 847}, "look": False})  # a point stays a raw touch
+            assert s.last_point == (356, 847)
+        finally:
+            await finish(stop, task)
+    run(go)
