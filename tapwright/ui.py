@@ -1083,7 +1083,9 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     area = screen[0] * screen[1] if screen else math.inf
     ahead = [(o, m, set(within)) for o, m, within in shown]
     for e, number, inside in shown[:MAX_ELEMENTS]:
-        bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)]
+        node = numbered.get(number)
+        bars_over = [(n, bar) for n, bar in live if n not in inside and _meets(e.rect, bar.rect)
+                     and not (bar.kind in ON_BAR_KINDS and node is not None and _on_bar(node, bar.rect, parents))]
         over = {n for n, _ in bars_over}
         # then every later listed element that is neither its descendant nor a layer, nor part of a bar over it
         later = tuple(Bar(o.type, o.rect, o.line(ref=False, actions=False)) for o, m, within in ahead
@@ -1669,6 +1671,28 @@ def is_back(element: Element, back: Back | None) -> bool:
             and abs(element.center[0] - back.point[0]) < 1 and abs(element.center[1] - back.point[1]) < 1)
 
 
+ON_BAR_KINDS = ("NavigationBar", "Toolbar")  # bars an app may lay its own controls on, as siblings (see _on_bar)
+SCROLLING_KINDS = ("ScrollView", "Table", "CollectionView", "Cell", "WebView")
+
+
+def _on_bar(node: ET.Element, bar: tuple[float, float, float, float], parents: dict[ET.Element, ET.Element]) -> bool:
+    """Is this control laid on the bar rather than under it? Wholly within the bar's frame, and in no scrolling content
+    (content that slides under a bar always sits in a scroll view, a table, a collection view or a cell). Seen on the
+    phone 2026-11-16: X draws its Back button as a sibling over its navigation bar, not inside it."""
+    x, y, w, h = _rect(node)
+    bx, by, bw, bh = bar
+    if w <= 0 or h <= 0 or x < bx - 1 or y < by - 1 or x + w > bx + bw + 1 or y + h > by + bh + 1:
+        return False
+    if _kind(node) in SCROLLING_KINDS:  # (a row itself is content)
+        return False
+    up = parents.get(node)
+    while up is not None:
+        if _kind(up) in SCROLLING_KINDS:
+            return False
+        up = parents.get(up)
+    return True
+
+
 def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
         x, y, w, h = rect
@@ -1682,6 +1706,11 @@ def _back_of(root: ET.Element, screen: tuple[float, float]) -> Back:
     bar = min(bars, key=lambda n: _rect(n)[1])
     bar_x, _, bar_w, _ = _rect(bar)
     buttons = [n for n in bar.iter() if _kind(n) == "Button" and on_screen(_rect(n))]
+    # (a Back button the app lays on the bar as a sibling, not inside it, is the bar's too: see _on_bar)
+    parents = {child: up for up in root.iter() for child in up}
+    own = set(buttons)
+    buttons += [n for n in root.iter() if _kind(n) == "Button" and n not in own and on_screen(_rect(n))
+                and _on_bar(n, _rect(bar), parents)]
 
     def centre(n: ET.Element) -> tuple[float, float]:
         x, y, w, h = _rect(n)
