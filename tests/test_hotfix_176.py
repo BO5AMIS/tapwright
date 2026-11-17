@@ -133,3 +133,20 @@ def test_a_log_entry_that_isnt_json_is_skipped_never_raised(tmp_path):
     assert said and "skipped" in said[0]
     log.write({"tool": "tap", "ok": True})
     assert any(p.read_text("utf-8") for p in (tmp_path / "log").glob("*.jsonl"))
+
+
+def test_back_is_a_word_of_the_id_never_inside_another_word():
+    """CodeRabbit, PR #16: a FeedbackButton laid on the bar is not Back; NavigationBackButton is."""
+    feedback = ui.read(_bar_screen("BAR" + _button("FeedbackButton", "Feedback")), (430.0, 932.0))
+    assert feedback.back.point is None
+    back = ui.read(_bar_screen("BAR" + _button("NavigationBackButton", "")), (430.0, 932.0))
+    assert back.back.point == (36.0, 87.0)
+    assert [ui._says_back(n) for n in ("nav-back-button", "BackButton", "backgroundView")] == [True, True, False]
+
+
+def test_the_runtime_notes_name_no_old_release():
+    """CodeRabbit, PR #16: the whole-phone note printed "Tapwright 1.7.5" in later releases."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "tapwright"
+    for name in ("cli.py", "mcp_server.py", "thin.py"):
+        assert "Tapwright 1.7.5 provides" not in (root / name).read_text("utf-8"), name

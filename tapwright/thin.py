@@ -95,7 +95,7 @@ def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
         if apps.strip():
             h["X-Tapwright-Apps"] = apps
     if a.policy:
-        print('Tapwright 1.7.5 provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
+        print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
     if a.ux_rules:
         h["X-Tapwright-Ux-Rules"] = _json_line(a.ux_rules, "ux rules")
     if a.maps:

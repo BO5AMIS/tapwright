@@ -1695,6 +1695,13 @@ def _on_bar(node: ET.Element, bar: tuple[float, float, float, float], parents: d
     return True
 
 
+def _says_back(name: str) -> bool:
+    """Does an identifier name a Back button: "back" as a word of it (`NavigationBackButton`, `nav-back-button`,
+    `BackButton`), never inside another word (`FeedbackButton`, `backgroundView`)?"""
+    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)
+    return any(w.lower() == "back" for w in words)
+
+
 def _back_of(root: ET.Element, screen: tuple[float, float],
              parents: "dict[ET.Element, ET.Element] | None" = None) -> Back:
     def on_screen(rect: tuple[float, float, float, float]) -> bool:
@@ -1724,7 +1731,7 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     parents = parents if parents is not None else {child: up for up in root.iter() for child in up}
     for n in root.iter():
         if (_kind(n) == "Button" and order[n] > after and on_screen(_rect(n)) and _on_bar(n, _rect(bar), parents)
-                and ("back" in _text(n.get("name")).lower() or _text(n.get("label")).lower() == "back")):
+                and (_says_back(_text(n.get("name"))) or _text(n.get("label")).lower() == "back")):
             return Back(True, centre(n))
     left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
     left.sort(key=lambda n: centre(n)[0])

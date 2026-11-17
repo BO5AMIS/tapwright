@@ -520,7 +520,7 @@ def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated
     BRIEF_DEFAULT = brief
     DIALOGS.enabled = dialog
     if apps or dedicated or rules is not None:
-        logger.warning('Tapwright 1.7.5 provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.')
+        logger.warning('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.')
     client.set_scope(apps, dedicated, phone)
     client.set_policy(rules)
     client.set_ux_rules(ux_rules)
