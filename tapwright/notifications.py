@@ -303,6 +303,11 @@ def rows_at(source: str, point: tuple[float, float]) -> int:
 
 CENTER_TITLE = "notification center"
 LISTS = ("ScrollView", "CollectionView", "Table")
+# (1.7.8, X item 7) iOS 26 shows Notification Center as the cover sheet, with no title and no scroll view in the tree:
+# each notification is a `ListCell` holding its `NotificationShortLookView`, and the sheet's date is
+# `lockscreen-date-view` (both in the earlier real capture). A banner over an app or the home screen has neither.
+LIST_CELL = "ListCell"
+COVER_DATE = "lockscreen-date-view"
 
 
 def _kind(node: ET.Element) -> str:
@@ -312,24 +317,30 @@ def _kind(node: ET.Element) -> str:
 def is_center(source: str) -> bool:
     """Is Notification Center open in this tree, proven (review 1.7 B-M3)? SpringBoard's tree is not enough: the home
     screen and a banner are SpringBoard's too, and a swipe that was swallowed (Siri, Control Center, an alert) would read
-    as "no notifications". Proof is SpringBoard at the root and either Notification Center's own title, or a
-    notification inside a list (Notification Center's scroll view; a banner over an app is in none). On a doubt the
-    callers say NOT_OPENED and read nothing."""
+    as "no notifications". Proof is SpringBoard at the root and either Notification Center's own title, the cover
+    sheet's date on the screen (iOS 26), or a notification inside a list (Notification Center's scroll view, or iOS 26's
+    `ListCell`; a banner over an app is in none). On a doubt the callers say NOT_OPENED and read nothing."""
     if 'bundleId="com.apple.springboard"' not in source[:800]:
         return False
     try:
         root = ET.fromstring(source)
     except ET.ParseError:
         return False
+    screen = next((_rect(n) for n in root.iter() if _kind(n) == "Application"), _rect(root))
     for node in root.iter():
         if " ".join((node.get("label") or node.get("name") or "").split()).casefold() == CENTER_TITLE:
             return True
+        if node.get("name") == COVER_DATE:
+            # the cover sheet's date, drawn on the screen (a frame left off screen or with no size proves nothing)
+            x, y, w, h = _rect(node)
+            if w > 0 and h > 0 and 0 <= y < (screen[3] or float("inf")) and x + w > 0:
+                return True
     parents = {c: up for up in root.iter() for c in up}
     for node in root.iter():
         if _is_notification(node):
             up = parents.get(node)
             while up is not None:
-                if _kind(up) in LISTS:
+                if _kind(up) in LISTS or (up.get("name") == LIST_CELL and _kind(up) != "Application"):
                     return True
                 up = parents.get(up)
     return False
