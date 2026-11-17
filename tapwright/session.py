@@ -105,6 +105,27 @@ def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
     return len(a) == len(b) and all(abs(p - q) <= PLACE_SLACK for p, q in zip(a, b))
 
 
+def _moved_with_content(field: ui.Element, now: ui.Element, before: list[ui.Element], after: list[ui.Element]) -> bool:
+    """Did the field move only as the content around it did (the keyboard scrolled the form after the tap)? It moved
+    up or down, not sideways and not resized, and another element with a name of its own, the one of its kind in
+    both lists, moved by the same distance. A field the app replaced by another with its key elsewhere has none."""
+    dy = now.y - field.y
+    if abs(now.x - field.x) > PLACE_SLACK or abs(now.width - field.width) > PLACE_SLACK:
+        return False
+
+    def key(e: ui.Element) -> tuple[str, str, str]:
+        return e.role, e.label, e.identifier
+
+    for e in before:
+        if e is field or not (e.identifier or e.label) or _alike(e, field):
+            continue
+        twins = [a for a in after if key(a) == key(e)]
+        if (len(twins) == 1 and sum(1 for b in before if key(b) == key(e)) == 1
+                and _near((twins[0].x, twins[0].y, twins[0].width), (e.x, e.y + dy, e.width))):
+            return True
+    return False
+
+
 class _FieldGone(Exception):
     """The element WebDriverAgent named a moment ago went stale while it was checked (the app redrew its view). The
     caller says what happened so far (1.7.8, Opus review 8)."""
@@ -854,10 +875,13 @@ class Session:
             try:
                 if (key and focused and focused[0] == key and isinstance(hit, ui.Element) and point is None
                         and self._unique(hit) and place is not None and _near((hit.x, hit.y, hit.width), place)
-                        and await self._active_element() == focused[1]):
+                        and await self._active_element() == focused[1]
+                        and await self._where_listed(focused[1], hit)):
                     # still focused by our own typing, nothing done since: no tap. Only for the very field typed into:
                     # its key the one of its kind in the list, listed where it was (1.7.8, Opus review H1: two posts
-                    # labelled alike, and the keys for the second went into the first)
+                    # labelled alike, and the keys for the second went into the first), and the focused element is
+                    # still there: an automatic scroll can carry it off and bring another input with its key to its
+                    # place (CodeRabbit, PR #18)
                     element, again = focused[1], True
                 elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
                       and (element := await self._active_element()) is not None
@@ -1041,35 +1065,57 @@ class Session:
         place = None if at is not None else listed if (strict or not unique) else None
         if not unique and at is None and place is None:
             return False  # another input has its key, and nothing says where this one is
-        now = await self._field_now(field, at, place)
+        seen: list[ui.Element] = []
+        now = await self._field_now(field, at, place, seen)
         if now is None:
             return False
+        if (strict and at is None and place is None and tapped is not None
+                and not ui._holds(now.rect, tapped) and not _moved_with_content(field, now, self.items, seen)):
+            # a clear after a focusing tap, the field's key the only one: the one input with it is the tapped one only
+            # where it is still under the tap, or where the content around it moved with it (the keyboard scrolled the
+            # form up). Another input with its key elsewhere isn't (CodeRabbit, PR #18)
+            return False
+        got_rect = await self._rect_of(element)
+        if got_rect is None or not _near(got_rect, now.raw_rect or now.rect):
+            return False
+        if strict or at is not None or place is not None:
+            self._placed_proof = element
+        return True
+
+    async def _rect_of(self, element: str) -> tuple[float, ...] | None:
+        """XCTest's frame of WebDriverAgent's element; None when it won't say. Raises _FieldGone when the element went
+        stale: the one WebDriverAgent named a moment ago is gone (the app redrew its view: X's composer opened its GIF
+        picker, 2026-11-17). Was `internal` (1.7.8, bug 6); the caller words it."""
         try:
             box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
         except ConnectionLost:
             raise
         except DeviceError as e:
             if "stale" in str(e).lower():
-                # the element WebDriverAgent named a moment ago is gone (the app redrew its view: X's composer opened
-                # its GIF picker, 2026-11-17). Was `internal` (1.7.8, bug 6); the caller words it
                 raise _FieldGone() from None
-            return False
-        got_rect = tuple(float(box.get(k, float("inf"))) for k in ("x", "y", "width", "height"))
-        if not _near(got_rect, now.raw_rect or now.rect):
-            return False
-        if strict or at is not None or place is not None:
-            self._placed_proof = element
-        return True
+            return None
+        return tuple(float(box.get(k, float("inf"))) for k in ("x", "y", "width", "height"))
+
+    async def _where_listed(self, element: str, field: ui.Element) -> bool:
+        """Is WebDriverAgent's element where the newest read lists the field (its x, y and width: a text view grows as
+        it is typed into; XCTest's own frame for content another process draws)?"""
+        got = await self._rect_of(element)
+        return got is not None and _near(got[:3], (field.raw_rect or field.rect)[:3])
 
     async def _field_now(self, field: ui.Element, at: tuple[float, float] | None = None,
-                         place: tuple[float, float, float, float] | None = None) -> ui.Element | None:
+                         place: tuple[float, float, float, float] | None = None,
+                         seen: list[ui.Element] | None = None) -> ui.Element | None:
         """The field as the tree shows it now: the one input with its identifier (else its label), or None. With `at`,
         the one input under that point; with `place`, the one input listed there (its x, y and width: a text view grows
-        as it is typed into). Another input there too, or none with the field's key: None."""
+        as it is typed into). Another input there too, or none with the field's key: None. `seen` gets the whole
+        fresh list."""
         source = await self._source()
         if not isinstance(source, str):
             return None
-        inputs = [e for e in ui.read(source, self.screen).items if e.role == field.role]
+        fresh = ui.read(source, self.screen).items
+        if seen is not None:
+            seen.extend(fresh)
+        inputs = [e for e in fresh if e.role == field.role]
         if at is not None:
             inputs = [e for e in inputs if ui._holds(e.rect, at)]
         elif place is not None:
