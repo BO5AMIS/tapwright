@@ -126,6 +126,19 @@ def _moved_with_content(field: ui.Element, now: ui.Element, before: list[ui.Elem
     return False
 
 
+def _sole_input(field: ui.Element, before: list[ui.Element], after: list[ui.Element], strict: bool) -> ui.Element | None:
+    """The fresh read's input that is the field, when the field is the only input in the agent's list and there is only
+    one in the fresh read too, and it moved up or down only (x within PLACE_SLACK; the same width too, except for the
+    check before a clear: a search field narrows as its Cancel button comes in). Else None (last Opus review, M1)."""
+    was = [e for e in before if e.role == "input"]
+    now = [e for e in after if e.role == "input"]
+    if len(was) != 1 or was[0] != field or len(now) != 1 or abs(now[0].x - field.x) > PLACE_SLACK:
+        return None
+    if not strict and abs(now[0].width - field.width) > PLACE_SLACK:
+        return None
+    return now[0]
+
+
 class _FieldGone(Exception):
     """The element WebDriverAgent named a moment ago went stale while it was checked (the app redrew its view). The
     caller says what happened so far (1.7.8, Opus review 8)."""
@@ -1070,10 +1083,15 @@ class Session:
             return False  # another input has its key, and nothing says where this one is
         seen: list[ui.Element] = []
         now = await self._field_now(field, at, place, seen)
+        if now is None and point is None and tapped is not None and at == tapped:
+            # nothing under the tap: the keyboard lifted the field (a chat composer with no label). With one input on
+            # the screen before and after, the focus can have gone nowhere else (last Opus review, M1)
+            now = _sole_input(field, self.items, seen, strict)
         if now is None:
             return False
         if (strict and at is None and place is None and tapped is not None
-                and not ui._holds(now.rect, tapped) and not _moved_with_content(field, now, self.items, seen)):
+                and not ui._holds(now.rect, tapped) and not _moved_with_content(field, now, self.items, seen)
+                and _sole_input(field, self.items, seen, strict) is not now):
             # a clear after a focusing tap, the field's key the only one: the one input with it is the tapped one only
             # where it is still under the tap, or where the content around it moved with it (the keyboard scrolled the
             # form up). Another input with its key elsewhere isn't (CodeRabbit, PR #18)
