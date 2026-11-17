@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.8 (unreleased)
+
+- While the app in front isn't answering, `close_app` closes it at once. Before, a reconnect attempt in the meantime
+  made it answer `reconnecting: … look before acting` again and again (2 min 40 s with X). `press_button home` also
+  gets through: it asks the runner for the home screen without a session, once, with a 10 s cap.
+
 ## 1.7.6 (2026-11-17)
 
 - A call whose target isn't an object (`"target": "Workouts"`) is refused as `bad_params` again, naming the target

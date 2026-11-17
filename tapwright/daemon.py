@@ -52,6 +52,7 @@ RESOLVE_SETTLE = 1.0  # the longest a silent re-read waits for the screen to be 
 CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
+HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
@@ -3606,6 +3607,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         notes = [NOTE_PERSON] if 0 <= view.seen < self.control.person_generation else []
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
+        if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
+            return await self._home_stuck(self.stuck, notes)
         await self.wait_connected()
         if (taken := self._taken_notes.pop(client_id, None)) is not None:
             notes = [*notes, taken]
@@ -4586,7 +4589,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("paused", "the phone is paused; ask the user to resume it")
             if self.control.person_generation != generation or self.control.person_active():
                 raise Refused("busy", "a person used the phone before delivery; look again before acting")
-            if self.stuck is not stuck or self.session.device is not device:
+            if not self._same_stuck(stuck) or self.session.device is not device:
                 raise Refused("reconnecting", "the phone connection changed; look before acting")
 
         async def close():
@@ -4603,6 +4606,49 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._wake.set()
         self._announce("agent", "close_app", label=stuck.name)
         return _answer([f"Closed {stuck.name} ({stuck.bundle_id}), which wasn't answering."], notes)
+
+    def _same_stuck(self, stuck: AppNotAnswering) -> bool:
+        """The same app still blocks the phone. Every reconnect attempt stores a new AppNotAnswering for it, so the
+        objects differ while the app is the same (1.7.8, bug 4: close_app lost that race for 2 min 40 s)."""
+        now = self.stuck
+        return isinstance(now, AppNotAnswering) and now.bundle_id == stuck.bundle_id
+
+    async def _home_stuck(self, stuck: AppNotAnswering, notes: list) -> dict:
+        """press_button home while the app in front is frozen: WebDriverAgent's home-screen route needs no session
+        (a session would wait on the frozen app); asked once, with a short cap."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        generation = self.control.person_generation
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if not self._same_stuck(stuck) or self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def home():
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                await device.http("POST", "/wda/homescreen", {}, timeout=HOME_STUCK_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(home)
+        except (ConnectionLost, DeviceError):
+            raise Refused("not_answering", f"{stuck}, and the home screen didn't come up. close_app can still "
+                                           "close it; then open_app it again.") from None
+        self.log(f"pressed home while {stuck.bundle_id} wasn't answering")
+        self._wake.set()
+        self._announce("agent", "press_button", label="home")
+        return _answer([f"Pressed home while {stuck.name} ({stuck.bundle_id}) wasn't answering; look before acting."],
+                       notes)
 
     async def _wait(self, view, args: dict, notes: list, shot) -> dict:
         """Sleep outside the phone's queue (a person may act meanwhile), then answer with what changed."""
