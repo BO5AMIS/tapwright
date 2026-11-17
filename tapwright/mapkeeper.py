@@ -231,6 +231,12 @@ class Maps:
             result.append(change(data))
             return result[0]
         def edited(d: dict) -> None:
+            forgotten = self._forgotten.setdefault(key, set())
+            gone_places = self._forgotten_places.setdefault(key, {})
+            if forgotten or gone_places:
+                # what a save under way wrote back from its snapshot is forgotten still: out of the file's map before this
+                # edit looks at it, so the edit can't take it for something it wants (1.7.8, X item 6)
+                self._undo([], set(forgotten), dict(gone_places))(d)
             before = {r.get("name") for r in d["reflexes"]}
             places_before = {n: places.key_id(p["key"]) for n, p in d["places"].items()}
             result.append(change(d))
@@ -249,15 +255,17 @@ class Maps:
                             if len(gone) == 1 and len(appeared.get(kid, [])) == 1})
             after = {r.get("name") for r in d["reflexes"]}
             task = self._tasks.get(key)
-            forgotten = self._forgotten.setdefault(key, set())
-            gone_places = self._forgotten_places.setdefault(key, {})
             if task is not None and not task.done():
                 forgotten |= before - after  # a save already under way would bring these back from its snapshot
                 # ...and so would a place (with the roads and reflexes that touched it) from its snapshot or the merge
                 gone_places.update({n: kid for n, kid in places_before.items() if n not in d["places"]})
-            forgotten -= after  # (a reflex added again is wanted)
-            for n in [n for n in gone_places if n in d["places"] and places.key_id(d["places"][n]["key"]) == gone_places[n]]:
-                del gone_places[n]  # (a place put back is wanted)
+            # (a reflex added again is wanted.) Only one THIS edit added: before 1.7.8 every reflex in the file's map
+            # counted, and one a save under way had written back stayed for good after an unrelated edit (CI, ubuntu
+            # 3.10: the reflex forgotten before `forget home` came back; X item 6)
+            forgotten -= after - before
+            for n in [n for n in gone_places if n not in places_before and n in d["places"]
+                      and places.key_id(d["places"][n]["key"]) == gone_places[n]]:
+                del gone_places[n]  # (a place this edit put back is wanted; one a save under way put back is not)
         try:
             file.save(copy.deepcopy(data))
             if file.problem is not None:  # the file turned out unusable: the edit goes on the map in memory, not on a new one
