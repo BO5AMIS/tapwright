@@ -8,8 +8,13 @@
   each frame's `seq`, capture time in epoch ms and in the action log's ISO form, and its place in the video, so a frame
   lines up with `~/.tapwright/log/actions-*.jsonl`. A recording shows whatever is on the phone's screen: record test data.
 - The recording leaves out Notification Center: `GET /stream?for=recording` sends no frame from while a notification
-  read had it open (the live view itself is unchanged), and says so in an `X-Hides` header; the command refuses an
-  older `tapwright serve`. It is a command only: no new agent tool.
+  read may have had it open (the live view itself is unchanged), and says so in an `X-Hides` header; the command
+  refuses an older `tapwright serve`. It fails closed: from before the swipe until 3 s after the close was confirmed
+  (open-ended when closing wasn't shown to work), no frame, none whose arrival the daemon can't tell, and never the
+  picture that was newest at the end of a read. A recording of a quiet screen no longer ends after 30 s (keep-alive
+  parts), a Ctrl+C never lands inside the encoder, queued frames are written on stop and the queue is bounded, an
+  encoder that can't open for a file is skipped, and the video and its frame list appear together or not at all.
+  It is a command only: no new agent tool.
 
 ## 1.7.6 (2026-11-17)
 

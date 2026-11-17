@@ -11,8 +11,12 @@ Privacy (decided for 1.7, W134):
   while it is open, no picture in any answer of this tool, and the caption says only `Read notifications`. Every answer
   says Notification Center was on screen. A person who doesn't want that pauses the live view (`paused`), and nothing
   is read; a person or an agent using the phone makes the trigger's check wait.
-- A video recording of the live view (`tapwright record-video`, 1.7.7) leaves those moments out: the daemon notes when
-  Notification Center was open (`_center_spans`) and `GET /stream?for=recording` sends no frame stamped inside one.
+- A video recording of the live view (`tapwright record-video`, 1.7.7) leaves those moments out, failing closed: the
+  daemon notes, on the hub's monotonic clock, when Notification Center may be open (`_center_spans`: from before the
+  swipe until the close is shown to have worked, plus CENTER_HIDE_AFTER_S for late and re-sent frames), and
+  `GET /stream?for=recording` sends no frame that arrived inside one, none whose arrival it can't tell, and never the
+  picture that was newest when the span ended (a feeder that sends it again). The recording holds the last picture
+  from before instead.
 - A one-time code is never shown: every code a source app's matching notification holds joins the redactor the moment it
   is read, before any text is made, so the `notifications` tool shows `<one-time code>` too.
 """
@@ -31,7 +35,8 @@ CENTER_PULL = 0.6  # how far down the swipe goes, in screen heights
 CENTER_SWIPE_MS = 300
 CENTER_OPEN_WAIT = 0.6  # seconds for Notification Center to come down before its tree is read
 CENTER_CLOSE_WAIT = 0.4  # seconds for it to go up again before the app in front is asked
-CENTER_HIDE_AFTER_MS = 400  # a recording leaves out frames this long after Notification Center closed (it slides up)
+CENTER_HIDE_AFTER_S = 3.0  # a recording leaves out frames this long after Notification Center's close was confirmed: it
+# slides up, WebDriverAgent's frames queue on a slow link, and AirPlay sends pictures again
 OPEN_WAIT = 1.0  # seconds for an opened notification's app to come to the front
 FIELD_MARGIN = 5.0  # seconds: a code field this daemon didn't see counts from 2 minutes ago less this (the read's own time)
 NOTE_ON_SCREEN = ("Notification Center was on the phone's screen for about a second while it was read (the live view "
@@ -59,24 +64,40 @@ class CenterTools:
         # input whose typed text says "code" (Codex, PR #12 cycle 1, M3)
         self.code_fields.seen(app, any(notes_lib.otp_target(e) for e in tree.items))
 
-    # ---- when Notification Center was on screen (a recording of the live view leaves those frames out) ----
+    # ---- when Notification Center may be on screen (a recording of the live view leaves those frames out) ----
     def _center_begin(self) -> None:
         spans = self.__dict__.setdefault("_center_spans", [])
         if not spans or spans[-1][1] is not None:  # (a span still open from a close that failed goes on)
-            spans.append([self.hub.now_ms(), None])
+            spans.append([self.hub.mono(), None])
 
     def _center_end(self, closed: bool) -> None:
-        """Closed (or its app opened): the span ends a moment later. Not shown closed: it stays open, so frames stay out."""
+        """Closed (or its app opened): the span ends CENTER_HIDE_AFTER_S later. Not shown closed: it stays open, so no
+        frame is recorded. Either way the picture that is newest now never reaches a recording."""
         spans = self.__dict__.setdefault("_center_spans", [])
+        picture = getattr(self.hub.latest, "picture", None)
+        if picture is not None:
+            self.__dict__["_center_pictures"] = [picture]
         if closed and spans and spans[-1][1] is None:
-            spans[-1][1] = self.hub.now_ms() + CENTER_HIDE_AFTER_MS
-        cut = self.hub.now_ms() - 3600_000
+            spans[-1][1] = self.hub.mono() + CENTER_HIDE_AFTER_S
+        cut = self.hub.mono() - 3600.0
         spans[:] = [s for s in spans if s[1] is None or s[1] >= cut]
 
-    def center_hidden(self, at_ms: int) -> bool:
-        """Was Notification Center (possibly) on the phone's screen at `at_ms` (epoch ms, a frame's `at`)?"""
-        return any(start <= at_ms and (end is None or at_ms <= end)
+    def center_covers(self, mono: float) -> bool:
+        """Was Notification Center possibly on the phone's screen at `mono` (the hub's monotonic seconds)?"""
+        return any(start <= mono and (end is None or mono <= end)
                    for start, end in self.__dict__.get("_center_spans", ()))
+
+    def recording_hides(self, hub, frame) -> bool:
+        """Must a recording of the live view leave `frame` out? Yes when it arrived while Notification Center may have
+        been open, when the hub can't say when it arrived, and when it is the picture that was newest at the end of a
+        read (a feeder sends a still picture again, with a new arrival time)."""
+        arrived = hub.arrival_of(frame.seq)
+        if arrived is None:
+            return True
+        picture = getattr(frame, "picture", None)
+        if picture is not None and any(picture is p for p in self.__dict__.get("_center_pictures", ())):
+            return True
+        return self.center_covers(arrived)
 
     # ---- the read ----
     async def _on_phone(self, fn):

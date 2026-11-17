@@ -264,6 +264,17 @@ class FrameHub:
             except asyncio.TimeoutError:
                 return None
 
+    def mono(self) -> float:
+        """Seconds on the monotonic clock that stamps arrivals (a wall-clock step never moves it)."""
+        return self._mono()
+
+    def arrival_of(self, seq: int) -> float | None:
+        """When frame `seq` arrived (monotonic seconds); None when the hub no longer keeps it, so nobody can say."""
+        for arrived, frame in reversed(self._recent):
+            if frame.seq == seq:
+                return arrived
+        return None
+
     def now_ms(self) -> int:
         """Epoch ms on the clock that stamps `Frame.at`."""
         return int(self._clock() * 1000)

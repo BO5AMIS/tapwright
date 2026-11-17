@@ -1,10 +1,12 @@
 """`tapwright record-video` (1.7.7): the stream's parts, their times on the video's clock, the MP4 and its sidecar, the
 stop after --seconds and on Ctrl+C, no token anywhere, no PyAV, and no frame from while Notification Center was open."""
+import errno
 import hashlib
 import hmac
 import io
 import json
 import queue
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,15 +46,31 @@ def stream_bytes(parts: list[tuple[bytes, int, int]]) -> bytes:
 class FakeWriter:
     size = (64, 96)
 
-    def __init__(self) -> None:
+    def __init__(self, fail_at: int | None = None, fail_close: bool = False, signal_at: int | None = None) -> None:
         self.written: list[tuple[bytes, int]] = []
+        self.fail_at, self.fail_close, self.signal_at = fail_at, fail_close, signal_at
+        self.abandoned = self.committed = False
+        self.completed = 0
 
     def write(self, data: bytes, video_ms: int) -> bool:
+        n = len(self.written) + 1
+        if self.fail_at == n:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        if self.signal_at == n:
+            signal.raise_signal(signal.SIGINT)  # a Ctrl+C in the middle of the encoder
         self.written.append((data, video_ms))
+        self.completed += 1
         return data != b"bad"
 
     def close(self, end_ms: int) -> None:
+        if self.fail_close:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        if self.signal_at:
+            signal.raise_signal(signal.SIGINT)  # and a second one while it finishes
         self.closed_at = end_ms
+
+    def commit(self) -> None:
+        self.committed = True
 
     def abandon(self) -> None:
         self.abandoned = True
@@ -191,6 +209,8 @@ class InterruptingQueue(queue.Queue):
         try:
             return super().get(block=False)
         except queue.Empty:
+            if not block:
+                raise
             raise KeyboardInterrupt from None
 
 
@@ -204,6 +224,7 @@ class FakeSource:
         if end:
             self.items.put(None)
         self.closed = False
+        self.dropped = 0
 
     def start(self) -> None:
         pass
@@ -213,10 +234,10 @@ class FakeSource:
 
 
 class Now:
-    def __init__(self, t: int) -> None:
+    def __init__(self, t: float) -> None:
         self.t = t
 
-    def __call__(self) -> int:
+    def __call__(self):
         return self.t
 
 
@@ -231,24 +252,25 @@ def read_back(path: Path) -> tuple[int, float, list[int]]:
 @needs_av
 def test_a_recording_has_real_time_frames_and_a_sidecar(tmp_path, capsys):
     t0 = 1_763_393_000_000
-    now = Now(t0)
+    now, mono = Now(t0), Now(0.0)
     pics = [(jpeg((200, 30, 30)), 11, t0 + 100), (jpeg((30, 200, 30)), 12, t0 + 350), (jpeg((30, 30, 200)), 13, t0 + 2350)]
     items = StreamParser().feed(stream_bytes(pics))
 
     def end_at():
         now.t = t0 + 3000
+        mono.t = 3.0
 
     out = tmp_path / "run.mp4"
     source = FakeSource(items)
     real_get = source.items.get
 
-    def get(timeout=None):
-        item = real_get(timeout=timeout)
+    def get(block=True, timeout=None):
+        item = real_get(block=block, timeout=timeout)
         if item is None:
             end_at()
         return item
     source.items.get = get
-    code = recordvideo.run(str(out), connect_fn=lambda: source, clock=now)
+    code = recordvideo.run(str(out), connect_fn=lambda: source, clock=now, mono=mono)
     assert code == 0 and source.closed
     text = capsys.readouterr().out
     assert str(out) in text and "3.0 s" in text and "3 frames" in text
@@ -418,7 +440,7 @@ def test_a_daemon_that_cannot_prove_the_token_never_gets_it(tmp_path, monkeypatc
     assert all(s[2] is None for s in fake.seen)
 
 
-# ---- Notification Center ----
+# ---- Notification Center (fails closed) ----
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Tapwright-Client": "agent-1", "X-Tapwright-Mode": "dedicated"}
 
@@ -428,8 +450,9 @@ def app_and_daemon():
     d = Daemon(FakeSession(), control=Controller(clock=clock, sleep=clock.sleep), log=lambda *a: None,
                stream_linger=0, stream_retry=0.01)
     d._set_state("live")
-    now = [1_000_000.0]
-    d.hub._clock = lambda: now[0]
+    now = [1_000.0]  # the hub's monotonic seconds
+    d.hub._mono = lambda: now[0]
+    d.hub._clock = lambda: 1_763_393_000.0 + now[0]
     return create_app(d, TOKEN, hosts={"testserver"}), d, now
 
 
@@ -440,33 +463,85 @@ def stream_parts(app, path: str):
     return StreamParser().feed(r.content), r.headers
 
 
+def pictures(parts: list[Part]) -> list[bytes]:
+    return [p.jpeg for p in parts if p.jpeg]
+
+
+def a_picture(color=(9, 9, 9)):
+    from tapwright.stream import Picture
+    return Picture(lambda: Image.new("RGB", (16, 16), color), lambda: Image.new("L", (2, 2)))
+
+
 def test_the_recording_stream_has_no_frame_from_while_notification_center_was_open():
     app, d, now = app_and_daemon()
     d.hub.publish(b"\xff\xd8before")
     d.hub.close()
     got, headers = stream_parts(app, "/stream?for=recording")
-    assert [p.jpeg for p in got] == [b"\xff\xd8before"] and headers["x-hides"] == "notification-center"
+    assert pictures(got) == [b"\xff\xd8before"] and headers["x-hides"] == "notification-center"
 
     app, d, now = app_and_daemon()
     d._center_begin()
     now[0] += 0.5
-    d.hub.publish(b"\xff\xd8center")  # captured while it was open
+    d.hub.publish(b"\xff\xd8center")  # arrived while it was open
     now[0] += 0.5
     d._center_end(True)
     d.hub.close()
     got, headers = stream_parts(app, "/stream?for=recording")
-    assert got == [] and headers["x-hides"] == "notification-center"
+    assert pictures(got) == [] and headers["x-hides"] == "notification-center"
     got, headers = stream_parts(app, "/stream")  # the live view itself is unchanged
-    assert [p.jpeg for p in got] == [b"\xff\xd8center"] and "x-hides" not in headers
+    assert pictures(got) == [b"\xff\xd8center"] and "x-hides" not in headers and not [p for p in got if p.keepalive]
 
     app, d, now = app_and_daemon()
     d._center_begin()
     d._center_end(True)
-    now[0] += 1.0  # past the moment it takes to slide up
+    now[0] += center_tool.CENTER_HIDE_AFTER_S + 1.0  # past the margin
     d.hub.publish(b"\xff\xd8after")
     d.hub.close()
     got, _ = stream_parts(app, "/stream?for=recording")
-    assert [p.jpeg for p in got] == [b"\xff\xd8after"]
+    assert pictures(got) == [b"\xff\xd8after"]
+
+
+def test_H1_a_late_frame_inside_the_margin_is_left_out_whatever_its_stamp():
+    """Fails on a2eb644: its span ended 400 ms after the close, so a frame that arrived 2 s after it (a slow link's
+    queue) was recorded."""
+    app, d, now = app_and_daemon()
+    d._center_begin()
+    d._center_end(True)
+    now[0] += 2.0
+    d.hub.publish(b"\xff\xd8queued")
+    d.hub.close()
+    assert pictures(stream_parts(app, "/stream?for=recording")[0]) == []
+
+
+def test_H1_a_picture_sent_again_after_the_span_is_left_out():
+    """Fails on a2eb644: a feeder that sends the newest picture again gives it a new arrival time, past the span."""
+    app, d, now = app_and_daemon()
+    shade, later = a_picture((1, 1, 1)), a_picture((200, 200, 200))
+    d._center_begin()
+    now[0] += 0.3
+    d.hub.publish_frame(shade)  # the picture of Notification Center half open
+    d._center_end(True)
+    now[0] += 10.0
+    d.hub.publish_frame(shade)  # sent again long after
+    d.hub.close()
+    assert pictures(stream_parts(app, "/stream?for=recording")[0]) == []
+    app, d, now = app_and_daemon()
+    d._center_begin()
+    d.hub.publish_frame(shade)
+    d._center_end(True)
+    now[0] += 10.0
+    d.hub.publish_frame(later)  # a different picture, long after the close: recorded
+    d.hub.close()
+    assert len(pictures(stream_parts(app, "/stream?for=recording")[0])) == 1
+
+
+def test_H1_a_frame_whose_arrival_the_hub_cannot_tell_is_dropped():
+    app, d, now = app_and_daemon()
+    f = d.hub.publish(b"\xff\xd8x")
+    assert d.recording_hides(d.hub, f) is False
+    for _ in range(300):  # it ages out of what the hub keeps
+        d.hub.publish(b"\xff\xd8y")
+    assert d.recording_hides(d.hub, f) is True
 
 
 def test_frames_stay_out_while_it_may_still_be_open():
@@ -476,13 +551,13 @@ def test_frames_stay_out_while_it_may_still_be_open():
     now[0] += 60
     d.hub.publish(b"\xff\xd8maybe")
     d.hub.close()
-    assert stream_parts(app, "/stream?for=recording")[0] == []
-    assert d.center_hidden(int(now[0] * 1000))
+    assert pictures(stream_parts(app, "/stream?for=recording")[0]) == []
+    assert d.center_covers(now[0])
     d._center_begin()  # the next read goes on in the same span
     d._center_end(True)
-    now[0] += 1.0
-    assert not d.center_hidden(int(now[0] * 1000))
-    assert d.center_hidden(int((now[0] - 30) * 1000))  # (the whole span stays out)
+    now[0] += center_tool.CENTER_HIDE_AFTER_S + 1
+    assert not d.center_covers(now[0])
+    assert d.center_covers(now[0] - 30)  # (the whole span stays out)
 
 
 def test_a_notification_read_marks_its_span(tmp_path, monkeypatch):
@@ -493,13 +568,266 @@ def test_a_notification_read_marks_its_span(tmp_path, monkeypatch):
     async def go():
         d, s = center_daemon(tmp_path, [])
         stop, task = await started(d)
-        before = d.hub.now_ms()
+        before = d.hub.mono()
         await d.run_tool("a", "notifications", {}, scope=Scope((BUNDLE,)))
-        after = d.hub.now_ms()
+        after = d.hub.mono()
         await finish(stop, task)
         assert len(d._center_spans) == 1 and d._center_spans[0][1] is not None
         start, end = d._center_spans[0]
-        assert before <= start <= end and d.center_hidden(start) and d.center_hidden(end)
-        assert not d.center_hidden(after + center_tool.CENTER_HIDE_AFTER_MS + 1)
-        assert not d.center_hidden(before - 1)
+        assert before <= start <= end and d.center_covers(start) and d.center_covers(end)
+        assert not d.center_covers(after + center_tool.CENTER_HIDE_AFTER_S + 1)
+        assert not d.center_covers(before - 1)
     run(go)
+
+
+# ---- M1, L5: a silent stream, and what the recorder is told ----
+def idle_hub(d, rounds=2):
+    """The hub answers `rounds` waits with nothing (a quiet screen), then closes."""
+    calls = [0]
+
+    async def next_after(seq, timeout=None):
+        calls[0] += 1
+        if calls[0] > rounds:
+            d.hub.close()
+        return None
+
+    d.hub.next_after = next_after
+
+
+def test_M1_a_quiet_recording_stream_sends_keep_alives():
+    """Fails on a2eb644: the stream sent nothing while still, and the recorder's read timed out after 30 s."""
+    app, d, now = app_and_daemon()
+    idle_hub(d)
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert len(got) == 2 and all(p.keepalive and not p.jpeg and not p.hidden for p in got)
+    app, d, now = app_and_daemon()
+    idle_hub(d)
+    assert stream_parts(app, "/stream")[0] == []  # the live view's stream has none
+
+
+def test_L5_keep_alives_say_when_frames_are_being_left_out():
+    app, d, now = app_and_daemon()
+    d._center_begin()
+    d._center_end(False)  # it may be open still
+    idle_hub(d)
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert got and all(p.hidden for p in got)
+    app, d, now = app_and_daemon()
+    d._center_begin()
+    d._center_end(True)
+    d.hub.publish(b"\xff\xd8x")  # a frame inside the margin is left out, and the stream says so
+    d.hub.close()
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert pictures(got) == [] and any(p.hidden for p in got)
+    app, d, now = app_and_daemon()
+    d.hub.publish(b"\xff\xd8x")  # no span: nothing is hidden
+    d.hub.close()
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert not any(p.hidden for p in got)
+
+
+def test_M1_a_read_that_times_out_is_not_a_broken_line():
+    """Fails on a2eb644: a TimeoutError of the socket ended the recording."""
+    data = stream_bytes([(jpeg(), 1, 1000)])
+
+    class Reply:
+        def __init__(self):
+            self.script = [TimeoutError(), TimeoutError(), data, b""]
+
+        def read1(self, n):
+            item = self.script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+    class Conn:
+        def close(self):
+            pass
+
+    source = recordvideo.Source(Conn(), Reply())
+    source.start()
+    first = source.items.get(timeout=5)
+    assert first.seq == 1 and source.items.get(timeout=5) is None
+
+
+def test_the_recorder_tells_the_user_when_frames_are_left_out(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(video, "available", lambda: True)
+    parts_ = [Part(b"", None, None, None, keepalive=True, hidden=True), Part(b"ok", 1, 50, "screen")]
+    w = FakeWriter()
+    assert recordvideo.run(str(tmp_path / "h.mp4"), connect_fn=lambda: FakeSource(parts_), writer_factory=lambda p: w,
+                           clock=Now(0), mono=Now(0.0)) == 0
+    assert "leaving frames out" in capsys.readouterr().err and len(w.written) == 1  # (a keep-alive is no picture)
+
+
+# ---- M2: a bounded queue, and the backlog on stop ----
+def test_M2_the_queue_is_bounded_and_keeps_the_newest():
+    """Fails on a2eb644: an unbounded queue."""
+    pics = [(jpeg(), n, 1000 + n) for n in range(1, 151)]
+
+    class Reply:
+        def __init__(self):
+            self.data = [stream_bytes(pics), b""]
+
+        def read1(self, n):
+            return self.data.pop(0)
+
+    class Conn:
+        def close(self):
+            pass
+
+    source = recordvideo.Source(Conn(), Reply())
+    source._run()  # (nobody takes parts from the queue)
+    assert source.items.qsize() <= recordvideo.QUEUE_MAX
+    left = []
+    while not source.items.empty():
+        left.append(source.items.get_nowait())
+    assert left[-1] is None and left[-2].seq == 150  # the newest are kept
+    assert source.dropped >= 150 - recordvideo.QUEUE_MAX
+
+
+def test_M2_the_recorder_keeps_no_list_when_it_has_a_sink():
+    seen = []
+    r = Recorder(FakeWriter(), 0, sink=seen.append)
+    for p in parts(0, 10, 20):
+        r.add(p, p.at)
+    assert r.entries == [] and r.count == 3 and [e["video_ms"] for e in seen] == [0, 10, 20]
+
+
+def test_M4_ctrl_c_inside_the_encoder_is_deferred_and_the_queued_frames_are_written(tmp_path, capsys, monkeypatch):
+    """Fails on a2eb644: the interrupt landed inside write (the frame never completed) and the queue was dropped."""
+    monkeypatch.setattr(video, "available", lambda: True)
+    before = signal.getsignal(signal.SIGINT)
+    w = FakeWriter(signal_at=1)
+    items = [Part(b"p%d" % n, n, 100 * n, "screen") for n in range(1, 6)]
+    code = recordvideo.run(str(tmp_path / "c.mp4"), connect_fn=lambda: FakeSource(items, end=False),
+                           writer_factory=lambda p: w, clock=Now(0), mono=Now(0.0))
+    assert code == 0 and w.completed == 5 and w.committed  # the interrupted write finished, and the backlog went in
+    assert signal.getsignal(signal.SIGINT) is before  # the handler is put back
+    assert "Saved" in capsys.readouterr().out
+
+
+# ---- M3: errors while recording ----
+def test_M3_a_full_disk_finishes_what_was_written(tmp_path, capsys, monkeypatch):
+    """Fails on a2eb644: the OSError escaped run() with a traceback and left the .part file."""
+    monkeypatch.setattr(video, "available", lambda: True)
+    w = FakeWriter(fail_at=3)
+    items = [Part(b"p%d" % n, n, 100 * n, "screen") for n in range(1, 6)]
+    out = tmp_path / "full.mp4"
+    code = recordvideo.run(str(out), connect_fn=lambda: FakeSource(items), writer_factory=lambda p: w, clock=Now(0),
+                           mono=Now(0.0))
+    err = capsys.readouterr().err
+    assert code == 0 and "the disk is full" in err and "what came before is saved" in err
+    assert w.committed and len(w.written) == 2
+    side = json.loads(recordvideo.sidecar_path(out).read_text("utf-8"))
+    assert side["frame_count"] == 2 and not list(tmp_path.glob("*.part"))
+
+
+def test_M3_a_file_that_cannot_be_finished_is_deleted_and_says_so(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(video, "available", lambda: True)
+    w = FakeWriter(fail_close=True)
+    out = tmp_path / "gone.mp4"
+    code = recordvideo.run(str(out), connect_fn=lambda: FakeSource([Part(b"a", 1, 5, "screen")]),
+                           writer_factory=lambda p: w, clock=Now(0), mono=Now(0.0))
+    assert code == 1 and "the disk is full" in capsys.readouterr().err
+    assert w.abandoned and not out.exists() and not recordvideo.sidecar_path(out).exists()
+    assert not list(tmp_path.iterdir())
+
+
+@needs_av
+def test_M3_an_encoder_that_cannot_open_for_a_file_is_skipped(tmp_path, monkeypatch):
+    """Fails on a2eb644: only the live view's probe chose the encoder, and a failure at the file's own open escaped."""
+    real = recordvideo.Mp4Writer._open_with
+    tried = []
+
+    def open_with(self, name, size):
+        tried.append(name)
+        if name != "libx264":
+            raise RuntimeError(f"{name} crashed on open")  # as h264_mf does in an MP4 stream
+        return real(self, name, size)
+
+    monkeypatch.setattr(recordvideo.Mp4Writer, "_open_with", open_with)
+    out = tmp_path / "enc.mp4"
+    items = StreamParser().feed(stream_bytes([(jpeg(), 1, 100), (jpeg((5, 5, 5)), 2, 300)]))
+    assert recordvideo.run(str(out), connect_fn=lambda: FakeSource(items), clock=Now(0), mono=Now(0.5)) == 0
+    assert tried == ["h264_nvenc", "libx264"] and len(read_back(out)[2]) == 2
+
+
+@needs_av
+def test_M3_when_no_encoder_opens_nothing_is_left_and_the_reason_is_said(tmp_path, monkeypatch, capsys):
+    def open_with(self, name, size):
+        raise RuntimeError(f"{name} crashed on open")
+
+    monkeypatch.setattr(recordvideo.Mp4Writer, "_open_with", open_with)
+    out = tmp_path / "none.mp4"
+    items = StreamParser().feed(stream_bytes([(jpeg(), 1, 100)]))
+    assert recordvideo.run(str(out), connect_fn=lambda: FakeSource(items), clock=Now(0), mono=Now(0.0)) == 1
+    err = capsys.readouterr().err
+    assert "no H.264 encoder works" in err and "h264_mf" in err and "Traceback" not in err
+    assert not list(tmp_path.iterdir())
+
+
+# ---- L1, L2: the files appear together, and only for the run that reserved them ----
+@needs_av
+def test_L1_a_sidecar_that_cannot_be_finished_leaves_no_mp4(tmp_path, monkeypatch, capsys):
+    """Fails on a2eb644: the MP4 was already renamed, so a complete-looking file stayed with exit 1."""
+    def broken(self, *a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(recordvideo.Sidecar, "close", broken)
+    out = tmp_path / "side.mp4"
+    items = StreamParser().feed(stream_bytes([(jpeg(), 1, 100)]))
+    assert recordvideo.run(str(out), connect_fn=lambda: FakeSource(items), clock=Now(0), mono=Now(0.0)) == 1
+    assert "nothing was saved" in capsys.readouterr().err
+    assert not list(tmp_path.iterdir())
+
+
+def test_L2_a_second_run_with_the_same_name_does_not_touch_the_first(tmp_path, monkeypatch, capsys):
+    """Fails on a2eb644: both runs passed the exists check and the later rename replaced the first file."""
+    monkeypatch.setattr(video, "available", lambda: True)
+    out = tmp_path / "same.mp4"
+    out.write_bytes(b"the first run's video")
+    monkeypatch.setattr(recordvideo, "check_args", lambda o, s, f: (out, None))  # (both passed the check)
+    code = recordvideo.run(str(out), connect_fn=lambda: FakeSource([Part(b"a", 1, 5, "screen")]),
+                           writer_factory=lambda p: FakeWriter(), clock=Now(0), mono=Now(0.0))
+    assert code == 2 and "another run" in capsys.readouterr().err
+    assert out.read_bytes() == b"the first run's video" and not recordvideo.sidecar_path(out).exists()
+    assert recordvideo.part_name(out) != recordvideo.part_name(out)  # each run has its own temporary name
+
+
+# ---- L3: video time follows the monotonic clock ----
+def test_L3_a_step_of_the_wall_clock_does_not_move_video_time():
+    """Fails on a2eb644: after the wall clock stepped back every frame was one ms after the one before."""
+    w = FakeWriter()
+    r = Recorder(w, start_ms=10_000)
+    spec = [(10_000, 5_000), (10_100, 5_100), (4_000, 7_000), (4_100, 7_100)]  # wall ms stepped back; monotonic ms
+    for i, (at, mono_ms) in enumerate(spec):
+        r.add(Part(b"j", i + 1, at, "screen", mono_ms), now_ms=at)
+    assert [t for _, t in w.written] == [0, 100, 2000, 2100]
+    assert [e["captured_ms"] for e in r.entries] == [10_000, 10_100, 4_000, 4_100]  # the sidecar keeps the wall clock
+
+
+def test_L3_the_stream_carries_the_monotonic_arrival():
+    app, d, now = app_and_daemon()
+    d.hub.publish(b"\xff\xd8x")
+    d.hub.close()
+    got, _ = stream_parts(app, "/stream?for=recording")
+    assert got[0].mono_ms == 1_000_000
+    plain, _ = stream_parts(app, "/stream")
+    assert plain[0].mono_ms is None
+
+
+# ---- L4: the last picture of a burst lasts to the end ----
+def test_L4_a_waiting_picture_is_written_at_the_end_not_a_gap_later():
+    """Fails on a2eb644: finish() took no end time, so the picture came a whole gap after the recording stopped."""
+    w = FakeWriter()
+    r = Recorder(w, start_ms=0, fps=2)
+    for p in parts(0, 100):
+        r.add(p, now_ms=p.at)
+    r.finish(end_ms=150)
+    assert [t for _, t in w.written] == [0, 150]
+    w = FakeWriter()
+    r = Recorder(w, start_ms=0, fps=2)
+    for p in parts(0, 100):
+        r.add(p, now_ms=p.at)
+    r.finish(end_ms=0)  # never before the one it follows
+    assert [t for _, t in w.written] == [0, 1]
