@@ -61,6 +61,10 @@
   scroll can carry it off and bring another field with its identifier to its place). `replace` after a focusing tap,
   with an identifier only one field has, clears it only where it is still under the tap, or where the content around
   it moved with it (the keyboard scrolled the form); otherwise `stale`.
+- A tap by point that first closed the keyboard is checked against the read the reflex made: when a control now lies
+  under the point that wasn't there when the agent aimed (the reflex's drag scrolled it there), the answer is `stale`
+  and nothing else is touched; `force` touches there anyway. The app a touch is meant for is the one the newest read
+  before it names, and a cover-sheet date partly above the screen's top still proves Notification Center open.
 
 ## 1.7.7 (2026-11-17)
 

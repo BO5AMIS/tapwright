@@ -249,3 +249,81 @@ def test_11_an_off_screen_hosted_element_keeps_its_mark():
     assert _one(tree.items, "Copy").placed == "unknown"
     [off] = [e for e in tree.offscreen if e.label == "Far"]
     assert off.placed == "unknown"
+
+
+# ---- cycle 2 (at 2203451) ----
+
+# c2-1: the keyboard reflex's drag never turns the agent's passive point into a control's touch
+
+def _reflex_drag_brings(new):
+    from test_daemon import keyboard_up
+
+    async def go(args):
+        d, stop, task = await keyboard_up(blank_tap_closes=False)
+        s = d.session
+        s.tree = [*s.tree, el("e8", "scroll", "", "form", rect=(0, 60, 400, 440))]
+        await d.run_tool("a", "look", {"screenshot": False})
+        real = s.swipe
+
+        async def swipe(*a, **kw):
+            out = await real(*a, **kw)
+            s.tree, s.last_keyboard = [*s.tree, *new], False  # the drag scrolled the form a little
+            return out
+        s.swipe = swipe
+        try:
+            return d, await d.run_tool("a", "tap", args)
+        finally:
+            await finish(stop, task)
+    return go
+
+
+def test_c2_1_a_control_the_reflex_drag_moved_under_the_point_is_not_touched():
+    go = _reflex_drag_brings([button("e9", "Delete", "delete", rect=(300, 220, 80, 40))])
+
+    async def refused():
+        with pytest.raises(Refused) as e:
+            await go({"target": {"x": 340, "y": 240}})
+        assert e.value.code == "stale" and "Delete" in str(e.value)
+    run(refused)
+
+    async def forced():
+        d, _ = await go({"target": {"x": 340, "y": 240}, "force": True})
+        assert (340, 240) in d.session.tap_points
+    run(forced)
+
+
+def test_c2_1_a_point_that_stays_passive_is_touched_after_the_reflex():
+    go = _reflex_drag_brings([el("e9", "text", "Note", rect=(300, 220, 80, 40), type="StaticText")])
+
+    async def touched():
+        d, r = await go({"target": {"x": 340, "y": 240}})
+        assert (340, 240) in d.session.tap_points
+    run(touched)
+
+
+# c2-2: the touch's app is the one the newest read before it named
+
+def test_c2_2_the_touch_is_meant_for_the_app_its_own_read_named():
+    async def go():
+        d, s = _files_then_safari()
+        stop, task = await started(d)
+        try:
+            await d.run_tool("a", "look", {"screenshot": False})
+            await d.run_tool("a", "tap", {"target": {"label": "Search"}, "look": False})
+            _safari_now(s, snapshot_too=False)  # the snapshot still says Files; the tap's own read names Safari
+            await d.run_tool("a", "tap", {"target": {"label": "Address"}, "look": False})
+            await d.run_tool("a", "type_text", {"text": "x"})  # the agent's touch went to Safari: typed there
+            assert len(s.typed) == 1
+        finally:
+            await finish(stop, task)
+    run(go)
+
+
+# c2-3: a date partly above the top of the screen still shows
+
+def test_c2_3_a_partly_visible_date_proves_the_sheet():
+    from test_x_items_178 import DATE, _springboard
+
+    from tapwright import notifications as nl
+    assert nl.is_center(_springboard(DATE.format(y=-20, h=80)))
+    assert not nl.is_center(_springboard(DATE.format(y=-80, h=80)))
