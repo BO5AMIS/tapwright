@@ -5,26 +5,33 @@
 - Content another app draws inside the app in front (Safari's share sheet, X's photo picker) is listed where it is on
   the screen. XCTest gives its frames in the host view's own space, so "View More" was listed 531 points too high, and
   a tap on it opened the video behind while answering "Tapped". Frames are moved only when the tree shows it plainly:
-  a child with the host's size at (0, 0), every frame inside the host's own space, and some outside its place on the
-  screen. A tap, toggle, long press or focusing tap on such an element goes out only when the runner's hit test
-  (route version 6) names that element at the touch point; otherwise it is refused `covered` and nothing is touched.
-  Where the frames can't be placed, elements in that view are never touched by their frame, even with `force`; a tap
-  by point still works.
+  a direct child with the host's size at (0, 0), the host clearly away from (0, 0), on the screen and outside any
+  scroll view's content (a parallax header is not a host), every frame inside the host's own space, and some clearly
+  outside its place on the screen. A tap, toggle, long press, focusing tap or scroll on such an element goes out only
+  when the runner's hit test (route version 6) names that element, or an element inside it, at the touch point;
+  otherwise it is refused `covered` and nothing is touched. Where the frames can't be placed, elements in that view
+  are never touched by their frame, even with `force` (and `back` doesn't press a bar in such a view); a tap by point
+  still works. The check adds about 5 ms to a read of a deep React Native tree.
 - While the app in front isn't answering, `close_app` closes it at once. Before, a reconnect attempt in the meantime
   made it answer `reconnecting: … look before acting` again and again (2 min 40 s with X). `press_button home` also
-  gets through: it asks the runner for the home screen without a session, once, with a 10 s cap.
+  gets through: it asks the runner for the home screen without a session, once, with a 10 s cap, and only when the
+  phone says it isn't locked. With no answer in time, the answer says the home screen may still come up.
 - `type_text` at a point focuses the field at that point, with or without `force`. Before, it tapped the field's
   centre, which in X's composer was under the app's floating toolbar, and the GIF picker opened. A point under the
-  keyboard is refused `covered`.
-- `type_text` with `replace` proves the field right before clearing it. A field without an identifier must be found at
-  its place in a fresh read, since another field (another post of a thread) may have the same label. Otherwise the
-  answer is `stale` and nothing is cleared or typed.
-- A field that goes away while its focus is checked answers `stale`, not `internal`. When the keyboard was closed to
+  keyboard (even with `force`) or under a control the app draws over the field is refused `covered`.
+- `type_text` with `replace` proves the field right before clearing it: it must be the one input at its place in a
+  fresh read (under the agent's point, or under the focusing tap when another field shares its label or identifier),
+  and the focused element's frame must be that input's. A label or identifier alone proves nothing: two posts of a
+  thread share a label, and a list may repeat one identifier on every row. Otherwise the answer is `stale` and
+  nothing is cleared or typed. Typing again without a tap is only for the very field typed into last.
+- A field that goes away while its focus is checked answers `stale`, not `internal` (while the focusing tap's focus is
+  awaited, it is checked again until the wait ends). When the keyboard was closed to
   try the focusing tap again and the field didn't survive the new read, the answer is `stale`, not `not_found`.
 - The field that has the keyboard's focus is typed into even when the keyboard's accessory area is drawn over it
   (Safari's address field). No tap is made on it; if the focus has moved meanwhile, the answer is `stale`.
 - `open_url` into Safari says when the link didn't show: Safari's address field shows another host, or Safari kept
-  the page that was open (same tab, same page). Before, it answered "opened" while Safari stayed on a video.
+  the page that was open (same tab, same page, same text). Before, it answered "opened" while Safari stayed on a video.
+  A redirect to another host (a short link) gets no note.
 
 ## 1.7.6 (2026-11-17)
 

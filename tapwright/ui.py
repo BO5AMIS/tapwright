@@ -813,6 +813,8 @@ def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
 
 
 HOSTED_SLACK = 2.0  # points a frame may be off from where it is checked (WebDriverAgent rounds frames)
+HOSTED_OFFSET = 2 * HOSTED_SLACK  # points a host must be away from (0, 0), and a frame outside it, to count
+_CLIPPING_TYPES = frozenset(f"XCUIElementType{k}" for k in CLIPPING) | frozenset(CLIPPING)
 PLACED_ATTR, RAW_ATTR = "tw-placed", "tw-raw"  # what _place_hosted marks a node with
 
 
@@ -821,26 +823,53 @@ def _place_hosted(root: ET.Element) -> None:
     with frames in its host view's own space, not the screen's: the share sheet at (9, 531) lists its content view at
     (0, 0) with the host's own size, and "View More" 531 points above where it is (2026-11-17: the tap opened the video
     behind). Those frames are put on the screen here, in place, only on strong evidence; a host that shows the tell
-    and fails the rest is marked "unknown", and nothing in it is touched by its frame (Daemon._hosted_proof).
+    and whose frames can't all be in its own space is marked "unknown", and nothing in it is touched by its frame
+    (Daemon._hosted_proof).
 
-    A node C away from (0, 0) is such a host when, among its descendants' frames (with area; a scroll view's content
-    is left out, since it runs past the view):
-    - one is about C's own size at about (0, 0): the tell, which no screen-space child has;
-    - all fit inside (0, 0, C's width, C's height);
-    - one lies outside C's frame on the screen (else nothing says the frames aren't the screen's).
-    Bottom-up: an inner host is placed in its parent's space first, so an outer one sees screen frames, or its own
-    space's when it is a host too."""
-    slack = HOSTED_SLACK
+    A node C is such a host when:
+    - a direct child of C is about C's own size at about (0, 0): the tell, which no screen-space child has;
+    - C is really away from (0, 0) (more than HOSTED_OFFSET: a list scrolled 1 or 2 points under a bar isn't), on
+      the screen (not above or left of it, as a header scrolled up is), and not inside a scroll view's content
+      (a parallax header's pinned image is the tell's shape too; a share sheet or a picker is never scroll content);
+    and, among its descendants' frames (with area; a scroll view's content is left out, since it runs past the view):
+    - all fit inside (0, 0, C's width, C's height) (else "unknown");
+    - one lies clearly outside C's frame on the screen (else nothing says the frames aren't the screen's: left as is).
+    One walk finds the tells (linear: a deep React Native tree read 4x slower with a subtree walk at every node,
+    Opus review 7); only the few hosts' subtrees are walked again. Bottom-up: an inner host is placed in its parent's
+    space first, so an outer one sees screen frames, or its own space's when it is a host too."""
+    slack, offset = HOSTED_SLACK, HOSTED_OFFSET
+    hosts: dict[ET.Element, int] = {}  # host -> its depth
+    # (node, its parent, its depth, inside a scroll view's content); the root's frame is never a tell
+    stack: list[tuple[ET.Element, ET.Element | None, int, bool]] = [(root, None, 0, False)]
+    while stack:
+        node, parent, depth, scrolled = stack.pop()
+        if len(node):
+            inside = scrolled or (node.get("type") or node.tag) in _CLIPPING_TYPES
+            stack.extend((child, node, depth + 1, inside) for child in node)
+        if parent is None or scrolled or parent in hosts:
+            continue
+        try:  # (the cheap part first: nearly every node is away from (0, 0))
+            if abs(float(node.get("x", 0))) > slack or abs(float(node.get("y", 0))) > slack:
+                continue
+        except ValueError:
+            continue
+        x, y, w, h = _rect(node)
+        if w <= 0 or h <= 0 or abs(x) > slack or abs(y) > slack:
+            continue
+        px, py, pw, ph = _rect(parent)
+        if (abs(pw - w) <= slack and abs(ph - h) <= slack and max(abs(px), abs(py)) > offset and px >= -slack
+                and py >= -slack and _kind(parent) != "Application"):
+            hosts[parent] = depth - 1
 
-    def frames(node: ET.Element) -> list[tuple[ET.Element, tuple[float, float, float, float]]]:
-        out, stack = [], list(node)
-        while stack:
-            n = stack.pop()
+    def frames(node: ET.Element) -> list[tuple[float, float, float, float]]:
+        out, pending = [], list(node)
+        while pending:
+            n = pending.pop()
             r = _rect(n)
             if r[2] > 0 and r[3] > 0:
-                out.append((n, r))
+                out.append(r)
             if _kind(n) not in CLIPPING:
-                stack.extend(n)
+                pending.extend(n)
         return out
 
     def mark(node: ET.Element, placed: str, dx: float = 0.0, dy: float = 0.0) -> None:
@@ -856,26 +885,18 @@ def _place_hosted(root: ET.Element) -> None:
                 n.set("x", repr(x + dx))
                 n.set("y", repr(y + dy))
 
-    def visit(node: ET.Element) -> None:
-        for child in node:
-            visit(child)
-        x, y, w, h = _rect(node)
-        if not len(node) or w <= 0 or h <= 0 or (abs(x) <= 1 and abs(y) <= 1) or _kind(node) == "Application":
-            return
-        inner = frames(node)
-        if not any(abs(r[0]) <= slack and abs(r[1]) <= slack and abs(r[2] - w) <= slack and abs(r[3] - h) <= slack
-                   for _, r in inner):
-            return
+    for host in sorted(hosts, key=lambda n: -hosts[n]):  # the deepest first
+        x, y, w, h = _rect(host)
+        inner = frames(host)
         fits = all(r[0] >= -slack and r[1] >= -slack and r[0] + r[2] <= w + slack and r[1] + r[3] <= h + slack
-                   for _, r in inner)
-        outside = any(r[0] < x - slack or r[1] < y - slack or r[0] + r[2] > x + w + slack or r[1] + r[3] > y + h + slack
-                      for _, r in inner)
-        if fits and outside:
-            mark(node, "moved", x, y)
-        else:
-            mark(node, "unknown")
-    visit(root)
-
+                   for r in inner)
+        if not fits:
+            mark(host, "unknown")
+            continue
+        if any(r[0] < x - offset or r[1] < y - offset or r[0] + r[2] > x + w + offset or r[1] + r[3] > y + h + offset
+               for r in inner):
+            mark(host, "moved", x, y)
+        # (the tell, everything fitting, nothing outside: these may well be screen frames; an ordinary screen)
 
 def _placed(node: ET.Element) -> tuple[str, tuple[float, float, float, float] | None]:
     """What _place_hosted found for a node: its mark and the frame XCTest gave."""
@@ -1729,6 +1750,8 @@ class Back(NamedTuple):
     bar: bool  # a NavigationBar is on screen
     point: tuple[float, float] | None  # the centre of its back button, if it has one
     dismiss: tuple[float, float] | None = None  # where a touch closes the popover that is open on top, if one is
+    # (1.7.8) the bar on top is in a view another process draws (_place_hosted): its button isn't touched by its frame
+    hosted: bool = False
 
 
 DISMISS_MARGIN = 60.0  # points a closing touch keeps from the screen's top (the status bar) and from the sheet
@@ -1805,7 +1828,11 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     bars = [n for n in root.iter() if _kind(n) == "NavigationBar" and on_screen(_rect(n))]
     if not bars:
         return Back(False, None)
+    if any(n.get(PLACED_ATTR) == "unknown" for n in bars):
+        return Back(True, None, hosted=True)  # its frame isn't the screen's: which bar is on top can't be told
     bar = min(bars, key=lambda n: _rect(n)[1])
+    if bar.get(PLACED_ATTR):
+        return Back(True, None, hosted=True)  # (Opus review 5: never pressed without the phone's hit test)
     bar_x, _, bar_w, _ = _rect(bar)
     buttons = [n for n in bar.iter() if _kind(n) == "Button" and on_screen(_rect(n))]
 
@@ -1822,8 +1849,8 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     after = max(order[n] for n in bar.iter())
     parents = parents if parents is not None else {child: up for up in root.iter() for child in up}
     for n in root.iter():
-        if (_kind(n) == "Button" and order[n] > after and on_screen(_rect(n)) and _on_bar(n, _rect(bar), parents)
-                and _is_back(n)):
+        if (_kind(n) == "Button" and order[n] > after and not n.get(PLACED_ATTR) and on_screen(_rect(n))
+                and _on_bar(n, _rect(bar), parents) and _is_back(n)):
             return Back(True, centre(n))
     left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
     left.sort(key=lambda n: centre(n)[0])

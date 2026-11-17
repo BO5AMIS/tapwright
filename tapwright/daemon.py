@@ -54,6 +54,7 @@ CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
 HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
+HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
@@ -147,9 +148,20 @@ def _safari_page(items: list) -> tuple[str | None, str | None, frozenset]:
                     and e.value and e.value != e.placeholder), None)
     tab = next((m.group(1) for e in items if e.identifier.startswith("TabDocument?")
                 and (m := re.search(r"[?&]UUID=([^&]+)", e.identifier))), None)
+    # (text labels count: two articles can share every link; Opus review 10)
     page = frozenset((e.role, e.identifier, e.label) for e in items
-                     if not e.identifier.startswith(("TabDocument?", "SafariWindow?")) and e.role not in ("text", "slider"))
+                     if not e.identifier.startswith(("TabDocument?", "SafariWindow?")) and e.role != "slider")
     return address, tab, page
+
+
+def _host_names(host: str) -> tuple[str, ...]:
+    """The link's host as Safari may show it: as written, and in Unicode for an international (xn--) name."""
+    host = host.lower().removeprefix("www.")  # (Safari leaves www. out)
+    try:
+        shown = host.encode("ascii").decode("idna") if "xn--" in host else host
+    except (UnicodeError, ValueError):
+        shown = host
+    return (host, shown.lower())
 
 
 def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | None", unchanged: bool) -> str | None:
@@ -163,12 +175,14 @@ def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | N
     address, tab, page = _safari_page(items)
     if address is None:
         return None
-    if host.lower().removeprefix("www.") not in address.lower():  # (Safari leaves www. out)
-        return URL_NOT_LOADED.format(shows=f"shows {address}, not {host}")
     before, before_app = box.get("url_before") or ([], None)
+    address_before, tab_before, page_before = _safari_page(before) if before_app == SAFARI else (None, None, None)
+    if not any(name in address.lower() for name in _host_names(host)):
+        # another host: a note only when Safari still shows the address it showed before the call. One that changed
+        # is most likely a redirect (youtu.be to m.youtube.com, a short link, x.com): no note (Opus review 10)
+        return URL_NOT_LOADED.format(shows=f"shows {address}, not {host}") if address == address_before else None
     if before_app != SAFARI:
         return None
-    _, tab_before, page_before = _safari_page(before)
     if unchanged or (tab is not None and tab == tab_before and page == page_before):
         return URL_NOT_LOADED.format(shows="kept the open page")
     return None
@@ -176,17 +190,28 @@ def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | N
 
 HOSTED_UNKNOWN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and where it is on the "
                   "screen can't be told; nothing was touched. Look with screenshot: true, then tap it by point.")
+HOSTED_BACK = ("covered: a navigation bar on screen is in a view another app draws (a share sheet, a picker), so where "
+               "back would touch can't be told; nothing was touched. Tap the back button you mean by label (the phone "
+               "confirms where that lands) or by point.")
 HOSTED_UNPROVEN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and the phone couldn't "
                    "confirm that a touch at ({x}, {y}) lands on it; nothing was touched. Look with screenshot: true, then "
                    "tap it by point.")
 
 
-def _hit_is(hit: ui.Hit, element: ui.Element) -> bool:
+def _hit_is(hit: ui.Hit, element: ui.Element, source: str | None = None) -> bool:
     """The hit test names this element: its type, name and label, and the frame XCTest gives it (a hosted view's own
-    space, as in the tree before it was placed)."""
+    space, as in the tree before it was placed); or an element inside it: within its frame, and its descendant in the
+    tree as XCTest gave it (`source`: a share sheet's cell answers with its image or its text, Opus review 11)."""
     raw = element.raw_rect
-    return (raw is not None and hit.type == element.type and hit.name == element.name and hit.label == element.label
-            and all(abs(a - b) <= 1 for a, b in zip(hit.rect, raw)))
+    if raw is None:
+        return False
+    if (hit.type == element.type and hit.name == element.name and hit.label == element.label
+            and all(abs(a - b) <= 1 for a, b in zip(hit.rect, raw))):
+        return True
+    x, y, w, h = hit.rect
+    within = x >= raw[0] - 1 and y >= raw[1] - 1 and x + w <= raw[0] + raw[2] + 1 and y + h <= raw[1] + raw[3] + 1
+    return (within and source is not None
+            and ui.hit_relation(source, dataclasses.replace(element, rect=raw), hit) == "inside")
 
 
 def _same_control(a: ui.Element, b: ui.Element) -> bool:
@@ -4694,6 +4719,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("reconnecting", "the phone connection changed; look before acting")
 
         async def home():
+            # (Opus review 9) the owner stops the agent by locking the phone: a home press would light the lock screen.
+            # Asked session-less (WebDriverAgent answers it without reading the frozen app); only "not locked" passes
+            try:
+                locked = (await device.http("GET", "/wda/locked", None, timeout=HOME_LOCK_CAP)).get("value")
+            except (ConnectionLost, DeviceError):
+                raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked; nothing was "
+                                               "pressed. close_app can still close it; then open_app it again.") from None
+            if locked is not False:
+                raise Refused("locked", "the phone is locked (or didn't say it isn't); ask the user to unlock it. "
+                                        "Nothing was pressed.")
             token = device_module.BEFORE_SEND.set(guard)
             try:
                 await guard()
@@ -4703,7 +4738,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         try:
             await self.control.agent(home)
-        except (ConnectionLost, DeviceError):
+        except ConnectionLost:
+            # no answer within the cap: WebDriverAgent may still carry it out (the `timeout` contract)
+            self.log(f"press_button home while {stuck.bundle_id} wasn't answering got no answer in {HOME_STUCK_CAP:g} s")
+            raise Refused("not_answering", f"{stuck}, and the phone didn't answer the home press in time; the home "
+                                           "screen may still come up: look before acting. close_app can still close "
+                                           "it; then open_app it again.") from None
+        except DeviceError:
             raise Refused("not_answering", f"{stuck}, and the home screen didn't come up. close_app can still "
                                            "close it; then open_app it again.") from None
         self.log(f"pressed home while {stuck.bundle_id} wasn't answering")
@@ -5421,6 +5462,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # to refuse. Session is told not to tap: if the focus moved meanwhile, it refuses instead.
         no_tap = bool(field.focused) and self.session.tw_version >= 5
         if a.get("force"):
+            if point is not None and (key := next((b for b in field.covered_by if b.kind == "Keyboard"
+                                                   and ui._holds(b.rect, point)), None)) is not None:
+                # (Opus review 11) a touch there presses a key: it types into the focused field and focuses nothing
+                raise Refused("not_actionable", f"covered: ({round(point[0])}, {round(point[1])}) is under {key.line}, "
+                                                f"even with force; aim at the part of {field.line(actions=False)} that "
+                                                "shows.")
             forced = self._forced(view, field)
             at = point
         else:
@@ -5497,9 +5544,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
 
     def _typing_aim(self, point: tuple[float, float]) -> "Callable[[ui.Element], tuple[float, float]]":
-        """The focusing tap of a type_text at a point: at that point, unless a bar (the keyboard) is drawn over it."""
+        """The focusing tap of a type_text at a point: at that point, unless something is drawn over it there (the
+        keyboard, a bar, a control of the app's)."""
         def aim(field: ui.Element) -> tuple[float, float]:
-            over = next((b for b in field.covered_by if b.kind in ui.COVERING_BARS and ui._holds(b.rect, point)), None)
+            # a bar, or a control the app draws over the field there (X's ComposeButtonBarView: Opus review 11)
+            over = next((b for b in field.covered_by if ui._holds(b.rect, point)), None)
             if over is not None:
                 raise Refused("not_actionable", f"covered: ({round(point[0])}, {round(point[1])}) is under "
                                                 f"{over.line}; aim at the part of {field.line(actions=False)} that shows.")
@@ -5521,7 +5570,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             hit = await self.session.hit_at(*at)
         except Refused:
             hit = None
-        if hit is None or self.session.tw_version < 6 or not _hit_is(hit, element):
+        if hit is None or self.session.tw_version < 6 or not _hit_is(hit, element, getattr(self.session, "last_source", None)):
             raise Refused("not_actionable", HOSTED_UNPROVEN.format(line=line, x=round(at[0]), y=round(at[1])))
 
     def _vault_names(self) -> tuple[str, ...]:
@@ -5563,8 +5612,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
-            if area.placed == "unknown":
-                raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=area.line(actions=False)))
+            if isinstance(hit, ui.Element) and hit.placed == "unknown":  # (its raw frame may lie in the app's own list)
+                raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=hit.line(actions=False)))
             self._touching(hit if isinstance(hit, ui.Element) else None)
         direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
         top, bottom = s.last_insets
@@ -5574,6 +5623,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         x0, y0, x1, y1 = ui.scroll_area_points(direction, area.rect if area else (0.0, 0.0, *s.screen),
                                                a.get("amount", ui.SCROLL_USABLE if to else 0.8), band)
         bounds = area.rect if area else (0.0, 0.0, *s.screen)
+        if area is not None and area.placed:
+            # (1.7.8, Opus review 5) a list in a view another process draws: dragged only where the phone confirms the
+            # drag starts in it, as a tap is; one whose place isn't known, never
+            await self._hosted_proof(area, (x0, y0))
         # Whether the tree shows what lies past the list's edge. Where it does (React Native renders a whole list),
         # the end is reached when a read after a drag shows nothing past it any more: no waiting for the pictures
         # to repeat, which over Wi-Fi took 4 to 14 s. A list that keeps only its visible rows shows nothing past
@@ -5725,7 +5778,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if drags == MAX_SCROLL_SWIPES:
                     note = f"the target wasn't reached in {MAX_SCROLL_SWIPES} drags; scroll again to go on."
                     break
-                await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
+                step = ui.scroll_step(move, (x, y, w, h))
+                if element.placed == "unknown":  # (1.7.8, Opus review 5: never by frames that can't be placed)
+                    raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=element.line(actions=False)))
+                if area is not None and area.placed:
+                    await self._hosted_proof(area, (step[0], step[1]))
+                await s.scroll(*step)
                 seen.append(element.rect)
                 await self._silent_read(view)  # once the screen is still: where the element is now
         except Refused:
@@ -6700,6 +6758,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if behind and not (back.point is not None and not any(ui._holds(e.rect, back.point) for e, _ in behind)):
             self._dry(a, "Would close the sheet in front.")
             return await self._close_sheet(view)
+        if back.hosted:
+            raise Refused("not_actionable", HOSTED_BACK)
         if back.point is not None:
             self._dry(a, "Would tap the back button.")
             await self._back_before(view, a)

@@ -41,11 +41,11 @@ def test_home_gets_through_while_the_front_app_is_not_answering():
 
         async def http(method, path, payload=None, timeout=30.0):
             sent.append((method, path, timeout))
-            return {}
+            return {"value": False} if path == "/wda/locked" else {}
         d.session.device.http = http
         answer = await d.run_tool("a", "press_button", {"name": "home"})
         assert answer["text"].startswith("Pressed home")
-        assert sent == [("POST", "/wda/homescreen", 10.0)]
+        assert sent == [("GET", "/wda/locked", 2.0), ("POST", "/wda/homescreen", 10.0)]  # (Opus review 9: not locked)
         assert "session" not in sent[0][1]  # never through a session, which would wait on the frozen app
     run(go)
 
