@@ -38,8 +38,9 @@ from . import device as device_module
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
+from .errors import PHONE_LOCKED
 from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
-                     Unanswered, PhoneNotFound)
+                     Unanswered, PhoneNotFound, PASSCODE_WORDS)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -60,12 +61,21 @@ LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (d
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media",
+                    "unlock"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
 UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
+# `unlock` (1.7.8): the agent's own call; its refusals in fixed words (never a value)
+UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, replay, a route, drive or a journey (a lock "
+                   "there ends them; call unlock after, then start again)")
+UNLOCK_NO_PASSCODE = ("the phone is locked, and no passcode is saved for this phone: ask the user to unlock it, or to save "
+                      "the passcode as phone.passcode in the accounts file Tapwright is started with (--accounts FILE; "
+                      "docs/setup.md)")
+UNLOCK_NOT_YET = ("the phone is locked, and the connection to it isn't up yet, so the passcode can't be typed now; try "
+                  "unlock again in a few seconds, or ask the user to unlock it")
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
@@ -1541,7 +1551,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return Refused("locked", "the phone is asking for its passcode to allow UI automation; ask the user "
                                      "to enter it on the phone")
         if isinstance(self.stuck, PhoneLocked):
-            return Refused("locked", "the phone is locked; ask the user to unlock it")
+            return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
             return Refused("not_answering", f"{self.stuck}. close_app can still close it; then open_app it again.")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
@@ -2082,7 +2092,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._greeted.add(client_id)
         # (the passcode prompt is a PhoneLocked too, and says its own note)
         locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
-        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
+        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked, agent=True)
                  if item not in answer["text"]]
         loaded = self._loaded()
         if (problem := loaded.problem) is not None and problem not in answer["text"]:
@@ -3421,7 +3431,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
-                await self._hold_for_phone(client_id, name, dry=bool(args.get("dry_run")))
+                await self._hold_for_phone(client_id, name, dry=bool(args.get("dry_run")),
+                                           home=name == "press_button" and args.get("name") == "home")
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
                 try:
                     answer = await self._run_tool(client_id, name, args)
@@ -3675,6 +3686,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return first + ("\n" + rest if rest else "")
 
     async def _run_tool_core(self, client_id: str, name: str, args: dict) -> dict:
+        if name == "unlock":
+            return await self._unlock_tool(client_id)
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
             raise Refused("unsupported", f"no tool named {name!r}; the tools are "
                                          f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
@@ -3744,8 +3757,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_FEW}
             return answer
+        if name == "press_button" and args.get("name") == "home" and self.state == "locked":
+            return await self._home_over_center(notes)
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         call, settle = ACTIONS[name]
         if session_module.TRACE:
             self.log(f"trace {name} begins")
@@ -3909,7 +3924,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             async def execution_guard() -> None:
                 self._require_connected()
                 if self.state == "locked":
-                    raise Refused("locked", "the phone is locked; ask the user to unlock it")
+                    raise Refused("locked", PHONE_LOCKED)
                 if self.control.paused:
                     raise Refused("paused", "the phone is paused; ask the user to resume it")
                 if self.control.person_generation != generation or self.control.person_active():
@@ -4770,8 +4785,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked; nothing was "
                                                "pressed. close_app can still close it; then open_app it again.") from None
             if locked is not False:
-                raise Refused("locked", "the phone is locked (or didn't say it isn't); ask the user to unlock it. "
-                                        "Nothing was pressed.")
+                raise Refused("locked", "the phone is locked (or didn't say it isn't); call unlock (it types the "
+                                        "passcode saved for this phone), or ask the user to unlock it. Nothing was "
+                                        "pressed.")
             token = device_module.BEFORE_SEND.set(guard)
             try:
                 await guard()
@@ -4795,6 +4811,102 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._announce("agent", "press_button", label="home")
         return _answer([f"Pressed home while {stuck.name} ({stuck.bundle_id}) wasn't answering; look before acting."],
                        notes)
+
+    async def _unlock_tool(self, client_id: str) -> dict:
+        """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with
+        the passcode saved in serve's own vault (`--accounts FILE`, `phone.passcode`), in every mode: personal,
+        dedicated and `--phone` alike. The agent never sees or sends the passcode; every rule of unlock.py holds (only
+        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 attempts an hour and 3 a day, none after a
+        refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
+        `drive` or a journey it is refused, and a lock there still ends them (§19.5). Paused: `paused`; a person at
+        the phone: `busy`. No passcode saved: `locked`, asking the user."""
+        if not self._top_level() or client_id in self._journeys:
+            raise Refused("bad_params", UNLOCK_TOP_ONLY)
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        if self.control.person_active():
+            raise Refused("busy", "a person is using the phone; try again in a moment")
+        if PASSCODE_WORDS in (self.detail or "") or isinstance(self.stuck, PasscodeNeeded):
+            raise Refused("locked", unlocklib.XCTEST)  # a person enters it there, never the tool
+        if self.state not in ("live", "locked"):
+            if isinstance(self.stuck, PhoneLocked):  # the connect found it locked: no session to type through yet
+                raise Refused("locked", UNLOCK_NOT_YET)
+            await self.wait_connected()
+        if self.state != "locked":
+            return _answer(["The phone isn't locked."], [])
+        if self.passcode_for() is None:
+            raise Refused("locked", UNLOCK_NO_PASSCODE)
+        result = await self.unlock_phone()
+        if result.code == "not_locked":
+            return _answer(["The phone isn't locked."], [])
+        if result.code in ("paused", "busy"):
+            raise Refused(result.code, result.message)
+        if result.code == "no_passcode":  # (the vault changed between the two reads)
+            raise Refused("locked", UNLOCK_NO_PASSCODE)
+        if result.code != "unlocked":
+            raise Refused("locked", result.message or unlocklib.FAILED)
+        self._announce("agent", "unlock", caption="Unlocked the phone")
+        said = "Unlocked the phone with the passcode saved in the vault."
+        try:
+            seen = await self._run_tool_core(client_id, "look", {"screenshot": False})
+        except Refused:
+            return _answer([said + " Look before acting."], [])
+        return {**seen, "text": said + "\n" + seen["text"]}
+
+    async def _home_over_center(self, notes: list) -> dict:
+        """press_button home while the phone reads as locked. iOS reports Notification Center pulled down over an
+        unlocked phone as locked (SpringBoard's lock state; phone check of 1.7.8), and every touch was refused, the home
+        press that closes it too. Home is pressed only when a fresh tree proves that sheet over an unlocked phone
+        (notifications.center_over_unlocked); a real lock is never pressed (Opus review 9: the owner stops an agent by
+        locking the phone, and a home press would light the lock screen)."""
+        from .notifications import center_over_unlocked
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        generation = self.control.person_generation
+        locked = Refused("locked", f"{PHONE_LOCKED}. Nothing was pressed.")
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def home():
+            try:
+                source = await self.session._source(HOME_STUCK_CAP)
+            except (ConnectionLost, DeviceError, AppNotAnswering):
+                raise locked from None
+            if not center_over_unlocked(source):
+                raise locked
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                await device.http("POST", "/wda/homescreen", {}, timeout=HOME_STUCK_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(home)
+        except ConnectionLost:
+            raise Refused("timeout", "the phone didn't answer the home press in time; Notification Center may still "
+                                     "close: look before acting") from None
+        except DeviceError:
+            raise Refused("internal", "the home press over Notification Center failed; look before acting") from None
+        self.log("pressed home over Notification Center (iOS reported the phone as locked while it was open)")
+        self._announce("agent", "press_button", label="home")
+        try:  # the sheet is gone: the next call needn't wait for the heartbeat to see the phone unlocked
+            if not await self.control.read(lambda: self._connected_only(self.session.locked)) \
+                    and self.state == "locked":
+                self._set_state("live")
+        except Exception:
+            pass  # (the heartbeat sets it)
+        return _answer(["Pressed home: Notification Center was open (iOS reports the phone as locked while it is); "
+                        "look before acting."], notes)
 
     async def _wait(self, view, args: dict, notes: list, shot) -> dict:
         """Sleep outside the phone's queue (a person may act meanwhile), then answer with what changed."""
@@ -4941,7 +5053,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if self.control.paused:
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         pictures: list[tuple[str, bytes]] = []
         if add:
             try:
@@ -5104,7 +5216,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         `tap`), or from a cold start to the first settled screen (`launch`). The app's own process only. The taps and
         the close and open go through the ordinary tools, so personal mode and the safety policy apply to them."""
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         scope, clock = _SCOPE.get(), self.control.clock
         bundle = await self._read(self.session.foreground_bundle_id) or self._bundle()
         if bundle in (None, SPRINGBOARD):
@@ -5278,7 +5390,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             width = self._shot_args({"width": args["width"]}, default=True, custom=True)[0] \
                 if args.get("width") is not None else None
             if self.state == "locked":
-                raise Refused("locked", "the phone is locked; ask the user to unlock it")
+                raise Refused("locked", PHONE_LOCKED)
             done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
                                        threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
             if (held := _COMPARED.get()) is not None:
@@ -6421,7 +6533,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return False
         return self.passcode_for() is not None
 
-    async def _hold_for_phone(self, client_id: str, name: str, *, dry: bool = False) -> None:
+    async def _hold_for_phone(self, client_id: str, name: str, *, dry: bool = False, home: bool = False) -> None:
         """Before a call. A step of a running `run`, `drive`, `replay`, route or journey moment never unlocks and never
         waits out a lock: a lock there ends it with `locked` (the step's own refusal), because locking the phone is how
         the owner stops the agent (AGENTS.md, §19.5). (iOS's XCTest prompt is no stop: a step still asks a person to
@@ -6447,6 +6559,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if tried.code in ("busy", "paused"):
                 raise Refused(tried.code, tried.message)
         moment = self._phone_moment(name)
+        if home and moment is needs.UNLOCK:
+            # (1.7.8) iOS reports Notification Center pulled down as locked: press_button home decides from a fresh tree
+            # (_home_over_center) at once, instead of asking a person to unlock a phone that may not be locked
+            return
         if moment is not None and _DIALOG.get() is not None:
             async def cleared() -> bool:
                 return self._phone_moment(name) is None

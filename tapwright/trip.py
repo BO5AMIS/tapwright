@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from . import driving, links, places, roads, routes, ui
 from .control import Refused
+from .errors import PHONE_LOCKED
 
 if TYPE_CHECKING:
     from .daemon import Daemon, Scope
@@ -115,7 +116,7 @@ class Trip:
         if d.control.paused:
             raise self._stopped(Refused("paused", "paused by the user in the live view; ask them to resume"))
         if d.state == "locked":
-            raise self._stopped(Refused("locked", "the phone is locked; ask the user to unlock it"))
+            raise self._stopped(Refused("locked", PHONE_LOCKED))
         if gone := d._grants_revoked():  # the kill switch: revoked, not only stopped (§19.5)
             from .daemon import REVOKED_STOP
             raise self._stopped(Refused("not_allowed", REVOKED_STOP.format(names=", ".join(json.dumps(g) for g in gone))))
@@ -231,7 +232,7 @@ class Trip:
         self.writes = SCRIPT.get() is None
         await d.wait_connected()
         if d.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         snap = await d._read(lambda: d.session.snapshot())
         if snap.app is None:
             raise Refused("not_found", "no app is in front to drive; open_app one first")

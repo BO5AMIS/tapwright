@@ -485,6 +485,12 @@ async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bo
     return await _tool("press_button", name=name, look=look, screenshot=screenshot, brief=brief)
 
 
+@server.tool(description=describe("unlock"), structured_output=False)
+async def unlock() -> CallToolResult:
+    # (no arguments: the passcode is typed from the vault `tapwright serve --accounts` was started with, never sent)
+    return await _tool("unlock")
+
+
 @server.tool(description=describe("swipe"), structured_output=False)
 async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True,
                 screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:

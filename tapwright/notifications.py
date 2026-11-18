@@ -348,6 +348,38 @@ def is_center(source: str) -> bool:
     return False
 
 
+CLEAR_BUTTON = "clear-button"
+FLASHLIGHT = "flashlight-orb-button"
+
+
+def center_over_unlocked(source: str) -> bool:
+    """Is this Notification Center pulled down over an UNLOCKED phone, proven? iOS sets SpringBoard's lock state while
+    the cover sheet is down, so WebDriverAgent answers "locked" then (phone check of 1.7.8, 2026-11-18). is_center is not
+    enough here: a really locked phone shows the same cover sheet, its date and its ListCells. Captured on iOS 26.5, the
+    pulled-down sheet has Notification Center's own header and its Clear button (value "Notification Center"), and an
+    enabled flashlight; the locked phone had neither, and a disabled flashlight. All three must hold."""
+    if 'bundleId="com.apple.springboard"' not in source[:800]:
+        return False
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return False
+    title = clear = flashlight = False
+    for node in root.iter():
+        name = node.get("name") or ""
+        if name == FLASHLIGHT:
+            if node.get("enabled") == "false":
+                return False  # (the locked phone's dark lock screen)
+            flashlight = True
+        said = " ".join((node.get("label") or name).split()).casefold()
+        if said == CENTER_TITLE and name != CLEAR_BUTTON and _kind(node) != "Button":
+            title = True
+        if (name == CLEAR_BUTTON and _kind(node) == "Button"
+                and " ".join((node.get("value") or "").split()).casefold() == CENTER_TITLE):
+            clear = True
+    return title and clear and flashlight
+
+
 # ---- one-time codes (§20.4, §24.3) ----------------------------------------------------------------------------------------
 CODE = re.compile(r"(?<![\d])(\d{4,8})(?![\d])")
 # `123 456`, `123-456`, and the same with any digits Python's \d takes (Arabic-Indic `١٢٣ ٤٥٦`, full-width…) and any

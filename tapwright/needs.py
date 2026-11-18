@@ -11,19 +11,23 @@ from .device import PASSCODE_WORDS
 PASSCODE = ("Enter the passcode on the phone (the XCTest prompt is up). Settings > Developer > Enable UI Automation "
             "stops it asking.")
 LOCKED = "Unlock the phone."
+# (1.7.8) the same, as an agent's note: it may call `unlock`, which types the passcode saved for this phone
+LOCKED_AGENT = ("The phone is locked: call unlock (it types the passcode saved for this phone), or ask the user to "
+                "unlock it.")
 DEVELOPER_MODE = ("Turn on Developer Mode: Settings > Privacy & Security > Developer Mode, restart the phone and "
                   "confirm.")
 NOT_TRUSTED = "Unlock the phone and tap Trust on \"Trust This Computer?\" (enter the passcode if it asks)."
 
 
-def from_state(state: str | None, detail: str | None, stuck_locked: bool = False) -> list[str]:
+def from_state(state: str | None, detail: str | None, stuck_locked: bool = False, agent: bool = False) -> list[str]:
     """From the daemon's own state and its detail line. `stuck_locked`: the last connect found the phone locked (the
-    state then reads connecting or reconnecting, not locked)."""
+    state then reads connecting or reconnecting, not locked). `agent`: said to an agent, which may call `unlock`
+    (doctor says it to a person)."""
     found = []
     if PASSCODE_WORDS in (detail or ""):
         found.append(PASSCODE)
     if state == "locked" or stuck_locked:
-        found.append(LOCKED)
+        found.append(LOCKED_AGENT if agent else LOCKED)
     return found
 
 

@@ -29,6 +29,7 @@ from collections.abc import Callable
 
 from . import notifications as notes_lib, otp as otplib, ui
 from .control import Refused
+from .errors import PHONE_LOCKED
 
 SPRINGBOARD = "com.apple.springboard"
 CENTER_X = 0.3  # across the screen, where the swipe down starts: the left half opens Notification Center (the right, Control Center)
@@ -253,7 +254,7 @@ class CenterTools:
         if client_id in getattr(self, "_journeys", {}):
             raise Refused("bad_params", "notifications isn't part of a journey: a user's-eyes run stays in the app")
         if self.state == "locked":  # (as actions are: a locked phone is never swiped, B-L2)
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         n = args.get("open")
         if n is not None and (isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= notes_lib.MAX):
             raise Refused("bad_params", f"open is the number of a notification in the list, 1 to {notes_lib.MAX} (n1 is 1), "
@@ -413,7 +414,7 @@ class CenterTools:
         if self.phone_in_use():
             raise Refused("busy", "the phone is in use; the check waits")
         if self.state == "locked":  # (a locked phone is never swiped: the lock screen, then its passcode screen)
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         from . import schedules
         secret = schedules.trigger_secret()  # (the digests are HMACs under it: never a plain hash of a code, L5)
         if secret is None:
