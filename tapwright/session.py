@@ -68,11 +68,15 @@ STAGE_ROOT = media.STAGE_ROOT
 STAGE_STALE = 3600.0  # seconds: a staged folder older than this is a leftover of an add that timed out; swept
 VIDEO_RATE = 4 * 1024 * 1024  # bytes a second the import wait allows for
 VIDEO_EXTRA_MAX = 480.0  # seconds that wait may grow by at most
+RUNNER_PROMPT_WAIT = 120.0  # seconds the runner waits for the person's answer to iOS's photo prompt, before its change
 
 
-def photos_timeout(video_bytes: int) -> float:
-    """How long an add with `video_bytes` of videos may take on the runner: iOS's prompt, then the library's import."""
-    return PHOTOS_WAIT + min(VIDEO_EXTRA_MAX, video_bytes / VIDEO_RATE)
+def photos_timeout(video_bytes: int, asks: bool = False) -> float:
+    """How long an add with `video_bytes` of videos may take on the runner: iOS's prompt, then the library's import.
+    `asks` (a first video add: iOS asks the person first): the runner waits for the answer (RUNNER_PROMPT_WAIT) and
+    only then starts the import's own wait, so both count (1.7.9, review R179b L5)."""
+    extra = min(VIDEO_EXTRA_MAX, video_bytes / VIDEO_RATE)
+    return PHOTOS_WAIT + extra + (RUNNER_PROMPT_WAIT if asks and video_bytes else 0.0)
 
 
 def _identifiers(value: object) -> list[str]:
@@ -836,7 +840,7 @@ class Session:
         return value if isinstance(value, dict) else {}
 
     async def photos_add(self, pictures: "list[tuple[str, bytes] | media.Video]",
-                         sent: "Callable[[], Awaitable[None]] | None" = None) -> list[str]:
+                         sent: "Callable[[], Awaitable[None]] | None" = None, asks: bool = False) -> list[str]:
         """Add pictures (file name, bytes) and videos (media.Video) to the photo library with add-only access; the
         local identifiers made, in order. It may wait for the person to allow the runner once. Never sent twice.
         Pictures alone go in route version 3's shape. A video is first copied into the runner's own container over
@@ -846,7 +850,8 @@ class Session:
         removes the files when its change ends, and the next video add sweeps folders older than STAGE_STALE (after a
         dropped line the reconnect stops the runner, and only that sweep removes them). `sent()` is called right before
         the add goes to the runner (after the copy); it may refuse the add (a pause): then nothing is sent and the
-        staged folder is removed."""
+        staged folder is removed. `asks`: iOS asks the person first (a first add), so a video add waits for the
+        answer and then the import (photos_timeout)."""
         videos = [(i, item) for i, item in enumerate(pictures) if isinstance(item, media.Video)]
         if not videos:
             def encode() -> dict:
@@ -883,7 +888,7 @@ class Session:
             remove = False
             try:
                 answer = await self._call("POST", PHOTOS_ADD_PATH, body,
-                                          timeout=photos_timeout(sum(video.size for _, video in videos)))
+                                          timeout=photos_timeout(sum(video.size for _, video in videos), asks))
             except (Unanswered, ConnectionLost, device_module.RunnerTimedOut):
                 # its end isn't known: the library may still be moving the clip (the runner's own wait ran out, or no
                 # answer came). The runner removes it when the change ends; the hour-old sweep is the backstop. Removing

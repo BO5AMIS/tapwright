@@ -631,11 +631,13 @@ def _checked(name: str, args: dict) -> dict:
             raise Refused("bad_params", f"text must be a string, not {args.get('text')!r}")
         if args["text"] == "" and args.get("replace") is False and args.get("submit") is not True:
             # (1.7.9) nothing to do: no keys, nothing cleared, no return. An empty text with replace (the default)
-            # clears the field; with submit it presses Return only (review R179 M3)
+            # clears the field, and with submit then presses the submit key; with replace false and submit it presses
+            # the submit key alone (review R179 M3, R179b L2)
             raise Refused("bad_params", "text is empty and replace is false: there is nothing to type. An empty text "
-                                        "with replace (the default) clears the field; with submit: true it presses "
-                                        "Return only. A recorded secure field's text isn't saved: put a test password "
-                                        "in the script's \"text\" first.")
+                                        "with replace (the default) clears the field (with submit: true, then presses "
+                                        "the submit key); with replace: false and submit: true it presses the submit "
+                                        "key alone. A recorded secure field's text isn't saved: put a test password in "
+                                        "the script's \"text\" first.")
         for key in ("replace", "submit", "force"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
@@ -991,6 +993,7 @@ VIDEO_PROMPT_BUSY = ("busy: a video is being added to Photos (from media), and i
                      "whether the runner may use Photos: the phone's runner answers nothing else until it is done, "
                      "{left} s at most. If the photo prompt is on the phone, ask your user to answer it; then try "
                      "again.")
+VIDEO_HOLDS = frozenset({"copy", "video", "video-prompt"})  # the holds of an add with a video (minutes, not 130 s)
 HOLD_WORDS = {"prompt": PHOTO_WAIT_BUSY, "copy": VIDEO_BUSY, "video": VIDEO_BUSY, "video-prompt": VIDEO_PROMPT_BUSY}
 # (CodeRabbit, PR #19) one add at a time when a video is in it: whatever the first add's hold budget says, a second add
 # would queue behind its import on the runner, and the one hold can't cover both
@@ -1000,6 +1003,13 @@ VIDEO_ADD_GOING = ("busy: another media add with a video is still going on (it i
 EARLIER_UNKNOWN = ("the earlier add of these same pictures or videos ended without an answer from the phone ({why}): the "
                    "photo library may still have added them. Check Photos > Recently Added first; if they aren't "
                    "there, call media again with them and they are added again.")
+# what the agent checks when a media write's end isn't known (review R179b L1: a remove isn't an add)
+CHECK_ADDED = "check Photos > Recently Added before adding again"
+CHECK_REMOVED = "check Photos before calling media again"
+# (review R179b L4) a media call that came in while an add held the phone, and found that hold ended by the time it
+# could look: nothing of the runner (its version, its access) has been read for it, so it starts nothing
+HOLD_ENDED_BUSY = ("busy: another media add held the phone as this call came in, and has just ended; call media again "
+                   "now.")
 PHOTO_WAIT_FREE = frozenset({"media", "session_report", "viewer"})  # calls that don't need the runner meanwhile
 RUNNER_NAME = "WebDriverAgentRunner"  # what iOS's own prompts call the runner ("“WebDriverAgentRunner-Runner” Would Like …")
 NEEDS_PHOTO_ANSWER = ("needs_a_person: iOS is asking on the phone whether Tapwright's runner may use Photos. A person "
@@ -1976,9 +1986,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         scope, policy = None, safety.NONE
         left = self._photo_wait_left()
         if left is not None and name not in PHOTO_WAIT_FREE:
-            if _NESTED.get() or _JOURNEY_OWN.get():
+            if _JOURNEY_OWN.get() or (_NESTED.get() and self._photo_wait_kind not in VIDEO_HOLDS):
                 # a tool's own call (a journey's stress putting the phone back upright): it waits for the person's
-                # answer and then runs, instead of being lost from a cleanup that nothing retries (Codex, PR #8 cycle 3)
+                # answer and then runs, instead of being lost from a cleanup that nothing retries (Codex, PR #8 cycle 3).
+                # A journey's own restore waits out any hold; another tool's own call (a drive's start, a reflex,
+                # performance's tap) waits only for iOS's prompt (130 s at most): a video's copy and import take
+                # minutes, so it is told busy at once, in the video's words (review R179b L7)
                 await self._after_photo_wait()
             else:
                 # it would queue behind the held add, time out, and look like a dead line (Codex, PR #8)
@@ -5202,10 +5215,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return _answer([medialib.by_hand_text(names, medialib.NEVER_ASKS_FULL)], notes)
         try:
             deleted = await self._media_write(lambda: self.session.photos_delete([e["id"] for e in held]),
-                                              "removing the pictures")
+                                              f"removing the {medialib.named(names)}", check=CHECK_REMOVED)
         except DeviceError:  # (only the "full access" refusal gets here: _media_write words the rest)
             return _answer([medialib.by_hand_text(names, "the runner has no full access to the photo library.")], notes)
-        lead = "Pictures from an earlier session: " if earlier else ""
+        lead = "From an earlier session: " if earlier else ""
         if not deleted:
             return _answer([f"{lead}Removed none of {medialib.named(names)}: the person declined the delete on "
                             "the phone, or they were already gone. Ask them to confirm it on the phone, then call "
@@ -5232,7 +5245,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             else:
                 return
         elif flight.video_bytes:
-            seconds = session_module.photos_timeout(flight.video_bytes) + MEDIA_HOLD_SLACK
+            seconds = session_module.photos_timeout(flight.video_bytes, flight.asks) + MEDIA_HOLD_SLACK
             kind = "video-prompt" if flight.asks else "video"
         elif flight.asks:
             seconds, kind = PHOTO_WAIT_MAX, "prompt"
@@ -5301,9 +5314,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
                 async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
                     return None
+                if asks is None:
+                    # the hold this call saw has ended (that add finished) and there is nothing to pick up: this call
+                    # skipped the runner's version and access reads, so it starts nothing; the retry takes the normal
+                    # way (review R179b L4: a v6 runner would get a clip, and a granted access a prompt's words)
+                    raise Refused("busy", HOLD_ENDED_BUSY)
                 await self.control.agent(gate)
-                # (asks None and nothing to pick up: the hold ran out as this call came in; iOS may still ask)
-                flight = _Flight(asks=True if asks is None else asks, video_bytes=video_bytes)
+                flight = _Flight(asks=asks, video_bytes=video_bytes)
                 own: list[asyncio.Future] = []
 
                 async def sent() -> None:
@@ -5326,7 +5343,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                     if entry is not None and entry[1] is own[0]:
                         self._media_adds[client_id] = (entry[0], own[0], self.control.clock())
                     self._claim(own[0], flight)
-                task = asyncio.ensure_future(self._media_added(client_id, pictures, names, sent))
+                task = asyncio.ensure_future(self._media_added(client_id, pictures, names, sent, asks=flight.asks))
                 own.append(task)
                 self._media_flights[task] = flight
                 task.add_done_callback(lambda done: self._media_flights.pop(done, None))
@@ -5383,8 +5400,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return None
 
     async def _media_added(self, client_id: str, pictures: "list[tuple[str, bytes] | medialib.Video]", names: list[str],
-                           sent: "Callable[[], Awaitable[None]] | None" = None) -> None:
-        ids = await self._media_write(lambda: self.session.photos_add(pictures, sent=sent),
+                           sent: "Callable[[], Awaitable[None]] | None" = None, asks: bool = False) -> None:
+        ids = await self._media_write(lambda: self.session.photos_add(pictures, sent=sent, asks=asks),
                                       f"adding the {medialib.named(names)}", queued=False)
         if len(ids) != len(names):
             if ids:  # what it did make stays recorded, so remove can take it
@@ -5393,10 +5410,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                       "Recently Added.")
         medialib.record(client_id, ids, names)
 
-    async def _media_write(self, call, doing: str, queued: bool = True):
+    async def _media_write(self, call, doing: str, queued: bool = True, check: str = CHECK_ADDED):
         """A write to the phone's photo library, once: sent again after a drop it could be done twice. `queued`: in the
         phone's queue like a touch (a person first); the add waits for iOS's prompt, so it isn't, or it would hold
-        every other call back for as long as the person takes."""
+        every other call back for as long as the person takes. `check`: what the agent checks before calling again
+        when the end isn't known (an add's or a remove's own words: review R179b L1)."""
         try:
             if not queued:
                 return await self._connected_only(call)
@@ -5404,14 +5422,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         except ConnectionLost as e:
             self.lost(e)
             raise Refused("reconnecting", f"the connection dropped while {doing}; it may or may not have happened: "
-                                          "wait a few seconds, then check Photos > Recently Added") from None
+                                          f"wait a few seconds, then {check}") from None
         except Unanswered as e:  # the line is alive, but the phone may have done it (CodeRabbit, PR #7)
-            raise Refused("timeout", f"{e} while {doing}; it may or may not have happened: check Photos > Recently "
-                                     "Added before adding again") from None
+            raise Refused("timeout", f"{e} while {doing}; it may or may not have happened: {check}") from None
         except device_module.RunnerTimedOut as e:
             # the runner's own wait ran out, not a refusal: the library's change may still finish (review R179 M1)
             raise Refused("timeout", f"the phone's runner stopped waiting while {doing} ({e}); the photo library may "
-                                     "still finish it: check Photos > Recently Added before adding again") from None
+                                     f"still finish it: {check}") from None
         except DeviceError as e:
             if "full access" in str(e).lower():
                 raise

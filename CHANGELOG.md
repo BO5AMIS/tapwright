@@ -9,8 +9,9 @@
   and its copy is refused. The staged folder is removed when the runner refuses the add or the copy fails; after a
   timeout (the runner's own or no answer) the runner removes the files when the library's change ends, and the next
   video add sweeps folders older than an hour (after a dropped line the reconnect stops the runner, so only that sweep
-  removes them). An add whose end isn't known answers `timeout`, and the next `media` call with the same files says
-  so once instead of adding them twice. While a video is copied and imported the heartbeat waits and other calls
+  removes them). An add whose end isn't known answers `timeout` (no answer in time) or `reconnecting` (a dropped
+  line, the copy's included), and the next `media` call with the same files says so once instead of adding them
+  twice. While a video is copied and imported the heartbeat waits and other calls
   answer `busy` ("a video is being added to Photos"), as for iOS's photo prompt; no other add starts until it is done,
   however long the copy takes. A pause or a person driving is checked again once the copy is done, right before the
   add goes to the runner: paused, nothing is sent, the staged folder is removed and the add answers `paused`. A vendor
@@ -18,7 +19,8 @@
   version 7 (`tw-16.15.3.7`); an older runner answers `unsupported`, naming `tapwright setup --force`, and still adds
   pictures. The MCP client and `tapwright call media` wait up to 15 minutes. Not yet proven on the phone.
 - `type_text` with an empty text and `replace` (the default) clears the field, as in 1.7.8, without the empty key
-  request that came back as an internal error; with `submit: true` it presses Return only. An empty text with
+  request that came back as an internal error; with `submit: true` it clears the field and then presses the submit
+  key, and with `replace: false` and `submit: true` it presses the submit key alone. An empty text with
   `replace: false` and no `submit` answers `bad_params`. A recorded secure field's step whose text is still empty is
   refused on replay.
 - `unlock` with no passcode saved says the phone reads as locked (or Notification Center is open over it), as the

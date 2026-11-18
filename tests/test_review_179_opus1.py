@@ -77,7 +77,7 @@ def test_a_video_add_the_runner_timed_out_is_timeout_and_reported_once_before_it
         d.session.tw_version = 7
         sent_adds = []
 
-        async def timed_out(items, sent=None):
+        async def timed_out(items, sent=None, asks=False):
             sent_adds.append([p[0] for p in items])
             if sent is not None:
                 await sent()

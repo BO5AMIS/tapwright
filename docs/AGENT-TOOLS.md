@@ -54,7 +54,7 @@ Arguments: `target`, `index`, `seconds`, `force`, `look`, `screenshot`, `dry_run
 
 ### type_text
 
-Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. An empty `text` with `replace` only clears the field (with `submit: true` it presses the submit key alone; empty with `replace: false` and no `submit` is `bad_params`). `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.
+Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. An empty `text` with `replace` only clears the field (with `submit: true` it clears the field, then presses the submit key; with `replace: false` and `submit: true`, the submit key alone; empty with `replace: false` and no `submit` is `bad_params`). `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.
 Tapwright: taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't see which field is focused, so without a target it uses the only input on screen. A secure field's value is reported as hidden.
 
 Arguments: `text`, `target`, `index`, `replace`, `submit`, `force`, `as`, `look`, `screenshot`, `dry_run`, `brief`.

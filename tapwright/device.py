@@ -64,6 +64,13 @@ class RunnerTimedOut(DeviceError):
     photo library's change of a media add), so it is no refusal (review R179 M1)."""
 
 
+def _line_dropped(e: BaseException) -> bool:
+    """Whether an error from pymobiledevice3 (or its socket) means the connection to the phone is gone, not a refusal:
+    a media copy cut short by it answers `reconnecting`, not `unsupported` (review R179b L6)."""
+    return (isinstance(e, (ConnectionError, EOFError, TimeoutError))
+            or type(e).__name__ in LINE_ERRORS)
+
+
 class PhoneLocked(ConnectionLost):
     """WebDriverAgent runs, but the phone is locked, so nothing on the screen can be read until it's unlocked."""
 
@@ -477,6 +484,8 @@ class Device:
         try:
             return await HouseArrestService.create(self.rsd, bundle_id)
         except (PyMobileDevice3Exception, OSError) as e:
+            if _line_dropped(e):
+                raise ConnectionLost(f"the line to the phone dropped while opening the runner's container ({e})") from None
             raise DeviceError(f"the phone wouldn't open the runner's container to copy the video into it ({e}); run "
                               "`tapwright setup --force` to install the runner again, then try again") from None
 
@@ -513,7 +522,11 @@ class Device:
                         if stamp is not None and (left or Stamp.of(os.fstat(f.fileno())) != stamp):
                             raise DeviceError(_CHANGED.format(name=Path(local).name))
             except PyMobileDevice3Exception as e:  # (before OSError: AFC's own errors are both)
+                if _line_dropped(e):  # USB pulled, Wi-Fi gone: a drop, not a phone that can't take videos (R179b L6)
+                    raise ConnectionLost(f"the line to the phone dropped while copying the video ({e})") from None
                 raise DeviceError(f"copying the video to the phone failed ({e})") from None
+            except (ConnectionError, EOFError, TimeoutError) as e:  # the AFC socket (a local file read raises none)
+                raise ConnectionLost(f"the line to the phone dropped while copying the video ({e})") from None
             except OSError as e:
                 raise DeviceError(f"the video couldn't be read on this computer ({e.strerror or e})") from None
 

@@ -241,7 +241,7 @@ def test_media_add_that_got_no_answer_says_it_may_have_happened_and_where_to_loo
         pic = tmp_path / "a.png"
         pic.write_bytes(bytes([0x89]) + b"PNG" + b"x")
 
-        async def unanswered(pictures, sent=None):
+        async def unanswered(pictures, sent=None, asks=False):
             raise Unanswered("the phone didn't answer within 120 s")
         d.session.photos_add = unanswered
         with pytest.raises(Refused) as e:

@@ -454,7 +454,8 @@ class FakeSession:
 
     stage_gate: "asyncio.Event | None" = None  # while set and not set(): a video's copy to the phone takes that long
 
-    async def photos_add(self, pictures, sent=None):
+    async def photos_add(self, pictures, sent=None, asks=False):
+        self.photos_asks = asks
         self._record(("photos_add", tuple(p[0] for p in pictures)))
         if self.stage_gate is not None and any(hasattr(p, "digest") for p in pictures):
             await self.stage_gate.wait()
