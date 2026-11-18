@@ -23,6 +23,8 @@ IF_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "if": {"text": "Not
 OPTIONAL_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "optional": true}'
 FORMAT, VERSION = "agent-tools-script", 1  # a route (AGENT-TOOLS §18.5) is version 2: routes.py
 VERSIONS = (1, 2)
+SECURE_UNSAVED = ("this type_text was recorded into a secure field, and its text isn't saved: put a test password in "
+                  "the script's \"text\" first (an empty text would only clear the field).")
 
 
 def check_steps(steps: object, *, script: bool = False) -> list[dict]:
@@ -168,7 +170,11 @@ def tool_args(step: dict) -> dict:
 
 def args_of(step: dict) -> dict:
     """The tool call a step makes: its parameters without `tool` and `expect`, and without an answer of its own
-    (the batch answers once)."""
+    (the batch answers once). A recorded secure field's step whose text is still empty is refused: its text was never
+    saved, and an empty text with replace only clears the field, so the replay would pass with no password typed
+    (review R179 M3)."""
+    if step["tool"] == "type_text" and step.get("secure") is True and step.get("text") == "":
+        raise Refused("bad_params", SECURE_UNSAVED)
     args = tool_args(step)
     if step["tool"] not in ("close_app", "performance"):  # (a measurement has no list to show)
         args["look"] = False

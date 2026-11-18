@@ -269,6 +269,7 @@ def test_automatic_retype_retains_original_turn_ownership(change):
             await looked(d, [field])
             s = real_dispatch(d.session)
             s.retype = types.MethodType(Session.retype, s)
+            s._keys = types.MethodType(Session._keys, s)
             s.focused = "email"
             original_http = s.device.http
 
@@ -367,6 +368,7 @@ def test_retype_checks_original_field_after_another_agent_turn(new_focus):
             await looked(d, [field, other])
             s = real_dispatch(d.session)
             s.retype = types.MethodType(Session.retype, s)
+            s._keys = types.MethodType(Session._keys, s)
             s.is_focused = types.MethodType(Session.is_focused, s)
             focus = "email"
             reads = []

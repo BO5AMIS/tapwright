@@ -29,7 +29,10 @@ MAX_VIDEOS = 5  # per call (pictures and videos together are still at most MAX_F
 VIDEO_TW_VERSION = 7  # the runner route version that adds videos
 # the ftyp brands of an mp4, a QuickTime movie or an m4v (an 'ftyp' alone is also HEIC's: the brand tells them apart)
 VIDEO_BRANDS = frozenset({b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"qt  ",
-                          b"M4V ", b"M4VH", b"M4VP", b"MSNV", b"dash", b"f4v ", b"XAVC"})
+                          b"M4V ", b"M4VH", b"M4VP", b"MSNV", b"dash", b"f4v ", b"XAVC",
+                          b"3gp4", b"3gp5", b"3gp6", b"3g2a", b"mmp4"})  # (3GPP and phone cameras: review R179 L6)
+# a vendor's own major brand is still a video when its compatible brands (after the minor version) name an mp4 one
+COMPATIBLE_VIDEO = frozenset({b"isom", b"mp41", b"mp42"})
 # an old QuickTime file may start with one of these atoms and no ftyp at all
 QUICKTIME_ATOMS = frozenset({b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot"})
 HEAD = 64  # bytes kept to tell what a file is
@@ -43,12 +46,27 @@ def old_runner_for_video(version: int) -> str:
             "Pictures can still be added.")
 
 
+class Stamp(NamedTuple):
+    """What a file was when it was checked and hashed: the copy to the phone refuses a file that changed since (it
+    grew, or another file was put in its place: review R179 L5)."""
+    size: int
+    ino: int
+    mtime_ns: int
+
+    @classmethod
+    def of(cls, st: os.stat_result) -> "Stamp":
+        return cls(st.st_size, st.st_ino, st.st_mtime_ns)
+
+
 class Video(NamedTuple):
     """A video to add: read from its file when it is copied to the phone, never held in memory whole."""
     name: str
     path: Path
     size: int
     digest: str  # sha256 of its bytes: the same clip again is the same add (Daemon._media_adding)
+    stamp: "Stamp | None" = None  # the file as it was hashed; the copy refuses it if it changed since
+
+
 NEVER_ASKS_FULL = ("the fixture-removal API needs full photo-library access; fixture import requests only "
                    "add-only access. Use the Photos UI to manage the library.")
 NEED_CONFIRM = ("media changes the photo library on the user's phone. Ask your user first whether pictures may be "
@@ -129,16 +147,21 @@ def _video(raw: str, path: Path, size: int) -> Video:
     head = b""
     try:
         with open(path, "rb") as f:
+            before = Stamp.of(os.fstat(f.fileno()))
             while chunk := f.read(CHUNK):
                 if len(head) < HEAD:
                     head += chunk[:HEAD - len(head)]
                 digest.update(chunk)
+            after = Stamp.of(os.fstat(f.fileno()))
     except OSError as e:
         raise ValueError(f"{raw}: can't be read ({e.strerror or e})") from None
+    if before != after or after.size != size:
+        raise ValueError(f"{path.name}: the file changed while it was read (is it still being written?); call media "
+                         "again once it is complete")
     suffix = path.suffix.lower()
     if not looks_like(suffix, head):
         raise ValueError(f"{path.name}: the file isn't a {suffix.lstrip('.')} video (its first bytes say otherwise)")
-    return Video(path.name, path, size, digest.hexdigest())
+    return Video(path.name, path, size, digest.hexdigest(), after)
 
 
 def looks_like(suffix: str, data: bytes) -> bool:
@@ -150,7 +173,10 @@ def looks_like(suffix: str, data: bytes) -> bool:
         return data[:4] == b"\x89PNG"
     if suffix in VIDEO_EXTENSIONS:  # an 'ftyp' box with a video brand; an old .mov may start with another atom
         if data[4:8] == b"ftyp":
-            return data[8:12] in VIDEO_BRANDS
+            if data[8:12] in VIDEO_BRANDS:
+                return True
+            end = min(len(data), int.from_bytes(data[:4], "big"))  # compatible brands: byte 16 to the box's end
+            return any(data[i:i + 4] in COMPATIBLE_VIDEO for i in range(16, end - 3, 4))
         return suffix == ".mov" and len(data) >= 8 and data[4:8] in QUICKTIME_ATOMS
     return data[4:8] == b"ftyp"
 
@@ -228,10 +254,21 @@ def added_text(names: list[str], videos: int = 0) -> str:
             "They stay until removed (media with remove: true).")
 
 
-def removed_text(names: list[str], asked: int) -> str:
-    if len(names) == asked:
-        return f"Removed {pictures(len(names))} from the photo library: {', '.join(names)}."
-    return (f"Removed {len(names)} of {pictures(asked)} from the photo library: {', '.join(names)}. "
+def is_video_name(name: str) -> bool:
+    return Path(name).suffix.lower() in VIDEO_EXTENSIONS
+
+
+def named(names: list[str]) -> str:
+    """'2 pictures', '1 picture and 1 video', by the names' extensions (the ledger keeps names, not kinds)."""
+    videos = sum(is_video_name(n) for n in names)
+    return items(len(names) - videos, videos)
+
+
+def removed_text(names: list[str], asked: list[str]) -> str:
+    """`names`: what was removed; `asked`: what was to be removed."""
+    if len(names) == len(asked):
+        return f"Removed {named(names)} from the photo library: {', '.join(names)}."
+    return (f"Removed {len(names)} of {named(asked)} from the photo library: {', '.join(names)}. "
             "The rest were already gone, or the person declined the delete on the phone.")
 
 

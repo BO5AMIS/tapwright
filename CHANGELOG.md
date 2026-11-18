@@ -5,13 +5,19 @@
 - `media add` takes videos: mp4, mov and m4v, told apart from HEIC pictures by their `ftyp` brand (an old .mov by its
   first atom). Up to 200 MB each, 400 MB and 5 videos a call; the picture limits are unchanged (20 MB each, 40 MB a
   call, 20 items). A video is copied into the runner's own container over house_arrest (never base64 in a request,
-  never whole in memory) and the runner adds it by file, moved into the library. The staged folder is removed when the
-  add answers or the copy fails; after a timeout or a dropped line the runner removes it when the library's change
-  ends, and the next video add sweeps folders older than an hour. Videos need the runner's route version 7
-  (`tw-16.15.3.7`); an older runner answers `unsupported`, naming `tapwright setup --force`, and still adds pictures.
-  The MCP client waits up to 15 minutes for `media`. Not yet proven on the phone.
-- `type_text` with empty text answers `bad_params` ("text is empty: give the characters to type") instead of an internal
-  error; with `submit: true` an empty text still presses Return only.
+  never whole in memory) and the runner adds it by file, moved into the library. A file that changes between its check
+  and its copy is refused. The staged folder is removed when the runner refuses the add or the copy fails; after a
+  timeout (the runner's own or no answer) the runner removes the files when the library's change ends, and the next
+  video add sweeps folders older than an hour (after a dropped line the reconnect stops the runner, so only that sweep
+  removes them). An add whose end isn't known answers `timeout`, and the next `media` call with the same files says
+  so once instead of adding them twice. While a video is copied and imported the heartbeat waits and other calls
+  answer `busy` ("a video is being added to Photos"), as for iOS's photo prompt. Videos need the runner's route
+  version 7 (`tw-16.15.3.7`); an older runner answers `unsupported`, naming `tapwright setup --force`, and still adds
+  pictures. The MCP client and `tapwright call media` wait up to 15 minutes. Not yet proven on the phone.
+- `type_text` with an empty text and `replace` (the default) clears the field, as in 1.7.8, without the empty key
+  request that came back as an internal error; with `submit: true` it presses Return only. An empty text with
+  `replace: false` and no `submit` answers `bad_params`. A recorded secure field's step whose text is still empty is
+  refused on replay.
 - `unlock` with no passcode saved says the phone reads as locked (or Notification Center is open over it), as the
   other answers of a lock state that may be Notification Center do.
 - The unlock's limit of 3 wakes in 10 minutes that type nothing is kept in the record of attempts

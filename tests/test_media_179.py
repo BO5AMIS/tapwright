@@ -161,8 +161,9 @@ class Stager:
     def __init__(self, fail=None):
         self.calls, self.fail = [], fail
 
-    async def stage_media(self, bundle_id, folder, files):
+    async def stage_media(self, bundle_id, folder, files, stamps=None):
         self.calls.append(("stage", bundle_id, folder, [(str(p), n) for p, n in files]))
+        self.stamps = stamps
         if self.fail is not None:
             raise self.fail
 
@@ -209,6 +210,8 @@ def test_the_wait_for_a_video_add_grows_with_its_size_to_a_cap():
 
 
 def test_a_refused_add_or_a_failed_upload_removes_the_staged_folder(clips):
+    """A real refusal (bad input, no access, unsupported) or a failed copy: nothing is moving, so the folder goes. The
+    runner's own timeout is no refusal (review R179 M1: test_review_179_opus1)."""
     video = media.read_media(clips[:1])[0]
     s, calls = staged_session(DeviceError("the photo library refused the pictures: no"))
     with pytest.raises(DeviceError):
@@ -335,17 +338,19 @@ def test_pictures_alone_keep_the_v3_shape_and_stage_nothing(pictures):
 
 
 # ---- 1.7.8 leftovers ----
-def test_type_text_with_empty_text_is_bad_params_in_plain_words():
+def test_type_text_with_empty_text_and_nothing_to_do_is_bad_params_in_plain_words():
+    """Only an empty text with replace false and no submit is refused (review R179 M3: an empty text with replace, the
+    default, clears the field as 1.7.8 did; with submit it presses Return)."""
     async def go():
         d = make()
         stop, task = await started(d)
         d.session.tree = [ui.Element("e1", "input", "Name", "name-field", rect=(10, 100, 100, 40), actions=("tap", "type"))]
         await d.run_tool("a", "look", {"screenshot": False})
         for target in ({"text": "Name"}, {"id": "name-field"}, None):
-            args = {"text": "", "look": False, **({"target": target} if target else {})}
+            args = {"text": "", "replace": False, "look": False, **({"target": target} if target else {})}
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "type_text", args)
-            assert e.value.code == "bad_params" and str(e.value).startswith("text is empty"), target
+            assert e.value.code == "bad_params" and str(e.value).startswith("text is empty and replace is false"), target
         r = await d.run_tool("a", "type_text", {"text": "", "submit": True, "look": False})  # return alone: allowed
         assert r["text"].startswith("Typed into")
         await finish(stop, task)

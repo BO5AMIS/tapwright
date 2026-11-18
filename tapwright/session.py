@@ -842,8 +842,9 @@ class Session:
         Pictures alone go in route version 3's shape. A video is first copied into the runner's own container over
         house_arrest (STAGE_ROOT/<token>/), and the add names it there (route version 7): the runner adds it by file
         and the library moves it in. The staged folder is removed when the add answered (added or refused) or the copy
-        failed; after a timeout or a dropped line the library may still be moving it, so the runner removes it when
-        its change ends, and the next video add sweeps folders older than STAGE_STALE. `sent()` is called right before
+        failed; after a timeout (the runner's own, or no answer) the library may still be moving it, so the runner
+        removes the files when its change ends, and the next video add sweeps folders older than STAGE_STALE (after a
+        dropped line the reconnect stops the runner, and only that sweep removes them). `sent()` is called right before
         the add goes to the runner (after the copy)."""
         videos = [(i, item) for i, item in enumerate(pictures) if isinstance(item, media.Video)]
         if not videos:
@@ -867,7 +868,8 @@ class Session:
         # removed afterwards unless the add went out and its end isn't known (no answer, a dropped line, cancelled)
         remove = True
         try:
-            await self.device.stage_media(runner, folder, [(video.path, files[i]) for i, video in videos])
+            await self.device.stage_media(runner, folder, [(video.path, files[i]) for i, video in videos],
+                                          stamps=[video.stamp for _, video in videos])
 
             def encode_items() -> dict:
                 return {"items": [{"kind": "video", "file": files[i], "name": item.name}
@@ -881,10 +883,13 @@ class Session:
             try:
                 answer = await self._call("POST", PHOTOS_ADD_PATH, body,
                                           timeout=photos_timeout(sum(video.size for _, video in videos)))
-            except (Unanswered, ConnectionLost):
-                raise  # (the library may still be moving the clip: the runner removes it when its change ends)
+            except (Unanswered, ConnectionLost, device_module.RunnerTimedOut):
+                # its end isn't known: the library may still be moving the clip (the runner's own wait ran out, or no
+                # answer came). The runner removes it when the change ends; the hour-old sweep is the backstop. Removing
+                # it now could break an import that would have finished (review R179 M1)
+                raise
             except DeviceError:
-                remove = True  # the runner answered with a refusal: nothing of it is moving
+                remove = True  # the runner answered with a refusal (bad input, no access, unsupported): nothing moves
                 raise
             remove = True
             return _identifiers(answer.get("value"))
@@ -1033,27 +1038,33 @@ class Session:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
                 note = " (couldn't find the focused field to clear, so the old text may remain)"
-        await self._touching(KEY_MS * len(keys))
-        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(keys)})
+        await self._keys(keys)
         if at_end and element and await self._attribute(element, "value") != text:
             # the caret wasn't at the end (the old text ran past the tap): the field holds a mix. Clear it and
             # type again, the long way; the answer reads the value afterwards either way
             await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
-            await self._touching(KEY_MS * len(text))
-            await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
-        elif (replace and not submit and switched and not again and element and field is not None
+            await self._keys(text)
+        elif (replace and not submit and switched and not again and element and field is not None and text
               and not field.secure and await self._attribute(element, "value") != text):
             # keys went missing as focus moved between fields: the field holds something else. Cleared and typed
             # once more; the answer says so (Daemon, NOTE_RETYPED). Typing again into the same field isn't checked:
-            # its keyboard is already the field's own (and that path is the fast one)
+            # its keyboard is already the field's own (and that path is the fast one). Nothing to retype when the
+            # text is empty: the clear was all (an empty field may read as its placeholder)
             await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
-            await self._touching(KEY_MS * len(text))
-            await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
+            await self._keys(text)
             self.retyped = True
         if field is not None and element and not submit:  # return may move focus on; keys never do
             self.typed_into = (_field_key(field), element)
             self.typed_place = (field.x, field.y, field.width)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
+
+    async def _keys(self, keys: str) -> None:
+        """Send keys to the focused field. None at all is nothing to send: the runner's keys route refuses an empty
+        list (an empty text with replace only clears the field: review R179 M3)."""
+        if not keys:
+            return
+        await self._touching(KEY_MS * len(keys))
+        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(keys)})
 
     async def retype(self, text: str) -> bool:
         """Clear the focused field and type `text` again, once: the first keys went missing (the daemon saw the
@@ -1062,8 +1073,7 @@ class Session:
         if not element:
             return False
         await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
-        await self._touching(KEY_MS * len(text))
-        await self._call("POST", "/session/{sid}/wda/keys", {"value": list(text)})
+        await self._keys(text)
         return True
 
     async def is_focused(self, field: ui.Element) -> bool:
