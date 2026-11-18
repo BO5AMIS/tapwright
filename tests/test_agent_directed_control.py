@@ -1,6 +1,6 @@
 ﻿"""1.7.5 contract: authorization belongs to the agent, execution ownership to Tapwright.
 
-Synthetic dispatch tests do not establish hardware usability. The reported JLD
+Synthetic dispatch tests do not establish hardware usability. The reported tester-app
 geometry is reproduced without inventing successful exact-Button hit responses.
 """
 import pytest
