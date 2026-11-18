@@ -351,3 +351,23 @@ def test_l6_no_reach_scroll_goes_out_toward_what_the_floor_holds():
         assert d.session.scrolls == [] and "tap" not in d.session.calls
         await finish(stop, task)
     run(go)
+
+
+def test_l2_an_explore_that_fails_before_its_run_leaves_no_busy_mark(tmp_path):
+    from test_daemon_explore import explored as explored_daemon
+
+    async def go():
+        d = explored_daemon(tmp_path)
+        stop, task = await started(d)
+        build_of = d._build_of
+
+        async def broken(bundle):
+            raise RuntimeError("the build can't be read")
+        d._build_of = broken
+        with pytest.raises(Exception):
+            await d.run_tool("a", "explore", {})
+        d._build_of = build_of
+        r = await d.run_tool("a", "explore", {"steps": 3})  # not `busy: another explore is running`
+        assert r["text"].startswith("Explored ")
+        await finish(stop, task)
+    run(go)

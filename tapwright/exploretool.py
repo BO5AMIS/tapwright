@@ -438,18 +438,22 @@ class ExploreTools:
         if self._explore_active is not None:
             raise Refused("busy", ALREADY)
         self._explore_active = client_id
-        build = await self._build_of(bundle)
-        who = self._explore_identity(bundle, build)
-        self.ensure_logs(bundle)
-        phone = DaemonPhone(self, client_id, scope, bundle)
-        channel = self.dialog_channel(client_id)
+        try:  # (review R180 L2) a cancellation or an error before the run never leaves every later explore `busy`
+            build = await self._build_of(bundle)
+            who = self._explore_identity(bundle, build)
+            self.ensure_logs(bundle)
+            phone = DaemonPhone(self, client_id, scope, bundle)
+            channel = self.dialog_channel(client_id)
 
-        def progress(line: str) -> None:
-            channel.push({"type": "progress", "id": f"p{next(self._explore_seq)}", "message": line})
-        rules = d._FLOOR_RULES.get() or d.safety.NONE  # (the caller's policy file: its words only add to the floor)
-        explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), rules, who, budget=parsed.budget,
-                                    start_place=parsed.start, focus=parsed.focus, continue_after_crash=parsed.keep_going,
-                                    clock=self.control.clock, progress=progress, fill=fill)
+            def progress(line: str) -> None:
+                channel.push({"type": "progress", "id": f"p{next(self._explore_seq)}", "message": line})
+            rules = d._FLOOR_RULES.get() or d.safety.NONE  # (the caller's policy file: its words only add to the floor)
+            explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), rules, who, budget=parsed.budget,
+                                        start_place=parsed.start, focus=parsed.focus, continue_after_crash=parsed.keep_going,
+                                        clock=self.control.clock, progress=progress, fill=fill)
+        except BaseException:
+            self._explore_active = None
+            raise
         tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
                   d._CRASHES.set(phone.crashes), d._TOUCH_FLOOR.set(explorer.floor))  # (the one dispatch gate of its moves)
         began = datetime.datetime.now(datetime.timezone.utc)
