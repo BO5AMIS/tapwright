@@ -210,6 +210,35 @@ def mark_seen(data: dict, place: str, sigs: list[str], now: str) -> bool:
     return True
 
 
+def scan_open(data: dict, place: str, now: str) -> bool:
+    """The place's screen is being enumerated past what showed first (a scroll is about to be made): its frontier ends in `…`
+    until `scan_done`, so a run that stops before the scan ends leaves the place a frontier place, never `explored` with what
+    lay below untried (CodeRabbit, PR #20)."""
+    rec = _ensure(data, place, now)
+    if rec is None or MORE in rec["frontier"]:
+        return False
+    rec["frontier"] = [*rec["frontier"], MORE]
+    return True
+
+
+def scan_done(data: dict, place: str, left: list[str]) -> bool:
+    """The place's whole screen was enumerated and every action on it was taken up: `left` are the signatures seen in that
+    scan that are still untried (a deferred toggle). The `…` goes when the frontier, with those, fits in 50: nothing lies past
+    it any more (an overflow marker that never cleared kept a fully tried place a frontier place for ever, CodeRabbit PR #20)."""
+    rec = record(data, place)
+    if rec is None or MORE not in rec["frontier"]:
+        return False
+    tried = {a["sig"] for a in rec["actions"]}
+    listed = [s for s in rec["frontier"] if s != MORE]
+    for sig in left:
+        if valid_signature(sig) and sig not in tried and sig not in listed:
+            listed.append(sig)
+    if len(listed) > FRONTIER_MAX:
+        return False
+    rec["frontier"] = listed
+    return True
+
+
 def _capped(sigs: list[str], more: bool) -> list[str]:
     return sigs[:FRONTIER_MAX] + [MORE] if more or len(sigs) > FRONTIER_MAX else sigs
 

@@ -21,7 +21,7 @@ from . import explore, findings
 
 FORMAT, VERSION = "agent-tools-explore-report", 1
 KEEP = 20  # the newest folders of an app that are kept (§25.10)
-FOLDER = re.compile(r"^\d{8}T\d{6}Z$")
+FOLDER = re.compile(r"^(\d{8}T\d{6}Z)(?:-(\d+))?$")  # (a second run in the same second gets `-2`: counted too, PR #20)
 STOP_WORDS = {
     "budget_minutes": "the budget (minutes) is used up.",
     "budget_steps": "the budget (steps) is used up.",
@@ -148,8 +148,12 @@ def _step(step: dict) -> str:
 
 def prune(app_folder: Path, keep: int = KEEP) -> None:
     """The newest `keep` run folders of an app stay (§25.10); the others are removed. Only folders named as ours."""
+    def order(p: Path) -> tuple[str, int]:
+        found = FOLDER.match(p.name)
+        assert found is not None
+        return found.group(1), int(found.group(2) or 1)
     try:
-        runs = sorted(p for p in app_folder.iterdir() if p.is_dir() and FOLDER.match(p.name))
+        runs = sorted((p for p in app_folder.iterdir() if p.is_dir() and FOLDER.match(p.name)), key=order)
     except OSError:
         return
     for old in runs[:max(0, len(runs) - keep)]:
@@ -163,7 +167,7 @@ def folder_for(root: Path, app: str, when: datetime.datetime) -> Path:
     n = 1
     while path.exists():
         n += 1
-        path = base / f"{stamp(when)}-{n}"  # (not one of ours for prune: it is never removed by it, and keeps the older run)
+        path = base / f"{stamp(when)}-{n}"  # (prune counts it, after the run of that second it follows)
     return path
 
 
@@ -181,7 +185,6 @@ def write(root: Path, result: explore.Result, who: explore.Identity, budget: exp
           ended: datetime.datetime, scrub: Callable[[str], str]) -> Path:
     """Write the run's folder and return its path (the answer's `Report:` is `<folder>/report.md`)."""
     folder = folder_for(root, who.app, started)
-    prune(folder.parent, KEEP - 1)  # (room for this run: the newest 20 stay)
     body, made = document(result, who, budget, started, ended, scrub)
     kept = tuple(f for f, _ in made)
     folder.mkdir(parents=True, exist_ok=True)
@@ -189,10 +192,26 @@ def write(root: Path, result: explore.Result, who: explore.Identity, budget: exp
         if f.picture is not None and f.id in result.pictures:
             _write(folder / f.picture.file, result.pictures[f.id])
         if script is not None and f.repro is not None:
-            _write(folder / f.repro, json.dumps(findings.redact(script, scrub), indent=2, ensure_ascii=False) + "\n")
+            _write(folder / f.repro, json.dumps(_redacted_script(script, scrub), indent=2, ensure_ascii=False) + "\n")
     _write(folder / "report.json", json.dumps(body, indent=2, ensure_ascii=False) + "\n")
     _write(folder / "report.md", markdown(body, kept, scrub))
+    prune(folder.parent, KEEP)  # (only once this run's report is there: a failed write never costs a finished one, PR #20)
     return folder
+
+
+def _redacted_script(script: dict, scrub: Callable[[str], str]) -> dict:
+    """A repro script with every string of content scrubbed, and its schema left as it is: the format, the version and each
+    step's `tool` (a test account's value that happens to be `tap` never rewrites a step's tool, CodeRabbit PR #20)."""
+    out: dict = {}
+    for key, value in script.items():
+        if key in ("format", "version"):
+            out[key] = value
+        elif key == "steps" and isinstance(value, list):
+            out[key] = [{k: v if k == "tool" else findings.redact(v, scrub) for k, v in s.items()} if isinstance(s, dict)
+                        else findings.redact(s, scrub) for s in value]
+        else:
+            out[key] = findings.redact(value, scrub)
+    return out
 
 
 def answer(result: explore.Result, folder: Path | None, scrub: Callable[[str], str]) -> str:

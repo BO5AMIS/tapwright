@@ -173,10 +173,12 @@ def typed_in(path: tuple[dict, ...]) -> bool:
     return any(s.get("tool") == "type_text" for s in path)
 
 
-def _file(value: object, what: str, folder: str) -> str:
+def _file(value: object, what: str, folder: str, scrub: Callable[[str], str] | None = None) -> str:
     text = _text(value, what)
     if not _FILE.match(text) or not text.replace("\\", "/").startswith(folder):
         raise FindingError(f"{what} is a relative path in {folder}, not {text!r}")
+    if scrub is not None and scrub(text) != text:  # (refused, not redacted: a redacted path names no file; CodeRabbit, PR #20)
+        raise FindingError(f"{what} holds a private value, so it isn't kept")
     return text
 
 
@@ -215,10 +217,10 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
         place=None if place is None else _label(place, "place", _PLACE),
         path_from=None if path_from is None else _label(path_from, "path_from", _PLACE),
         path=tuple(_step(s, scrub) for s in path),
-        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/"), not test_app),
+        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/", scrub), not test_app),
         logs=tuple(safe(line)[:LOG_CUT] for line in logs[:MAX_LOGS]), crash=crash,
         component_stack=tuple(safe(c) for c in component_stack),
-        repro=None if repro is None else _file(repro, "repro", "repro/"), count=count)
+        repro=None if repro is None else _file(repro, "repro", "repro/", scrub), count=count)
 
 
 def visible_picture(finding: Finding, asked: bool = False) -> str | None:

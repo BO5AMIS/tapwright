@@ -16,6 +16,7 @@ import dataclasses
 import datetime
 import io
 import itertools
+import math
 import re
 import time
 from pathlib import Path
@@ -94,7 +95,8 @@ def timeout_for(args: dict) -> float:
     """How long the client waits for the daemon's answer: the time budget, a minute for the report (§25.2), and a margin for
     the time a person's touches made the run wait, which `minutes` doesn't count (review R180 L9)."""
     minutes = args.get("minutes")
-    budget = float(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) else explore.MINUTES
+    # (a non-finite `minutes` is the daemon's bad_params; the wait for that answer must still be a number: CodeRabbit, PR #20)
+    budget = float(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and math.isfinite(minutes)         else explore.MINUTES
     return budget * 60 + 60 + CLIENT_MARGIN
 
 
@@ -152,7 +154,7 @@ class DaemonPhone:
 
     def _own(self, tree: ui.Tree) -> ui.Tree:
         """Another app's screen never goes further than here: its elements are dropped, only that it is another app stays."""
-        if tree.app is not None and tree.app[1] != self.bundle:
+        if tree.app is None or tree.app[1] != self.bundle:  # (a screen no app can be named for is no screen of this app)
             # an alert stays only when it is this app's own permission prompt: another app's alert is never answered
             # (review R180 L1: after a link opened Safari, its "OK" is a touch in another app)
             alert = tree.alert if tree.alert is not None and self.d._alert_ours(self.bundle, tree.alert, tree.app[1]) else None

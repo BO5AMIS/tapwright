@@ -215,8 +215,11 @@ def merge(disk: dict, memory: dict) -> dict:
     for final, place in out["places"].items():
         sides = held_records.get(final, [])
         place.pop("explored", None)
-        if sides:
-            place["explored"] = explored.merge_record(*sides) if len(sides) == 2 else sides[0]
+        if sides:  # every record that is this place, folded in disk-then-memory order (more than two: CodeRabbit, PR #20)
+            merged = sides[0]
+            for later in sides[1:]:
+                merged = explored.merge_record(merged, later)
+            place["explored"] = merged
     all_roads: dict[tuple[str, str, str], dict] = {}
     for source, names in ((out["roads"], disk_names), (mem["roads"], mem_names)):
         for road in source:

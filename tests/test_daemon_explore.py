@@ -168,10 +168,11 @@ def test_bad_arguments_say_what_is_allowed_and_guide_is_unsupported(tmp_path):
             await d.run_tool("a", "explore", {"guide": "agent"})
         assert (e.value.code, str(e.value)) == ("unsupported", "guide isn't offered yet; explore chooses by itself.")
         assert (await d.run_tool("a", "explore", {"guide": "none", "steps": 1}))["text"].startswith("Explored ")
+        before = list(d.session.tapped)  # (the guide="none" run above may have tapped: only this call's taps count, PR #20)
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "explore", {"from": "nowhere"})
         assert e.value.code == "not_found"
-        assert d.session.tapped == [] or True
+        assert d.session.tapped == before
         await finish(stop, task)
     run(go)
 

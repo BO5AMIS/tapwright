@@ -61,10 +61,13 @@ def test_a_phone_in_use_before_it_starts_is_waited_for_then_skipped(monkeypatch,
     busy = client.DaemonError("busy", "a person is using the phone; try again in a moment")
     calls, _ = patched(monkeypatch, [busy, {"text": "Explored 1 places in 0.1 min (3 steps), 0 findings. Stopped: the frontier is empty."}])
     slept: list[float] = []
-    assert cli.explore(flags(), sleep=slept.append) == 0 and slept == [cli.EXPLORE_RETRY] and len(calls) == 2
+
+    def clock() -> float:  # (the time that passes is the sleeps' here: the calls take none)
+        return sum(slept)
+    assert cli.explore(flags(), sleep=slept.append, clock=clock) == 0 and slept == [cli.EXPLORE_RETRY] and len(calls) == 2
     patched(monkeypatch, [busy] * 100)
     slept.clear()
-    assert cli.explore(flags(), sleep=slept.append) == 2
+    assert cli.explore(flags(), sleep=slept.append, clock=clock) == 2
     assert sum(slept) == cli.EXPLORE_WAIT and "skipped: the phone was in use" in capsys.readouterr().out
 
 

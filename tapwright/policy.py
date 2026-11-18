@@ -166,8 +166,13 @@ def combined(daemon: Policy, call: Policy) -> Policy:
     in serve's spelling); a caller that names none leaves serve's list as it is (the lead's ruling, review R180)."""
     apps: dict[str, AppWords] = {}
     for bundle in dict.fromkeys([*daemon.apps, *call.apps]):
-        a, b = daemon.apps.get(bundle, AppWords()), call.apps.get(bundle, AppWords())
-        apps[bundle] = AppWords(_union(a.confirm, b.confirm), _union(a.block, b.block))
+        # each side's words IN FORCE for the app (`words`: its own list, else the global one), so an app's own list on one
+        # side (even an empty one) never hides the other side's global words for that app (CodeRabbit, PR #20)
+        (a_block, a_confirm), (b_block, b_confirm) = daemon.words(bundle), call.words(bundle)
+        own_a, own_b = daemon.apps.get(bundle, AppWords()), call.apps.get(bundle, AppWords())
+        # (a list neither side gives the app stays None: the app reads the combined global list, the same words)
+        apps[bundle] = AppWords(None if own_a.confirm is None and own_b.confirm is None else _union(a_confirm, b_confirm),
+                                None if own_a.block is None and own_b.block is None else _union(a_block, b_block))
     asked = {" ".join(w.split()).casefold() for w in call.explore.submit}
     submit = tuple(w for w in daemon.explore.submit if not asked or " ".join(w.split()).casefold() in asked)
     words = ExploreWords(_union(daemon.explore.skip, call.explore.skip) or (), submit)

@@ -172,11 +172,20 @@ class Floor:
 NEVER_TYPED_WORDS = ("Password", "Passcode", "PIN", "Card", "Credit", "Debit", "CVV", "CVC", "Security code", "Expiry")
 
 
+# an id that runs a card or password word into others (`cardnumber-test-safe`, `newpassword`) is read without its separators
+# for these (CodeRabbit, PR #20): whole words elsewhere, so `PIN` doesn't hold `shipping`
+COMPOUND_NEVER_TYPED = ("card", "credit", "debit", "cvv", "cvc", "password", "passcode", "securitycode")
+
+
 def never_typed(field: ui.Element) -> bool:
-    """A field that is secure, or whose label or id says password, passcode or card: never typed in (§25.6)."""
+    """A field that is secure, or whose label or id says password, passcode or card: never typed in (§25.6). In the id a card
+    or password word counts inside a compound too (`cardnumber`)."""
     if field.secure:
         return True
-    return any(grants.matches(w, _plain(text)) for w in NEVER_TYPED_WORDS for text in (field.label, id_words(field.identifier)) if text)
+    if any(grants.matches(w, _plain(text)) for w in NEVER_TYPED_WORDS for text in (field.label, id_words(field.identifier)) if text):
+        return True
+    joined = _NOT_WORD.sub("", field.identifier).casefold()
+    return any(w in joined for w in COMPOUND_NEVER_TYPED)
 
 
 def inside(inner: ui.Element, outer: ui.Element) -> bool:
@@ -200,6 +209,16 @@ def safe_button(alert: ui.Alert, floor: Floor) -> str | None:
         if button is not None and floor.named(button) is None:
             return button
     if len(alert.buttons) == 1 and floor.named(_plain(alert.buttons[0])) is None \
-            and floor.named(_plain(f"{alert.title} {alert.message}")) is None:
+            and floor.named(_plain(f"{alert.title} {alert.message}")) is None and not grants_access(alert.buttons[0]):
         return alert.buttons[0]
     return None
+
+
+# a button that grants a permission: never pressed, even as an alert's only button (explore never allows, §25.5; CodeRabbit,
+# PR #20). `OK` on an alert that only informs stays pressable
+ALLOW_WORDS = ("Allow", "Always Allow", "Turn On", "Enable", "Grant")
+
+
+def grants_access(button: str) -> bool:
+    text = " ".join(_plain(button).split()).casefold()
+    return any(text == w.casefold() or text.startswith(w.casefold() + " ") for w in ALLOW_WORDS)

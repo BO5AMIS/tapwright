@@ -211,7 +211,17 @@ def _lists_agree(a: dict, b: dict) -> bool:
     if a.get("lists") != b.get("lists"):
         return False
     inner_a, inner_b = set(a.get("inner", ())), set(b.get("inner", ()))
-    return not (inner_a and inner_b) or bool(inner_a & inner_b)
+    return not (inner_a and inner_b) or any(_kin(x, y) for x in inner_a for y in inner_b)
+
+
+def _kin(x: str, y: str) -> bool:
+    """One family of rows, as `stem` cut two ids: the same, or one the other's start up to a separator (`dest-card` from
+    `dest-card-kyoto` and `dest-card-cape` from `dest-card-cape-town`: a row's name of several words is cut one word short;
+    CodeRabbit, PR #20). `settings-row` and `profile-row` stay two families."""
+    if x == y:
+        return True
+    short, long_ = (x, y) if len(x) < len(y) else (y, x)
+    return long_.startswith(short) and long_[len(short)] in "-_. "
 
 
 def similarity(a: dict, b: dict) -> float:

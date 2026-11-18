@@ -13,7 +13,9 @@ share one; `position` and `component` need `seen`.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -408,8 +410,9 @@ class Work:
 def repaired_script(data: dict, work: list[Work], script: Path, at: datetime.datetime, build: str | None, count: int,
                     version: str, scrub: Callable[[str], str]) -> dict:
     """The repaired script (§26.6): the original's keys and steps, with `repaired` at the top and on each repaired or inserted
-    step. A repaired step carries the `seen` of the element that was accepted. Text added here goes through `scrub`; the
-    original's own text is kept as it is."""
+    step. A repaired step carries the `seen` of the element that was accepted. The text a repair adds was checked before it
+    got here (repairanalysis: a target or road move that names a private value is never a candidate); the original's own text
+    is kept as it is. (`scrub` is kept for the callers; nothing here needs it.)"""
     top = {"from": script.name, "at": stamp(at), "tool": "tapwright", "build": build or "unknown", "count": count}
     steps: list[dict] = []
     for item in work:
@@ -430,8 +433,23 @@ def repaired_script(data: dict, work: list[Work], script: Path, at: datetime.dat
     return out
 
 
+def under_repair(steps: list[dict], at: int) -> bool:
+    """Is `steps[at]` part of a repair, for the dispatch gate of the check replay: a repaired or inserted step, or the step an
+    inserted road or scroll leads to (the trial ran it under the floor too). The script's other steps are not."""
+    if "repaired" in steps[at]:
+        return True
+    before = steps[at - 1].get("repaired") if at > 0 else None
+    return isinstance(before, dict) and before.get("inserted") is True
+
+
+def skipped_steps(text: str) -> set[int]:
+    """The steps a batch's answer says it skipped (`  4. skipped (if: ...)`, batch.skipped)."""
+    return {int(m.group(1)) for m in re.finditer(r"(?m)^  (\d+)\. skipped \(", text)}
+
+
 def _file_step(step: dict, data: dict, scrub: Callable[[str], str]) -> dict:
-    """A step as the file keeps it. In a route (version 2) every string is a template, so a literal `${` is written `$${`."""
+    """A step as the file keeps it. In a route (version 2) every string is a template, so a literal `${` is written `$${`. Its
+    text was checked by the analysis, which never makes a candidate of a private value (CodeRabbit, PR #20: no scrub here)."""
     from . import routes
     out = {k: v for k, v in step.items() if k != "repaired"}
     return routes.escaped(out) if data.get("version") == 2 else out  # type: ignore[return-value]
@@ -480,6 +498,8 @@ def write_files(script: Path, repaired: dict, markdown: str) -> list[str]:
 # ---- the replay check of a repair: the emitted file itself, from the script's start (§26.4, Tapline's lesson) ----
 
 CHECKED = "Checked: "
+DIGEST_CHARS = 16
+_DIGEST = re.compile(r"\(sha256 ([0-9a-f]{%d})\)" % DIGEST_CHARS)
 # (review R180 M4) how long a client waits for `replay` with `repair: "apply"`: the run with its trials, then the repaired file's
 # own replay from a fresh start; about twice a plain replay's 200 s, and the trials' fresh starts
 APPLY_TIMEOUT = 480.0
@@ -491,8 +511,9 @@ def why_not_fresh(data: dict) -> str | None:
     script that can is repaired by `apply` and adopted: its repaired file is checked by replaying it from that start."""
     if not isinstance(data.get("app"), str) or not data["app"]:
         return "it names no app, so its replay can't close and open the app to start it fresh"
-    if data.get("fresh", True) is False:
-        return 'it says "fresh": false, so its replay starts wherever the phone is, not from a fresh start of the app'
+    if not data.get("fresh", True):  # (the replay's own test, _replay_prepare: `"fresh": 0` doesn't start fresh either)
+        return (f'it says "fresh": {json.dumps(data.get("fresh"))}, so its replay starts wherever the phone is, not from a fresh '
+                'start of the app')
     return None
 
 
@@ -519,47 +540,82 @@ def write_check(script: Path, repaired: dict) -> Path:
     return temp
 
 
+def digest(data: bytes) -> str:
+    """The short SHA-256 of a repaired file's bytes: the `Checked:` line names it, and `--adopt` installs only a file with
+    those very bytes (CodeRabbit, PR #20: another apply run may have replaced the file between that run's answer and the
+    adoption)."""
+    return hashlib.sha256(data).hexdigest()[:DIGEST_CHARS]
+
+
+def checked_digest(answer: str) -> str | None:
+    """The digest the answer's `Checked:` line names, or None."""
+    for line in answer.splitlines():
+        if line.startswith(CHECKED) and (found := _DIGEST.search(line)) is not None:
+            return found.group(1)
+    return None
+
+
 def keep_checked(script: Path, checked: Path, markdown: str) -> list[str]:
     """`<script>.repair.md` is written, then the checked file becomes `<script>.repaired.json` (a rename: the very bytes that
-    replayed green). Their names. On an OSError nothing new is left: the `.md` goes again when the rename fails, so an answer
-    that says "nothing was kept" is true (review R180 L8)."""
+    replayed green). Their names. On an OSError nothing new is left and nothing old is lost: the `.md` goes again when the
+    rename fails (review R180 L8), and the notes of an earlier repair that were there are put back (CodeRabbit, PR #20)."""
     out_json, out_md = sibling(script, "repaired.json"), sibling(script, "repair.md")
     if script in (out_json, out_md):
         raise OSError("the repaired file would replace the script itself")
-    write_atomic(out_md, markdown)
+    kept_md = out_md.with_name(f"{out_md.name}.{os.getpid()}.previous")
+    had_md = out_md.is_file()
+    if had_md:
+        os.replace(out_md, kept_md)
     try:
+        write_atomic(out_md, markdown)
         os.replace(checked, out_json)
     except OSError:
-        out_md.unlink(missing_ok=True)
+        if had_md:
+            os.replace(kept_md, out_md)
+        else:
+            with contextlib.suppress(OSError):
+                out_md.unlink(missing_ok=True)
         raise
+    kept_md.unlink(missing_ok=True)
     return [out_json.name, out_md.name]
 
 
 # ---- adopt: a person's choice, on the command line only (§26.5) ----
 
-def adopt(script: Path, audit: Callable[[str], bool]) -> tuple[bool, str]:
+def adopt(script: Path, audit: Callable[[str], bool], expected: str | None = None) -> tuple[bool, str]:
     """Adopt `<script>.repaired.json`: the `adopted` audit line first (`audit(detail)`; when it can't be written nothing is
     adopted), the original kept as `<script>.orig.json` once (only when that file isn't there yet, so the first original is
-    never lost), then the original replaced by the repaired script (a temporary file and a rename) and
-    `<script>.repaired.json` removed. `<script>.repair.md` stays. (adopted?, a line for the person)."""
+    never lost; it is written in full beside it first and only then put in place, never over one that is there), then the
+    original replaced by the repaired script (a temporary file and a rename) and `<script>.repaired.json` removed.
+    `<script>.repair.md` stays. `expected`: the digest of the bytes the run checked (`digest`); a file with other bytes is
+    never adopted. (adopted?, a line for the person)."""
     repaired, orig = sibling(script, "repaired.json"), sibling(script, "orig.json")
     if not repaired.is_file():
         return False, f"nothing to adopt: {repaired.name} isn't there (a run with --repair apply writes it when it passes)"
     try:
-        text = repaired.read_text(encoding="utf-8")
+        raw = repaired.read_bytes()
+        text = raw.decode("utf-8")
         json.loads(text)
     except (OSError, ValueError) as e:
         return False, f"can't adopt {repaired.name}: {getattr(e, 'strerror', None) or e}"
+    if expected is not None and digest(raw) != expected:
+        return False, (f"nothing was adopted: {repaired.name} isn't the file this run checked (another run has written it "
+                       "since)")
     if not audit("adopted"):
         return False, "the audit log couldn't be written, so nothing was adopted"
     kept = False
     try:
-        try:
-            with open(orig, "xb") as f:
-                f.write(script.read_bytes())
-            kept = True
-        except FileExistsError:
-            pass
+        if not orig.exists():
+            staged = orig.with_name(f"{orig.name}.{os.getpid()}.tmp")
+            try:
+                staged.write_bytes(script.read_bytes())  # (the whole copy first: a half-written backup is never the original)
+                try:
+                    os.link(staged, orig)  # (put in place only when no backup is there: never over the first original)
+                    kept = True
+                except FileExistsError:
+                    pass
+            finally:
+                staged.unlink(missing_ok=True)
         write_atomic(script, text)
         repaired.unlink(missing_ok=True)
     except OSError as e:

@@ -28,7 +28,7 @@
   picture is kept while the phone is being unlocked or Notification Center may be open. A redactor that fails hides
   the text instead of passing it on.
 - Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
-  target, a new screen in the way) and touches nothing; `repair: "apply"` tries up to 3 candidates per break, each a real
+  target, a new screen in the way) and tries no candidate (the script's own steps still run); `repair: "apply"` tries up to 3 candidates per break, each a real
   touch through the same skip floor (and so is its way back after a rejected one: a saved road through Sign out is never
   driven), accepts one only when its check holds and the whole script then runs to its end,
   and keeps a repair only after the repaired file itself has replayed green from the script's fresh start, the repaired and inserted steps

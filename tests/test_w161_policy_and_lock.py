@@ -24,7 +24,8 @@ CALL = policylib.parse({"confirm": ["publish", "Transfer"], "apps": {APPID: {"co
 def test_combined_keeps_every_word_of_both_once():
     both = policylib.combined(SERVE, CALL)
     assert both.block == ("Wipe",) and both.confirm == ("Publish", "Transfer")  # (once, ignoring case: the daemon's spelling)
-    assert both.apps[APPID] == policylib.AppWords(confirm=("Rewind",), block=("Shred",))
+    # (each side's words in force for the app: the call's own confirm list doesn't hide serve's global Publish there, PR #20)
+    assert both.apps[APPID] == policylib.AppWords(confirm=("Publish", "Rewind"), block=("Shred",))
     assert both.explore.skip == ("Archive", "Rename") and both.explore.submit == ("send-form",)
     # a caller's policy that names nothing still leaves every word of the daemon's
     assert policylib.combined(SERVE, policylib.NONE).to_obj() == SERVE.to_obj()

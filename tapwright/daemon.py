@@ -341,6 +341,8 @@ _DIALOG: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_
 _GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar("tapwright_grant_call", default=None)
 # The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
 _ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
+# the place a recorded touch went out from, filled inside its turn (CodeRabbit, PR #20); None outside a recorded call
+_PLACE_AT_TURN: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_place_at_turn", default=None)
 # The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
 BEFORE_TOUCH = frozenset({"not_actionable", "stale", "not_found", "ambiguous"})  # refusals made before a touch (A-L1)
 _RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str], float] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
@@ -2241,6 +2243,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             aimed = self._aim_for_recording(client_id, name, args)
             # the place the move starts on, for the step a recording saves (§26.6): worked out before the call, which moves it
             ran_on = self._place_before(self.control.client(client_id)) if client_id in self._recording else None
+            at_turn: list = []  # (the place as the touch got its turn: another agent may have moved the app meanwhile, PR #20)
+            turn_token = _PLACE_AT_TURN.set(at_turn) if ran_on is not None else None
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2264,6 +2268,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
+                if turn_token is not None:
+                    _PLACE_AT_TURN.reset(turn_token)
+            if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
+                ran_on = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
                               place=ran_on[1] if ran_on is not None else None)
@@ -3332,7 +3340,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                                          f"{REVOKED_STOP.format(names=', '.join(json.dumps(g) for g in gone))}")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
-            floor_off = _TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and "repaired" not in step else None
+            # (the check replay gates the repaired and inserted steps, and the step an inserted road or scroll leads to, as the
+            # trial did: CodeRabbit, PR #20)
+            floor_off = (_TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and not scriptrepair.under_repair(steps, i - 1)
+                         else None)
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 if "if" in step or step.get("optional"):  # one check, right after the step before settled (§9.1)
@@ -4004,6 +4015,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             trace.mark("resolved")
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
+            if (turned := _PLACE_AT_TURN.get()) is not None and not dry:
+                turned.append(box["from"])
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
             if not dry and client_id in self._recording and (touched := _RESOLVED.get()) is not None:
                 aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from

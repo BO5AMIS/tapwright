@@ -885,7 +885,11 @@ def replay(a) -> int:
             continue
         print(f"{f}: {answer.get('text', '')}")
         if adopt:
-            print(f"{f}: {adopt_repair(path, answer.get('text', ''))}")
+            adopted, said = adopt_repair(path, answer.get('text', ''))
+            print(f"{f}: {said}")
+            if adopted is False:  # (a checked repair that couldn't be adopted fails the command; a run with no repair doesn't)
+                results.append((f, "error", f"--adopt: {said}", time.monotonic() - began))
+                continue
         results.append((f, "ok", "", time.monotonic() - began))
     if a.junit:
         write_junit(a.junit, results)
@@ -893,32 +897,38 @@ def replay(a) -> int:
     return 2 if "error" in kinds else 1 if "failed" in kinds else 0
 
 
-def adopt_repair(path: str, answer: str) -> str:
+def adopt_repair(path: str, answer: str) -> tuple[bool | None, str]:
     """`--repair apply --adopt`, after the run passed: the script is replaced by the repaired one it just wrote, the original kept
     as `<script>.orig.json` once (AGENT-TOOLS §26.5). Done here, by the person's command, and never by the daemon: no tool call
-    can adopt. A run that made no repair wrote nothing, so nothing is adopted."""
+    can adopt. (adopted?, the line for the person): None when the run made no repair, so there is nothing to adopt; False when
+    a checked repair couldn't be adopted (the command then fails, CodeRabbit PR #20). Only the bytes the run checked are
+    adopted: the `Checked:` line names their digest."""
     from . import auditlog, batch, scriptrepair
     script = Path(path)
     if f"Wrote {script.stem}.repaired.json" not in answer:
-        return "nothing to adopt: that run made no repair, so it wrote no repaired script"
+        return None, "nothing to adopt: that run made no repair, so it wrote no repaired script"
     if not any(line.startswith(scriptrepair.CHECKED) for line in answer.splitlines()):
         # (§26.4, Tapline's lesson: only a repaired file that replayed green from the script's start is adopted)
-        return (f"nothing was adopted: that run didn't say {script.stem}.repaired.json replayed green from the script's fresh "
-                "start, so it isn't adopted")
+        return False, (f"nothing was adopted: that run didn't say {script.stem}.repaired.json replayed green from the script's "
+                       "fresh start, so it isn't adopted")
+    expected = scriptrepair.checked_digest(answer)
+    if expected is None:
+        return False, (f"nothing was adopted: that run didn't name the bytes of {script.stem}.repaired.json it checked, so "
+                       "they can't be told from another run's")
     try:
         data = batch.load_script(path)
     except Exception as e:  # noqa: BLE001 - a script that can't be read again isn't adopted over
-        return f"nothing was adopted: {e}"
+        return False, f"nothing was adopted: {e}"
     name, app = str(data.get("name") or script.stem), data.get("app") if isinstance(data.get("app"), str) else None
     log = auditlog.AuditLog()
-    return scriptrepair.adopt(script, lambda detail: log.write("repair", name=name, app=app, detail=detail))[1]
+    return scriptrepair.adopt(script, lambda detail: log.write("repair", name=name, app=app, detail=detail), expected)
 
 
 EXPLORE_WAIT = 600.0  # seconds `explore` waits for a phone in use before it starts (AGENT-TOOLS §22.3, §25.2)
 EXPLORE_RETRY = 15.0
 
 
-def explore(a, sleep=time.sleep) -> int:
+def explore(a, sleep=time.sleep, clock=time.monotonic) -> int:
     """`tapwright explore`: the same search as the `explore` tool (AGENT-TOOLS §25.2), from the command line, with the same
     report. Exit 0: it ended and found nothing. 1: it ended with findings, a crash included. 2: it couldn't start (no phone,
     no app, a bad flag), or a person or a pause stopped it before the end (the report is still written). When the phone is
@@ -947,15 +957,15 @@ def explore(a, sleep=time.sleep) -> int:
     client.set_policy(rules)
     client.set_maps(getattr(a, "maps", None))
     client.set_accounts(getattr(a, "accounts", None))
-    waited = 0.0
+    deadline = clock() + EXPLORE_WAIT  # (the calls' own time counts too, not only the sleeps: CodeRabbit, PR #20)
     while True:
         try:
             answer = client.call("explore", args, "cli-explore", timeout=exploretool.timeout_for(args))
             break
         except client.DaemonError as e:
-            if e.code == "busy" and "Done: " not in str(e) and waited < EXPLORE_WAIT:  # the phone was in use before it began
-                sleep(EXPLORE_RETRY)
-                waited += EXPLORE_RETRY
+            left = deadline - clock()
+            if e.code == "busy" and "Done: " not in str(e) and left > 0:  # the phone was in use before it began
+                sleep(min(EXPLORE_RETRY, left))
                 continue
             if e.code == "busy" and "Done: " not in str(e):
                 print("skipped: the phone was in use")
@@ -1164,7 +1174,7 @@ def main() -> int:
                    help="picture checks (matches, compare_screen) save the screen into the script's "
                         "<name>.references folder instead of comparing; exit 0 when every step ran")
     p.add_argument("--repair", choices=("suggest", "apply"),
-                   help="when a step's target moved or was renamed: suggest the fix after the failure (touches nothing), or "
+                   help="when a step's target moved or was renamed: suggest the fix after the failure (the script runs; no candidate is tried), or "
                         "apply it as the run goes, checked, and write <script>.repaired.json and .repair.md beside the script")
     p.add_argument("--adopt", action="store_true",
                    help="with --repair apply: when that run passed, replace the script with the repaired one, keeping the "
@@ -1252,12 +1262,14 @@ def main() -> int:
                         "with drive's account, and the tool types its values; they are never shown")
     a = ap.parse_args()
     if a.cmd == "mcp":
-        from . import mcp_server, uxcheck
+        from . import mcp_server, policy as policies, uxcheck
         apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
         try:
             if a.policy:
                 print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
-            chosen = None
+            # (its words still reach explore's and a repair's skip floor, which they only add to; no other call reads them:
+            # CodeRabbit, PR #20)
+            chosen = policies.load(a.policy) if a.policy else None
             ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
             raise SystemExit(f"tapwright mcp: {e}") from e
@@ -1355,11 +1367,14 @@ def main() -> int:
         if a.no_log:
             os.environ["TAPWRIGHT_NO_LOG"] = "1"
         port = a.port if a.port is not None else server.DEFAULT_PORT
+        from . import policy as policies
         from .ceiling import Ceiling
         try:
             if a.policy:
                 print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
-            chosen = None
+            # (serve --policy is the floor a call's own explore or repair policy only adds to, server.py; it restricts no other
+            # call: CodeRabbit, PR #20)
+            chosen = policies.load(a.policy) if a.policy else None
         except ValueError as e:
             raise SystemExit(f"tapwright serve: {e}") from e
         whole, address = serve_phone(a.phone, a.address)

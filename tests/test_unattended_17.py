@@ -337,7 +337,7 @@ def test_the_mcp_server_shows_a_notice_in_chat_and_asks_nothing():
 
     async def go():
         dialogs = hostdialog.HostDialogs(poll=lambda since, wait: {}, answer=lambda i, v: None)
-        dialogs._calls.append(Ctx())
+        dialogs._calls.append((Ctx(), True, False))  # (context, can show a form, takes progress: PR #20)
         dialogs._handle({"type": "notice", "id": "w1", "kind": "gone", "message": watchdog.GONE_USB})
         await asyncio.sleep(0.05)
         assert sent == [("warning", watchdog.GONE_USB, "tapwright")] and dialogs._shown == {}

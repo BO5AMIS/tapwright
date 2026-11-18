@@ -8,7 +8,7 @@ from fakes import FakeSession, button, el
 from mapfakes import APP, MapSession, screen
 from test_daemon import finish, make, run, started
 
-from tapwright import auditlog, mapkeeper, params, ui
+from tapwright import auditlog, mapkeeper, params, scriptrepair, ui
 from tapwright.control import Refused
 
 BUNDLE = APP[1]
@@ -191,7 +191,8 @@ def test_apply_repairs_a_renamed_id_checks_it_and_writes_the_files_beside_the_sc
         lines = r["text"].split("\n")
         assert re.fullmatch(r"Ran 2 of 2 steps in \d+\.\d s, with 1 repair \(not adopted\)\.", lines[0]), lines[0]
         assert lines[1] == "Repaired: step 1 tap id=login-btn to id=login-button (score 1.00)."
-        assert lines[2] == "Checked: replayed sign_in.repaired.json from the script's fresh start: all 2 steps passed."
+        sha = scriptrepair.digest((tmp_path / "sign_in.repaired.json").read_bytes())  # (the bytes it checked, PR #20)
+        assert lines[2] == f"Checked: replayed sign_in.repaired.json from the script's fresh start: all 2 steps passed (sha256 {sha})."
         assert lines[3] == "Wrote sign_in.repaired.json and sign_in.repair.md. The original is unchanged."
         assert not list(tmp_path.glob("*.checking"))  # the checked file became the repaired one: nothing else is left
         assert path.read_bytes() == original  # never over the original

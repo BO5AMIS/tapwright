@@ -330,6 +330,8 @@ class Explorer:
         self.resets_in_row = 0
         self.at: str | None = None  # the place the app was last seen at
         self._announced: set[str] = set()
+        self._typed_places: set[str] = set()  # where `fill` typed: a leg from there taps only `explore.submit` (CodeRabbit, PR #20)
+        self._new: tuple[str, ui.Tree] | None = None  # a place first seen by a move, announced once its hop is known
         self._listed: dict[str, set[str]] = {}  # the signatures already put on each place's frontier in this run
 
     # ---- hooks ----
@@ -392,7 +394,10 @@ class Explorer:
         if now is None or now.checked is None:
             self._toggle_lost(element, before)
         self.steps += 1  # the flip back is a touch too, which the budget never refuses (one move with the flip, §25.7)
-        back = await self.phone.toggle(ui.Target(ref=now.ref), before)
+        try:
+            back = await self.phone.toggle(ui.Target(ref=now.ref), before)
+        except PhoneStop as stop:  # (the restoring touch itself stopped: the switch is named, CodeRabbit PR #20)
+            self._toggle_lost(element, before, stop.reason)
         if back.code is not None:
             self._toggle_lost(element, before, back.code)
         try:
@@ -568,8 +573,11 @@ class Explorer:
     def _foreign(self, tree: ui.Tree) -> bool:
         return tree.app is None or tree.app[1] != self.who.app
 
-    async def _look(self, arrived: bool) -> Look:
-        """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is."""
+    async def _look(self, arrived: bool, hold_new: bool = False) -> Look:
+        """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is. `hold_new`: a place
+        first seen here is announced (its checks run) only by `_announce`, once the move that reached it is registered, so
+        what is found there has the way to it (CodeRabbit, PR #20)."""
+        self._new = None
         tree = await self.phone.read()
         tries = 0
         while tree.alert is not None and tries < ALERT_TRIES:
@@ -594,9 +602,19 @@ class Explorer:
         self.at = seen.name
         self.seen.setdefault(seen.name)
         if seen.name not in self._announced:  # first seen in this run: the hook of part 2b's audit and ux checks
-            self._announced.add(seen.name)
-            await self.on_new_place(seen.name, tree)
+            if hold_new:
+                self._new = (seen.name, tree)
+            else:
+                self._announced.add(seen.name)
+                await self.on_new_place(seen.name, tree)
         return Look(tree, seen.name, seen.new)
+
+    async def _announce(self) -> None:
+        """The place `_look(..., hold_new=True)` saw first, announced now (its first-visit checks)."""
+        held, self._new = self._new, None
+        if held is not None and held[0] not in self._announced:
+            self._announced.add(held[0])
+            await self.on_new_place(*held)
 
     # ---- the actions of a place (§25.3, §25.4) ----
 
@@ -701,6 +719,7 @@ class Explorer:
             if moved.code is None:
                 self.typed += 1
                 self._typed_here = True
+                self._typed_places.add(place)
 
     def _fill_text(self, field: ui.Element) -> str:
         """What a marked field gets: the fixture's field with `fixture:…` (§25.6), else a fake value."""
@@ -716,7 +735,7 @@ class Explorer:
             self._typed_here = False
 
     async def _expand_place(self, place: str) -> None:
-        done: set[str] = set()
+        done: dict[str, None] = {}  # (in the order seen: what a finished scan leaves untried goes back on the frontier)
         scrolls = 0
         lost = 0
         typing = self.fill.mode != "none"
@@ -753,11 +772,15 @@ class Explorer:
                 if scrolls < SCROLLS and tree.below > 0 and not any(
                         self.floor.element(e) for e in tree.items if e.role == "scroll"):  # a scroll view is a recipient too
                     scrolls += 1
+                    if explored.scan_open(self.data, place, mapfile.now()):  # (kept a frontier place until the scan ends)
+                        self.map.changed()
                     self._spend()
                     await self._moved(await self.phone.scroll())
                     continue
+                if explored.scan_done(self.data, place, [s for s in done if not explored.is_tried(self.data, place, s, self.build)]):
+                    self.map.changed()
                 break
-            done.add(action.sig)
+            done[action.sig] = None
             if explored.is_tried(self.data, place, action.sig, self.build):
                 continue
             if self._typed_here and action.kind != "back" and (action.element is None
@@ -812,7 +835,14 @@ class Explorer:
         if moved.code is not None:
             await self._refused(place, action, moved)
             return True
-        look = await self._look(True)
+        look = await self._look(True, hold_new=True)
+        try:
+            return await self._after_tap(place, action, element, items, titles, moved, look, mark)
+        finally:
+            self._new = None  # (announced by _after_tap once the hop is known; a later look announces it otherwise)
+
+    async def _after_tap(self, place: str, action: Action, element: ui.Element, items: list[ui.Element], titles: frozenset[str],
+                         moved: Moved, look: Look, mark: int) -> bool:
         watch = await self.phone.watch(mark)
         step = action.step
         if moved.left and not look.foreign and not look.sheet and watch.crash is None:  # (the daemon already came back)
@@ -846,6 +876,7 @@ class Explorer:
             self._mark(place, action.sig, "same")
             return True
         self._arrived(place, look, action, element, items, titles, moved)
+        await self._announce()
         await self._return_to(place)
         return True
 
@@ -1108,6 +1139,8 @@ class Explorer:
                 return False
             if self.floor.touch(element, items) is not None or self.floor.may_submit(element, items) is not None:
                 return False
+            if edge.src in self._typed_places and element.identifier not in self.floor.submit_ids:
+                return False  # (§25.7: where it typed, a form may still hold the fake values; only a listed submit is touched)
             target = ui.Target(ref=element.ref)
             if (await self.phone.check(target)).kind != "ok":
                 return False

@@ -196,7 +196,7 @@ def test_the_roads_it_finds_are_saved_as_a_persons_driving_would_save_them(tmp_p
     data = maps.data(str(tmp_path), "com.example.app")
     road = next(r for r in data["roads"] if r["from"] == "place_1" and r["move"]["target"] == {"id": "go-settings"})
     assert road["by"] == "tapwright" and road["build"] == "1.5.0 (220)"
-    assert not any("Trip" in str(r) for r in data["roads"] if r["move"].get("target", {}).get("id") is None and False)
+    assert not any("Trip" in str(r) for r in data["roads"] if r["move"].get("target", {}).get("id") is None)
 
 
 def test_it_resets_with_open_app_when_nothing_else_brings_it_back(tmp_path):
