@@ -220,7 +220,7 @@ def test_an_id_that_carries_content_is_kept_in_no_signature(tmp_path):
 
 # ---- M6: the check replay passes the gate ----
 
-def test_the_check_replay_of_the_repaired_file_passes_the_gate(tmp_path):
+def test_the_check_replay_gates_only_the_repaired_steps_not_the_scripts_own_delete_step(tmp_path):
     welcome = [title("Welcome"), button("e1", "Log in", "login-button", rect=(10, 600, 100, 40))]
     home = [title("Home"), button("h1", "Delete trip", "trip-x", rect=(10, 600, 100, 40))]
 
@@ -228,11 +228,9 @@ def test_the_check_replay_of_the_repaired_file_passes_the_gate(tmp_path):
         d = phone(tmp_path, Flow(welcome, {"login-button": home, "trip-x": home}))
         stop, task = await started(d)
         steps = [tap({"id": "login-btn"}, expect={"text": "Home"}), tap({"id": "trip-x"})]
-        with pytest.raises(Refused) as e:
-            await replay(d, script(tmp_path, steps), "apply")
-        assert "didn't pass when it was replayed" in str(e.value) and "needs_confirmation" in str(e.value)
-        assert "sign_in.repaired.json" not in names(tmp_path)
-        assert d.session.calls.count("tap") == 3  # the trial, the script's own Delete step in the run, the check's Log in
+        answer = await replay(d, script(tmp_path, steps), "apply")  # (was refused by the all-steps gate of W164's M6)
+        assert "all 2 steps passed" in answer["text"] and "sign_in.repaired.json" in names(tmp_path)
+        assert d.session.calls.count("tap") == 4  # the trial, the own Delete step in the run, then both in the check
         await finish(stop, task)
     run(go)
 
@@ -369,5 +367,66 @@ def test_l2_an_explore_that_fails_before_its_run_leaves_no_busy_mark(tmp_path):
         d._build_of = build_of
         r = await d.run_tool("a", "explore", {"steps": 3})  # not `busy: another explore is running`
         assert r["text"].startswith("Explored ")
+        await finish(stop, task)
+    run(go)
+
+
+# ---- W165: the check replay gates only the steps the repair made ----
+
+def sign_in_flow():
+    welcome = [title("Welcome"), button("e1", "Log in", "login-button", rect=(10, 600, 100, 40))]
+    home = [title("Home"), el("f1", "input", "Password", "pw-field", rect=(10, 200, 200, 40), secure=True),
+            button("h1", "Sign out", "signout-btn", rect=(10, 600, 100, 40))]
+    return Flow(welcome, {"login-button": home, "signout-btn": welcome})
+
+
+def test_a_sign_in_script_with_a_password_step_and_its_own_sign_out_step_is_repaired_and_applied(tmp_path):
+    async def go():
+        d = phone(tmp_path, sign_in_flow())
+        stop, task = await started(d)
+        steps = [tap({"id": "login-btn"}, expect={"text": "Home"}),
+                 {"tool": "type_text", "target": {"id": "pw-field"}, "text": "test-password"},
+                 tap({"id": "signout-btn"})]
+        answer = await replay(d, script(tmp_path, steps), "apply")
+        assert "Checked: " in answer["text"] and "all 3 steps passed" in answer["text"]
+        assert "sign_in.repaired.json" in names(tmp_path)
+        data = json.loads((tmp_path / "sign_in.repaired.json").read_text("utf-8"))
+        assert data["steps"][0]["target"] == {"id": "login-button"} and "repaired" in data["steps"][0]
+        assert "repaired" not in data["steps"][1] and "repaired" not in data["steps"][2]
+        assert len(d.session.typed) == 2  # the run, then the check: the person's own password step is not held
+        await finish(stop, task)
+    run(go)
+
+
+def _check(d, tmp_path, steps):
+    """The check replay of a repaired file, as `_check_repaired` runs it: under the repair's floor, only the marked steps held."""
+    from tapwright import batch, daemon
+    path = script(tmp_path, steps, name="checked")
+    data = batch.load_script(str(path))
+
+    async def go():
+        gate = daemon._TOUCH_FLOOR.set(explorefloor.Floor(daemon.safety.NONE, daemon.BUNDLE if hasattr(daemon, "BUNDLE") else None))
+        only = daemon._FLOOR_REPAIRED_ONLY.set(True)
+        try:
+            return await d._replay("a", data, None, {"look": False})
+        finally:
+            daemon._FLOOR_REPAIRED_ONLY.reset(only)
+            daemon._TOUCH_FLOOR.reset(gate)
+    return go()
+
+
+def test_a_repaired_step_aimed_at_delete_is_still_refused_in_the_check_and_an_unchanged_one_is_not(tmp_path):
+    welcome = [title("Welcome"), button("e1", "Log in", "login-button", rect=(10, 600, 100, 40))]
+    home = [title("Home"), button("h1", "Delete trip", "trip-x", rect=(10, 600, 100, 40))]
+
+    async def go():
+        d = phone(tmp_path, Flow(welcome, {"login-button": home, "trip-x": home}))
+        stop, task = await started(d)
+        own = [tap({"id": "login-button"}), tap({"id": "trip-x"})]
+        await _check(d, tmp_path, own)  # the person's own Delete step runs as a plain replay would
+        marked = [tap({"id": "login-button"}), {**tap({"id": "trip-x"}), "repaired": {"was": {"id": "trip-y"}}}]
+        with pytest.raises(Refused) as e:
+            await _check(d, tmp_path, marked)
+        assert "needs_confirmation" in str(e.value) and "stopped at step 2" in str(e.value)
         await finish(stop, task)
     run(go)

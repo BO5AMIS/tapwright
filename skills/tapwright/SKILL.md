@@ -26,7 +26,7 @@ Follow [setup reference](references/setup.md). Install a pinned release in its o
 
 To map an app on your own, `explore` one app: it tries the controls of each screen in that app (never Delete, Buy, Send, Sign out and the like, never a system sheet or another app), types only test values, answers permission prompts Don't Allow, and ends with a report of the screens it reached and the findings (crashes, accessibility, usability). A locked phone, Pause or a person's touch ends or holds the run; explore never unlocks the phone itself. When an app's screens moved and a recorded script breaks, `replay` with `repair: "suggest"` shows the likely fix and `"apply"` repairs only what it can check, writing `FILE.repaired.json` beside the script; a failing `expect` is a bug to report, never repaired, and adopting the repair is the user's (`tapwright replay FILE --repair apply --adopt`).
 
-For structured QA, use `journey` and `ux_check` with the [persona guide](references/personas.md). `media` imports and removes test fixtures; ordinary Photos UI is available for other library workflows.
+For structured QA, use `journey` and `ux_check` with the [persona guide](references/personas.md). `media` imports and removes test fixtures, pictures and videos (mp4, mov, m4v); ordinary Photos UI is available for other library workflows.
 
 ## Errors
 

@@ -1,6 +1,6 @@
 """Private button content may be absent from XCTest's app tree: recover only by hitting the button itself.
 
-The report's geometry is synthetic test data, not a recording of the reporting app's accessibility hierarchy.
+The report's geometry is synthetic test data, not a recording of the tester app's accessibility hierarchy.
 """
 import dataclasses
 

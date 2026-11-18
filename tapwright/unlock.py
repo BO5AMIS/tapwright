@@ -38,7 +38,8 @@ with its passcode entry showing, types the passcode there, and checks that the p
     the passcode, not even a hash: the refusal is tied to the vault file (its path, modification time and size). A
     changed file may be tried once; after that nothing is typed until a person runs `tapwright unlock-reset`, which
     clears the refusal and leaves the counts.
-  - **At most 3 wakes in 10 minutes that type nothing**, per daemon (WAKE_LIMIT): each wake presses Home and may swipe
+  - **At most 3 wakes in 10 minutes that type nothing**, in the record of attempts (WAKE_LIMIT; every process, a
+    restarted daemon too, since 1.7.9; a record whose wakes can't be read wakes nothing): each wake presses Home and may swipe
     up on a real lock screen, and each of those is a Face ID try. After that: `locked`, for a person.
 
 The phone side (`PhoneLockScreen`) is one adapter over Session; the logic (`Unlocker`) takes any object with the same
@@ -69,7 +70,7 @@ CONFIRM_WAIT = 6.0  # seconds the phone gets to say it unlocked after the last k
 CONFIRM_POLL = 0.3
 KEY_GAP = 0.08  # seconds between two keypad touches
 WAKE_LIMIT = 3  # wakes that typed nothing ...
-WAKE_WINDOW = 600.0  # ... per this many seconds, per daemon (last Opus review of 1.7.8, L3)
+WAKE_WINDOW = 600.0  # ... per this many seconds, in the record (last Opus review of 1.7.8, L3; on disk since 1.7.9)
 DIGITS = "0123456789"
 STATE_FILE: Path | None = None  # the record of attempts; None: ~/.tapwright/unlock-state.json (the tests set their own)
 RESET = "tapwright unlock-reset"
@@ -78,7 +79,8 @@ RESET = "tapwright unlock-reset"
 REFUSED = "the passcode in the file was refused"
 REFUSED_HELD = (f"the phone is locked, and the passcode unlock stopped after a refused passcode: nothing is typed until "
                 f"a person checks phone.passcode in the vault and runs `{RESET}`. Ask the user to unlock it")
-NO_PASSCODE = "the phone is locked; ask the user to unlock it"
+NO_PASSCODE = ("the phone reads as locked (or Notification Center is open over it); ask the user to unlock it or "
+               "close Notification Center")
 LIMITED = ("the phone is locked, and the passcode unlock was already tried twice this hour (at most 2 an hour, so iOS's "
            "lockout delays are never reached); ask the user to unlock it")
 LIMITED_DAY = ("the phone is locked, and the passcode unlock was already tried 3 times today (at most 3 a day); ask the "
@@ -155,7 +157,7 @@ def state_file() -> Path:
 
 
 def _fresh() -> dict:
-    return {"version": 1, "tries": [], "refused": None, "retried": False, "pending": None}
+    return {"version": 1, "tries": [], "refused": None, "retried": False, "pending": None, "wakes": []}
 
 
 def _number(x: object) -> bool:
@@ -165,7 +167,8 @@ def _number(x: object) -> bool:
 class Ledger:
     """The record of passcode attempts, on disk and shared by every process of this user (review 1.7, H2):
     `{"version": 1, "tries": [unix times], "refused": {"path", "mtime_ns", "size"} or null, "retried": bool,
-    "pending": unix time or null, "attempt": random ownership token or null}`. Read whole (a reader never sees half a write: it is written to a temporary file and
+    "pending": unix time or null, "attempt": random ownership token or null, "wakes": [unix times of wakes that typed
+    nothing]}` (a record from before 1.7.9 has no "wakes": none). Read whole (a reader never sees half a write: it is written to a temporary file and
     renamed), and changed only under `<file>.lock` (pidlock, as the policy edit lock). A record that can't be read stops
     the unlock (`no_record`) until a person runs `tapwright unlock-reset`."""
 
@@ -202,7 +205,10 @@ class Ledger:
             return None
         if pending is not None and not _number(pending):
             return None
-        return {"version": 1, "tries": [float(t) for t in tries],
+        wakes = data.get("wakes", [])
+        if not isinstance(wakes, list) or not all(_number(t) for t in wakes):
+            return None  # (fails closed: an unreadable count of wakes wakes nothing)
+        return {"version": 1, "tries": [float(t) for t in tries], "wakes": [float(t) for t in wakes],
                 "refused": None if refused is None else
                 {"path": refused["path"], "mtime_ns": refused["mtime_ns"], "size": refused["size"]},
                 "retried": data.get("retried") is True, "pending": None if pending is None else float(pending),
@@ -293,7 +299,27 @@ class Ledger:
         return max(0, min(LIMIT - self._counted(data["tries"], now, WINDOW),
                           DAY_LIMIT - self._counted(data["tries"], now, DAY)))
 
-    async def begin(self, source: Source) -> Result | str:
+    async def wake(self) -> Result | float:
+        """Right before the lock screen is woken: at most WAKE_LIMIT wakes that typed nothing in WAKE_WINDOW, counted in
+        the record (1.7.9: a restarted daemon or another process counts them too). The wake's time, written down; or a
+        Result (wake_limit, no_record, busy): nothing is woken."""
+        woke: list[float] = []
+
+        def change(data: dict | None) -> "tuple[dict | None, Result | None]":
+            if data is None:
+                return None, Result(False, "no_record", NO_RECORD)
+            now = self.wall()
+            wakes = [t for t in data["wakes"] if now - t < WAKE_WINDOW]  # (one ahead of now counts: fails closed)
+            if len(wakes) >= WAKE_LIMIT:
+                return None, Result(False, "wake_limit", WOKEN_TOO_OFTEN)
+            woke.append(now)
+            return {**data, "wakes": [*wakes, now]}, None
+        result = await self._change(change)
+        if result is not None:
+            return result
+        return woke[0] if woke else Result(False, "no_record", NO_RECORD)
+
+    async def begin(self, source: Source, woke: float | None = None) -> Result | str:
         """Right before the first key: decide again under the lock and, when it may go on, write down the attempt AND
         the refusal it may turn out to be, so a process that dies while typing leaves the latch set (the keys may have
         counted on the phone). A token: type now and give that token to end; a Result: nothing is typed."""
@@ -304,8 +330,13 @@ class Ledger:
                 return None, why
             now = self.wall()
             tries = [t for t in data["tries"] if now - t < DAY] + [now]
+            # the wake of this attempt types: the 2 an hour and 3 a day hold it from here, not the wake limit
+            wakes = list(data["wakes"])
+            if woke in wakes:
+                wakes.remove(woke)
             return {"version": 1, "tries": tries, "refused": source.as_json(),
-                    "retried": data.get("refused") is not None, "pending": now, "attempt": attempt}, None
+                    "retried": data.get("refused") is not None, "pending": now, "attempt": attempt,
+                    "wakes": wakes}, None
         result = await self._change(change)
         return attempt if result is None else result
 
@@ -419,7 +450,6 @@ class Unlocker:
         self.confirm_wait, self.poll, self.sleep, self.key_gap = confirm_wait, poll, sleep, key_gap
         self.ledger = ledger if ledger is not None else Ledger()
         self._lock = asyncio.Lock()
-        self._wakes: list[float] = []  # when a wake went out that has typed nothing (yet), on `clock`
 
     def tries_left(self) -> int:
         return self.ledger.left()
@@ -432,11 +462,6 @@ class Unlocker:
         async with self._lock:  # (two calls at once: the second finds the phone unlocked, or the first's refusal)
             return await self._unlock(phone, passcode, audit, source, may_type)
 
-    def _woken_too_often(self) -> bool:
-        now = self.clock()
-        self._wakes = [t for t in self._wakes if now - t < WAKE_WINDOW]
-        return len(self._wakes) >= WAKE_LIMIT
-
     async def _unlock(self, phone: LockScreen, passcode: str | None, audit: Callable[[str], object] | None,
                       source: Source, may_type: "Callable[[], Result | None] | None" = None) -> Result:
         if not await phone.locked():
@@ -448,10 +473,9 @@ class Unlocker:
         prompt = await phone.xctest_prompt()
         if prompt is not False:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
-        if self._woken_too_often():
-            return Result(False, "wake_limit", WOKEN_TOO_OFTEN)
-        woke = self.clock()
-        self._wakes.append(woke)  # (taken back below when this attempt types: the ledger counts it then)
+        woke = await self.ledger.wake()  # (on disk; taken back when this attempt types: the attempt counts then)
+        if isinstance(woke, Result):
+            return woke
         try:
             await phone.wake()
         except Exception:
@@ -480,11 +504,9 @@ class Unlocker:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
         if may_type is not None and (stop := may_type()) is not None:
             return stop  # (paused, or a person: never between keys, where a partial passcode counts as a wrong one)
-        attempt = await self.ledger.begin(source)  # counted, and latched, before the first key
+        attempt = await self.ledger.begin(source, woke)  # counted, and latched, before the first key
         if isinstance(attempt, Result):
             return attempt
-        if woke in self._wakes:
-            self._wakes.remove(woke)  # a wake that typed: the ledger's 2 an hour and 3 a day hold it
         try:
             if digits and entry.keys:
                 points = [entry.keys[c] for c in passcode]

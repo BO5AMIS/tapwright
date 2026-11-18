@@ -54,7 +54,7 @@ Arguments: `target`, `index`, `seconds`, `force`, `look`, `screenshot`, `dry_run
 
 ### type_text
 
-Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.
+Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; false appends. An empty `text` with `replace` only clears the field (with `submit: true` it clears the field, then presses the submit key; with `replace: false` and `submit: true`, the submit key alone; empty with `replace: false` and no `submit` is `bad_params`). `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.
 Tapwright: taps the field and waits until it has focus and the keyboard is up, then types on the keyboard. It can't see which field is focused, so without a target it uses the only input on screen. A secure field's value is reported as hidden.
 
 Arguments: `text`, `target`, `index`, `replace`, `submit`, `force`, `as`, `look`, `screenshot`, `dry_run`, `brief`.
@@ -143,6 +143,7 @@ Arguments: .
 ### media
 
 Add test pictures with add:[paths]; remove:true deletes pictures this daemon added. confirm is a deprecated compatibility argument. Apple's Photos permissions still apply. Use the Photos UI for general library workflows.
+Tapwright: also adds videos (mp4, mov, m4v; 200 MB each, 400 MB and 5 a call) once the phone's runner is current: an older one answers `unsupported`, naming `tapwright setup --force`. A video is copied to the phone first, so a big one takes a while; meanwhile other calls answer `busy` ("a video is being added to Photos"). `tapwright call media` waits up to 900 s.
 
 Arguments: `add`, `remove`, `confirm`.
 
@@ -902,4 +903,4 @@ The shared text above is what both tools must match. These are the parts only on
 
 ## Historical design
 
-[Pre-1.7.5 design notes](history/AGENT-TOOLS-pre-1.7.5.md) describe earlier and proposed behavior; they are not the current control contract.
+[AGENT-TOOLS 1.16.2](history/AGENT-TOOLS-pre-1.7.5.md) is still the shared contract with Tapline for the tools both have; this guide is Tapwright's own on top of it, and its app-scope, policy, grant and confirmation rules don't bind Tapwright's whole-phone control.

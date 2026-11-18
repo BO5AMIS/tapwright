@@ -24,6 +24,8 @@ import urllib.parse
 from pathlib import Path
 
 EXIT_REFUSED, EXIT_UNREACHABLE = 2, 3
+CALL_TIMEOUT = 120.0  # seconds `tapwright call` waits for an answer by default
+MEDIA_CALL_TIMEOUT = 900.0  # media: a video is copied, then imported (as mcp_server.MEDIA_TIMEOUT)
 NO_DAEMON = "tapwright serve isn't running (or its address file is unreadable): start it with `tapwright serve`."
 
 
@@ -76,8 +78,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--client", metavar="NAME", default=None,
                     help="this agent's name, so its report and journey stay its own (default: the parent process id)")
     ap.add_argument("--json", action="store_true", help='print {"text", "image_path"} instead of the text')
-    ap.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS",
-                    help="how long to wait for the answer (default 120)")
+    ap.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                    help=f"how long to wait for the answer (default {CALL_TIMEOUT:g}; media {MEDIA_CALL_TIMEOUT:g}: a "
+                         "video is copied to the phone, then imported)")
     return ap
 
 
@@ -199,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         print("tapwright call: the arguments must be one JSON object, like '{\"target\": {\"id\": \"save\"}}'",
               file=sys.stderr)
         return EXIT_REFUSED
+    if a.timeout is None:
+        a.timeout = MEDIA_CALL_TIMEOUT if a.tool == "media" else CALL_TIMEOUT
     info = _serve_info()
     port, token = info.get("port"), info.get("token")
     if not isinstance(port, int) or not isinstance(token, str) or not token:

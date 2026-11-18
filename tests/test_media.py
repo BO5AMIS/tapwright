@@ -124,7 +124,7 @@ def test_remove_deletes_only_what_was_added_and_a_restart_can_still_remove_it(pi
         stop, task = await started(d2)
         ids = {e["id"] for entries in media.load().values() for e in entries}
         r = await d2.run_tool("new-agent", "media", {"remove": True, "confirm": True})
-        assert r["text"].startswith("Pictures from an earlier session: Removed 3 pictures")
+        assert r["text"].startswith("From an earlier session: Removed 3 pictures")
         deletes = [c for c in d2.session.calls if isinstance(c, tuple) and c[0] == "photos_delete"]
         assert len(deletes) == 1 and set(deletes[0][1]) == ids
         assert media.load() == {} and len(ids) == 3
@@ -434,7 +434,7 @@ def test_m7_remove_takes_this_agents_pictures_and_the_ones_from_before_the_daemo
         d2.session.photos = ["a-library-that-has-others"]  # (the fake numbers pictures by the library's size)
         await d2.run_tool("live", "media", {"add": pictures[1:2], "confirm": True})
         r = await d2.run_tool("new", "media", {"remove": True, "confirm": True})
-        assert r["text"].startswith("Pictures from an earlier session: Removed 1 picture")
+        assert r["text"].startswith("From an earlier session: Removed 1 picture")
         assert [e["name"] for e in media.load()["live"]] == ["label.PNG"]  # the live agent's is untouched
         r = await d2.run_tool("new", "media", {"remove": True, "confirm": True})
         assert r["text"].startswith("Nothing to remove")
@@ -502,7 +502,7 @@ def test_pictures_a_short_answer_did_make_stay_recorded(pictures):
         d = make()
         stop, task = await started(d)
 
-        async def short(pics):
+        async def short(pics, sent=None, asks=False):
             d.session.calls.append("short")
             return ["ONLY/L0/001"]
         d.session.photos_add = short

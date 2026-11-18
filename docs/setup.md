@@ -189,6 +189,10 @@ The development profile and certificate last a year. Then WebDriverAgent stops s
 - `--fix` never makes a certificate or a profile. If the profile itself has run out, or is
   about to, it says so: run `tapwright setup` again with your App Store Connect key (it
   makes the new profile and installs WebDriverAgent again).
+- A new Tapwright may need a newer runner for a feature: `media add` with videos (mp4, mov, m4v) needs the runner's
+  route version 7 (1.7.9), and an older one answers `unsupported` naming `tapwright setup --force`, which installs the
+  current runner (pictures still work meanwhile). The video is copied into the runner's own container over USB or
+  Wi-Fi first, so a big clip takes a while.
 
 The first start of a session mounts Apple's developer disk image on the phone (downloaded
 once, needs internet) and starts WebDriverAgent; that takes up to a minute. Later starts

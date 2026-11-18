@@ -531,12 +531,16 @@ class RepairTools:
             data = batch.load_script(str(checking))
             if scriptrepair.why_not_fresh(data) is not None:  # (apply refused this before it began; the file kept the keys)
                 raise Refused("bad_params", f"the repaired script can't be started fresh: {scriptrepair.why_not_fresh(data)}")
-            # every step of the check goes through the dispatch gate, as the repair's own moves did (review R180 M6): a
-            # repaired target resolved again from scratch may land elsewhere, and this replay is still the repair's own run
+            # the repaired and inserted steps (they carry `repaired`) go through the dispatch gate, as the repair's own moves did
+            # (review R180 M6): a repaired target resolved again from scratch may land elsewhere. The script's own unchanged
+            # steps run as a plain replay would, as the person wrote them (lead's ruling: a sign-in script's password step or
+            # its own Sign out step must not make every repair of it unkeepable)
             gate = _d()._TOUCH_FLOOR.set(self._repair_floor(run))
+            only = _d()._FLOOR_REPAIRED_ONLY.set(True)
             try:
                 checked = await self._replay(client_id, data, run.scope, {"look": False})
             finally:
+                _d()._FLOOR_REPAIRED_ONLY.reset(only)
                 _d()._TOUCH_FLOOR.reset(gate)
         except Refused as e:
             first = str(e).split("\n")[0]

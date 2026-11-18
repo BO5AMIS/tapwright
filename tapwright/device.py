@@ -17,6 +17,7 @@ import posixpath
 import re
 import sys
 import time
+from pathlib import Path
 
 from . import aio, store, trace
 from . import diagnostics
@@ -39,6 +40,9 @@ MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
 MIN_TIMEOUT = 0.5  # seconds: the least any one request to WebDriverAgent is given
 KEEP_IDLE = 2.0  # seconds a kept connection may sit idle and still carry an action (see Device._on_kept)
 STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
+STAGE_CHUNK = 4 * 1024 * 1024  # bytes of a video copied to the phone at a time (AFC reads in 4 MB too)
+_CHANGED = ("{name} changed on this computer since media checked it (it is still being written, or another file was put "
+            "in its place): nothing was added; call media again once the file is complete")
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
 
@@ -53,6 +57,18 @@ class ConnectionLost(DeviceError):
 class Unanswered(DeviceError):
     """One action got no answer, and WebDriverAgent answers other requests: the line is alive, and whether the
     action happened isn't known. Not a ConnectionLost: nothing needs starting again."""
+
+
+class RunnerTimedOut(DeviceError):
+    """WebDriverAgent answered that its own wait ran out ("timeout"): the work it waited on may still be going on (the
+    photo library's change of a media add), so it is no refusal (review R179 M1)."""
+
+
+def _line_dropped(e: BaseException) -> bool:
+    """Whether an error from pymobiledevice3 (or its socket) means the connection to the phone is gone, not a refusal:
+    a media copy cut short by it answers `reconnecting`, not `unsupported` (review R179b L6)."""
+    return (isinstance(e, (ConnectionError, EOFError, TimeoutError))
+            or type(e).__name__ in LINE_ERRORS)
 
 
 class PhoneLocked(ConnectionLost):
@@ -459,6 +475,90 @@ class Device:
             stat = await manager.afc.stat(filename)
             return await _read_capped(manager.afc, filename, _size_of(stat))
 
+    # ---- staging videos for `media` (1.7.9) ----
+    async def _container(self, bundle_id: str):
+        """AFC rooted at the app's own container (house_arrest VendContainer). iOS vends it for an app signed with
+        get-task-allow, as Tapwright signs the runner (signing.py); the words of a refusal say what to do."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        from pymobiledevice3.services.house_arrest import HouseArrestService
+        try:
+            return await HouseArrestService.create(self.rsd, bundle_id)
+        except (PyMobileDevice3Exception, OSError) as e:
+            if _line_dropped(e):
+                raise ConnectionLost(f"the line to the phone dropped while opening the runner's container ({e})") from None
+            raise DeviceError(f"the phone wouldn't open the runner's container to copy the video into it ({e}); run "
+                              "`tapwright setup --force` to install the runner again, then try again") from None
+
+    async def stage_media(self, bundle_id: str, folder: str, files: list[tuple[Path, str]],
+                          stamps: "list | None" = None) -> None:
+        """Copy each local file to its path (relative to the app's container) in a new `folder` there, in chunks: a
+        clip is never held in memory whole. `stamps` (media.Stamp, one per file, or None): what each file was when it
+        was checked and hashed; a file that changed since (it grew, or another file was put in its place) is refused,
+        and only its checked size is ever copied (review R179 L5)."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        from .media import Stamp
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                await afc.makedirs(folder)
+                for n, (local, remote) in enumerate(files):
+                    stamp = stamps[n] if stamps is not None and n < len(stamps) else None
+                    with open(local, "rb") as f:
+                        if stamp is not None and Stamp.of(os.fstat(f.fileno())) != stamp:
+                            raise DeviceError(_CHANGED.format(name=Path(local).name))
+                        left = stamp.size if stamp is not None else None
+                        handle = await afc.fopen(remote, "w")
+                        try:
+                            while left is None or left > 0:
+                                want = STAGE_CHUNK if left is None else min(STAGE_CHUNK, left)
+                                chunk = await asyncio.to_thread(f.read, want)
+                                if not chunk:
+                                    break
+                                await afc.fwrite(handle, chunk)
+                                if left is not None:
+                                    left -= len(chunk)
+                        finally:
+                            await _close_file(afc, handle)
+                        if stamp is not None and (left or Stamp.of(os.fstat(f.fileno())) != stamp):
+                            raise DeviceError(_CHANGED.format(name=Path(local).name))
+            except PyMobileDevice3Exception as e:  # (before OSError: AFC's own errors are both)
+                if _line_dropped(e):  # USB pulled, Wi-Fi gone: a drop, not a phone that can't take videos (R179b L6)
+                    raise ConnectionLost(f"the line to the phone dropped while copying the video ({e})") from None
+                raise DeviceError(f"copying the video to the phone failed ({e})") from None
+            except (ConnectionError, EOFError, TimeoutError) as e:  # the AFC socket (a local file read raises none)
+                raise ConnectionLost(f"the line to the phone dropped while copying the video ({e})") from None
+            except OSError as e:
+                raise DeviceError(f"the video couldn't be read on this computer ({e.strerror or e})") from None
+
+    async def unstage_media(self, bundle_id: str, folder: str) -> None:
+        """Remove a staged folder and what is left in it (the library moved what it added)."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                await afc.rm(folder, force=True)
+            except (PyMobileDevice3Exception, OSError) as e:
+                raise DeviceError(f"the staged video couldn't be removed ({e})") from None
+
+    async def sweep_media(self, bundle_id: str, older_than: float) -> None:
+        """Remove staged folders older than `older_than` seconds: leftovers of adds whose end wasn't known."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        from .media import STAGE_ROOT
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                if not await afc.exists(STAGE_ROOT):
+                    return
+                now = time.time()
+                for name in await afc.listdir(STAGE_ROOT):
+                    path = f"{STAGE_ROOT}/{name}"
+                    stat = await afc.stat(path)
+                    made = stat.get("st_mtime")
+                    if made is not None and now - made.timestamp() > older_than:
+                        await afc.rm(path, force=True)
+            except (PyMobileDevice3Exception, OSError) as e:
+                raise DeviceError(f"old staged videos couldn't be listed ({e})") from None
+
     # ---- network conditions (AGENT-TOOLS §16.4) ----
     async def set_network(self, mode: str) -> str:
         """Put the phone's network in `mode` (offline, 3g or lossy; network.py) and keep it there: Apple's condition
@@ -583,7 +683,8 @@ class Device:
             raise ConnectionLost("WebDriverAgent sent an answer that isn't JSON") from None
         if status >= 400 or (isinstance(data.get("value"), dict) and data["value"].get("error")):
             err = data.get("value", {}) if isinstance(data.get("value"), dict) else {}
-            raise DeviceError(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
+            kind = RunnerTimedOut if err.get("error") == "timeout" else DeviceError
+            raise kind(f"WebDriverAgent: {err.get('error', status)}: {err.get('message', '')[:300]}")
         return data
 
     @property
