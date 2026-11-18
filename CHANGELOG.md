@@ -14,15 +14,19 @@
   Send, Post, Pay, Sign out and the like, a card, account, privacy and security screens, a system share sheet, a
   password field, another app, a point or a swipe. The floor is one gate checked as each move goes out, on the element
   the touch really lands on after its lookup and any scroll (a dry run meets the same gate); a `--policy` file's words
-  and its `explore.skip` list only add to it. It answers a permission prompt with its denial, by the button's name;
+  and its `explore.skip` list only add to it (a caller's policy is combined with `serve --policy`, never put in its
+  place). It answers a permission prompt with its denial, by the button's name;
   submits no form; sets a flipped switch back; asks nobody. Pause and a person's input stop or hold it; a locked phone
-  ends it with `locked`, and explore never unlocks the phone (the agent may call `unlock`, then explore again). No
+  ends it with `locked` ("the phone reads as locked (or Notification Center is open over it)"), and explore never
+  unlocks the phone (the agent may call `unlock`, then explore again). No
   picture is kept while the phone is being unlocked or Notification Center may be open. A redactor that fails hides
   the text instead of passing it on.
 - Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
   target, a new screen in the way) and touches nothing; `repair: "apply"` tries up to 3 candidates per break, each a real
   touch through the same skip floor, accepts one only when its check holds and the whole script then runs to its end,
-  and writes `<script>.repaired.json` and `<script>.repair.md` beside the script (the original is unchanged). A failing
+  and keeps a repair only after the repaired file itself has replayed green from the script's fresh start; then it
+  writes `<script>.repaired.json` and `<script>.repair.md` beside the script (the original is unchanged). A script that
+  can't start fresh (`"fresh": false`, or no app) is only suggested: `apply` and `--adopt` refuse it. A failing
   `expect`, a typing step, a native Back and a draftsOnly script are never repaired; at most 5 repairs a run; every
   trial is an audit line of kind `repair`. Adopting is the user's: `tapwright replay FILE --repair apply --adopt`
   (JUnit carries the suggestion). Recorded steps now keep `place` and `seen` (role, screen area, component, and the id's

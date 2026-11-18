@@ -125,7 +125,7 @@ Arguments: `start`, `stop`, `name`, `path`, `route`, `action`.
 Run a saved script like `run` and answer the same way: it stops at the first step that fails or whose expectation doesn't hold. Give `name` (a saved script) or `path` (a script file); without either, lists saved scripts. It starts the app fresh first unless the script says `"fresh": false`. The user can run the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`).
 
 Arguments: `name`, `path`, `look`, `screenshot`, `update_references`, `repair`.
-Tapwright 1.8: `repair: "suggest"` answers the usual failure and the likely fix for a step whose target moved, touching nothing; `repair: "apply"` repairs only what passes its check and writes `<script>.repaired.json` beside the script (§26). A failing `expect` is never repaired. Adopting a repair is the user's (`tapwright replay FILE --repair apply --adopt`).
+Tapwright 1.8: `repair: "suggest"` answers the usual failure and the likely fix for a step whose target moved, touching nothing; `repair: "apply"` repairs only what passes its check, replays the repaired file itself from the script's fresh start, and writes `<script>.repaired.json` beside the script only when that replay is green (§26.4; the answer's `Checked:` line says so). A script that can't start fresh (`"fresh": false`, or no `app`) can only be suggested: `apply` and `--adopt` refuse it, naming why. A failing `expect` is never repaired. Adopting a repair is the user's (`tapwright replay FILE --repair apply --adopt`).
 
 ### audit
 
@@ -277,7 +277,7 @@ Arguments: `minutes`, `steps`, `depth`, `from`, `focus`, `fill`, `continue`, `ac
 
 ## Explore and self-repairing tests (1.8.0)
 
-The sections below are the 1.15 design frozen with Tapline. Tapwright 1.8.0 runs them on the whole-phone daemon of 1.7.5 to 1.7.8. Where they speak of the safety policy, personal mode or grants, read: an agent's own touches have no policy gate since 1.7.5, and `explore` and a repair's trials narrow only their own moves, through the skip floor of §25.5, which is the one dispatch gate of every such move (built-in words, plus the words of a policy file the caller passes; it lets nothing through). "The agent's scope" in §25.1 is the one app explore searches. A locked phone ends the run; explore never unlocks it.
+The sections below are the 1.15 design frozen with Tapline. Tapwright 1.8.0 runs them on the whole-phone daemon of 1.7.5 to 1.7.8. Where they speak of the safety policy, personal mode or grants, read: an agent's own touches have no policy gate since 1.7.5, and `explore` and a repair's trials narrow only their own moves, through the skip floor of §25.5, which is the one dispatch gate of every such move (built-in words, plus the words of `serve --policy` combined with those of a policy file the caller passes: the caller's only add, never replace; it lets nothing through). "The agent's scope" in §25.1 is the one app explore searches. A locked phone ends the run (`locked`: "the phone reads as locked (or Notification Center is open over it): call unlock, or ask the user to unlock it"); explore never unlocks it. Tapwright adds to §26.4 a third check: the repaired script is written to a file and that file is replayed from the script's fresh start, and it must run green before `<script>.repaired.json` is kept or adopted; a script with no fresh start (`"fresh": false`, or no `app`) is only suggested.
 
 ## 25. Explore (v1.15)
 
