@@ -13,8 +13,19 @@
   and then it types nothing and answers `locked` (docs/setup.md).
 - `press_button home` closes Notification Center while the phone reads as locked. iOS sets SpringBoard's lock state
   while Notification Center is pulled down over an unlocked phone, so every call, the home press that closes it too,
-  was refused `locked`. Home is pressed only when a fresh read proves that sheet (its header, its Clear button and an
-  enabled flashlight); on the real lock screen nothing is pressed.
+  was refused `locked`. Home is pressed only when a fresh read proves that sheet: its header and its Clear button on
+  the screen, on one row, the header not a notification's text, and an enabled flashlight. On the dark lock screen
+  nothing is pressed, and the answer says the phone reads as locked (or Notification Center is open where Tapwright
+  can't prove it). A lit lock screen showing the same sheet (a notification woke it) may pass the proof, and Home there
+  may wake Face ID; Pause in the live view is the owner's stop.
+- While the phone is being unlocked (from the wake to the check), no picture of the screen reaches an agent:
+  `filmstrip`, `compare_screen` and screenshots answer `busy` ("the phone is being unlocked"), a journey keeps no
+  picture, and `tapwright record-video` leaves those frames out as it does Notification Center's (iOS's keypad shows
+  each key as it is touched). The owner's live view still shows it. The keypad's keys write no trace line each.
+- The unlock checks Pause and a person's input again right before the first key, and wakes the lock screen at most 3
+  times in 10 minutes without typing (each wake presses Home and may swipe up: a Face ID try). After an unlock that
+  found the phone not locked, and after the automatic unlock of `serve --phone`, the next call no longer reads a stale
+  `locked`.
 - Content another app draws inside the app in front (Safari's share sheet, X's photo picker) is listed where it is on
   the screen. XCTest gives its frames in the host view's own space, so "View More" was listed 531 points too high, and
   a tap on it opened the video behind while answering "Tapped". Frames are moved only when the tree shows it plainly:

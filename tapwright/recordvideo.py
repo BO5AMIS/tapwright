@@ -613,7 +613,7 @@ def run(out: str, seconds: float | None = None, fps: int | None = None, *,
                 if recorder.hidden_seen and not told_hidden:
                     told_hidden = True
                     print("tapwright record-video: the live view is leaving frames out (Notification Center may be "
-                          "open); the video holds the last picture until it is shown again", file=sys.stderr, flush=True)
+                          "open, or the phone is being unlocked); the video holds the last picture until it is shown again", file=sys.stderr, flush=True)
         except KeyboardInterrupt:  # (a thread that can't take the signal handler)
             pass
         except Exception as e:  # noqa: BLE001 - an encoder or disk error: finish what is written

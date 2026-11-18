@@ -231,7 +231,7 @@ Arguments: `action`, `name`, `dry_run`, `look`, `screenshot`, `brief`.
 ### press_button
 
 Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; `open_app` brings it back.
-Tapwright: iOS reports the phone as locked while Notification Center is pulled down over an unlocked phone; `home` then closes it, only when a fresh read proves that sheet (its header, its Clear button and an enabled flashlight). On the real lock screen nothing is pressed (`locked`).
+Tapwright: iOS reports the phone as locked while Notification Center is pulled down over an unlocked phone; `home` then closes it, only when a fresh read proves that sheet (its header and its Clear button on the screen, on one row, the header not a notification's text, and an enabled flashlight). Otherwise nothing is pressed (`locked`: "the phone reads as locked (or Notification Center is open where Tapwright can't prove it)"). A lit lock screen showing the same sheet may pass the proof, and Home there may wake Face ID: Pause in the live view is the owner's stop.
 
 Arguments: `name`, `look`, `screenshot`, `brief`.
 
@@ -239,7 +239,7 @@ Arguments: `name`, `look`, `screenshot`, `brief`.
 
 Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, `phone.passcode`). You never see or send the passcode: the tool types it on iOS's own lock screen, never on the XCTest prompt, at most twice an hour and 3 times a day, and never again after the phone refused it. Answers with the screen once unlocked, or `The phone isn't locked.`; `locked` when no passcode is saved (ask the user to unlock it) or the unlock couldn't be done (its reason). A call of its own: not a step of `run`, `replay`, `drive` or a journey. The owner stops you by pausing in the live view.
 
-Works in every mode (personal, `--dedicated`, `--phone`); `serve --phone` still also unlocks by itself at the start of a new call. Every rule of the passcode unlock holds (only iOS's lock screen with its keypad proven, never the XCTest prompt, the limits, the stop after a refusal, an audit line with the name `phone.passcode` only). Paused: `paused`; a person at the phone: `busy`. Every `locked` answer for a locked phone now says: "the phone is locked; call unlock (it types the passcode saved for this phone), or ask the user to unlock it".
+Works in every mode (personal, `--dedicated`, `--phone`); `serve --phone` still also unlocks by itself at the start of a new call. While it runs, `filmstrip`, `compare_screen` and screenshots answer `busy` ("the phone is being unlocked"), and recordings leave those frames out. It wakes the lock screen at most 3 times in 10 minutes without typing. Every rule of the passcode unlock holds (only iOS's lock screen with its keypad proven, never the XCTest prompt, the limits, the stop after a refusal, an audit line with the name `phone.passcode` only). Paused: `paused`; a person at the phone: `busy`. Every `locked` answer for a locked phone now says: "the phone is locked; call unlock (it types the passcode saved for this phone), or ask the user to unlock it".
 
 Arguments: none.
 

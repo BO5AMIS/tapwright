@@ -2,6 +2,7 @@
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
+import contextvars
 import io
 import os
 import re
@@ -27,6 +28,9 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 # TAPWRIGHT_TRACE=1: every request to WebDriverAgent is logged with how long it took (for profiling, e.g. over Wi-Fi)
 TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
+# The passcode unlock's keypad (unlock.PhoneLockScreen.press_keys): its requests write no trace line, neither the TRACE
+# log line nor trace.py's request count, so nothing gives the passcode's length (last Opus review of 1.7.8, L4)
+QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
@@ -295,7 +299,7 @@ class Session:
         full = path.replace("{sid}", self.sid)
         try:
             try:
-                if not TRACE:
+                if not TRACE or QUIET.get():
                     return await self._timed(method, path, full, payload, timeout)
                 began = time.monotonic()
                 try:
@@ -341,7 +345,7 @@ class Session:
         validate = getattr(self, "before_input", None) if input_request else None
         if validate is not None:
             await validate(self.input_point)
-        pending = trace.request(method, path)
+        pending = None if QUIET.get() else trace.request(method, path)
         token = device_module.BEFORE_SEND.set(guard if method == "POST" else None)
         try:
             answer = await self.device.http(method, full, payload, timeout)

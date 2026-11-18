@@ -5,11 +5,13 @@ When the phone is locked and the vault that `tapwright serve` was started with (
 with its passcode entry showing, types the passcode there, and checks that the phone is unlocked. The rules, each tested
 (tests/test_unlock.py, tests/test_unlock_daemon.py):
 
-  - **Only where unattended running is meant to happen.** At the start of a scheduled run (`/api/phone/unlock`, from
-    `tapwright run-schedule`), and with `tapwright serve --phone` at the start of a new top-level call. Never in the
-    middle of a `run`, `drive`, `replay`, route or `journey`: locking the phone is how the owner stops the agent
-    (AGENTS.md, §19.5), so a lock there ends it with `locked`. With `--apps` (personal mode) or `--dedicated`, a locked
-    phone answers `locked` as in 1.6: a person unlocks it.
+  - **Only where the owner allows it.** At the start of a scheduled run (`/api/phone/unlock`, from
+    `tapwright run-schedule`), with `tapwright serve --phone` at the start of a new top-level call, and (1.7.8, the
+    owner's decision of 2026-11-18) when the agent calls the `unlock` tool, in every mode (personal, `--dedicated`,
+    `--phone`), as a call of its own only. Never in the middle of a `run`, `drive`, `replay`, route or `journey`: a lock
+    there ends it with `locked` (§19.5). With no passcode saved, locking the phone stays the owner's stop: a person
+    unlocks it. With one saved, an agent can unlock it, and Pause in the live view is the owner's stop: it is checked
+    again, with a person's input, right before the first key (`may_type`).
   - **Only serve's own vault.** The passcode is read only from the file `tapwright serve --accounts` names, never from a
     file that a request or a call names.
   - **Only on the lock screen.** Before a key goes out, all of these hold: WebDriverAgent says the phone is locked; the
@@ -23,7 +25,9 @@ with its passcode entry showing, types the passcode there, and checks that the p
   - **Never shown.** The passcode is never in an answer, an error, a log line, the trace, a caption or a report: the
     results below carry fixed words only, a failure's own message is dropped (a device error could echo what was sent),
     and the keypad's touches are sent straight to WebDriverAgent (not through the agent's touch path, its log or the
-    `last_point` a later answer could name). The audit log gets `vault` with the name `phone.passcode`, never a value.
+    `last_point` a later answer could name), with no trace line per key (session.QUIET: their count is the length).
+    While an unlock runs, no frame of the screen reaches an agent or a recording (the daemon's unlock span: the keypad
+    lights each key as it is touched). The audit log gets `vault` with the name `phone.passcode`, never a value.
     It is not in the text redactor either: a 4 to 6 digit passcode replaced in answers would turn every date and price
     into a test of it, and it is never typed anywhere text can show it (the lock screen shows dots).
   - **At most 2 attempts an hour and 3 a day, across processes, and none after a refusal.** An attempt is a passcode
@@ -34,6 +38,8 @@ with its passcode entry showing, types the passcode there, and checks that the p
     the passcode, not even a hash: the refusal is tied to the vault file (its path, modification time and size). A
     changed file may be tried once; after that nothing is typed until a person runs `tapwright unlock-reset`, which
     clears the refusal and leaves the counts.
+  - **At most 3 wakes in 10 minutes that type nothing**, per daemon (WAKE_LIMIT): each wake presses Home and may swipe
+    up on a real lock screen, and each of those is a Face ID try. After that: `locked`, for a person.
 
 The phone side (`PhoneLockScreen`) is one adapter over Session; the logic (`Unlocker`) takes any object with the same
 methods, so the tests drive it with a fake.
@@ -62,6 +68,8 @@ LOCK_WAIT = 5.0  # seconds a change of the record waits for the record's lock; t
 CONFIRM_WAIT = 6.0  # seconds the phone gets to say it unlocked after the last key
 CONFIRM_POLL = 0.3
 KEY_GAP = 0.08  # seconds between two keypad touches
+WAKE_LIMIT = 3  # wakes that typed nothing ...
+WAKE_WINDOW = 600.0  # ... per this many seconds, per daemon (last Opus review of 1.7.8, L3)
 DIGITS = "0123456789"
 STATE_FILE: Path | None = None  # the record of attempts; None: ~/.tapwright/unlock-state.json (the tests set their own)
 RESET = "tapwright unlock-reset"
@@ -84,15 +92,20 @@ XCTEST = ("the phone is asking for its passcode to allow UI automation (the XCTe
           "passcode there: ask the user to enter it on the phone (Settings > Developer > Enable UI Automation stops it "
           "asking)")
 FAILED = "typing the passcode on the lock screen didn't finish; ask the user to unlock the phone"
+NOT_RUN = ("the unlock couldn't run (the connection to the phone changed); nothing was typed. Try unlock again in a few "
+           "seconds, or ask the user to unlock the phone")
 LETTERS_ON_KEYPAD = ("the phone is locked, and its lock screen shows a number keypad, but the passcode in the file has "
                      "other characters; nothing was typed. Ask the user to unlock it")
+WOKEN_TOO_OFTEN = ("the phone is locked, and the unlock already tried to wake the lock screen 3 times in 10 minutes; "
+                   "ask the user to unlock it")
 AUDIT_NAME = "phone.passcode"
 
 
 @dataclass(frozen=True)
 class Result:
     ok: bool  # the phone is unlocked now (or wasn't locked)
-    code: str  # unlocked, not_locked, no_passcode, refused, limit, not_proven, xctest_prompt, failed, busy, no_record
+    code: str  # unlocked, not_locked, no_passcode, refused, limit, not_proven, xctest_prompt, failed, busy, no_record,
+    # paused, wake_limit
     message: str = ""  # fixed words for an answer: never a value
 
     @property
@@ -406,19 +419,26 @@ class Unlocker:
         self.confirm_wait, self.poll, self.sleep, self.key_gap = confirm_wait, poll, sleep, key_gap
         self.ledger = ledger if ledger is not None else Ledger()
         self._lock = asyncio.Lock()
+        self._wakes: list[float] = []  # when a wake went out that has typed nothing (yet), on `clock`
 
     def tries_left(self) -> int:
         return self.ledger.left()
 
     async def unlock(self, phone: LockScreen, passcode: str | None, audit: Callable[[str], object] | None = None,
-                     source: Source = NO_SOURCE) -> Result:
+                     source: Source = NO_SOURCE, may_type: "Callable[[], Result | None] | None" = None) -> Result:
         """Unlock the phone with `passcode` (from the vault file `source`) when every rule allows it. `audit(detail)`
-        writes the `vault` line."""
+        writes the `vault` line. `may_type()`, asked right before the attempt is counted and the first key goes out:
+        a Result (paused, a person at the phone) stops it with nothing typed; None lets it go on."""
         async with self._lock:  # (two calls at once: the second finds the phone unlocked, or the first's refusal)
-            return await self._unlock(phone, passcode, audit, source)
+            return await self._unlock(phone, passcode, audit, source, may_type)
+
+    def _woken_too_often(self) -> bool:
+        now = self.clock()
+        self._wakes = [t for t in self._wakes if now - t < WAKE_WINDOW]
+        return len(self._wakes) >= WAKE_LIMIT
 
     async def _unlock(self, phone: LockScreen, passcode: str | None, audit: Callable[[str], object] | None,
-                      source: Source) -> Result:
+                      source: Source, may_type: "Callable[[], Result | None] | None" = None) -> Result:
         if not await phone.locked():
             return Result(True, "not_locked")
         if not passcode:
@@ -428,6 +448,10 @@ class Unlocker:
         prompt = await phone.xctest_prompt()
         if prompt is not False:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
+        if self._woken_too_often():
+            return Result(False, "wake_limit", WOKEN_TOO_OFTEN)
+        woke = self.clock()
+        self._wakes.append(woke)  # (taken back below when this attempt types: the ledger counts it then)
         try:
             await phone.wake()
         except Exception:
@@ -454,9 +478,13 @@ class Unlocker:
         prompt = await phone.xctest_prompt()
         if prompt is not False:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
+        if may_type is not None and (stop := may_type()) is not None:
+            return stop  # (paused, or a person: never between keys, where a partial passcode counts as a wrong one)
         attempt = await self.ledger.begin(source)  # counted, and latched, before the first key
         if isinstance(attempt, Result):
             return attempt
+        if woke in self._wakes:
+            self._wakes.remove(woke)  # a wake that typed: the ledger's 2 an hour and 3 a day hold it
         try:
             if digits and entry.keys:
                 points = [entry.keys[c] for c in passcode]
@@ -464,16 +492,24 @@ class Unlocker:
             else:
                 await phone.type_secret(passcode)
         except Exception:  # its message may hold what was sent: never passed on
-            await self.ledger.end(attempt, False)  # it may have counted as a wrong one on the phone: no second try
+            await self._end(attempt, False)  # it may have counted as a wrong one on the phone: no second try
             self._audit(audit, "typed on the lock screen; it didn't finish")
             return Result(False, "failed", FAILED)
         unlocked = await self._unlocked(phone)
-        await self.ledger.end(attempt, unlocked)
+        await self._end(attempt, unlocked)
         if unlocked:
             self._audit(audit, "typed on the lock screen; unlocked")
             return Result(True, "unlocked")
         self._audit(audit, "typed on the lock screen; refused")
         return Result(False, "refused", REFUSED)
+
+    async def _end(self, attempt: str, unlocked: bool) -> None:
+        """The ledger's end, which never raises: after a key went out, an error here must not read as "nothing was
+        typed" (the caller's NOT_RUN); the latch `begin` set stays when it can't be cleared."""
+        try:
+            await self.ledger.end(attempt, unlocked)
+        except Exception:
+            pass
 
     async def _entry(self, phone: LockScreen) -> Entry | None:
         try:
@@ -537,10 +573,15 @@ class PhoneLockScreen:
         return await ask() if ask is not None else None
 
     async def press_keys(self, points: list[tuple[float, float]]) -> None:
-        for i, (x, y) in enumerate(points):
-            if i:
-                await self.sleep(self.key_gap)
-            await self.session._call("POST", "/session/{sid}/actions", ui.tap(x, y, 60), timeout=10)
+        from .session import QUIET
+        token = QUIET.set(True)  # no trace line per key: their number is the passcode's length (L4)
+        try:
+            for i, (x, y) in enumerate(points):
+                if i:
+                    await self.sleep(self.key_gap)
+                await self.session._call("POST", "/session/{sid}/actions", ui.tap(x, y, 60), timeout=10)
+        finally:
+            QUIET.reset(token)
 
     async def type_secret(self, text: str) -> None:
         await self.session._call("POST", "/session/{sid}/wda/keys", {"value": list(text) + ["\n"]}, timeout=15)

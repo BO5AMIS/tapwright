@@ -8,7 +8,7 @@ Follow [docs/setup.md](docs/setup.md). Install a pinned release in its own envir
 
 ## Working loop
 
-1. Use apps/open_app/open_url to navigate and look to inspect. Home, Settings, system alerts and cross-app flows are supported. The Home button is `press_button {"name": "home"}`. iOS reports the phone as locked while Notification Center is pulled down: `press_button home` closes it then (only when the screen proves it is Notification Center, never on the real lock screen).
+1. Use apps/open_app/open_url to navigate and look to inspect. Home, Settings, system alerts and cross-app flows are supported. The Home button is `press_button {"name": "home"}`. iOS reports the phone as locked while Notification Center is pulled down: `press_button home` closes it then, pressed only when the screen proves that sheet (its header and Clear button on screen, on one row). A lit lock screen showing the same sheet may pass that proof, and Home there may wake Face ID; Pause in the live view is the owner's stop.
 2. Prefer a stable id, then a fresh ref/label/text. Use fresh screenshot-grounded coordinates for UI that accessibility does not identify reliably. Do not reuse stale coordinates.
 3. Read the complete action response and verify what changed. Input delivery alone is not task success. Request screenshots when visual evidence matters.
 4. Use wait_for for loading, scroll to reach off-screen content, type_text for input (submit presses Return), toggle for switches and back for navigation.

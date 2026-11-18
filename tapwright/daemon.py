@@ -74,6 +74,11 @@ UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, repl
 UNLOCK_NO_PASSCODE = ("the phone is locked, and no passcode is saved for this phone: ask the user to unlock it, or to save "
                       "the passcode as phone.passcode in the accounts file Tapwright is started with (--accounts FILE; "
                       "docs/setup.md)")
+HOME_NOT_PROVEN = ("the phone reads as locked (or Notification Center is open where Tapwright can't prove it): call "
+                   "unlock (it types the passcode saved for this phone), or ask the user to unlock the phone or close "
+                   "Notification Center. Nothing was pressed.")
+UNLOCK_BUSY = ("the phone is being unlocked: no picture of the screen is taken until that ends (its keypad shows each key "
+               "as it is touched); try again in a few seconds")
 UNLOCK_NOT_YET = ("the phone is locked, and the connection to it isn't up yet, so the passcode can't be typed now; try "
                   "unlock again in a few seconds, or ask the user to unlock it")
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
@@ -1707,9 +1712,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def unlock_phone(self) -> "unlocklib.Result":
         """Unlock a locked phone with the passcode of serve's own vault (unlock.py has the rules). Never while paused or
         while a person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode
-        typed; the log gets fixed words. On success the state is live at once. Its callers are the two places unattended
-        running is meant to happen (§19.5, review 1.7 H1): a scheduled run's start (`/api/phone/unlock`), and a new
-        top-level call to `tapwright serve --phone` (_hold_for_phone)."""
+        typed; the log gets fixed words. On success, and when the unlock found the phone not locked (WebDriverAgent said
+        so just now), the state is live at once (1.7.8, M2). Its callers: a scheduled run's start (`/api/phone/unlock`),
+        a new top-level call to `tapwright serve --phone` (_hold_for_phone), and the agent's `unlock` tool in every mode
+        (_unlock_tool; the owner's decision of 2026-11-18). Pause and a person's input are checked here and again right
+        before the first key (`may_type`, L2). From the wake to the end of the check no frame reaches an agent or a
+        recording (the unlock span, center_tool.py; M1)."""
         if self.control.paused:
             return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
         if self.control.person_active():
@@ -1719,23 +1727,37 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                     "" if self.state == "live" else "the phone isn't connected")
         passcode = self.passcode_for()
         source = unlocklib.Source.of(self._passcode_file())
+        generation = self.control.person_generation
 
         def audit(detail: str) -> None:
             if self.audit is not None:
                 self.audit.write("vault", name=unlocklib.AUDIT_NAME, detail=detail)
 
+        def may_type() -> "unlocklib.Result | None":
+            if self.control.paused:
+                return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
+            if self.control.person_generation != generation or self.control.person_active():
+                return unlocklib.Result(False, "busy", "a person is using the phone; try again in a moment")
+            return None
+
         async def attempt() -> "unlocklib.Result":
-            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source)
+            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source, may_type)
+        span = self._unlock_begin()
         try:
             result = await (attempt() if self.control.holds_turn() else self.control.read(attempt))
-        except Exception as e:  # (a reconnect under way: no key was typed by this, or unlock.py said so itself)
+        except Exception as e:  # (a reconnect under way; a key typed would have been caught in unlock.py itself)
             self.log(f"passcode unlock: couldn't run ({type(e).__name__})")
-            return unlocklib.Result(False, "failed", unlocklib.FAILED)
+            return unlocklib.Result(False, "not_run", unlocklib.NOT_RUN)
+        finally:
+            self._unlock_end(span)
         if result.code == "unlocked":
             self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
             if self.state == "locked":
                 self._set_state("live")
-        elif result.code not in ("not_locked", "no_passcode"):
+        elif result.code == "not_locked":
+            if self.state == "locked":  # (the unlock read /wda/locked false just now: no wait for the heartbeat)
+                self._set_state("live")
+        elif result.code not in ("no_passcode",):
             self.log(f"passcode unlock: {result.code}")
         return result
 
@@ -3703,6 +3725,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             args = {**{k: v for k, v in args.items() if k != "index"}, "target": {**args["target"], "index": args["index"]}}
         args = _checked(name, args)
         shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
+        if self.unlocking() and (name in ("filmstrip", "compare_screen") or shot is not None or args.get("ocr")):
+            raise Refused("busy", UNLOCK_BUSY)  # (1.7.8, M1: the keypad shows each key as it is touched)
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
         target = args.get("target")
@@ -4777,8 +4801,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("reconnecting", "the phone connection changed; look before acting")
 
         async def home():
-            # (Opus review 9) the owner stops the agent by locking the phone: a home press would light the lock screen.
-            # Asked session-less (WebDriverAgent answers it without reading the frozen app); only "not locked" passes
+            # (Opus review 9) a home press on a locked phone would light the lock screen (and may wake Face ID); to
+            # unlock, the agent calls `unlock` (1.7.8). Asked session-less (WebDriverAgent answers it without reading the frozen app); only "not locked" passes
             try:
                 locked = (await device.http("GET", "/wda/locked", None, timeout=HOME_LOCK_CAP)).get("value")
             except (ConnectionLost, DeviceError):
@@ -4841,6 +4865,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return _answer(["The phone isn't locked."], [])
         if result.code in ("paused", "busy"):
             raise Refused(result.code, result.message)
+        if result.code == "not_connected":  # (a reconnect between the check above and the unlock, L6)
+            raise self._not_connected()
         if result.code == "no_passcode":  # (the vault changed between the two reads)
             raise Refused("locked", UNLOCK_NO_PASSCODE)
         if result.code != "unlocked":
@@ -4849,16 +4875,20 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         said = "Unlocked the phone with the passcode saved in the vault."
         try:
             seen = await self._run_tool_core(client_id, "look", {"screenshot": False})
-        except Refused:
+        except Exception as e:  # (the phone is unlocked and an attempt was used: never `internal` for the look, L7)
+            self.log(f"unlock: the look after it failed ({type(e).__name__})")
             return _answer([said + " Look before acting."], [])
         return {**seen, "text": said + "\n" + seen["text"]}
 
     async def _home_over_center(self, notes: list) -> dict:
         """press_button home while the phone reads as locked. iOS reports Notification Center pulled down over an
         unlocked phone as locked (SpringBoard's lock state; phone check of 1.7.8), and every touch was refused, the home
-        press that closes it too. Home is pressed only when a fresh tree proves that sheet over an unlocked phone
-        (notifications.center_over_unlocked); a real lock is never pressed (Opus review 9: the owner stops an agent by
-        locking the phone, and a home press would light the lock screen)."""
+        press that closes it too. Home is pressed only when a fresh tree proves that sheet (notifications.
+        center_over_unlocked: its header and Clear button on the screen, on one row, not a notification's text, and an
+        enabled flashlight). A lit lock screen showing the same sheet (a notification woke it, scrolled to its history)
+        may pass that proof, and Home there may wake Face ID: under the owner's rule of 2026-11-18 a lock is no longer
+        the stop for an agent that may unlock; Pause in the live view is. When the proof fails nothing is pressed, and the
+        answer doesn't claim a lock it can't tell from that sheet (L9)."""
         from .notifications import center_over_unlocked
         if self.control.paused:
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
@@ -4866,9 +4896,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if device.rsd is None:
             raise self._not_connected()
         generation = self.control.person_generation
-        locked = Refused("locked", f"{PHONE_LOCKED}. Nothing was pressed.")
+        locked = Refused("locked", HOME_NOT_PROVEN)
 
         async def guard():
+            # (L1) It can't see the owner pressing the side button in the milliseconds between the tree read and the
+            # press: no lock signal apart from SpringBoard's (which says locked over Notification Center too) is known.
+            # The press would then light the lock screen; Pause, checked here, is the owner's stop.
             if self.control.paused:
                 raise Refused("paused", "the phone is paused; ask the user to resume it")
             if self.control.person_generation != generation or self.control.person_active():
@@ -4934,11 +4967,15 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _with_ocr(self, view, answer: dict) -> dict:
         """`look` with `ocr: true`: the text the picture shows that no element carries, as lines with refs o1, o2…
         after the list (before its notes). Read from the stream's newest frame when it is fresh, else a screenshot."""
-        frame = self.hub.latest
+        frame, asked = self.hub.latest, self.hub.mono()
         if frame is not None and self.hub.now_ms() - frame.at <= FRESH_FRAME * 1000:
+            if self.frame_private(frame):
+                raise Refused("busy", UNLOCK_BUSY)
             picture = await jpeg_of(frame)
         else:
             picture = await self._read(self.session.screenshot_png)
+            if self.unlocked_since(asked):
+                raise Refused("busy", UNLOCK_BUSY)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
@@ -5319,6 +5356,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         frame = self.hub.latest
         if not fresh(frame):
             frame = await self.hub.next_after(after_seq, timeout=self.shot_wait)
+        if self.frame_private(frame):  # (1.7.8, M1) an unlock began while filming: the strip is refused
+            raise Refused("busy", UNLOCK_BUSY)
         if fresh(frame):
             try:
                 source = await jpeg_of(frame)
@@ -5329,7 +5368,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is not None:
                 return frame.seq, frame.at, source
-        return after_seq, self.hub.now_ms(), await self._read(self.session.screenshot_png)
+        asked = self.hub.mono()
+        shot = await self._read(self.session.screenshot_png)
+        if self.unlocked_since(asked):
+            raise Refused("busy", UNLOCK_BUSY)
+        return after_seq, self.hub.now_ms(), shot
 
     async def _filmstrip(self, client_id: str, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §14.4: `frames` pictures of the screen about `interval_ms` apart, from the live stream (a
@@ -5446,7 +5489,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
         if found is None and check and not keep:
             return Compared("missing", [], notes, compare.missing(name), folder=folder)
+        asked = self.hub.mono()
         png = await self._read(self.session.screenshot_png)
+        if self.unlocked_since(asked):  # (1.7.8, M1) never a picture of the keypad, saved or compared
+            raise Refused("busy", UNLOCK_BUSY)
         if given is not None:  # the picture is saved or compared only if a given app was still in front for it
             await self._still_given(given)
         before, before_bytes = await asyncio.to_thread(compare.read, found) if found is not None else (None, None)
@@ -6521,10 +6567,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return BATCH.get() is None and not _NESTED.get() and not _JOURNEY_OWN.get() and SCRIPT.get() is None
 
     def _unlocks_itself(self, client_id: str, name: str) -> bool:
-        """May this call unlock the locked phone with the vault's passcode (§18.6, §19.5; review 1.7, H1)? Only with
-        `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call that
-        needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a lock is the owner's
-        stop: `locked`, for a person to unlock (personal mode and `--dedicated` as in 1.6)."""
+        """May this call unlock the locked phone with the vault's passcode by itself (§18.6, §19.5; review 1.7, H1)? Only
+        with `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call
+        that needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a call answers
+        `locked`, and the agent may call `unlock` (1.7.8, the owner's decision of 2026-11-18: every mode, top-level
+        only) or ask a person. With a passcode saved, Pause in the live view is the owner's stop, not the lock."""
         if not getattr(getattr(self, "ceiling", None), "phone", False) or client_id in self._journeys:
             return False
         if needs.phone_moment(self.state, self.detail) is not needs.UNLOCK:
@@ -6535,8 +6582,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _hold_for_phone(self, client_id: str, name: str, *, dry: bool = False, home: bool = False) -> None:
         """Before a call. A step of a running `run`, `drive`, `replay`, route or journey moment never unlocks and never
-        waits out a lock: a lock there ends it with `locked` (the step's own refusal), because locking the phone is how
-        the owner stops the agent (AGENTS.md, §19.5). (iOS's XCTest prompt is no stop: a step still asks a person to
+        waits out a lock: a lock there ends it with `locked` (the step's own refusal; §19.5). The agent may then call
+        `unlock` as a call of its own (1.7.8), or ask a person. (iOS's XCTest prompt is no stop: a step still asks a person to
         enter the passcode there, as in 1.6.) A top-level call to `serve --phone` unlocks a locked phone with the vault's
         passcode (unlock.py; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
         locked or asking for its passcode, ask a person and wait for it to clear (the daemon looks at the phone again by
@@ -7259,6 +7306,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         width, labels = shot
         try:
             frame = view.read_frame if at_read else await self._newest_frame()
+            if self.frame_private(frame):  # (M1: an unlock ran when it was taken; a Note, the call itself is done)
+                raise Refused("busy", UNLOCK_BUSY)
             try:
                 source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
@@ -7267,7 +7316,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if source is not None and turn and getattr(frame, "picture", None) is None:
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is None:
+                asked = self.hub.mono()
                 source = await self._read(self.session.screenshot_png)
+                if self.unlocked_since(asked):
+                    raise Refused("busy", UNLOCK_BUSY)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
             jpeg, size, skipped = await asyncio.to_thread(shotlib.render, source, self.session.screen, width, boxes)
         except Exception as e:

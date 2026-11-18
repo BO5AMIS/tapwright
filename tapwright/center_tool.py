@@ -98,17 +98,78 @@ class CenterTools:
         return any(start <= mono and (end is None or mono <= end)
                    for start, end in self.__dict__.get("_center_spans", ()))
 
+    # ---- while the phone is being unlocked (1.7.8, last Opus review M1): iOS's keypad lights each key as it is touched,
+    # and its dots show the length, so from the wake to the end of the check no frame reaches an agent (filmstrip,
+    # compare_screen, a screenshot, a journey's picture) or a recording. The owner's own live view still shows it.
+    def _unlock_begin(self) -> list:
+        """A span opens now; give it back to _unlock_end."""
+        span = [self.hub.mono(), None]
+        self.__dict__.setdefault("_unlock_spans", []).append(span)
+        return span
+
+    def _unlock_end(self, span: list) -> None:
+        """The unlock ended: every picture that came since the span began, and the newest one now, is left out for good
+        (from recordings and agents alike); the span ends CENTER_HIDE_AFTER_S later (frames queue on a slow link)."""
+        start = span[0]
+        for arrived, frame in self.hub.recent():
+            if arrived >= start:
+                self._exclude_unlock_picture(getattr(frame, "picture", None))
+        self._exclude_unlock_picture(getattr(self.hub.latest, "picture", None))
+        span[1] = self.hub.mono() + CENTER_HIDE_AFTER_S
+        spans = self.__dict__.setdefault("_unlock_spans", [])
+        cut = self.hub.mono() - 3600.0
+        spans[:] = [s for s in spans if s[1] is None or s[1] >= cut]
+
+    def _exclude_unlock_picture(self, picture) -> None:
+        if picture is not None:
+            self.__dict__.setdefault("_unlock_pictures", weakref.WeakSet()).add(picture)
+            self._exclude_picture(picture)  # (and from recordings, as a Notification Center picture is)
+
+    def unlocking(self) -> bool:
+        """Is an unlock running now (its span open)?"""
+        return any(end is None for _, end in self.__dict__.get("_unlock_spans", ()))
+
+    def unlock_covers(self, mono: float) -> bool:
+        """Was the phone possibly being unlocked at `mono` (the hub's monotonic seconds)?"""
+        return any(start <= mono and (end is None or mono <= end)
+                   for start, end in self.__dict__.get("_unlock_spans", ()))
+
+    def unlocked_since(self, mono: float) -> bool:
+        """Did an unlock run at any moment since `mono` (a screenshot asked of the phone then may show its keypad)?"""
+        return any(end is None or end >= mono for _, end in self.__dict__.get("_unlock_spans", ()))
+
+    def recording_covers(self, mono: float) -> bool:
+        """Are a recording's frames being left out at `mono` (Notification Center open, or the phone being unlocked)?"""
+        return self.center_covers(mono) or self.unlock_covers(mono)
+
+    def frame_private(self, frame) -> bool:
+        """May `frame` not reach an agent, because the phone was (or may have been) being unlocked? Yes while an unlock
+        runs, when it arrived inside an unlock's span, when it is a picture of one, and when the hub can't say when it
+        arrived while an unlock's span is known (fail-closed)."""
+        if self.unlocking():
+            return True
+        if frame is None:
+            return False
+        picture = getattr(frame, "picture", None)
+        if picture is not None and picture in self.__dict__.get("_unlock_pictures", ()):
+            return True
+        arrived = self.hub.arrival_of(frame.seq)
+        if arrived is None:
+            return bool(self.__dict__.get("_unlock_spans"))
+        return self.unlock_covers(arrived)
+
     def recording_hides(self, hub, frame) -> bool:
         """Must a recording of the live view leave `frame` out? Yes when it arrived while Notification Center may have
-        been open, when the hub can't say when it arrived, and when it is the picture that was newest at the end of a
-        read (a feeder sends a still picture again, with a new arrival time)."""
+        been open or the phone was being unlocked, when the hub can't say when it arrived, and when it is the picture
+        that was newest at the end of a read or an unlock (a feeder sends a still picture again, with a new arrival
+        time)."""
         arrived = hub.arrival_of(frame.seq)
         if arrived is None:
             return True
         picture = getattr(frame, "picture", None)
         if picture is not None and picture in self.__dict__.get("_center_pictures", ()):
             return True
-        if self.center_covers(arrived):
+        if self.unlocking() or self.recording_covers(arrived):
             self._exclude_picture(picture)  # (a picture that came while it was open stays out when it comes again)
             return True
         return False

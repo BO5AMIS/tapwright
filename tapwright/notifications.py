@@ -352,19 +352,57 @@ CLEAR_BUTTON = "clear-button"
 FLASHLIGHT = "flashlight-orb-button"
 
 
+ROW_TOLERANCE = 12.0  # points: the Clear button's vertical centre is within this of the header's (the same row)
+EDGE_TOLERANCE = 0.5  # points a frame may stand past the screen's edge and still count as on it (rounding)
+
+
+def _on_screen(rect: tuple[float, float, float, float], screen: tuple[float, float, float, float]) -> bool:
+    """The whole frame on the screen, with a size: a node in the tree that is off screen (scrolled away, or kept for
+    later) shows nothing."""
+    x, y, w, h = rect
+    sw, sh = screen[2], screen[3]
+    return (w > 0 and h > 0 and sw > 0 and sh > 0 and x >= -EDGE_TOLERANCE and y >= -EDGE_TOLERANCE
+            and x + w <= sw + EDGE_TOLERANCE and y + h <= sh + EDGE_TOLERANCE)
+
+
+def _in_notification(node: ET.Element, parents: dict[ET.Element, ET.Element]) -> bool:
+    """Is the node a notification's own text, or inside a notification (its ListCell, a Cell, its short look)? Its
+    words then come from an app, not from SpringBoard."""
+    up: ET.Element | None = node
+    while up is not None:
+        if _kind(up) == "Application":
+            return False
+        if _is_notification(up) or up.get("name") in (LIST_CELL, "NotificationTitle") or _kind(up) == "Cell":
+            return True
+        up = parents.get(up)
+    return False
+
+
 def center_over_unlocked(source: str) -> bool:
     """Is this Notification Center pulled down over an UNLOCKED phone, proven? iOS sets SpringBoard's lock state while
     the cover sheet is down, so WebDriverAgent answers "locked" then (phone check of 1.7.8, 2026-11-18). is_center is not
     enough here: a really locked phone shows the same cover sheet, its date and its ListCells. Captured on iOS 26.5, the
     pulled-down sheet has Notification Center's own header and its Clear button (value "Notification Center"), and an
-    enabled flashlight; the locked phone had neither, and a disabled flashlight. All three must hold."""
+    enabled flashlight; the locked phone (dark, just locked with the side button) had neither, and a disabled
+    flashlight. All of these must hold (last Opus review of 1.7.8, H1):
+      - the header: a node (not a button) saying "Notification Center", wholly on the screen with a size, and neither a
+        notification's own text nor inside one (a notification titled "Notification Center" proves nothing);
+      - the Clear button (`clear-button`, value "Notification Center"), wholly on the screen, on the header's row
+        (vertical centres within ROW_TOLERANCE) and to its right;
+      - the flashlight, enabled (a disabled one fails the proof at once).
+    What it can't tell apart: a LIT lock screen scrolled to the same sheet (a notification woke it) may look the same,
+    and a Home press there may wake Face ID. Pause in the live view is the owner's stop (docs/AGENT-TOOLS.md)."""
     if 'bundleId="com.apple.springboard"' not in source[:800]:
         return False
     try:
         root = ET.fromstring(source)
     except ET.ParseError:
         return False
-    title = clear = flashlight = False
+    screen = next((_rect(n) for n in root.iter() if _kind(n) == "Application"), _rect(root))
+    parents = {c: up for up in root.iter() for c in up}
+    headers: list[tuple[float, float, float, float]] = []
+    clears: list[tuple[float, float, float, float]] = []
+    flashlight = False
     for node in root.iter():
         name = node.get("name") or ""
         if name == FLASHLIGHT:
@@ -372,12 +410,20 @@ def center_over_unlocked(source: str) -> bool:
                 return False  # (the locked phone's dark lock screen)
             flashlight = True
         said = " ".join((node.get("label") or name).split()).casefold()
-        if said == CENTER_TITLE and name != CLEAR_BUTTON and _kind(node) != "Button":
-            title = True
+        if (said == CENTER_TITLE and name != CLEAR_BUTTON and _kind(node) != "Button"
+                and _on_screen(_rect(node), screen) and not _in_notification(node, parents)):
+            headers.append(_rect(node))
         if (name == CLEAR_BUTTON and _kind(node) == "Button"
-                and " ".join((node.get("value") or "").split()).casefold() == CENTER_TITLE):
-            clear = True
-    return title and clear and flashlight
+                and " ".join((node.get("value") or "").split()).casefold() == CENTER_TITLE
+                and _on_screen(_rect(node), screen)):
+            clears.append(_rect(node))
+    if not flashlight:
+        return False
+    for hx, hy, hw, hh in headers:
+        for cx, cy, cw, ch in clears:
+            if abs((hy + hh / 2) - (cy + ch / 2)) <= ROW_TOLERANCE and cx + cw / 2 > hx + hw / 2:
+                return True
+    return False
 
 
 # ---- one-time codes (§20.4, §24.3) ----------------------------------------------------------------------------------------
