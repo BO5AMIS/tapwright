@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.9
+## 1.7.9 (2026-11-19)
 
 - `media add` takes videos: mp4, mov and m4v, told apart from HEIC pictures by their `ftyp` brand (an old .mov by its
   first atom). Up to 200 MB each, 400 MB and 5 videos a call; the picture limits are unchanged (20 MB each, 40 MB a
@@ -17,7 +17,7 @@
   add goes to the runner: paused, nothing is sent, the staged folder is removed and the add answers `paused`. A vendor
   brand counts as a video by any mp4 or QuickTime compatible brand in its `ftyp` box. Videos need the runner's route
   version 7 (`tw-16.15.3.7`); an older runner answers `unsupported`, naming `tapwright setup --force`, and still adds
-  pictures. The MCP client and `tapwright call media` wait up to 15 minutes. Not yet proven on the phone.
+  pictures. The MCP client and `tapwright call media` wait up to 15 minutes. Checked on an iPhone 14 Pro Max with iOS 26.5 over USB: a 130 KB clip in 4 s, a 150 MB clip in 17 s (other calls answered `busy` meanwhile, nothing reconnected, the staging folder empty after); over Wi-Fi not yet.
 - `type_text` with an empty text and `replace` (the default) clears the field, as in 1.7.8, without the empty key
   request that came back as an internal error; with `submit: true` it clears the field and then presses the submit
   key, and with `replace: false` and `submit: true` it presses the submit key alone. An empty text with
