@@ -86,23 +86,57 @@ def test_bug_says_what_is_wrong(home):
     assert not (home / "bugs").exists()
 
 
-def test_bug_export_writes_a_zip_and_asks_before_github(home, monkeypatch):
+def test_bug_export_writes_a_zip_and_asks_before_github(home, monkeypatch, tmp_path):
     from test_journey import FakeGh
 
     from tapwright import auditlog, journey_export
     folder = write_run(home / "explore")
+    vault = tmp_path / "vault.json"
+    vault.write_text(json.dumps({"version": 1, "accounts": {"tester": {"username": "t@example.com", "password": SECRET}}}),
+                     encoding="utf-8")
     said: list[str] = []
-    assert cli.bug_cmd(args(str(folder), "f3"), out=said.append) == 0
-    bug_id = said[-1].splitlines()[-1].rsplit("/", 1)[-1]
+    assert cli.bug_cmd(args(str(folder), "f3"), out=said.append, alive=lambda: False) == 0
+    assert said[-1].splitlines()[-1] == f"Checked for: {cli.BUG_VALUES_NONE}."
+    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).rsplit("/", 1)[-1]
     gh = FakeGh({})
     monkeypatch.setattr(journey_export, "run_gh", gh)
-    assert cli.bug_cmd(args("export", bug_id, to="zip"), out=said.append) == 0
+    # (made with no daemon: no app is one of its test apps, so a zip needs a yes too: review R185 H2)
+    assert cli.bug_cmd(args("export", bug_id, to="zip"), out=said.append, ask=lambda q: "n", alive=lambda: False) == 2
+    assert "needs_confirmation" in said[-1] and "test apps" in said[-1]
+    assert not (home / "bugs" / APP / f"{bug_id}.zip").exists()
+    assert cli.bug_cmd(args("export", bug_id, to="zip", yes=True), out=said.append, alive=lambda: False) == 0
     assert (home / "bugs" / APP / f"{bug_id}.zip").exists() and not gh.calls
-    assert cli.bug_cmd(args("export", bug_id, to="issue", repo="o/r"), out=said.append, ask=lambda q: "n") == 2
+    assert f"Checked for: {cli.BUG_VALUES_NONE}." in said[-1]
+    # (no daemon and no --accounts: nothing could check the values, so GitHub is refused: review R185 M3)
+    assert cli.bug_cmd(args("export", bug_id, to="issue", repo="o/r", yes=True), out=said.append, alive=lambda: False) == 2
+    assert said[-1] == cli.BUG_ISSUE_NEEDS_VALUES and not gh.calls
+    assert cli.bug_cmd(args("export", bug_id, to="issue", repo="o/r", accounts=str(vault)), out=said.append,
+                       ask=lambda q: "n", alive=lambda: False) == 2
     assert "needs_confirmation" in said[-1] and "--yes" in said[-1] and not gh.calls
-    assert cli.bug_cmd(args("export", bug_id), out=said.append) == 2  # --to is needed
+    assert cli.bug_cmd(args("export", bug_id), out=said.append, alive=lambda: False) == 2  # --to is needed
     kinds = [json.loads(x) for x in auditlog.read_lines(home / "audit")]
-    assert [x["kind"] for x in kinds] == ["export", "export"] and kinds[1]["detail"].endswith("refused (needs confirmation)")
+    assert [x["kind"] for x in kinds] == ["export"] * 4
+    assert kinds[0]["detail"].endswith("refused (needs confirmation)")
+    assert kinds[1]["detail"].endswith(f"picture not sent; {cli.BUG_VALUES_NONE}")
+    assert kinds[2]["detail"].endswith("refused (no values to check)")
+    assert kinds[3]["detail"].endswith("refused (needs confirmation)")
+
+
+def test_with_a_daemon_running_the_make_and_the_export_go_through_it(home):
+    """Review R185 M3: the daemon's live values (the session's typed values, the codes) hold for the command line too."""
+    folder = write_run(home / "explore")
+    call = Call(text="New bug: x\nReproduced: not checked (not asked).\nSeen: 1 time.\nFolder: ~/b/bug_0123456789abcdef")
+    said: list[str] = []
+    assert cli.bug_cmd(args(str(folder), "f3"), out=said.append, call=call, alive=lambda: True) == 0
+    assert call.calls[0][0] == "bug_report" and call.calls[0][1]["finding"] == "f3"
+    assert call.calls[0][1]["run"] == str(folder) and call.calls[0][1]["verify"] is False
+    assert not (home / "bugs").exists()  # (nothing made here: the daemon makes it)
+    made = cli.bug_cmd(args(str(folder), "f3"), out=said.append, alive=lambda: False)
+    assert made == 0
+    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).rsplit("/", 1)[-1]
+    assert cli.bug_cmd(args("export", bug_id, to="issue", repo="o/r", yes=True), out=said.append, call=call,
+                       alive=lambda: True) == 0
+    assert call.calls[-1][1] == {"bug": bug_id, "export": {"to": "issue", "repo": "o/r", "public": False, "confirm": True}}
 
 
 def test_the_parser_knows_bug(home, monkeypatch):

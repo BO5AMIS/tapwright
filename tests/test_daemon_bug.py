@@ -15,9 +15,12 @@ from tapwright.control import Refused
 TYPED = "Margaret-Hamilton-1969"
 
 
-def bugged(tmp_path, **options):
+def bugged(tmp_path, named=(BUNDLE, RUN_APP), **options):
+    """The fake daemon with its bugs in tmp_path. `named`: its test apps (`serve --apps`, review R185 H2); None: none."""
+    from tapwright.ceiling import Ceiling
     d = explored(tmp_path, **options)
     d.bug_home = tmp_path / "bugs"
+    d.ceiling = Ceiling(apps=tuple(named)) if named else None
     return d
 
 
@@ -47,7 +50,8 @@ def test_from_now_writes_the_last_touches_and_never_the_typed_value(tmp_path):
         assert "1. Tap id go-form" in page and "2. Type something in id name-test-safe" in page
         assert "b-more" not in page  # a dry run is no step
         assert "Expected: the field is cleared. Got: the name field kept <typed value> after saving" in page
-        assert "A picture exists and is private." in page and not (folder / "picture.jpg").exists()
+        assert "A picture was taken and is private. It can only be included in the call" in page  # (review R185 L3)
+        assert not (folder / "picture.jpg").exists() and "bug_report {" not in page
         text = files_text(tmp_path / "bugs")
         assert TYPED not in text and not any(TYPED[i:i + 12] in text for i in range(len(TYPED) - 11))
         finding = json.loads((folder / "finding.json").read_text("utf-8"))

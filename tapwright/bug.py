@@ -21,7 +21,7 @@ KIND_WORDS = {
     "observed": "Observed",
 }
 # §29.8 (Tapwright): a system sheet or prompt that was in front at the moment, by its kind only
-SYSTEM_SHEETS = ("share sheet", "permission prompt", "system alert", "purchase sheet", "other")
+SYSTEM_SHEETS = findings.SYSTEM_SHEETS
 HOWS = ("explore", "failure", "journey", "now")
 HOW_WORDS = {"explore": "explore", "failure": "a failed check", "journey": "a journey", "now": "seen while driving"}
 STEPS_SHOWN = 15
@@ -44,11 +44,13 @@ def place_key_json(key: dict | None) -> str:
     return json.dumps(out, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-_UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
-_ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
-_CLOCK = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?")
-_HEX_PREFIXED = re.compile(r"\b0x[0-9a-fA-F]+\b")
-_HEX_LONG = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{8,}\b")
+# (an id is told apart by the letters and digits around it, not by `\b`: `order_7b9e3c1a-…` and `user_deadbeef12` hold
+# ids after a `_` too, review R185 L4; a shared vector, so Tapline agrees)
+_UUID = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9A-Za-z])")
+_ISO_DATE = re.compile(r"(?<![0-9])\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
+_CLOCK = re.compile(r"(?<![0-9])\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?")
+_HEX_PREFIXED = re.compile(r"(?<![0-9A-Za-z])0x[0-9a-fA-F]+(?![0-9A-Za-z])")
+_HEX_LONG = re.compile(r"(?<![0-9A-Za-z])(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{8,}(?![0-9A-Za-z])")
 _DIGITS = re.compile(r"\d+(?:\.\d+)?")
 
 
@@ -145,11 +147,21 @@ _QUOTED_PATH = re.compile(rf"([\"']){_ROOTED}[^\"'\r\n]*[\\/]([^\"'\r\n\\/]+)\1"
 # (a folder's name may hold spaces, quotes, brackets and a placeholder the redactor left, `<tester's password>`)
 _BARE_PATH = re.compile(rf"(?<![\w:/.\\-]){_ROOTED}(?:[^\\/:\"|\r\n]+[\\/])+([^\\/\s:\"'()<>|]+)")
 _ANY_PATH = re.compile(r"(?<![\w:/.\\-])(?:[A-Za-z]:)?(?:[\\/][^\s\\/:'\"()]+){2,}")
+# (review R185 M2) a `file://` URL, a UNC path `\\MACHINE\share\...`, and a path that ends at the user folder itself
+_FILE_URL = re.compile(r"(?i)file://[^\s/\"'<>()]*((?:/[^\s/\"'<>()]+)+)")
+_UNC = re.compile(r"(?<![\w\\])\\\\[^\\\s\"'<>()|]+(?:\\[^\\\s\"'<>()|]+)+")
+_USER_HOME = re.compile(r"(?<![\w:/.\\-])(?:[A-Za-z]:[\\/](?:Users|Documents and Settings)|/(?:Users|home))[\\/]"
+                        r"[^\\/\s:\"'()<>|]+[\\/]?(?=$|[\s\"'():,;<>|])(?!(?:\s+[^\s\\/\"'<>|:]+)+[\\/])")
+# (the last part: `C:\Users\Jane Doe\proj\…` is a path under a folder with a space in its name, cut whole below)
 
 
 def strip_paths(text: str) -> str:
     """A path in a frame or a log line cut to its file name: no user folder, no machine name (§29.6). A path under a user
-    folder may hold spaces (`C:\\Users\\Jane Doe\\...`): it is cut whole, so what follows (`:48 renderDays`) stays."""
+    folder may hold spaces (`C:\\Users\\Jane Doe\\...`): it is cut whole, so what follows (`:48 renderDays`) stays. A
+    `file://` URL and a UNC path are cut the same way; a path that ends at a user folder itself becomes `~`."""
+    text = _FILE_URL.sub(lambda m: m.group(1).rsplit("/", 1)[-1], text)
+    text = _UNC.sub(lambda m: m.group(0).rsplit("\\", 1)[-1], text)
+    text = _USER_HOME.sub("~", text)
     text = _QUOTED_PATH.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}", text)
     text = _BARE_PATH.sub(lambda m: m.group(1), text)
     return _ANY_PATH.sub(lambda m: re.split(r"[\\/]", m.group(0))[-1], text)
@@ -212,8 +224,15 @@ def _phrase(target: dict, name: str | None) -> str:
     return f"id {ident}" if ident else "the element"
 
 
-def step_line(step: dict, name: str | None = None, others: bool = False, needs_person: bool = False) -> str:
-    """One step written for a person. The value of a typed step is never shown, whatever it was."""
+LINK_CUT = "its query and fragment aren't kept: if the bug needs them, this link doesn't reproduce it"
+NOT_A_TEST_APP = ("not one of this daemon's test apps (tapwright serve --apps): this page keeps no screen text and no log "
+                  "lines, its picture is private, and any export of it (a zip too) needs confirm")
+
+
+def step_line(step: dict, name: str | None = None, others: bool = False, needs_person: bool = False,
+              link_cut: bool = False) -> str:
+    """One step written for a person. The value of a typed step is never shown, whatever it was. A link is shown cut down
+    (§18.3); `link_cut`: the link opened had a query or a fragment, which isn't kept."""
     tool = step.get("tool", "tap") if not step.get("row") else step.get("tool", "tap")
     target = step.get("target") if isinstance(step.get("target"), dict) else None
     row = step.get("row") is True or (target is not None and target.get("row") is True)
@@ -241,7 +260,7 @@ def step_line(step: dict, name: str | None = None, others: bool = False, needs_p
         line = "Go back"
     elif tool == "open_url":
         url = step.get("url") if isinstance(step.get("url"), str) else step.get("link")
-        line = f"Open the link {cut_down_link(url if isinstance(url, str) else '')}"
+        line = f"Open the link {cut_down_link(url if isinstance(url, str) else '')}" + (f" ({LINK_CUT})" if link_cut else "")
     else:
         line = f"Run {tool}" + (f" {one_line(name)}" if name else "")
     line = one_line(line)
@@ -278,6 +297,10 @@ def picture_lines(finding: dict, meta: dict, picture_file: str | None) -> list[s
     if not isinstance(pic, dict):
         return ["There is no picture."]
     if pic.get("private") is not False:
+        if (meta.get("source") or {}).get("how") == "now":
+            # (review R185 L3) a picture of the screen at the moment is kept nowhere else: only the call that made it can add it
+            return ["A picture was taken and is private. It can only be included in the call that makes or updates the bug "
+                    "(with_picture: true)."]
         return [f'A picture exists and is private. To include it: bug_report {{"bug": "{meta["id"]}", "with_picture": true}}']
     return ["A picture was taken, but its file is gone."]
 
@@ -293,6 +316,8 @@ def environment_lines(finding: dict, meta: dict) -> list[str]:
     r = meta.get("reproduced") or {}
     if r.get("checked") is not False and r.get("reset"):
         env.append(f"- Reset before each run: {r['reset']}")
+    if meta.get("test_app") is not True:
+        env.append(f"- The app is {NOT_A_TEST_APP}.")
     return env
 
 
@@ -335,9 +360,10 @@ def markdown(finding: dict, meta: dict, picture_file: str | None) -> str:
     names = meta.get("names") or []
     needs = set(meta.get("needs_person") or [])
     others = set(meta.get("others") or [])
+    cut = set(meta.get("links_cut") or [])
     for i in range(first, len(steps)):
         name = names[i] if i < len(names) else None
-        how.append(f"{i - first + 1}. {step_line(steps[i], name, i in others, i in needs)}")
+        how.append(f"{i - first + 1}. {step_line(steps[i], name, i in others, i in needs, i in cut)}")
     section("How to see it", how)
 
     section("Reproduced", reproduced_lines(meta, finding["kind"]))

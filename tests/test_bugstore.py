@@ -55,9 +55,10 @@ def ctx_for(tmp_path: Path, keep: accountlib.Store | None = None, kept: int = bu
 NOT_ASKED = {"checked": False, "why": "not asked"}
 
 
-def make(ctx, home, run, with_picture=False, finding_id="f3"):
+def make(ctx, home, run, with_picture=False, finding_id="f3", named=True):
+    """(`named`: the app is one of the daemon's test apps, `serve --apps`)"""
     got = bugmake.read_run(home, home / APP / run, finding_id)
-    return bugmake.from_run(ctx, got, with_picture=with_picture, reproduced=NOT_ASKED)
+    return bugmake.from_run(ctx, got, with_picture=with_picture, reproduced=NOT_ASKED, named=named)
 
 
 def every_text(folder: Path) -> str:
@@ -286,7 +287,7 @@ def test_the_observed_finding_from_the_last_touches(tmp_path):
                                       "device": {"model": "iPhone16,1", "os": "iOS 19.1"}},
                             when="2026-11-14T09:21:07.512Z", observed=seen, place="place_20",
                             place_key={"signature": "c41f9a07d2"}, logs=["a", "b"], picture=b"jpg", system="share sheet",
-                            with_picture=False)
+                            with_picture=False, named=True)
     page = (made.folder / "report.md").read_text("utf-8")
     assert page.startswith("# Observed on place_20: Total shows $12.50 after 2 coupons <tester's password>")
     assert "Expected: (not given). Got:" in page and "not checked (not asked)" in page

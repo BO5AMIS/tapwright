@@ -212,8 +212,9 @@ SHARED = {
         'runs, `true` for 3; default 3 for `finding` and `from: "failure"`) replays it on the phone, relaunching the '
         'app, through the skip floor; it stops before any step that needs a person and asks no one. A private picture '
         'goes in only with `with_picture: true`, and `export` (`{"to": "zip"}`, or `{"to": "issue", "repo": '
-        '"owner/name", "confirm": true}`) only when your user asked. Answers the title, `Reproduced:`, `Seen:` '
-        'and the folder.'
+        '"owner/name", "confirm": true}`) only when your user asked; a bug of an app that is not one of the daemon\'s '
+        'test apps (`serve --apps`) keeps no screen text or logs and needs `confirm: true` for a zip too. Answers the '
+        'title, `Reproduced:`, `Seen:` and the folder.'
     ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "

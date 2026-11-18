@@ -322,6 +322,7 @@ class Explorer:
         self.done_places: set[str] = set()
         self.moves: list[tuple[str, str]] = []
         self.found: tuple[findings.Finding, ...] = ()
+        self._system_now: str | None = None  # the system sheet or prompt the last read saw in front (§29.8)
         self.skipped: dict[tuple[str, str], Skipped] = {}
         self.notes: list[str] = []
         self.resets: list[dict] = []
@@ -571,6 +572,8 @@ class Explorer:
     async def _look(self, arrived: bool) -> Look:
         """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is."""
         tree = await self.phone.read()
+        # §29.8 (review R185 M6): the kind of system sheet or prompt in front at the moment, for the findings made from here
+        self._system_now = explorefloor.system_of(tree)
         tries = 0
         while tree.alert is not None and tries < ALERT_TRIES:
             button = explorefloor.safe_button(tree.alert, self.floor)
@@ -587,6 +590,7 @@ class Explorer:
         if self._foreign(tree):
             return Look(tree, None, foreign=True)
         if explorefloor.system_sheet(tree):
+            self._system_now = self._system_now or "share sheet"
             return Look(tree, None, sheet=True)
         seen = self.map.observe(tree, arrived)
         if seen is None:
@@ -894,7 +898,7 @@ class Explorer:
                 build=_build_number(self.who.build), tool=self.who.tool, tool_version=self.who.tool_version, device=self.who.device,
                 expected=expected, got=got, scrub=self.who.scrub, place=place, path_from=path_from, path=path,
                 test_app=self.who.test_app, logs=logs, crash_reason=crash.reason if crash else None,
-                crash_frames=crash.frames if crash else ())
+                crash_frames=crash.frames if crash else (), system=self._system_now)
         except findings.FindingError as e:
             self.notes.append(f"a {kind} finding could not be made ({e})")
             return
@@ -909,7 +913,8 @@ class Explorer:
             if shot:  # (the phone gives one only while the given app is in front, §27.2; private unless a test app)
                 file = f"findings/{made.id}.jpg"
                 self.pictures[made.id] = shot
-                made = dataclasses.replace(made, picture=findings.Picture(file, not self.who.test_app))
+                # (a picture with a system sheet in front is private for any app: it shows the owner's own things, §29.8)
+                made = dataclasses.replace(made, picture=findings.Picture(file, not self.who.test_app or made.system is not None))
         self.found = findings.add(self.found, made)
 
     def _path_for(self, place: str | None, step: dict | None) -> tuple[str | None, list[dict]]:

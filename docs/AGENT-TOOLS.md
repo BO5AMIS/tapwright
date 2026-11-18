@@ -919,16 +919,32 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   the reproduction check passes the same floor as explore.
 - **`from: "now"`** reads the touches the daemon logged for this session (the action log of §12; with `serve --no-log` it is
   `unsupported`): a target as `record` would save it (id, else label, else text; a ref is the element it named), and the
-  place it ran on. A person's input in the live view is a point, which can't be written down: the path starts after it.
+  place it ran on. A person's input in the live view is a point, which can't be written down: the path starts after it. A
+  tool's own moves (explore's, a check's, a drive's) are not the agent's touches and aren't in it. A row of a list with no id
+  of its own, or one whose id carries content, is `Tap the 1st row of the list.`, never its text (§18.1).
+- **Links** (§18.3). An `open_url` is kept only as the pattern of a place's link it matched (`map {"link": …}`); its query and
+  fragment are never kept, and the page says so (`its query and fragment aren't kept: if the bug needs them, this link
+  doesn't reproduce it`). A link that matches no pattern can't be written down: the path starts after it. A pattern with a
+  value in it (`wayfare://trips/[id]`) can't be run, so such a bug is `not checked` with why. The same holds for a failed
+  run's steps.
+- **A bug of an app that isn't one of the daemon's test apps.** `serve --apps` names the test apps (`--dedicated` and
+  `--phone` name every app; with none named, no app is one). Tapwright controls the whole phone, so `bug_report` works for
+  any app, but a bug of any other app keeps no screen text and no log lines beyond its own `got`, normalized (§29.5): no
+  logs, a step only when it is aimed by an id, its picture always private, and ANY export of it (a zip too) needs
+  `confirm: true`. Its page says why in Environment.
 - **Typed values.** Every value typed in this session (the agent's, a script's) is kept out of every bug report, registered
   before it is typed; the explorer's public fake values are not. Only the bug report hides them: an ordinary answer still
   shows what the screen shows.
 - **System sheets** (§29.8): `share sheet` (in the app's tree, as the explorer's floor sees it) and `permission prompt` are
-  named; an app's own alert is no system sheet.
+  named; an app's own alert is no system sheet. An explore finding records the one in front when it was made (`system` in
+  `report.json`), and a picture taken with one in front is private for any app.
+- **Paths** (§29.6): `got`, `expected`, the note, logs and frames have their paths cut to the file name before the signature
+  (a `file://` URL and a UNC path too); a path that ends at a user folder itself becomes `~`.
 - **The CLI** is `tapwright bug <report folder> <finding id> [--with-picture] [--accounts FILE]`, `tapwright bug list [--app
-  ID]`; it needs no phone. `--accounts` is the vault file whose values the bug keeps out (the daemon's own redactor, with the
-  session's typed values, is used by the tool). `from: "now"` and `from: "failure"` need the live session: `tapwright call
-  bug_report '{…}'`.
+  ID]`; it needs no phone. While a daemon runs, the make and the export go through it, so its live values hold (the vault's,
+  the codes, the session's typed values). Without one, the redactor holds only the vault values of `--accounts`, the answer
+  says which values were checked (`Checked for: …`), and an export to GitHub is refused without `--accounts`. `from: "now"`
+  and `from: "failure"` need the live session: `tapwright call bug_report '{…}'`.
 - **The reproduction check** (§29.4) runs on the daemon, every move as the agent's own call under the skip floor of §25.5:
   the ONE dispatch gate of 1.8.0, judged on the element each touch really goes to after resolution and scroll, with nobody
   asked and no grant (Tapline's lesson, C1). A `${typed}` step, or a step whose target (label, text, id as words) holds a
@@ -943,20 +959,32 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
 - **What a run matches** (§29.4): the bug's signature, with the run's place key, `got` and crash facts as explore would make
   them (`the app crashed: <reason>`, the first error log line, `it left the app`, `not_actionable: <why>`, a settle over
   3 s); `expect_failed` the same step's `expect`; `a11y` and `ux` the first issues on the same place; `observed` the same
-  place key at the end; a dead end with no way back the same place with no back. A step that names a row of a list by its
-  place (written for a person) can't be run: `not checked` with why.
+  place key at the end (with no key known it isn't checked: any end would count); a dead end with no way back the same
+  place with no back. A step that names a row of a list by its place (written for a person) can't be run: `not checked`
+  with why.
+- **`from: "failure"`** keeps the run's steps as they were replayed: each step's arguments and `expect`, with only what can
+  hold a value changed (a typed text is `${typed}`, a link its pattern, a content row the n-th row); a `drive` with values
+  can't be written down. `repro.json` is those steps.
+- **The folder** changes under one lock of the app's bugs (a lock file, shared with the command line); a check reads the bug
+  again right before it writes, so a sighting made meanwhile is kept, and a bug removed meanwhile isn't made again. Retention
+  never removes a bug a check holds. Every rewrite reads the kept finding and script through the redactor again, so a value
+  added to the vault since is hidden instead of stopping the update.
 - **A later check** of a kept bug (`{"bug": …, "verify": N}`, `tapwright bug verify`) replaces `Reproduced` and the reset line;
   a check that can't run then leaves the last real check on the page and says why in a note.
 - **The CLI.** `tapwright bug <report folder> <finding id>` needs no phone and doesn't check (`not asked`); `--verify N` then
   checks it through the daemon. `tapwright bug verify <bug id> [--verify N]` goes through the daemon (default 3 runs). A
   `${typed}` step is never given a value from the command line in Tapwright 1.8.5: the check stops there, as the tool's does.
   `tapwright bug export <bug id> --to zip | --to issue --repo owner/name [--public] [--with-picture] [--yes] [--app ID]`
-  needs no phone; GitHub asks `Send to GitHub? [y/N]`, `--yes` answers it without a terminal. Exit codes as §29.3.
+  needs no phone; GitHub asks `Send to GitHub? [y/N]` (and a zip of a bug of an app that isn't a test app asks too), `--yes`
+  answers it without a terminal. Exit codes as §29.3.
 - **Export** (§29.7): the zip holds `<bug id>/report.md`, `report.html`, `repro.json`, `finding.json` and the picture when it
   may go, at a fixed time, with no user name or path of this machine. A private picture left out changes what is sent (the
   page says a private picture exists; `finding.json` says it wasn't included), never the folder. The issue commits
-  `repro.json` (and the picture) to `qa-reports` under `.tapwright/bugs/<app folder>/<bug id>/`. Every text sent is grepped
-  again with the live values (the vault's, the codes, the session's typed values) before anything is written or sent. One
+  `repro.json` (and the picture) to `qa-reports` under `.tapwright/bugs/<app folder>/<bug id>/`; in the issue's body every
+  `@` and `#` outside the log's fence is escaped, so the app's text mentions nobody and links no issue. Every text sent is
+  grepped again with the live values (the daemon's: the vault's, the codes, the session's typed values; the command line
+  with no daemon: `--accounts` only, and it says so) before anything is written or sent. `owner/name` is GitHub's form
+  (never `..` or a leading `-`). One
   audit line of kind `export` for each export, a refused one too: `zip ~/.tapwright/bugs/<app>/<bug id>.zip: <bug id>, picture
   not sent`, `issue owner/name: <bug id>, refused (public repository)`; with no audit log (or a line that can't be written)
   nothing is sent.

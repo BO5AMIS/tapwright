@@ -48,6 +48,19 @@
   the value), nothing sent. A new audit kind `export`: one line per export, a refused one too, its detail the target and
   the bug id, never content; with no audit line nothing is sent. `tapwright bug export <bug id> --to zip|issue [--repo
   owner/name] [--public] [--with-picture] [--yes] [--app ID]` asks `Send to GitHub? [y/N]` (`--yes` without a terminal).
+- Privacy (review R185): a link is kept only as the pattern of a place's link it matched, never its query, fragment or a
+  token in it (one that matches none starts the path after it); a row of a list with no id is `the 1st row of the list`,
+  never its text; paths are cut in `got`, `expected` and the note too (`file://` URLs and UNC paths as well, a path ending
+  at a user folder is `~`). A bug of an app that isn't one of the daemon's test apps (`serve --apps`) keeps no screen text
+  and no log lines beyond its own normalized `got`, its picture is private, and any export of it, a zip too, needs
+  `confirm`; its page says why. An explore finding records the system sheet that was in front (`system`), and a picture
+  taken with one in front is private for any app. The issue's body escapes `@` and `#`, so it mentions nobody.
+- Safety of the folder: changes are made under one lock per app (shared with the command line); a check reads the bug again
+  before it writes, so a sighting made meanwhile is kept and a removed bug isn't made again; retention never removes a bug a
+  check holds; an update re-reads the kept bug through the redactor, so a value added to the vault since is hidden. A failed
+  run's steps are kept as replayed (their arguments and `expect`), so its check can reproduce it. While a daemon runs, the
+  command line's make and export go through it (its live values); without one, GitHub needs `--accounts` and the answer
+  says which values were checked.
 
 ## 1.8.0, "the Explorer"
 

@@ -18,14 +18,16 @@ import datetime
 import json
 from pathlib import Path
 
-from . import batch, bugcheck, bugexport, bugmake, bugstore, explore, explorefloor, findings, places, routes, store, ui
+from . import (batch, bugcheck, bugexport, bugmake, bugstore, explore, explorefloor, findings, links, places, roads, routes,
+               store, ui)
 from .control import Refused
 
 KEYS = ("finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture", "export")
 TRAIL = 50  # the touches the daemon keeps for `from: "now"` (it uses the last 10 of the app)
 NOT_ASKED = "not asked"
 NO_PHONE = "no phone connected"
-CHECK_BUSY = "stopped (busy): an explore is running on this phone"
+CHECK_BUSY = "stopped (busy): an explore or another bug check is running on this phone"
+BATCHES_KEPT = 8  # the runs whose touches are kept by step, for the failure of the one that ends (`_bug_batch_aims`)
 ACCOUNT_NOTE = ("Note: account isn't used: the check relaunches the app, which keeps its data (a sign-in included), and never "
                 "signs in.")
 NO_LOG = ('from "now" needs the action log, and it is off (tapwright serve --no-log): the last touches aren\'t known, so '
@@ -91,6 +93,15 @@ class BugTools:
     bug_home: Path | None = None  # where the bugs go; None: ~/.tapwright/bugs
     _bug_trail_q: "collections.deque | None" = None
     _bug_failures_d: dict | None = None
+    _bug_batch_aims_d: dict | None = None
+
+    @property
+    def _bug_batch_aims(self) -> dict:
+        """{run id: {step number: its trail entry}}: how each touch of a running `run` or `replay` was named (review R185
+        M1, M4), for the failure kept when it ends."""
+        if self._bug_batch_aims_d is None:
+            self._bug_batch_aims_d = {}
+        return self._bug_batch_aims_d
 
     # ---- what the session keeps for it ----
     @property
@@ -116,22 +127,47 @@ class BugTools:
 
     def _bug_aim(self, client_id: str, name: str, args: dict) -> tuple[tuple[str, str] | None, dict | None]:
         """Before a touch: the place it starts on and its target as a recording would save it (id, else label, else text;
-        a ref turned into the element it names). Never fails the touch."""
-        if name not in bugmake.NOW_TOUCHES or args.get("dry_run"):
+        a ref turned into the element it names). A row of a list with no id of its own, or one whose id carries content,
+        is the n-th row, never its text (§29.1, §18.1; review R185 M1). A tool's own move (explore's, a check's, a
+        drive's) is not the agent's: nothing (L7). Never fails the touch."""
+        d = _d()
+        if name not in bugmake.NOW_TOUCHES or args.get("dry_run") or d._NESTED.get() or d._EXPLORING.get():
             return None, None
         try:
             view = self.control.client(client_id)
-            from . import batch
-            aimed = None if batch.holds_value(args.get("target")) else batch.recorded_target(args.get("target"), view.items, name)
+            target = args.get("target")
+            if batch.holds_value(target):
+                return self._place_before(view), None
+            row = self._bug_row(view.items, target, name)
+            aimed = row if row is not None else batch.recorded_target(target, view.items, name)
             return self._place_before(view), aimed
         except Exception:  # noqa: BLE001 - a touch that can't be named starts the path after it
             return None, None
 
+    @staticmethod
+    def _bug_row(items: list, target: object, tool: str) -> dict | None:
+        """`{"row": true, "index": n}` when the target resolves to a row whose words are content (roads.move_of's rule:
+        a cell with no id, or an element whose id carries content), else None."""
+        if not isinstance(target, dict) or target.get("x") is not None:
+            return None
+        try:
+            found = ui.replayed(items, ui.parse_target(target), tool)
+        except Refused:
+            return None
+        if not isinstance(found, ui.Element):
+            return None
+        if not ((found.role == "cell" and not found.identifier) or roads.content_id(found)):
+            return None
+        cells = [e for e in items if e.role == "cell" and not e.in_alert]
+        index = next((n for n, e in enumerate(cells, 1) if e is found or e.ref == found.ref), 1)
+        return {"row": True, "index": index}
+
     async def _bug_failure_seen(self, client_id: str, failed: tuple[str, str] | None, steps: list[dict], at: int,
                                 start: tuple[str, str] | None, end: tuple[str, str] | None, logs: list[str],
-                                expect: dict | None) -> None:
+                                expect: dict | None, run_id: str | None = None) -> None:
         """The end of an agent's own `run` or `replay`: one that stopped `expect_failed` is kept for `from: "failure"`;
         any other end clears it (only the last one counts, §29.3)."""
+        aims = self._bug_batch_aims.pop(run_id, {}) if run_id is not None else {}
         if failed is None or failed[0] != "expect_failed" or not isinstance(expect, dict):
             self._bug_failed(client_id, None)
             return
@@ -150,26 +186,82 @@ class BugTools:
                 app=bundle, identity=identity, when=utc_ms(datetime.datetime.now(datetime.timezone.utc)), steps=steps,
                 failed_at=at, expected=f"step {at} holds its check ({shown or 'expect'})", got=got,
                 path_from=start[1] if start is not None and start[0] == bundle else None,
-                place=end[1] if end is not None and end[0] == bundle else None, logs=logs)
+                place=end[1] if end is not None and end[0] == bundle else None, logs=logs, aims=aims,
+                link_of=lambda url: self._bug_link(bundle, url))
         except Exception:  # noqa: BLE001 - a failure that can't be kept is no failure to report
             record = None
         self._bug_failed(client_id, record)
 
     def _bug_touch(self, name: str, args: dict, aimed: dict | None, place: tuple[str, str] | None, by: str = "agent") -> None:
-        """A touch that went through, as `from: "now"` reads it (§29.3): never a typed value, a target as a road names it."""
-        if name not in bugmake.NOW_TOUCHES or args.get("dry_run"):
+        """A touch that went through, as `from: "now"` reads it (§29.3): never a typed value, a target as a road names it,
+        a content row as the n-th row (M1), a link only as its place's pattern (§18.3: a link may carry a secret in its
+        query or its path; review R185 H1). A tool's own move is not the agent's (L7)."""
+        d = _d()
+        if name not in bugmake.NOW_TOUCHES or args.get("dry_run") or d._NESTED.get() or d._EXPLORING.get():
             return
         bundle = self._bundle()
         entry: dict = {"tool": name, "ok": True, "app": bundle, "by": by,
                        "place": place[1] if place is not None and place[0] == bundle else None}
-        if isinstance(aimed, dict) and any(isinstance(aimed.get(k), str) and aimed[k] for k in ("id", "label", "text")):
+        if isinstance(aimed, dict) and aimed.get("row") is True:
+            entry["target"] = {"row": True, "index": aimed.get("index", 1)}
+        elif isinstance(aimed, dict) and any(isinstance(aimed.get(k), str) and aimed[k] for k in ("id", "label", "text")):
             entry["target"] = {k: v for k, v in aimed.items() if k in ("id", "label", "text", "index")}
         elif name in bugmake.ELEMENT_TOOLS or args.get("target") is not None:
             entry["target"] = {"point": True}  # (a point or a ref that can't be named: the path starts after it)
-        for key in ("direction", "to", "url", "x0", "y0", "x1", "y1"):
+        for key in ("direction", "to", "x0", "y0", "x1", "y1"):
             if args.get(key) is not None:
                 entry[key] = args[key]
+        if name == "open_url":
+            url = args.get("url")
+            entry["link"] = self._bug_link(bundle, url) if isinstance(url, str) else None
+            entry["link_cut"] = isinstance(url, str) and ("?" in url or "#" in url)
         self._bug_trail.append(entry)
+        run = d.BATCH.get()
+        if isinstance(run, dict) and isinstance(run.get("id"), str):
+            aims = self._bug_batch_aims
+            aims.setdefault(run["id"], {})[run.get("step")] = entry
+            while len(aims) > BATCHES_KEPT:
+                aims.pop(next(iter(aims)))
+
+    def _bug_link(self, bundle: str | None, url: str) -> str | None:
+        """The pattern of a place's link of the app that `url` matches (links.canonical), or None: a link is never kept as
+        it was opened (§18.3)."""
+        if not bundle:
+            return None
+        try:
+            data = self.maps.data(self._maps_root(), bundle)
+        except Exception:  # noqa: BLE001 - no map: no pattern, so the link isn't kept
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("places"), dict):
+            return None
+        try:
+            return links.canonical(data, url)
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _bug_named(self, app: str) -> bool:
+        """Is the app one of the daemon's test apps (review R185 H2)? `serve --apps` names them; `--dedicated` and `--phone`
+        name every app (a phone kept for testing); with none named, no app is one. A name in the list is looked up among the
+        installed apps."""
+        ceiling = getattr(self, "ceiling", None)
+        if ceiling is None:
+            return False
+        if getattr(ceiling, "dedicated", False) or getattr(ceiling, "phone", False):
+            return True
+        named = tuple(getattr(ceiling, "apps", ()) or ())
+        if app in named:
+            return True
+        d = _d()
+        for entry in named:
+            if d.BUNDLE_ID.match(entry):
+                continue
+            try:
+                bundle, _ = await self._app(entry, partial=False)
+            except Exception:  # noqa: BLE001 - a name that can't be found names no app
+                continue
+            if bundle == app:
+                return True
+        return False
 
     def _bug_person(self, kind: str) -> None:
         """A person's input in the live view: it has no name to write down (a point), so a path starts after it."""
@@ -224,13 +316,16 @@ class BugTools:
                 made = await self._bug_again(ctx, args["bug"].strip(), with_picture)
             elif parsed["source"] == "finding":
                 got = await asyncio.to_thread(self._bug_run_finding, args.get("run") or "last", args["finding"].strip())
-                made = await asyncio.to_thread(bugmake.from_run, ctx, got, with_picture=with_picture, reproduced=reproduced)
+                named = await self._bug_named(str(got.raw.get("app")))
+                made = await asyncio.to_thread(bugmake.from_run, ctx, got, with_picture=with_picture, reproduced=reproduced,
+                                               named=named)
             elif args["from"] == "failure":
                 failure = self._bug_failures.get(client_id)
                 if failure is None:
                     raise Refused("not_found", NO_FAILURE)
+                named = await self._bug_named(failure["finding"]["app"])
                 made = await asyncio.to_thread(bugmake.from_failure, ctx, failure, with_picture=with_picture,
-                                               reproduced=reproduced)
+                                               reproduced=reproduced, named=named)
             else:
                 made = await self._bug_now(ctx, client_id, scope, args, with_picture, reproduced)
             notes: list[str] = []
@@ -239,7 +334,11 @@ class BugTools:
         except bugmake.BugError as e:
             raise Refused(e.code, ctx.safe()(str(e))) from None
         except bugstore.BugGateError as e:
+            if e.update:
+                raise Refused("not_allowed", f"the bug was kept as it was: {e} Nothing was written.") from None
             raise Refused("not_allowed", f"the bug was not made: {e} Nothing was written.") from None
+        except bugstore.BugFolderError as e:
+            raise Refused("not_allowed", ctx.safe()(str(e))) from None
         except findings.FindingError as e:
             raise Refused("bad_params", ctx.safe()(f"the finding can't be made into a bug: {e}")) from None
         now_unasked = parsed["source"] == "from" and args["from"] == "now" and not runs
@@ -266,12 +365,18 @@ class BugTools:
             raise Refused("not_found", f"{made.meta['id']} can't be read back from its folder to check it.")
         if parsed["account"] is not None:
             notes.append(ACCOUNT_NOTE)
-        result = await self._bug_check(held, runs, parsed["reset"], parsed["account"], client_id=client_id, scope=scope)
+        with ctx.store.hold(held.app, held.id):  # (retention never removes a bug a check holds: review R185 M5)
+            result = await self._bug_check(held, runs, parsed["reset"], parsed["account"], client_id=client_id,
+                                           scope=scope)
         before = held.meta.get("reproduced") or {}
         if result.get("checked") is False and before.get("checked") is not False and not made.new:
             notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
             return made
-        checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new)
+        checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new,
+                                          scrub=ctx.safe())
+        if checked is None:
+            notes.append(f"Note: {held.id} was removed while it was checked; the check wasn't written.")
+            return made
         return checked
 
     def _bug_app_hint(self) -> str | None:
@@ -312,7 +417,7 @@ class BugTools:
             picture = bugmake.picture_again(self._bug_explore_home(), held.meta.get("picture_source"))
             if picture is None:
                 raise Refused("not_found", f"{bug_id}: its picture's source file is gone, so it can't be added.")
-            return await asyncio.to_thread(bugs.add_picture, held, picture, ctx.gate)
+            return await asyncio.to_thread(bugs.add_picture, held, picture, ctx.gate, ctx.safe())
         return bugstore.Made(held.meta, held.folder, False, held.title, held.finding)
 
     async def _bug_now(self, ctx: bugmake.Context, client_id: str, scope, args: dict, with_picture: bool,
@@ -339,6 +444,7 @@ class BugTools:
         observed = bugmake.observed_path(list(self._bug_trail), bundle, place)
         if observed is None:
             raise Refused("not_found", NO_TOUCH)
+        named = await self._bug_named(bundle)
         build = await self._build_of(bundle)
         who = self._explore_identity(bundle, build)
         identity = {"app_version": who.app_version, "build": explore._build_number(who.build), "tool_version": who.tool_version,
@@ -354,8 +460,8 @@ class BugTools:
         when = utc_ms(datetime.datetime.now(datetime.timezone.utc))
         return await asyncio.to_thread(
             bugmake.from_now, ctx, app=bundle, note=note, expected=expected, identity=identity, when=when,
-            observed=observed, place=place, place_key=key, logs=await self._bug_logs(bundle), picture=picture,
-            system=system_of(snap.tree), with_picture=with_picture, reproduced=reproduced)
+            observed=observed, place=place, place_key=key, logs=await self._bug_logs(bundle) if named else [],
+            picture=picture, system=system_of(snap.tree), with_picture=with_picture, reproduced=reproduced, named=named)
 
     async def _bug_logs(self, bundle: str) -> list[str]:
         """The app's last 20 log lines of any level (§29.3), each `HH:MM:SS.mmm level text`; redacted when the bug is made."""
@@ -408,16 +514,19 @@ class BugTools:
             return bugcheck.not_checked(NO_PHONE)
         if self._explore_active is not None:
             return bugcheck.not_checked(CHECK_BUSY)
-        self._explore_active = client_id or "bug_report"  # (no explore starts on the phone while the check runs)
 
         def key_of(lang: str | None, tree) -> dict | None:
             if tree is None or not places.has_structure(tree):
                 return None
             key = places.read_place(tree, lang).key
             return {"signature": key["signature"]} if isinstance(key.get("signature"), str) else None
-        port = bugcheck.DaemonCheck(self, client_id, scope, app, key_of)
-        tokens = (d._NESTED.set(True), d._DIALOG.set(None), d._CRASHES.set(port.phone.crashes), d._TOUCH_FLOOR.set(floor))
+        tokens: tuple = ()
         try:
+            # (set inside the try: a port that can't be made never leaves the busy mark set, review R185 L1)
+            self._explore_active = client_id or "bug_report"  # (no explore starts on the phone while the check runs)
+            port = bugcheck.DaemonCheck(self, client_id, scope, app, key_of)
+            tokens = (d._NESTED.set(True), d._DIALOG.set(None), d._CRASHES.set(port.phone.crashes),
+                      d._TOUCH_FLOOR.set(floor))
             self.ensure_logs(app)
             build = await self._build_of(app) or "unknown"
             return await bugcheck.check(port, target, steps, runs, build=build,
@@ -427,11 +536,14 @@ class BugTools:
             return bugcheck.not_checked(f"stopped ({e.code})")
         except Refused as e:
             return bugcheck.not_checked(f"stopped ({e.code})")
+        except Exception as e:  # noqa: BLE001 - a check that can't run never stops the bug (§29.3)
+            return bugcheck.not_checked(f"it couldn't run ({type(e).__name__})")
         finally:
-            d._TOUCH_FLOOR.reset(tokens[3])
-            d._CRASHES.reset(tokens[2])
-            d._DIALOG.reset(tokens[1])
-            d._NESTED.reset(tokens[0])
+            if tokens:
+                d._TOUCH_FLOOR.reset(tokens[3])
+                d._CRASHES.reset(tokens[2])
+                d._DIALOG.reset(tokens[1])
+                d._NESTED.reset(tokens[0])
             self._explore_active = None
 
     async def _bug_export(self, held: bugstore.Kept, export: dict) -> str:
@@ -445,14 +557,4 @@ class BugTools:
         return await asyncio.to_thread(bugexport.export, held, export, ctx.gate, audit, Path.home())
 
 
-def system_of(tree: ui.Tree) -> str | None:
-    """The kind of a system sheet or prompt in front (§29.8), never its content: the share sheet in the app's tree, an
-    alert that asks for a permission. An app's own alert is no system sheet."""
-    if explorefloor.system_sheet(tree):
-        return "share sheet"
-    alert = tree.alert
-    if alert is not None:
-        words = f"{alert.title} {alert.message}"
-        if "Would Like to" in words or "would like to" in words or "Allow “" in words or 'Allow "' in words:
-            return "permission prompt"
-    return None
+system_of = explorefloor.system_of  # (§29.8: the kind of a system sheet or prompt in front)

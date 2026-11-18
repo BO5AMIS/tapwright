@@ -190,6 +190,19 @@ def system_sheet(tree: ui.Tree) -> bool:
     return any(name in SHEET_MARKERS for name in named) or (tree.back is not None and tree.back.dismiss is not None)
 
 
+def system_of(tree: ui.Tree) -> str | None:
+    """The kind of a system sheet or prompt in front (§29.8), never its content: the share sheet in the app's tree, an
+    alert that asks for a permission. An app's own alert is no system sheet."""
+    if system_sheet(tree):
+        return "share sheet"
+    alert = tree.alert
+    if alert is not None:
+        words = f"{alert.title} {alert.message}"
+        if "Would Like to" in words or "would like to" in words or "Allow “" in words or 'Allow "' in words:
+            return "permission prompt"
+    return None
+
+
 def safe_button(alert: ui.Alert, floor: Floor) -> str | None:
     """The button the explorer may press on an alert: a deny or cancel word first (`Don't Allow`, `Not Now`, `Cancel`...),
     never `Allow` or `OK` on a prompt that offers a denial; else the only button, when nothing on the alert is held by the

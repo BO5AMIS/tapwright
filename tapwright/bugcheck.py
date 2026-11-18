@@ -31,6 +31,7 @@ RUN_SECONDS = 60.0
 RESET_OWN = "relaunch only, data kept"
 UNREACHABLE = "an unreachable place has no steps"
 NO_START = "the screen it started on isn't known"
+NO_KEY = "the screen's key isn't known"  # (an `observed` bug with no place key: any end would count, review R185 L11)
 NO_RESET = "no reset reached a known place"
 NO_APP_RESET = ('reset "app" clears the app\'s data with app_command reset, which Tapwright doesn\'t have; reset "own" '
                 "relaunches the app and keeps its data")
@@ -40,6 +41,7 @@ STOPS = ("paused", "busy", "locked")
 _VARIABLE = re.compile(r"(?<!\$)\$\{")
 _POLICY_WORD = re.compile(r'policy word "([^"]*)"')
 _BROKE = re.compile(r"^Ran \d+ of \d+ steps; stopped at step \d+ \(.*?\): ", re.S)
+_PATTERN_PARAM = re.compile(r"/\[[A-Za-z_][A-Za-z0-9_]*\](?=/|$)")
 
 
 class Stopped(Exception):
@@ -133,6 +135,8 @@ def why_not(target: Target, reset: str) -> str | None:
         return NO_APP_RESET
     if not target.start:
         return NO_START
+    if target.kind == "observed" and target.place_key is None:
+        return NO_KEY
     return None
 
 
@@ -154,6 +158,9 @@ def unaimed(steps: list[dict]) -> str | None:
     for i, step in enumerate(steps, 1):
         if step.get("row") is True or not isinstance(step.get("tool"), str):
             return f"step {i} names a row of a list by its place, which a run can't aim at"
+        if step.get("tool") == "open_url" and isinstance(step.get("url"), str) and _PATTERN_PARAM.search(step["url"]):
+            # (§18.3, review R185 H1: a link is kept only as its place's pattern; a value in it isn't kept)
+            return f"step {i} opens a link whose value isn't kept ({step['url']}), which a run can't fill in"
     return None
 
 
@@ -166,6 +173,7 @@ def _same(target: Target, kind: str, key: dict | None, got: str, reason: str | N
     """Does what a run ended with have the bug's signature (§29.5)? A bug with no place key compares with none."""
     if kind != target.kind or not target.signature:
         return False
+    got = "\n".join(bug.strip_paths(line) for line in got.split("\n"))  # (as the bug's own `got` was: review R185 M2)
     sig = bug.signature(kind, key if target.place_key is not None else None, got, reason, frames)
     return sig == target.signature
 

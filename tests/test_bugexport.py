@@ -105,10 +105,13 @@ def test_the_export_argument_is_checked():
     assert bugexport.check({"to": "issue", "repo": "o/r", "confirm": True}) == {
         "to": "issue", "repo": "o/r", "confirm": True, "public": False, "with_picture": False}
     for bad in ("zip", {"to": "gist"}, {"to": "issue"}, {"to": "issue", "repo": "o/r; rm"}, {"to": "zip", "repo": "o/r"},
-                {"to": "zip", "x": 1}, {"to": "issue", "repo": "o/r", "confirm": "yes"}, {"to": "zip", "confirm": True}):
+                {"to": "zip", "x": 1}, {"to": "issue", "repo": "o/r", "confirm": "yes"}, {"to": "zip", "public": True},
+                {"to": "issue", "repo": "../.."}, {"to": "issue", "repo": "-x/y"}, {"to": "issue", "repo": "o/.."}):
         with pytest.raises(Refused) as e:
             bugexport.check(bad)
         assert e.value.code == "bad_params", bad
+    # (a zip of a bug of an app that isn't a test app needs confirm too: review R185 H2)
+    assert bugexport.check({"to": "zip", "confirm": True})["confirm"] is True
 
 
 def issue_replies(visibility="PRIVATE"):

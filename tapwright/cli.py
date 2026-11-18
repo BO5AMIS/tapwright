@@ -971,7 +971,25 @@ def explore(a, sleep=time.sleep) -> int:
     return 1 if found and int(found.group(1)) > 0 else 0
 
 
-def bug_cmd(a, out=print, ask=None, call=None) -> int:
+def _daemon_alive() -> bool:
+    """Is a `tapwright serve` running now (it answers with its token)? Never starts one."""
+    import json as jsonlib
+    from . import client, store as storelib
+    try:
+        info = jsonlib.loads((storelib.HOME / "serve.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(info, dict) and client.healthy(info) is not None
+
+
+BUG_VALUES_VAULT = "the vault values of --accounts only (no daemon is running: not the session's typed values or codes)"
+BUG_VALUES_NONE = "no values (no daemon is running and no --accounts was given)"
+BUG_ISSUE_NEEDS_VALUES = ("Error not_allowed: no daemon is running, so the values a bug must never hold (the session's typed "
+                          "values, the codes) can't be checked, and no --accounts names the vault's. Start tapwright serve, or "
+                          "give --accounts FILE; nothing was sent.")
+
+
+def bug_cmd(a, out=print, ask=None, call=None, alive=None) -> int:
     """`tapwright bug` (AGENT-TOOLS §29.3):
     - `bug <report folder> <finding id> [--with-picture] [--verify N]` makes a bug of an explore report's finding with no phone;
       with `--verify` the daemon then checks it on the phone (§29.4);
@@ -980,8 +998,11 @@ def bug_cmd(a, out=print, ask=None, call=None) -> int:
     - `bug export <bug id> --to zip|issue [--repo owner/name] [--public] [--with-picture] [--yes] [--app ID]` (§29.7), with no
       phone: GitHub asks `Send to GitHub? [y/N]`, and without a terminal `--yes` answers it.
     Exit 0: a bug was made or updated and it reproduced or wasn't checked (or the export was written); 1: it was made and
-    didn't reproduce (`0 of N`); 2: it couldn't be made or sent, or a person, a pause or a refusal stopped it. The redactor
-    holds the values of `--accounts` (the vault file); every file is grepped before it is written or sent (§29.6)."""
+    didn't reproduce (`0 of N`); 2: it couldn't be made or sent, or a person, a pause or a refusal stopped it. Every file is
+    grepped before it is written or sent (§29.6). While a daemon runs, the make and the export go through it (review R185
+    M3), so its live values hold (the vault's, the codes, the session's typed values); without one the redactor holds only
+    the values of `--accounts`, the answer says so, and an export to GitHub is refused without `--accounts`. `alive`: is a
+    daemon running (tests)."""
     from . import accounts as accountlib, bugmake, bugstore, mapkeeper, store as storelib
     words = list(a.what)
     bugs = bugstore.BugStore(storelib.HOME / "bugs")
@@ -1007,12 +1028,20 @@ def bug_cmd(a, out=print, ask=None, call=None) -> int:
         return 2
     keep = accountlib.Store()
     keep.remember(loaded)
+    running = (alive or _daemon_alive)()
     if words[:1] == ["export"]:
-        return _bug_export_cmd(a, words, bugs, keep, out, ask)
+        return _bug_export_cmd(a, words, bugs, keep, out, ask, call, running)
     if len(words) != 2:
         out("usage: tapwright bug <report folder> <finding id> [--with-picture] [--verify N] | bug list [--app ID] | "
             "bug verify <bug id> | bug export <bug id> --to zip|issue")
         return 2
+    if running:  # (the daemon makes it, with its live values: review R185 M3; it checks it too when asked)
+        given = Path(words[0]).expanduser()
+        made_args: dict = {"finding": words[1], "run": str(given if given.is_absolute() else Path.cwd() / given),
+                           "verify": verify or False}
+        if a.with_picture:
+            made_args["with_picture"] = True
+        return _bug_call(made_args, out, call)
     maps = mapkeeper.Maps(getattr(a, "maps", None))
     ctx = bugmake.Context(bugs, keep.bug_scrub, keep.bug_gate, lambda app: _map_or_none(maps, app))
     home = storelib.HOME / "explore"
@@ -1032,7 +1061,7 @@ def bug_cmd(a, out=print, ask=None, call=None) -> int:
         return 2
     if verify:  # the bug is made; the phone checks it (the daemon finds it by its id, preferring the app in front)
         return _bug_call({"bug": made.meta["id"], "verify": verify}, out, call)
-    out(bugmake.answer(made, ctx.scrub, home=Path.home()))
+    out(bugmake.answer(made, ctx.scrub, home=Path.home()) + f"\nChecked for: {BUG_VALUES_VAULT if a.accounts else BUG_VALUES_NONE}.")
     return 0
 
 
@@ -1068,8 +1097,11 @@ def bug_exit(text: str) -> int:
     return 0
 
 
-def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None) -> int:
-    """`tapwright bug export <bug id> --to zip|issue ...` (§29.7): no phone and no daemon; the audit line is written here."""
+def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None, call=None, daemon: bool = False) -> int:
+    """`tapwright bug export <bug id> --to zip|issue ...` (§29.7), no phone. `daemon`: one is running (`call` reaches it); the export goes
+    through it when `daemon` (its live values, its audit line: review R185 M3). Without one it is made here with the values of
+    `--accounts`, and an export to GitHub needs `--accounts`. A bug of an app that isn't one of the daemon's test apps needs
+    a yes for any export (H2)."""
     import sys
     from . import auditlog, bugexport
     from .control import Refused
@@ -1094,24 +1126,41 @@ def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None) -> int:
         out(f'Error not_found: no bug "{bug_id}" is kept.')
         return 2
     raw: dict = {"to": a.to}
-    if a.to == "issue":
-        raw.update(repo=getattr(a, "repo", None), public=bool(getattr(a, "public", False)))
+    other_app = held.meta.get("test_app") is not True
+    if a.to == "issue" or other_app:
+        if a.to == "issue":
+            raw.update(repo=getattr(a, "repo", None), public=bool(getattr(a, "public", False)))
         confirmed = bool(getattr(a, "yes", False))
         if not confirmed and ask is None and sys.stdin is not None and sys.stdin.isatty():
             ask = input
         if not confirmed and ask is not None:
+            question = "Send to GitHub? [y/N] " if a.to == "issue" else (
+                "This bug's app isn't one of the daemon's test apps. Write the zip anyway? [y/N] ")
             try:
-                confirmed = ask("Send to GitHub? [y/N] ").strip().lower() in ("y", "yes")
+                confirmed = ask(question).strip().lower() in ("y", "yes")
             except EOFError:
                 confirmed = False
         raw["confirm"] = confirmed
     if a.with_picture:
         raw["with_picture"] = True
+    if daemon:
+        try:
+            bugexport.check(raw)
+        except Refused as e:
+            out(f"Error {e.code}: {e}")
+            return 2
+        return _bug_call({"bug": bug_id, "export": raw}, out, call)
     log = auditlog.AuditLog(scrub=keep.scrub)
+    if a.to == "issue" and not a.accounts:  # (every export, a refused one too, has its audit line: §29.7)
+        log.write("export", name="bug_report", app=held.app,
+                  detail=f"issue {getattr(a, 'repo', None)}: {bug_id}, refused (no values to check)")
+        out(BUG_ISSUE_NEEDS_VALUES)
+        return 2
+    checked = BUG_VALUES_VAULT if a.accounts else BUG_VALUES_NONE
     try:
         spec = bugexport.check(raw)
         said = bugexport.export(held, spec, keep.bug_gate, lambda detail: log.write(
-            "export", name="bug_report", app=held.app, detail=detail), Path.home())
+            "export", name="bug_report", app=held.app, detail=detail), Path.home(), checked)
     except Refused as e:
         text = str(e)
         if "needs_confirmation" in text:

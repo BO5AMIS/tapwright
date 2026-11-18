@@ -52,11 +52,19 @@ class Context:
 
 # ---- the finding, made safe ----
 
-def clean(raw: dict, scrub: Callable[[str], str]) -> dict:
-    """A finding (§27 JSON, or `observed`) checked and redacted whole, then its paths cut to file names, then cut; a
-    `system` that isn't one of §29.8's kinds is `other`. `FindingError` for what isn't a finding."""
+def clean(raw: dict, scrub: Callable[[str], str], named: bool = True) -> dict:
+    """A finding (§27 JSON, or `observed`) checked and redacted whole, then its paths cut to file names (its `got`,
+    `expected`, logs and crash: review R185 M2), then cut; a `system` that isn't one of §29.8's kinds is `other`.
+    `FindingError` for what isn't a finding.
+
+    `named`: is the app one of the daemon's test apps (`serve --apps`)? A bug of any other app (review R185 H2) keeps no
+    screen text and no log lines beyond its own normalized `got`: no logs, no component names, `got` and `expected`
+    normalized (§29.5), a step only when it is aimed by an id (one aimed by words cuts the path after it), and its picture
+    is private."""
     made = findings.parse(raw, scrub, bug.BUG_KINDS)
     out = findings.to_dict(made)
+    out["got"] = "\n".join(bug.strip_paths(line) for line in out["got"].split("\n"))
+    out["expected"] = bug.strip_paths(out["expected"])
     out["logs"] = [bug.strip_paths(line)[:findings.LOG_CUT] for line in out["logs"]][-findings.MAX_LOGS:]
     if "crash" in out:
         out["crash"] = {"reason": bug.strip_paths(out["crash"]["reason"]),
@@ -64,8 +72,61 @@ def clean(raw: dict, scrub: Callable[[str], str]) -> dict:
     system = raw.get("system")
     if system is not None:
         out["system"] = system if system in bug.SYSTEM_SHEETS else "other"
-        if isinstance(out.get("picture"), dict):  # (§29.8) a picture with a system sheet in front is always private
-            out["picture"] = {**out["picture"], "private": True}
+    if out.get("system") is not None and isinstance(out.get("picture"), dict):
+        out["picture"] = {**out["picture"], "private": True}  # (§29.8) a picture with a system sheet in front: always private
+    if not named:
+        out = _bare(out)
+    return out
+
+
+_QUOTED = re.compile("([\"'\u2018\u201c])[^\"'\u2019\u201d]*([\"'\u2019\u201d])")
+_BARE_ARGS = ("tool", "direction", "to", "x0", "y0", "x1", "y1", "url", "app", "seconds", "timeout", "action", "button",
+              "orientation", "mode", "gone", "force", "optional", "name", "under")
+
+
+def _bare(out: dict) -> dict:
+    """A finding of an app that isn't one of the daemon's test apps (review R185 H2): its own normalized `got` and no other
+    text of the screen or the log."""
+    out = dict(out)
+    out["got"] = "\n".join(bug.normalize_got(line) for line in out["got"].split("\n") if line.strip()) or "#"
+    out["expected"] = bug.normalize_got(_QUOTED.sub(lambda m: f"{m.group(1)}\u2026{m.group(2)}", out["expected"])) or "#"
+    out["logs"] = []
+    out.pop("component_stack", None)
+    if "crash" in out:
+        out["crash"] = {"reason": bug.normalize_got(out["crash"]["reason"]) or "#", "frames": out["crash"]["frames"]}
+    if isinstance(out.get("picture"), dict):
+        out["picture"] = {**out["picture"], "private": True}
+    path = [bare_step(s) for s in out.get("path") or []]
+    last_bad = max((i for i, s in enumerate(path) if s is None), default=-1)
+    if last_bad >= 0:
+        out["path"] = path[last_bad + 1:]
+        out["path_from"] = None
+        out["steps_cut"] = True
+    else:
+        out["path"] = path
+    return out
+
+
+def bare_step(step: dict) -> dict | None:
+    """A step as a bug of an app that isn't a test app keeps it: aimed by an id only, no words of the screen; None when it
+    can't be written down so (aimed by a label or a text, or holding any other words)."""
+    if step.get("row") is True:
+        return step
+    out: dict = {}
+    for key, value in step.items():
+        if key == "text" and step.get("tool") == "type_text" and value == findings.TYPED:
+            out[key] = value
+        elif key in ("target", "expect", "if"):
+            if not isinstance(value, dict):
+                return None
+            kept = {k: v for k, v in value.items() if k in ("id", "index", "gone", "timeout", "row", "x", "y")}
+            if any(k not in kept for k in value) and not (key == "target" and isinstance(value.get("id"), str)):
+                return None
+            out[key] = kept
+        elif key in _BARE_ARGS or not isinstance(value, (str, dict, list)):
+            out[key] = value
+        else:
+            return None
     return out
 
 
@@ -146,16 +207,24 @@ def _escaped(step: dict) -> dict:
 
 def _make(ctx: Context, finding: dict, *, place_key: dict | None, how: str, key: str, run: str | None,
           script: dict | None, picture: bytes | None, with_picture: bool, reproduced: dict, extras: dict | None = None,
-          picture_source: str | None = None) -> bugstore.Made:
+          picture_source: str | None = None, named: bool = False) -> bugstore.Made:
+    finding = dict(finding)
+    cut = finding.pop("steps_cut", False)  # (a bug of an app that isn't a test app: a step aimed by words was left out)
     path = list(finding.get("path") or [])
-    more = {"names": road_names(ctx, finding["app"], path), "needs_person": needs_person(ctx, finding["app"], path),
-            **(extras or {})}
+    more = {"names": road_names(ctx, finding["app"], path) if named else [],
+            "needs_person": needs_person(ctx, finding["app"], path), **(extras or {})}
+    if cut:
+        more["steps_cut"] = True
+        more.pop("links_cut", None)  # (the indices were the path's before the cut)
     if not any(more["names"]):
         more.pop("names")
+    if not named and isinstance(script, dict):
+        script = None  # (the report's own script holds the words: the script is made from the bare path)
     return ctx.store.make(finding=finding, place_key=place_key,
                           source={"how": how, "key": key, "run": run, "finding": finding["id"] if how != "now" else None},
                           script=script_for(finding, script, ctx.safe()), picture=picture, with_picture=with_picture,
-                          extras=more, reproduced=reproduced, gate=ctx.gate, picture_source=picture_source)
+                          extras=more, reproduced=reproduced, gate=ctx.gate, picture_source=picture_source,
+                          test_app=named, scrub=ctx.safe())
 
 
 # ---- from an explore report (§29.3 `finding` and `run`) ----
@@ -236,12 +305,12 @@ def read_run(explore_home: Path, run_dir: Path, finding_id: str) -> RunFinding:
     return RunFinding(raw, run_dir.name, script, picture, source, keys)
 
 
-def from_run(ctx: Context, got: RunFinding, *, with_picture: bool, reproduced: dict) -> bugstore.Made:
-    finding = clean(got.raw, ctx.safe())
+def from_run(ctx: Context, got: RunFinding, *, with_picture: bool, reproduced: dict, named: bool = False) -> bugstore.Made:
+    finding = clean(got.raw, ctx.safe(), named)
     key = place_key_of(ctx, finding["app"], finding.get("place"), got.place_keys)
     return _make(ctx, finding, place_key=key, how="explore", key=f"{got.run}/{finding['id']}", run=got.run,
                  script=got.script, picture=got.picture, with_picture=with_picture, reproduced=reproduced,
-                 picture_source=got.picture_source)
+                 picture_source=got.picture_source, named=named)
 
 
 def picture_again(explore_home: Path, source: str | None) -> bytes | None:
@@ -303,7 +372,10 @@ def step_of(entry: dict) -> dict | None:
     if tool == "back":
         return {"tool": "back"}
     if tool == "open_url":
-        return {"tool": "open_url", "url": entry["url"]} if isinstance(entry.get("url"), str) and entry["url"] else None
+        # (review R185 H1, §18.3) never the link as it was opened: only the pattern of a place's link it matched (the
+        # daemon cut it down when it was kept); one that matched none can't be written down
+        link = entry.get("link")
+        return {"tool": "open_url", "url": link} if isinstance(link, str) and link else None
     return None
 
 
@@ -312,6 +384,7 @@ class Observed:
     path: list[dict]
     path_from: str | None
     cut: bool  # earlier steps couldn't be written down
+    links_cut: tuple[int, ...] = ()  # the steps (from 0) whose link had a query or a fragment, which isn't kept
 
 
 def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observed | None:
@@ -327,14 +400,15 @@ def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observe
     kept = list(range(last_bad + 1, len(touches)))
     path = [steps[i] for i in kept]  # type: ignore[misc]
     start = next((touches[i].get("place") for i in kept if touches[i].get("place")), None)
-    return Observed(path, start, last_bad >= 0)  # type: ignore[arg-type]
+    cut = tuple(n for n, i in enumerate(kept) if touches[i].get("link_cut"))
+    return Observed(path, start, last_bad >= 0, cut)  # type: ignore[arg-type]
 
 
 def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identity: dict, when: str, observed: Observed,
              place: str | None, place_key: dict | None, logs: list[str], picture: bytes | None, system: str | None,
-             with_picture: bool, reproduced: dict | None = None) -> bugstore.Made:
+             with_picture: bool, reproduced: dict | None = None, named: bool = False) -> bugstore.Made:
     """The `observed` finding of what a person or an agent saw (§29.3), made into a bug. `identity`: app_version, build,
-    tool_version, device {model, os}."""
+    tool_version, device {model, os}. `named`: the app is one of the daemon's test apps (see `clean`)."""
     raw: dict = {"id": "f1", "kind": "observed", "app": app, "app_version": identity["app_version"],
                  "build": identity["build"], "tool": "tapwright", "tool_version": identity["tool_version"], "when": when,
                  "device": identity["device"], "place": place, "path_from": observed.path_from, "path": observed.path,
@@ -343,50 +417,83 @@ def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identit
                  "logs": logs[-findings.MAX_LOGS:], "count": 1}
     if system is not None:
         raw["system"] = system
-    finding = clean(raw, ctx.safe())
+    finding = clean(raw, ctx.safe(), named)
     return _make(ctx, finding, place_key=place_key, how="now", key=f"now/{when}", run=None, script=None, picture=picture,
                  with_picture=with_picture, reproduced=reproduced or {"checked": False, "why": "not asked"},
-                 extras={"steps_cut": observed.cut})
+                 extras={"steps_cut": observed.cut, "links_cut": list(observed.links_cut)}, named=named)
 
 
 # ---- from the last failed check (§29.3 `from: "failure"`) ----
 
-def failure_record(*, app: str, identity: dict, when: str, steps: list[dict], failed_at: int, expected: str, got: str,
-                   path_from: str | None, place: str | None, logs: list[str]) -> dict:
-    """What the daemon keeps of a `run` or `replay` that stopped `expect_failed` at step `failed_at` (from 1): the finding
-    §25.10 would make (`got` what the screen showed instead, `path` the steps that ran up to and including the failed one),
-    kept until the agent's next run or replay. A step that can't be written down (a ref, a point) cuts the path after it.
-    A typed value is never kept: a typed step is `${typed}`."""
-    path: list[dict | None] = []
-    for raw in steps[:failed_at]:
-        tool = raw.get("tool") if isinstance(raw, dict) else None
-        if not isinstance(tool, str):
-            path.append(None)
-            continue
-        if tool in NOW_TOUCHES:
-            step = step_of({**raw, "target": raw.get("target")})
-            if step is not None and isinstance(raw.get("expect"), dict) and "row" not in step:
-                step["expect"] = raw["expect"]
+# a run step's arguments that are the batch's notes, never kept; `with` (a drive's values) holds values: such a step can't be
+# written down
+_NOTE_KEYS = ("place", "seen", "repaired", "secure", "look", "screenshot", "brief")
+
+
+def failed_step(raw: object, aimed: dict | None, link_of: Callable[[str], str | None]) -> tuple[dict | None, bool]:
+    """One step of a failed run as the bug keeps it (review R185 M4): the step as it was replayed, its `expect`, `if` and
+    `optional` kept, with only what can hold a value changed: a typed text is `${typed}`, a link only its place's pattern
+    (§18.3, H1), a touch aimed as the touch itself was named (`aimed`, the session's trail entry: a content row is the n-th
+    row, M1). (the step, its link had a query or a fragment); None when it can't be written down."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("tool"), str):
+        return None, False
+    tool = raw["tool"]
+    if tool == "drive" and raw.get("with"):
+        return None, False  # (its values aren't kept, and it can't run without them)
+    dropped = {"type_text": ("text",), "open_url": ("url",)}.get(tool, ())
+    step: dict = {k: v for k, v in raw.items() if k not in _NOTE_KEYS and k not in dropped
+                  and not (k == "target" and tool in NOW_TOUCHES)}
+    link_cut = False
+    if tool in NOW_TOUCHES:
+        if isinstance(aimed, dict) and aimed.get("tool") == tool:
+            entry = aimed
+        elif tool == "open_url":
+            url = raw.get("url")
+            entry = {"tool": "open_url", "link": link_of(url) if isinstance(url, str) else None,
+                     "link_cut": isinstance(url, str) and ("?" in url or "#" in url)}
         else:
-            step = {"tool": tool}  # (its arguments left out: the page says `Run <tool>`)
-        path.append(step)
-    last_bad = max((i for i, s in enumerate(path) if s is None), default=-1)
-    kept = [s for s in path[last_bad + 1:] if s is not None]
+            entry = {**raw, "target": raw.get("target")}
+        base = step_of(entry)
+        if base is None:
+            return None, False
+        if base.get("row"):
+            return base, False  # (a row is written for a person: no expect; the check says it can't aim at it)
+        link_cut = tool == "open_url" and bool(entry.get("link_cut"))
+        step.update(base)
+    elif tool == "type_text":
+        step["text"] = findings.TYPED
+    return step, link_cut
+
+
+def failure_record(*, app: str, identity: dict, when: str, steps: list[dict], failed_at: int, expected: str, got: str,
+                   path_from: str | None, place: str | None, logs: list[str], aims: dict[int, dict] | None = None,
+                   link_of: Callable[[str], str | None] = lambda url: None) -> dict:
+    """What the daemon keeps of a `run` or `replay` that stopped `expect_failed` at step `failed_at` (from 1): the finding
+    §25.10 would make (`got` what the screen showed instead, `path` the steps that ran up to and including the failed one,
+    as they were replayed: `failed_step`), kept until the agent's next run or replay. `aims`: the session's trail entry of
+    each touch step that ran (by its number from 1). A step that can't be written down cuts the path after it. A typed
+    value is never kept: a typed step is `${typed}`."""
+    path: list[tuple[dict | None, bool]] = [failed_step(raw, (aims or {}).get(n), link_of)
+                                            for n, raw in enumerate(steps[:failed_at], 1)]
+    last_bad = max((i for i, (s, _) in enumerate(path) if s is None), default=-1)
+    kept = path[last_bad + 1:]
     finding = {"id": "f1", "kind": "expect_failed", "app": app, "app_version": identity["app_version"],
                "build": identity["build"], "tool": "tapwright", "tool_version": identity["tool_version"], "when": when,
                "device": identity["device"], "place": place, "path_from": path_from if last_bad < 0 else None,
-               "path": kept, "expected": expected, "got": got, "picture": None, "logs": logs[-findings.MAX_LOGS:],
-               "count": 1}
-    return {"finding": finding, "cut": last_bad >= 0}
+               "path": [s for s, _ in kept], "expected": expected, "got": got, "picture": None,
+               "logs": logs[-findings.MAX_LOGS:], "count": 1}
+    return {"finding": finding, "cut": last_bad >= 0, "links_cut": [i for i, (_, c) in enumerate(kept) if c]}
 
 
-def from_failure(ctx: Context, failure: dict, *, with_picture: bool, reproduced: dict) -> bugstore.Made:
-    """The `expect_failed` finding of the session's last failed `run` or `replay` (`failure` as the daemon kept it)."""
-    finding = clean(failure["finding"], ctx.safe())
+def from_failure(ctx: Context, failure: dict, *, with_picture: bool, reproduced: dict, named: bool = False) -> bugstore.Made:
+    """The `expect_failed` finding of the session's last failed `run` or `replay` (`failure` as the daemon kept it). Its
+    script is its path: the steps as they were replayed (review R185 M4)."""
+    finding = clean(failure["finding"], ctx.safe(), named)
     key = place_key_of(ctx, finding["app"], finding.get("place"))
     return _make(ctx, finding, place_key=key, how="failure", key=f"failure/{finding['when']}", run=None,
-                 script=failure.get("script"), picture=failure.get("picture"), with_picture=with_picture,
-                 reproduced=reproduced, extras={"steps_cut": failure.get("cut", False)})
+                 script=None, picture=failure.get("picture"), with_picture=with_picture, reproduced=reproduced,
+                 extras={"steps_cut": failure.get("cut", False), "links_cut": list(failure.get("links_cut") or [])},
+                 named=named)
 
 
 # ---- the answer (§29.3) ----

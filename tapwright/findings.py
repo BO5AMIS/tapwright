@@ -23,6 +23,9 @@ MAX_LOGS = 20
 LOG_CUT = 300
 MAX_FRAMES = 8
 TYPED = "${typed}"  # what a step that typed carries instead of the text (§27.1)
+# §29.8 (Tapwright): a system sheet or prompt that was in front at the moment, by its kind only; any other is `other`.
+# A picture taken with one in front is always private: it shows the owner's own things (share suggestions, contacts).
+SYSTEM_SHEETS = ("share sheet", "permission prompt", "system alert", "purchase sheet", "other")
 _ID = re.compile(r"^f[0-9]{1,6}$")
 _WHEN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 _PLACE = re.compile(r"^[a-z0-9_]{1,60}$")
@@ -77,6 +80,7 @@ class Finding:
     component_stack: tuple[str, ...] = ()
     repro: str | None = None
     count: int = 1
+    system: str | None = None  # §29.8: the kind of system sheet in front at the moment (SYSTEM_SHEETS), never its content
 
 
 # ---- redaction (§27.2) ----
@@ -187,7 +191,7 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
          path_from: str | None = None, path: list[dict] | tuple[dict, ...] = (), picture_file: str | None = None,
          test_app: bool = False, logs: list[str] | tuple[str, ...] = (), crash_reason: str | None = None,
          crash_frames: list[str] | tuple[str, ...] = (), component_stack: list[str] | tuple[str, ...] = (),
-         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS) -> Finding:
+         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS, system: str | None = None) -> Finding:
     """A finding as §27.1 has it, made safe: all text redacted whole, then cut (a log line at 300 characters, at most 20
     lines, the top 8 frames, at most 10 issues). `picture_file` is where the picture was saved (`findings/f3.jpg`), None for
     none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding."""
@@ -199,6 +203,8 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
         raise FindingError("count is a whole number from 1")
     if crash_frames and crash_reason is None:
         raise FindingError("a crash has its reason")
+    if system is not None:
+        system = system if system in SYSTEM_SHEETS else "other"
 
     def safe(text: str) -> str:  # redaction is always before a cut
         if not isinstance(text, str):
@@ -215,10 +221,11 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
         place=None if place is None else _label(place, "place", _PLACE),
         path_from=None if path_from is None else _label(path_from, "path_from", _PLACE),
         path=tuple(_step(s, scrub) for s in path),
-        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/"), not test_app),
+        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/"),
+                                                          not test_app or system is not None),
         logs=tuple(safe(line)[:LOG_CUT] for line in logs[:MAX_LOGS]), crash=crash,
         component_stack=tuple(safe(c) for c in component_stack),
-        repro=None if repro is None else _file(repro, "repro", "repro/"), count=count)
+        repro=None if repro is None else _file(repro, "repro", "repro/"), count=count, system=system)
 
 
 def visible_picture(finding: Finding, asked: bool = False) -> str | None:
@@ -273,6 +280,8 @@ def to_dict(finding: Finding) -> dict:
     if finding.repro is not None:
         out["repro"] = finding.repro
     out["count"] = finding.count
+    if finding.system is not None:
+        out["system"] = finding.system
     return out
 
 
@@ -314,6 +323,9 @@ def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KIN
     count = raw.get("count", 1)
     if isinstance(count, bool) or not isinstance(count, int):
         raise FindingError("count is a whole number from 1")
+    system = raw.get("system")
+    if system is not None and not isinstance(system, str):
+        system = "other"
     return make(finding_id=text("id"), kind=text("kind"), app=text("app"), app_version=text("app_version"), build=text("build"),
                 tool=text("tool"), tool_version=text("tool_version"), when=text("when"),
                 device=Device(text("model", device), text("os", device)), expected=text("expected"), got=text("got"),
@@ -321,4 +333,4 @@ def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KIN
                 picture_file=None if picture is None else text("file", picture),
                 test_app=picture is not None and picture.get("private") is False,
                 logs=lists["logs"], crash_reason=None if crash is None else text("reason", crash), crash_frames=frames,
-                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds)
+                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds, system=system)
