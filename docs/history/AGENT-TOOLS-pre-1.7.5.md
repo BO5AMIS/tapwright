@@ -1,6 +1,9 @@
-# Historical design reference (superseded)
+# The shared contract: AGENT-TOOLS 1.16.2
 
-This snapshot predates the 1.7.5 agent-directed control contract. Its app-scope, policy, grants and confirmation requirements are obsolete.
+This is AGENT-TOOLS 1.16.2, still the shared contract between Tapline and Tapwright for the tools both have (the owner,
+2026-11-18). Each tool's own guide sits on top of it: Tapwright's is [docs/AGENT-TOOLS.md](../AGENT-TOOLS.md). Since
+Tapwright 1.7.5's whole-phone control, its app-scope, policy, grant and confirmation rules don't bind Tapwright; the rest
+holds for both tools.
 
 # Agent tools: one interface for Tapline and Tapwright
 

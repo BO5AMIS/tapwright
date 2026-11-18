@@ -48,6 +48,15 @@ def _network_marker_in_tmp(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _phone_state_in_tmp(monkeypatch, tmp_path):
+    """The phone's saved setup (udid, runner id, pairing port) is never the owner's real ~/.tapwright/state.json in a
+    test. On 2026-11-18 that file was found overwritten with fake values ("iPhone 1337", a com.example runner, a 0000
+    udid), and the daemon could no longer reach the phone until `setup --force` was run again."""
+    from tapwright import store
+    monkeypatch.setattr(store, "STATE", tmp_path / "phone-state.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_journey_left_running():
     """`journey.running` is the module's registry of running journeys, held weakly: a daemon from an earlier test that
     isn't collected yet can still have one for agent "a", and a test that starts with "no journey running" fails now
