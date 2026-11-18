@@ -151,13 +151,3 @@ def test_a_tap_by_id_in_personal_mode_asks_the_front_app_only_once_after_the_tou
         assert s.front_asks - asks == 1  # only _taken_away's, after the touch
         await finish(stop, task)
     run(go)
-
-
-def test_a_tap_whose_read_names_no_app_asks_once_before_and_once_after():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        asks = s.front_asks
-        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert s.front_asks - asks == 2
-        await finish(stop, task)
-    run(go)

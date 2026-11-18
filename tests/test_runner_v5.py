@@ -3,6 +3,7 @@ Element.focused), the hit test before a touch on an element (GET /wda/tw/hit; QU
 and typing into a field the runner says has focus without tapping it again (part 10: no caret menu)."""
 import asyncio
 import dataclasses
+from unittest.mock import patch
 
 import pytest
 from fakes import button
@@ -96,9 +97,9 @@ def test_the_hit_on_the_target_inside_it_or_holding_it_passes_and_a_bar_over_it_
     assert ui.hit_relation(xml, row, hit(BAR)) == "other"
 
 
-def test_without_the_tree_the_frames_decide():
+def test_without_the_tree_the_frames_prove_nothing_inside():
     row = find(listed(), "terms-row")
-    assert ui.hit_relation(None, row, hit(ROW_TEXT)) == "inside"
+    assert ui.hit_relation(None, row, hit(ROW_TEXT)) == "unplaced"  # (proves nothing: Codex, PR #12 c1, M1)
     assert ui.hit_relation(None, row, hit(BAR_BUTTON)) == "other"
     assert ui.hit_relation("<not xml", row, hit(ROW)) == "same"
 
@@ -154,7 +155,20 @@ class Runner(V4Runner):
         if "/attribute/name" in route:
             self.requests.append((method, path, payload))
             return {"value": self.active_name}
+        if route.endswith(f"/element/{self.active}/rect"):  # (1.7.8: a clear is proven by the field's place)
+            self.requests.append((method, path, payload))
+            found = _named(self.tree, self.active_name)
+            if found is None:
+                raise DeviceError("WebDriverAgent: no such element")
+            x, y, w, h = found["r"]
+            return {"value": {"x": x, "y": y, "width": w, "height": h}}
         return await super().http(method, path, payload, timeout)
+
+
+def _named(n: dict, name: str) -> dict | None:
+    if n.get("n") == name:
+        return n
+    return next((found for c in n.get("c", ()) if (found := _named(c, name)) is not None), None)
 
 
 def _without_f(n: dict) -> dict:
@@ -172,7 +186,9 @@ def checks_on(monkeypatch):
 def ready(runner) -> Session:
     s = Session(runner)
     s.screen = SCREEN
-    asyncio.run(s.refresh())
+    # This helper is also imported by other modules, whose fixtures do not include runner_state.
+    with patch.object(store, "load_state", return_value={"runner_id": "synthetic-runner"}):
+        asyncio.run(s.refresh())
     return s
 
 
@@ -284,19 +300,6 @@ def armed_daemon(answer):
     return d
 
 
-def test_a_tap_on_a_target_a_bar_covers_is_refused_and_touches_nothing():
-    async def go():
-        d = armed_daemon(hit(BAR_BUTTON))
-        stop, task = await started(d)
-        await looked(d, lab_items())
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "terms-row"}})
-        assert e.value.code == "not_actionable"
-        assert str(e.value).startswith('covered: e1 button "Terms" id=terms-row @20,770 390x44 is behind ')
-        assert 'button "Checkout" id=checkout @20,772 390x48' in str(e.value)
-        assert "tap" not in d.session.calls and d.session.hit_asks == [(215.0, 792.0)]
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_hit_on_the_target_or_inside_it_taps():
@@ -311,9 +314,9 @@ def test_a_hit_on_the_target_or_inside_it_taps():
     run(go)
 
 
-def test_no_answer_another_apps_element_force_or_a_point_tap_as_before():
+def test_no_answer_force_or_a_point_tap_as_before():
     async def go():
-        for answer in (None, hit(BAR_BUTTON, bundle="com.apple.springboard")):
+        for answer in (None,):  # (another app's element over it is covered since W144: test_review_17_w144)
             d = armed_daemon(answer)
             stop, task = await started(d)
             await looked(d, lab_items())
@@ -332,7 +335,52 @@ def test_no_answer_another_apps_element_force_or_a_point_tap_as_before():
 
 # ---- the pin ----
 
-def test_the_runner_pinned_is_tw_16_15_3_5():
+def test_the_runner_pinned_is_tw_16_15_3_6():
     repo, tag, sha, folder = store.WDA_SOURCES["fork"]
-    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.5", "fork-tw-16.15.3.5")
-    assert len(sha) == 64 and store.WDA_VERSION == "fork-tw-16.15.3.5"
+    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.6", "fork-tw-16.15.3.6")
+    assert sha == "5562fb2c0df223ea675c7be57e0f70e8e26c692f20012b7ae9783f64c4a3a081"
+    assert store.WDA_VERSION == "fork-tw-16.15.3.6"
+
+
+# ---- a cover the tree only guesses: the runner's hit test decides ----
+
+CANCEL = node("Button", (24, 83, 36, 36), n="Cancel", l="Cancel")
+SHEET_TABLE = node("Table", (0, 59, 430, 873), n="sheet-table")
+SHEET = node("Application", (0, 0, 430, 932), [node("Window", (0, 0, 430, 932), [node("Other", (0, 0, 430, 932), [
+    node("NavigationBar", (0, 79, 430, 54), [CANCEL], n="New Item"), SHEET_TABLE])])],
+    n="Lab", l="Lab", pid=42, b="com.example.lab")
+
+
+def sheet_items() -> list[ui.Element]:
+    """Seen on the phone 2026-11-14 (Reminders' New Reminder sheet): the sheet's table is listed after its nav bar and
+    overlaps it, so the tree guesses the table covers Cancel; iOS draws the bar on top."""
+    cancel = button("e1", "Cancel", "", rect=(24, 83, 36, 36), name="Cancel")
+    cancel.covered_by = (ui.Bar("Table", (0, 59, 430, 873), 'scroll id=sheet-table @0,59 430x873'),)
+    return [cancel]
+
+
+
+
+def test_an_element_behind_a_guessed_layer_is_lifted_when_the_hit_lands_on_it():
+    """Seen on the phone 2026-11-14 (Calendar's search): the results container read as a sheet over the search bar, so
+    Close was 'behind' it; the runner's hit test says a touch there lands on Close."""
+    async def go():
+        close = button("", "Close", "", rect=(24, 83, 36, 36), name="Cancel")
+        close.type, close.name = "Button", "Cancel"
+        front = button("e1", "Today", "", rect=(176, 861, 78, 38), name="Today")
+        # (the hit's label is the element's own: both come from one XCTest snapshot of the same button)
+        for answer, tapped in ((hit({**CANCEL, "l": "Close"}), True), (hit(SHEET_TABLE), False), (None, False)):
+            d = armed_daemon(answer)
+            d.session.last_source = source(SHEET)
+            stop, task = await started(d)
+            await looked(d, [front])
+            d.session.behind = [(close, front)]
+            if tapped:
+                r = await d.run_tool("a", "tap", {"target": {"text": "Close"}})
+                assert r["text"].startswith("Tapped") and "tap" in d.session.calls
+            else:
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", "tap", {"target": {"text": "Close"}})
+                assert e.value.code == "not_actionable" and "behind" in str(e.value) and "tap" not in d.session.calls
+            await finish(stop, task)
+    run(go)

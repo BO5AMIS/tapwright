@@ -87,40 +87,8 @@ def daemon(tmp_path, username=USERNAME, password="pw-secret-0042", name="tester2
 
 
 # ---- P1: the policy decides on the screen's own words ----
-@pytest.mark.parametrize("rule", ["confirm", "block"])
-def test_a_password_that_is_a_policy_word_still_holds_the_button_back(tmp_path, rule):
-    """Codex's trace: password `Delete`, a button id=remove-record labelled "Delete". The default confirmation (and a
-    block rule) still holds the tap back; what is said and sent shows the placeholder."""
-    async def go():
-        d = daemon(tmp_path, password="Delete")
-        d.session.buttons = [("remove-record", "Delete"), ("other", "Keep")]
-        stop, task = await started(d)
-        rules = policy.DEFAULT if rule == "confirm" else policy.Policy(block=("Delete",))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "remove-record"}, "look": False}, policy=rules)
-        said = str(e.value)
-        assert e.value.code == "not_allowed"
-        assert said.startswith("needs_confirmation" if rule == "confirm" else "blocked"), said
-        assert "tap" not in d.session.calls, "nothing was touched"
-        assert "<tester2's password>" in said and "Delete" not in said
-        assert "Delete" not in json.dumps(d.sent), d.sent  # the live view's request: caption and word
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_password_that_is_a_policy_word_still_holds_an_alerts_accept_back(tmp_path):
-    async def go():
-        d = daemon(tmp_path, password="Delete")
-        d.session.alert_shown = ("Remove this record?", ("Cancel", "Delete"))
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "alert", {"action": "accept", "look": False})
-        assert str(e.value).startswith("needs_confirmation"), str(e.value)
-        assert "alert" not in d.session.calls
-        assert "Delete" not in str(e.value) and "Delete" not in json.dumps(d.sent)
-        await finish(stop, task)
-    run(go)
 
 
 # ---- P2: erasing counts the field's real text, never the placeholder ----

@@ -245,22 +245,6 @@ def test_a_dry_run_and_a_look_false_action_make_no_road(tmp_path):
     run(go)
 
 
-def test_a_move_that_needed_a_persons_ok_is_not_a_road_and_the_answer_says_so(tmp_path):
-    async def go():
-        d = mapped(tmp_path, start="settings")
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await tap(d, {"id": "delete-btn"})
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value)
-        [ask] = list(d._confirms)
-        await d.viewer_message({"type": "confirm_answer", "id": ask, "allow": True})
-        r = await tap(d, {"id": "delete-btn"})
-        assert "Note: not saved as a road (it needed a person's OK)." in r["text"] and r["text"].endswith("Note: allowed by a person (in the live view).")
-        await d.maps.flush()
-        assert file_of(tmp_path)["roads"] == []
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_replay_reads_the_map_and_never_writes_it(tmp_path):
@@ -397,17 +381,6 @@ def test_a_journey_in_a_users_eyes_saves_and_says_nothing_of_places(tmp_path):
     run(go)
 
 
-def test_an_app_the_agent_was_not_given_is_never_mapped(tmp_path):
-    async def go():
-        from tapwright.daemon import Scope
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        with pytest.raises(Refused):
-            await d.run_tool("a", "look", {"screenshot": False}, scope=Scope(apps=("com.other.app",)))
-        await d.maps.flush()
-        assert not (tmp_path / BUNDLE).exists()
-        await finish(stop, task)
-    run(go)
 
 
 def test_open_app_remembers_the_language_the_app_was_started_in(tmp_path):

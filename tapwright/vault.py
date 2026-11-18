@@ -19,12 +19,15 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
+
+from . import pidlock
 
 DPAPI_ENTROPY = b"tapline-tapwright-vault-v2"
 KEYCHAIN_SERVICE = "tapline-tapwright-vault"
@@ -116,7 +119,25 @@ def run_security(args: list[str], stdin: str) -> "tuple[int | None, str, str]":
 
 def _quote(text: str) -> str:
     """An argument of one `security -i` line."""
+    if "\n" in text or "\r" in text:
+        raise VaultOpenError("a path with a line break can't be kept in the keychain")
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# a vault's chunk items are `<realpath>#<n>` (§20.2, the format both tools share): a vault file whose own real path ends in
+# `#<digits>` would have its main item at another vault's chunk account, and the two would overwrite each other
+# (CodeRabbit, PR #12, vault.py). Such a path is never written to the keychain.
+CHUNK_LIKE = re.compile(r"#[0-9]+$")
+
+
+def _whole_json(text: str | None) -> bool:
+    """Is this item's text a whole JSON object (a vault or a manifest: another vault's main item), not a chunk's piece?"""
+    if text is None or not text.startswith("{"):
+        return False
+    try:
+        return isinstance(json.loads(text), dict)
+    except (ValueError, RecursionError):
+        return False
 
 
 def _all_hex(text: str) -> bool:
@@ -219,7 +240,12 @@ class Keychain:
 
     def write(self, account: str, text: str) -> None:
         """Store the vault JSON: one item when it fits a line, else chunks #1…#n, then the manifest, then the stale
-        chunks of an earlier, longer vault dropped. Each item is read back; raises VaultOpenError when one didn't keep."""
+        chunks of an earlier, longer vault dropped. Each item is read back; raises VaultOpenError when one didn't keep.
+        Nothing is written for a path that looks like a chunk's account, nor over a chunk account that holds another
+        vault's main item (CHUNK_LIKE)."""
+        if CHUNK_LIKE.search(account):
+            raise VaultOpenError("the vault file's name ends in # and a number, which the keychain keeps for the pieces "
+                                 "of another vault; rename the file first")
         try:
             previous = (_manifest(self._read_text(account)) or (0, None))[0]
         except VaultOpenError:
@@ -245,6 +271,10 @@ class Keychain:
                 end -= 1
             pieces.append(data[at:end])
             at = end
+        for i in range(1, len(pieces) + 1):  # (checked before any is written: nothing of the other vault is lost)
+            if i > previous and _whole_json(self._read_text(f"{account}#{i}")):
+                raise VaultOpenError("another vault file's entry is kept where this vault's pieces go (a file named "
+                                     "like this one with # and a number); rename one of them first")
         for i, piece in enumerate(pieces, 1):
             self._store(f"{account}#{i}", piece)
             back = self._read_both(f"{account}#{i}")
@@ -332,31 +362,49 @@ def protected_file(how: str, text: str, deps: Deps, path: str) -> str:
     return json.dumps({"version": 2, "protected": KEYCHAIN})
 
 
-def _as_version2(top: dict) -> dict | None:
+PHONE_ENTRY = "phone"  # the only entry whose passcode is the phone's (accounts.PHONE)
+
+
+def _as_version2(top: dict, dropped: list[str] | None = None) -> dict | None:
     """A plain file's content as a version 2 vault (a version 1 file's accounts become account entries, its `phone`
-    a phone entry; other top-level keys, such as `otp`, travel along). None when it is neither."""
+    a phone entry; other top-level keys, such as `otp`, travel along). None when it is neither. A `passcode` on any
+    other entry (an app's PIN, which version 1 never used) is left out, and its entry's name is added to `dropped`: it
+    never becomes a phone entry, so it can never be typed on the lock screen (review 1.7, L3)."""
     if top.get("version") == 2 and isinstance(top.get("vault"), dict):
         return top
     if top.get("version") != 1 or not isinstance(top.get("accounts"), dict):
         return None
+    if not all(isinstance(entry, dict) for entry in top["accounts"].values()):
+        return None  # (an entry that isn't an object is never made an empty account: CodeRabbit, PR #12, vault.py)
     rest = {k: v for k, v in top.items() if k not in ("version", "accounts")}
     vault: dict[str, object] = {}
-    accounts = top["accounts"]
-    for name, entry in accounts.items():
-        fields = entry if isinstance(entry, dict) else {}
-        if "passcode" in fields and "username" not in fields and "password" not in fields:
+    for name, entry in top["accounts"].items():
+        fields = entry
+        if name == PHONE_ENTRY and "passcode" in fields and "username" not in fields and "password" not in fields:
             vault[name] = {"kind": "phone", **fields}
             continue
         vault[name] = {"kind": "account", **{k: v for k, v in fields.items() if k != "passcode"}}
-        if "passcode" in fields:  # (a version 2 account has no passcode: it moves into a phone entry of its own)
-            phone, n = f"{name[:52]}_phone", 2
-            while phone in accounts or phone in vault:
-                phone, n = f"{name[:50]}_phone{n}", n + 1
-            vault[phone] = {"kind": "phone", "passcode": fields["passcode"]}
+        if "passcode" in fields and dropped is not None:
+            dropped.append(str(name))
     return {"version": 2, "vault": vault, **rest}
 
 
 def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | None] | None = None) -> tuple[bool, str]:
+    """Serialize protection of one real vault path, including its keychain writes and readback."""
+    if not os.path.isfile(path):
+        return False, f"the vault file {os.path.abspath(path)} doesn't exist."
+    real = real_path(path)
+    lock = f"{real}.protect.lock"
+    token = pidlock.take(lock)
+    if token is None:
+        return False, "couldn't lock the vault for protection; another protection may be running."
+    try:
+        return _protect_locked(path, deps, check)
+    finally:
+        pidlock.release(lock, token)
+
+
+def _protect_locked(path: str, deps: Deps | None, check: Callable[[str], str | None] | None) -> tuple[bool, str]:
     """`tapwright vault protect FILE`: a plain vault file written in this system's protected form (a version 1 file
     becomes version 2). The plain file stays until the protected copy reads back and its sha256 matches; then it is
     replaced through a temporary file and a rename. `check(text)` says why a vault JSON wouldn't load (accounts.py), so a
@@ -371,7 +419,9 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
                        "stays plain, for test data only.")
     real = real_path(file)
     try:
-        text = Path(real).read_text("utf-8-sig")
+        original = Path(real).read_bytes()
+        text = original.decode("utf-8-sig")
+        source_stat = os.stat(real)
     except (OSError, UnicodeDecodeError):
         return False, f"couldn't read {file}."
     try:
@@ -382,7 +432,17 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         return False, f"the vault file {file} isn't a vault."
     if protection(top) is not None:
         return False, f"the vault file {file} is already protected."
-    payload = _as_version2(top)
+    dropped: list[str] = []
+    accounts_v1 = top.get("accounts") if top.get("version") == 1 else None
+    if isinstance(accounts_v1, dict) and (bad := [str(n) for n, e in accounts_v1.items() if not isinstance(e, dict)]):
+        # the source is left as it is: never protected with the entry dropped (CodeRabbit, PR #12, vault.py)
+        return False, (f"the vault file {file} can't be protected as it is (the account {', '.join(bad[:5])} isn't an "
+                       "object with its fields); fix it first. The file stays plain.")
+    if how == KEYCHAIN and CHUNK_LIKE.search(real):
+        return False, (f"the vault file {file} can't be kept in the macOS keychain under a name that ends in # and a "
+                       "number (the keychain keeps those for the pieces of another vault); rename it first. The file "
+                       "stays plain.")
+    payload = _as_version2(top, dropped)
     if payload is None:
         return False, f"the vault file {file} isn't a version 1 or 2 vault."
     plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -402,6 +462,12 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(out + "\n")
+        current = os.stat(real)
+        if ((current.st_dev, current.st_ino, current.st_mtime_ns, current.st_size) !=
+                (source_stat.st_dev, source_stat.st_ino, source_stat.st_mtime_ns, source_stat.st_size)
+                or Path(real).read_bytes() != original):
+            os.unlink(temp)
+            return False, "the vault file changed during protection; its newer contents were left in place."
         os.replace(temp, real)
     except OSError as e:
         try:
@@ -409,7 +475,11 @@ def protect(path: str, deps: Deps | None = None, check: Callable[[str], str | No
         except OSError:
             pass
         return False, f"couldn't write {file} ({e.strerror or 'an error'}); the file stays plain."
+    # (names only, never a value: `dropped` holds entry names)
+    left_out = ("" if not dropped else
+                f"\nNote: the passcode of {', '.join(dropped)} was left out: only the entry named \"{PHONE_ENTRY}\" holds "
+                "the phone's passcode, and an account's passcode is never typed anywhere.")
     if how == DPAPI:
-        return True, f"Protected {file} with Windows DPAPI (current user). Tapline reads it too."
+        return True, f"Protected {file} with Windows DPAPI (current user). Tapline reads it too.{left_out}"
     return True, (f"Protected {file} in the macOS keychain (service {KEYCHAIN_SERVICE}; the entry belongs to this path, "
-                  "so a moved file needs protecting again).")
+                  f"so a moved file needs protecting again).{left_out}")

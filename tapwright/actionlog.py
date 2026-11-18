@@ -56,7 +56,11 @@ class ActionLog:
         if self._pruned_on != self.now().date():
             self.prune()  # a daemon that runs for weeks prunes once a day, not only when it starts
         stamp = self.now().isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        line = json.dumps({"t": stamp, **{k: v for k, v in entry.items() if v is not None}}, ensure_ascii=False)
+        try:
+            line = json.dumps({"t": stamp, **{k: v for k, v in entry.items() if v is not None}}, ensure_ascii=False)
+        except (TypeError, ValueError) as e:  # (a value that isn't JSON: this line is skipped, the action goes on)
+            self.report(f"an action log line was skipped ({type(e).__name__})")
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
@@ -73,9 +77,12 @@ def target_of(target: object) -> dict | None:
     fields = ("id", "label", "text", "ref", "x", "y", "index")
     if isinstance(target, dict):  # as the call carried it, before it is checked
         found = {f: target[f] for f in fields if target.get(f) is not None}
-    else:
+    elif hasattr(target, "__dataclass_fields__"):  # a checked ui.Target
         found = {f: getattr(target, f) for f in fields if getattr(target, f, None) is not None}
-    return found or None
+    else:  # anything else the call carried (a string, a list: refused as bad_params) is logged by its kind only
+        return {"given": type(target).__name__}
+    # only plain values go into the log (a field holding anything else is left out, never a crash)
+    return {k: v for k, v in found.items() if isinstance(v, (str, int, float, bool))} or None
 
 
 def default_folder() -> Path:

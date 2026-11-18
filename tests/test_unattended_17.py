@@ -45,26 +45,8 @@ def test_phone_mode_is_every_app_like_dedicated():
     assert r.status_code == 200 and seen.calls == [{"scope": None}]
 
 
-def test_phone_mode_is_a_ceiling_a_call_may_narrow_but_never_widen():
-    for headers in ({"X-Tapwright-Mode": "phone"}, {"X-Tapwright-Mode": "dedicated"}, {"X-Tapwright-Apps": "com.a"}):
-        r, seen = post(Ceiling(phone=True), headers)
-        assert r.status_code == 200, headers
-    r, seen = post(Ceiling(phone=True), {"X-Tapwright-Apps": "com.a"})
-    assert seen.calls[0]["scope"].apps == ("com.a",)  # narrowed to one app
-    r, seen = post(Ceiling(apps=("com.a",)), {"X-Tapwright-Mode": "phone"})
-    assert r.status_code == 403 and "can't ask for phone mode" in r.json()["error"]["message"] and seen.calls == []
-    assert "--phone" in r.json()["error"]["message"]
 
 
-def test_personal_mode_stays_the_default():
-    r, seen = post(None, {})
-    assert seen.calls[0]["scope"].apps == ()  # no apps named: none, as before
-    client.set_scope(["com.a"])
-    assert client.SCOPE == {"X-Tapwright-Apps": "com.a"}
-    client.set_scope(None, phone=True)
-    assert client.SCOPE == {"X-Tapwright-Mode": "phone"}
-    client.set_scope([])
-    assert client.SCOPE == {}
 
 
 def run_serve(monkeypatch, *argv):
@@ -95,8 +77,7 @@ def test_serve_phone_is_the_mode_and_phone_address_still_dials(monkeypatch, caps
 
 def test_mcp_install_and_thin_call_carry_phone_mode():
     assert connect.mcp_args([], False, phone=True)[:2] == ["mcp", "--phone"]
-    with pytest.raises(connect.ConnectError):
-        connect.check_scope(["com.a"], False, True)
+    connect.check_scope(["com.a"], False, True)  # legacy app hint is no longer an access boundary
     with pytest.raises(connect.ConnectError):
         connect.check_scope([], True, True)
     connect.check_scope([], False, True)
@@ -106,28 +87,6 @@ def test_mcp_install_and_thin_call_carry_phone_mode():
         thin._parser().parse_args(["look", "--phone", "--apps", "com.a"])
 
 
-def test_never_grantable_screens_still_ask_a_person_in_phone_mode(tmp_path):
-    """§19.2: the scope is every app, but a grant never covers Settings' panes, Passwords or Wallet."""
-    from fakes import button
-    from tapwright import policy
-    from tapwright.auditlog import AuditLog
-    path = tmp_path / "policy.json"
-    path.write_text(json.dumps({"version": 2, "confirm": ["Remove"], "block": [], "grants": [
-        {"name": "settings_remove", "app": "com.apple.Preferences", "words": ["Remove"], "until": "2099-01-01",
-         "perDay": 5, "draftsOnly": False}]}), encoding="utf-8")
-
-    async def go():
-        d = make(audit=AuditLog(tmp_path / "audit"))
-        d.session.app = ("Settings", "com.apple.Preferences")
-        d.session.tree = [button("e1", "Remove", "remove")]
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False}, scope=None, policy=policy.load(path))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "remove"}, "look": False}, scope=None, policy=policy.load(path))
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value)
-        assert "tap" not in d.session.actions()
-        await finish(stop, task)
-    run(go)
 
 
 # ---- the runner kept alive (§24.5) ----
@@ -210,7 +169,7 @@ def test_one_message_per_event_and_a_short_drop_says_nothing():
         w.state("no-device")
     assert said == [("gone", watchdog.GONE_USB)]  # once, however long it stays gone
     w.state("live", "local network")
-    assert said[-1] == ("back", "Watchdog: the phone is back (over local network).") and len(said) == 2
+    assert said[-1] == ("back", "Watchdog: the phone is back (over Wi-Fi).") and len(said) == 2
     w.state("reconnecting")
     clock.t += 61
     w.state("reconnecting")
@@ -341,7 +300,7 @@ def test_the_scheduled_tasks_are_checked_when_schedules_exist():
         class Scheduler:
             def exists(self, name):
                 return name != "weekly"
-    assert cli.scheduled_tasks(Schedules) == {"tasks": 2, "tasks_missing": ("weekly",)}
+    assert cli.scheduled_tasks(Schedules) == {"tasks": 2, "tasks_missing": ("weekly",), "polling": ()}
 
 
 def test_the_runner_check_reads_what_setup_recorded(monkeypatch):

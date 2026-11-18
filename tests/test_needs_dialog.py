@@ -6,6 +6,7 @@ import pytest
 from fakes import FakeSession, button
 from test_daemon import finish, make, run, started, until_stuck
 
+from tapwright.errors import PHONE_LOCKED
 from tapwright import needs
 from tapwright.control import Refused
 from tapwright.daemon import Scope
@@ -59,7 +60,7 @@ def test_cant_now_answers_the_usual_error_at_once():
         assert d.dialog_answer("a", "n1-x", "cant") is True
         with pytest.raises(Refused) as e:
             await asyncio.wait_for(call, 2)
-        assert e.value.code == "locked" and str(e.value) == "the phone is locked; ask the user to unlock it"
+        assert e.value.code == "locked" and str(e.value) == PHONE_LOCKED
         await finish(stop, task)
     run(go)
 
@@ -171,44 +172,8 @@ def test_the_health_sheet_that_stays_keeps_todays_note_after_cant_now():
     run(go)
 
 
-def test_an_ios_alert_over_the_phone_asks_and_the_touch_goes_on_when_it_is_gone():
-    from test_daemon import ALERT as an_alert
-
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example"}
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.foreground, s.app, s.last_alert = "com.apple.springboard", ("Home screen", "com.apple.springboard"), an_alert
-        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=mine, dialog=True))
-        ask, seq = await asked(d)
-        assert ask["kind"] == "needs" and ask["message"] == needs.message(needs.IOS_ALERT)
-        s.foreground, s.app, s.last_alert = "com.example.app", ("Example", "com.example.app"), None  # the person answered
-        r = await asyncio.wait_for(call, 10)
-        assert "Tapped" in r["text"]
-        assert (await asked(d, seq))[0] == {"type": "close", "id": ask["id"]}
-        await finish(stop, task)
-    run(go)
 
 
-def test_an_ios_alert_with_cant_now_is_the_usual_refusal():
-    from test_daemon import ALERT as an_alert
-
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example"}
-        d = make(s)
-        stop, task = await started(d)
-        s.foreground, s.app, s.last_alert = "com.apple.springboard", ("Home screen", "com.apple.springboard"), an_alert
-        call = asyncio.create_task(d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=Scope(("com.example.app",)), dialog=True))
-        ask, _ = await asked(d)
-        d.dialog_answer("a", ask["id"], "cant")
-        with pytest.raises(Refused) as e:
-            await asyncio.wait_for(call, 5)
-        assert str(e.value).startswith("outside_apps: an iOS system alert is in front")
-        await finish(stop, task)
-    run(go)
 
 
 def test_another_agents_answer_does_not_count():

@@ -16,8 +16,8 @@ MAX_FILES = 20  # per call
 MAX_TOTAL = 40 * 1024 * 1024  # per call, all pictures together (the runner's JSON body is a third bigger)
 MIN_TW_VERSION = 3  # the runner route version that has the photo routes
 OLD_RUNNER = ("this phone's runner is older than the photo routes (tw version < 3); update the runner")
-NEVER_ASKS_FULL = ("deleting needs full access to the photo library, and Tapwright never asks for it (it adds with "
-                   "add-only access).")
+NEVER_ASKS_FULL = ("the fixture-removal API needs full photo-library access; fixture import requests only "
+                   "add-only access. Use the Photos UI to manage the library.")
 NEED_CONFIRM = ("media changes the photo library on the user's phone. Ask your user first whether pictures may be "
                 "added (and whether to remove them afterwards), then call again with confirm: true.")
 
@@ -149,5 +149,5 @@ def removed_text(names: list[str], asked: int) -> str:
 
 
 def by_hand_text(names: list[str], why: str) -> str:
-    return (f"Couldn't remove them: {why} Delete {'it' if len(names) == 1 else 'them'} by hand in Photos > "
+    return (f"Couldn't remove them: {why} Remove {'it' if len(names) == 1 else 'them'} through the Photos UI > "
             f"Recently Added: {', '.join(names)}.")

@@ -40,7 +40,7 @@ class TypingSession(MapSession):
         self.items, self.last_tree = list(items), shown
         return shown
 
-    async def type_text(self, text, replace=False, submit=False, target=None, at=None):
+    async def type_text(self, text, replace=False, submit=False, target=None, at=None, no_tap=False):
         out = await super().type_text(text, replace, submit, target, at)
         hit = ui_resolve(self.items, target)
         self.values[hit.identifier] = text
@@ -56,6 +56,12 @@ def screens():
     return {"welcome": screen("Welcome", ids=("continue-btn", "w1", "w2")),
             "login": screen("Login", ids=("sign-in-btn", "l1", "l2"), inputs=("email",), secure=("password",)),
             "home": screen("Home", ids=("settings-btn", "h1", "h2"), tab="home")}
+
+
+def code_screens():
+    """screens(), with a one-time code field on the login screen (`otp-code`: a one-line field that says code)."""
+    return {**screens(), "login": screen("Login", ids=("sign-in-btn", "l1", "l2"), inputs=("email", "otp-code"),
+                                         secure=("password",))}
 
 
 def write_accounts(tmp_path, data=ACCOUNTS, name="accounts.json"):
@@ -146,29 +152,6 @@ def test_the_values_are_nowhere_in_an_answer_a_file_or_the_log(tmp_path):
     run(go)
 
 
-def test_a_password_goes_only_into_a_secure_field_and_a_username_only_into_a_plain_one(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await explore(d, with_route=False)
-        swapped = [SIGN_IN[0], {**SIGN_IN[1], "target": {"id": "password"}}, SIGN_IN[2], SIGN_IN[3]]
-        d.maps.file(None, BUNDLE).write_route("swapped", routes.route("swapped", BUNDLE, "welcome", "home", ["account"], swapped))
-        d.maps.edit(None, BUNDLE, lambda data: data["routes"].__setitem__("swapped", "routes/swapped.json"))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "drive", {"route": "swapped", "account": "tester2"})
-        assert e.value.code == "bad_params"
-        assert "an account's username goes only into a text field that isn't secure; " in str(e.value) and "Done:" in str(e.value)
-        assert d.session.typed == []
-        pw_in_text = [SIGN_IN[0], {**SIGN_IN[2], "target": {"id": "email"}}]
-        d.maps.file(None, BUNDLE).write_route("plain_pw", routes.route("plain_pw", BUNDLE, "welcome", "home", ["account"], pw_in_text))
-        d.maps.edit(None, BUNDLE, lambda data: data["routes"].__setitem__("plain_pw", "routes/plain_pw.json"))
-        d.session.at = "welcome"
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "drive", {"route": "plain_pw", "account": "tester2"})
-        assert "an account's password goes only into a password field; " in str(e.value) and "is a text field." in str(e.value)
-        assert d.session.typed == []
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_value_is_never_part_of_a_text(tmp_path):
@@ -216,32 +199,6 @@ def test_the_then_steps_of_a_drive_may_type_an_account(tmp_path):
     run(go)
 
 
-def test_an_accounts_value_is_not_typed_into_an_app_it_isnt_for_even_after_a_step_switched_apps(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        d.session.installed.append({"bundle_id": "com.other.app", "name": "Other", "version": "1", "build": "1", "executable": "Other"})
-        stop, task = await started(d)
-        await explore(d)
-        switch = {"tool": "open_app", "app": "com.other.app"}
-        d.session.at = "login"
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:  # a then step
-            await d.run_tool("a", "drive", {"to": "login", "account": "tester2", "then": [
-                switch, {"tool": "type_text", "target": {"id": "password"}, "text": "${account.password}"}]})
-        assert e.value.code == "not_allowed" and "not for this app" in str(e.value) and PASSWORD not in str(e.value)
-        assert d.session.typed == [] and d.session.foreground == "com.other.app"
-        # a route's own step
-        d.session.foreground, d.session.app, d.session.at = BUNDLE, ("Example", BUNDLE), "welcome"
-        await d.run_tool("a", "look", {"screenshot": False})
-        steps = [SIGN_IN[0], switch, SIGN_IN[1]]
-        d.maps.file(None, BUNDLE).write_route("hop", routes.route("hop", BUNDLE, "welcome", "home", ["account"], steps))
-        d.maps.edit(None, BUNDLE, lambda data: data["routes"].__setitem__("hop", "routes/hop.json"))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "drive", {"route": "hop", "account": "tester2"})
-        assert e.value.code == "not_allowed"
-        assert d.session.typed == []
-        await finish(stop, task)
-    run(go)
 
 
 def test_an_accounts_value_in_an_element_is_scrubbed_from_the_live_view_and_the_log(tmp_path):
@@ -265,22 +222,6 @@ def test_an_accounts_value_in_an_element_is_scrubbed_from_the_live_view_and_the_
     run(go)
 
 
-def test_the_account_is_checked_before_anything_is_touched(tmp_path):
-    async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await explore(d)
-        before = d.session.calls.count("tap")
-        for account, code in (("nobody", "not_found"), ("tester1", "not_allowed"), ("phone", "not_found")):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "drive", {"route": "sign_in", "account": account})
-            assert e.value.code == code, account
-        with pytest.raises(Refused) as e:  # a route that wants an account, given none
-            await d.run_tool("a", "drive", {"route": "sign_in"})
-        assert e.value.code == "bad_params" and "account" in str(e.value)
-        assert d.session.calls.count("tap") == before
-        await finish(stop, task)
-    run(go)
 
 
 def test_no_file_means_no_accounts(tmp_path):

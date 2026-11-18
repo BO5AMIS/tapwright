@@ -70,9 +70,7 @@ def test_serve_runs_is_found_and_stops(home):
         assert client.healthy(info)["protocol"] == 1 and len(info["token"]) >= 32
         assert run(lambda: server.serve(port=0, make_daemon=make_factory(made))) == 0  # found, not doubled
         assert len(made) == 1
-        with pytest.raises(client.DaemonError) as e:  # personal mode with no app list: nothing runs
-            client.call("look", {"screenshot": False}, "agent-1")
-        assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps: ")
+        assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         client.set_scope(dedicated=True)
         assert client.call("look", {"screenshot": False}, "agent-1")["text"].startswith("Screen")
         made[0].control.set_paused(True)

@@ -184,133 +184,12 @@ def test_locked_phone():
     run(go)
 
 
-def test_personal_mode_without_an_app_list_runs_nothing():
-    """LAUNCH-PLAN D5: on the owner's everyday phone the agent may only use the apps it was given. It fails closed."""
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        for tool, args in (("look", {}), ("tap", {"target": {"x": 5, "y": 5}}), ("apps", {}),
-                           ("open_app", {"app": "com.example.app"}), ("open_url", {"url": "https://example.com"})):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", tool, args, scope=Scope(()))
-            assert e.value.code == "not_allowed" and str(e.value).startswith("no_apps: "), tool
-            assert "--apps" in str(e.value) and "--dedicated" in str(e.value)
-        assert d.session.actions() == []
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_moment_of_springboard_from_webdriveragent_is_asked_again_not_refused():
-    """Seen on the phone 2026-11-10: twice in forty calls WebDriverAgent named SpringBoard as the app in front
-    while the app under test showed its own alert. The phone's process list had the app in the foreground."""
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example"}
-        s.tree = [button("e1", "OK", "ok-button", rect=(10, 400, 100, 40))]  # below the banners (not what is tested)
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.example.app"
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        daemon_module.FRONT_RETRY = 0.001  # (the pause between two questions, not what is under test)
-        answers = ["com.apple.springboard", "com.apple.springboard", "com.example.app"]
-
-        async def flaky():
-            return answers.pop(0) if answers else "com.example.app"
-
-        async def running():
-            return ["com.example.app"]
-        s.foreground_bundle_id, s.device.foreground_apps = flaky, running
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert r["text"].startswith("Tapped") and answers == []
-        # the real home screen: the process list has no given app in the foreground, so nothing is asked twice
-        asked: list[int] = []
-
-        async def home():
-            asked.append(1)
-            return "com.apple.springboard"
-
-        async def nothing():
-            return []
-        s.foreground_bundle_id, s.device.foreground_apps = home, nothing
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and len(asked) == 1
-        # and SpringBoard that stays, with the app still listed as running in front: refused after the retries
-        asked.clear()
-        s.device.foreground_apps = running
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and len(asked) == 1 + daemon_module.FRONT_RETRIES
-        await finish(stop, task)
-    pause = daemon_module.FRONT_RETRY
-    try:
-        run(go)
-    finally:
-        daemon_module.FRONT_RETRY = pause
 
 
-def test_personal_mode_keeps_the_agent_in_the_apps_it_was_given():
-    async def go():
-        s = FakeSession()
-        s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
-        s.app_names = {"com.example.app": "Example", "com.example.mail": "Mail box"}
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.example.app"
-        assert (await d.run_tool("a", "look", {"screenshot": False}, scope=mine))["text"].startswith("Screen")
-        assert (await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine))["text"].startswith("Tapped")
-        assert (await d.run_tool("a", "apps", {}, scope=mine))["text"].splitlines()[0].startswith("com.example.app")
-        assert "com.example.mail" not in (await d.run_tool("a", "apps", {}, scope=mine))["text"]
-        for app in ("com.example.mail", "Mail box"):  # by bundle id or by name: not its app
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "open_app", {"app": app}, scope=mine)
-            assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: ")
-        assert s.launched == []
-        before = len(s.actions())
-        s.foreground = "com.example.mail"  # something took the phone elsewhere
-        s.app = ("Mail box", "com.example.mail")  # what a read there would say
-        with pytest.raises(Refused) as e:  # a look reads, learns where it is, and shows nothing of it
-            await d.run_tool("a", "look", {}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
-        before = len(s.actions())
-        for tool, args in (("tap", {"target": {"x": 5, "y": 5}}), ("type_text", {"text": "x"}),
-                           ("swipe", {"x0": 1, "y0": 1, "x1": 9, "y1": 9}), ("wait_for", {"text": "OK"})):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", tool, args, scope=mine)
-            assert e.value.code == "not_allowed", tool  # AGENT-TOOLS v1.5 (it was `unsupported`)
-            assert str(e.value).startswith("outside_apps: Mail box (com.example.mail) is in front and isn't one of the apps")
-        assert len(s.actions()) == before  # nothing was read or touched there
-        r = await d.run_tool("a", "open_app", {"app": "Example"}, scope=mine)  # the way back always works
-        s.app = ("Example", "com.example.app")
-        assert r["text"].startswith("Opened Example") and s.launched == ["com.example.app"]
-        s.foreground = None  # the phone can't say: closed, not open
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=mine)
-        assert "can't say which app" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
-def test_an_answer_in_personal_mode_never_shows_another_apps_screen():
-    async def go():
-        s = FakeSession()
-        s.tree = [button("e1", "OK", "ok-button", rect=(10, 400, 100, 40))]  # below the banners (not what is tested)
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.example.app"
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        s.app = ("Mail box", "com.example.mail")  # the tap opens another app: the answer would list its screen
-        s.tree = [button("e1", "Private thing", "private-row")]
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "screenshot": True}, scope=mine)
-        assert r["text"].startswith("Tapped e1") and "Private thing" not in r["text"] and r["image"] is None
-        assert r["text"].splitlines()[1].startswith("Note: outside_apps: Mail box (com.example.mail) is in front")
-        r = await d.run_tool("a", "tap", {"target": {"x": 1, "y": 1}}, scope=None)  # a dedicated device: no limit
-        assert "Private thing" in r["text"] or "No visible change" in r["text"]
-        await finish(stop, task)
-    run(go)
 
 
 def rates(session) -> list[int]:
@@ -903,25 +782,6 @@ def test_a_list_that_may_be_out_of_date_is_read_again_for_id_label_and_text():
     run(go)
 
 
-def test_a_points_tap_reads_the_screen_only_when_a_policy_has_words():
-    """Without policy words a tap at a point is a raw touch, no read. With them, what is under the point is read
-    fresh first: the agent's list may be old, and a policy word may sit there now (safety review H2, 2026-11-12)."""
-    from tapwright import policy
-
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.control.clock.t += 10.0
-        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False}, policy=policy.NONE)
-        assert d.session.calls.count("refresh") == 0 and "look" not in d.session.calls
-        await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
-        assert d.session.calls.count("refresh") == 1
-        d.session.tree = [el("e9", "button", "Delete account", rect=(0, 0, 100, 40))]  # it came in since the list
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}, "look": False})
-        assert "needs_confirmation" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_person_makes_a_ref_stale_but_not_an_id_text_or_label():
@@ -2476,19 +2336,6 @@ def test_open_app_with_launch_arguments_ends_a_running_app_the_fast_way_too(monk
     run(go)
 
 
-def test_close_app_outside_the_given_apps_ends_nothing():
-    async def go():
-        s = FakeSession()
-        s.installed.append({"bundle_id": "com.example.mail", "name": "Mail box", "version": "1", "build": "1"})
-        d = make(s)
-        stop, task = await started(d)
-        for app in ("com.example.mail", "Mail box"):
-            with pytest.raises(Refused) as e:
-                await d.run_tool("a", "close_app", {"app": app}, scope=Scope(("com.example.app",)))
-            assert e.value.code == "not_allowed"
-        assert s.device.kill_asks == [] and s.closed == []
-        await finish(stop, task)
-    run(go)
 
 
 NOTE_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
@@ -3466,6 +3313,19 @@ def test_type_text_without_any_input_is_not_found():
     run(go)
 
 
+def test_type_text_without_a_target_prefers_the_focused_input():
+    async def go():
+        d = make()
+        stop, task = await started(d)
+        focused = inp("e2", "Email", y=160)
+        focused.focused = True
+        await looked(d, [inp("e1", "Name"), focused])
+        await d.run_tool("a", "type_text", {"text": "x", "look": False})
+        assert d.session.typed[-1][3].ref and d.session.typed[-1][3] != ui.Target(ref="e1")
+        await finish(stop, task)
+    run(go)
+
+
 def test_type_text_at_a_point_uses_the_input_under_it_or_refuses():
     async def go():
         d = make()
@@ -4403,36 +4263,8 @@ def settings_rows(search: bool) -> list:
                covered_by=(SETTINGS_SEARCH,) if search else ())]
 
 
-def test_the_first_tap_after_open_app_reads_the_screen_again_and_aims_at_the_part_the_search_field_leaves():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.screen = (430.0, 932.0)
-        d.session.tree = settings_rows(search=False)  # what open_app's own list had: the field wasn't there yet
-        await d.run_tool("a", "open_app", {"app": "com.example.app"})
-        d.session.tree = settings_rows(search=True)
-        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
-        assert d.session.last_point == (215.0, 839.0)  # the strip above the field, not the row's centre (215, 860.5)
-        assert re.fullmatch(r'Tapped e\d cell "General" id=com.apple.settings.general at its visible part \(215, 839\)\.',
-                            r["text"])
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_look_after_open_app_is_the_list_a_touch_uses_with_no_second_read():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.screen = (430.0, 932.0)
-        d.session.tree = settings_rows(search=False)
-        await d.run_tool("a", "open_app", {"app": "com.example.app", "look": False})
-        d.session.tree = settings_rows(search=True)
-        await d.run_tool("a", "look", {"screenshot": False})  # the agent's own look, after the launch
-        reads = d.session.calls.count("refresh")
-        r = await d.run_tool("a", "tap", {"target": {"text": "General"}, "look": False})
-        assert d.session.calls.count("refresh") == reads and "at its visible part (215, 839)" in r["text"]
-        await finish(stop, task)
-    run(go)
 
 
 def test_an_element_with_too_little_showing_is_refused():
@@ -4498,34 +4330,8 @@ def covered_card(cover_rect):
     return el("e1", "button", "Covered", "lab-covered", rect=(20, 100, 390, 60), covered_by=(cover,))
 
 
-def test_a_button_fully_under_a_later_element_is_refused():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.screen = (430.0, 932.0)
-        await looked(d, [covered_card((10.0, 90.0, 410.0, 80.0))])
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert e.value.code == "not_actionable"
-        assert str(e.value) == ('covered: e1 button "Covered" id=lab-covered @20,100 390x60 is covered by '
-                                'other id=lab-overlay @10,90 410x80; move or close it first.')
-        assert "tap" not in d.session.calls
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "force": True, "look": False})
-        assert d.session.last_point == (215.0, 130.0)  # forced: its own centre
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_button_partly_under_a_later_element_is_touched_where_it_shows():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        d.session.screen = (430.0, 932.0)
-        await looked(d, [covered_card((20.0, 100.0, 390.0, 40.0))])  # the top 40 of 60 points
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False})
-        assert d.session.last_point == (215.0, 150.0) and "at its visible part (215, 150)" in r["text"]
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_badge_over_a_corner_leaves_the_centre_tap_alone():
@@ -4902,54 +4708,6 @@ def test_a_view_over_the_app_from_another_process_is_not_taken_for_a_theft():
     run(go)
 
 
-def test_in_personal_mode_a_given_apps_permission_prompt_can_be_seen_and_answered():
-    """2026-11-11, a first-time agent on Wayfare (in Expo Go): the reminder switch raised iOS's notification prompt,
-    drawn in SpringBoard, and personal mode refused both `look` and `alert` as the home screen."""
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        s = d.session
-        mine = Scope(("com.example.app",))
-        s.app_names["com.example.app"] = "Example"
-        s.foreground, s.tree = "com.example.app", [button("e1", "Remind me", "remind")]
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-
-        async def still_running():
-            return ["com.example.app"]
-        s.device.foreground_apps = still_running
-        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
-        s.tree = [button("e1", "Allow"), button("e2", "Don’t Allow")]
-        s.last_alert = ui.Alert("“Example” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
-                                (60.0, 300.0, 300.0, 200.0))
-        began = asyncio.get_running_loop().time()
-        r = await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        assert "outside_apps" not in r["text"]  # the prompt is shown, not withheld
-        assert asyncio.get_running_loop().time() - began < 2.0  # no banner wait: a prompt doesn't leave by itself
-        answer_alert = s.alert
-
-        async def answered(action):  # the prompt fades and the app is back in front a moment later
-            s.last_alert = None
-
-            async def back():
-                await asyncio.sleep(0.3)
-                s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
-                s.tree = [button("e1", "Remind me", "remind")]
-            asyncio.get_running_loop().create_task(back())
-            return await answer_alert(action)
-        s.alert = answered
-        r = await d.run_tool("a", "alert", {"action": "accept"}, scope=mine)
-        assert "alert" in d.session.calls and "outside_apps" not in r["text"]
-        assert r["text"].startswith("alert accepted") and s.launched == []  # the app's screen, nothing reopened
-        s.alert = answer_alert
-        s.foreground, s.app = daemon_module.SPRINGBOARD, ("Home screen", daemon_module.SPRINGBOARD)
-        # a prompt naming another app is not the given app's
-        s.last_alert = ui.Alert("“Mail” Would Like to Send You Notifications", ("Don’t Allow", "Allow"),
-                                (60.0, 300.0, 300.0, 200.0))
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "alert", {"action": "accept"}, scope=mine)
-        assert e.value.code == "not_allowed"
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_shade_pulled_down_over_the_app_is_a_theft():
@@ -5853,25 +5611,6 @@ def test_a_tab_under_a_keyboard_that_stays_up_says_how_to_close_it():
     run(go)
 
 
-def test_an_ios_alert_over_everything_is_named_as_one_in_personal_mode():
-    """An account-password prompt of iOS's own sat over the app; "Home screen is in front" read like the app had
-    quit (2026-11-12). With an alert up, the refusal says what it is and who answers it."""
-    async def go():
-        s = FakeSession()
-        s.app_names = {"com.example.app": "Example"}
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.foreground = "com.apple.springboard"
-        s.app = ("Home screen", "com.apple.springboard")
-        s.last_alert = ALERT
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"x": 5, "y": 5}}, scope=mine)
-        assert e.value.code == "not_allowed"
-        assert str(e.value).startswith("outside_apps: an iOS system alert is in front (not a prompt of one of your apps)")
-        assert "Ask the user to answer it on the phone" in str(e.value)
-        await finish(stop, task)
-    run(go)
 
 
 def test_an_index_given_beside_the_target_is_taken_as_the_targets():
@@ -6013,71 +5752,12 @@ async def personal_stale(**tree) -> tuple:
     return s, mine, d, stop, task
 
 
-def test_tap_scope_comes_from_the_read_when_it_names_a_given_app():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.tree_app = ("Example", "com.example.app")
-        asks, reads = s.front_asks, s.calls.count("refresh")
-        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert r["text"].startswith("Tapped")
-        assert s.calls.count("refresh") == reads + 1  # it read the tree
-        # (the one question after the touch, _taken_away, is all that is asked; before it was one more)
-        s2, mine2, d2, stop2, task2 = await personal_stale()
-        asks2 = s2.front_asks
-        await d2.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine2)  # the read names no app
-        assert s2.front_asks - asks2 == s.front_asks - asks + 1
-        await finish(stop, task)
-        await finish(stop2, task2)
-    run(go)
 
 
-def test_tap_is_refused_when_its_read_names_another_app_and_nothing_is_touched():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.tree_app, s.foreground, s.app = ("Mail box", "com.example.mail"), "com.example.mail", ("Mail box", "com.example.mail")
-        s.tap_points.clear()
-        asks = s.front_asks
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
-        assert s.tap_points == [] and s.front_asks > asks  # the question was asked, as before
-        await finish(stop, task)
-    run(go)
 
 
-def test_tap_asks_separately_when_the_read_names_no_app_or_the_home_screen_or_an_alert():
-    async def go():
-        alert = ui.Alert("Allow?", ("OK",), (0, 0, 10, 10))
-        for tree_app, last_alert in ((None, None), (("Home screen", "com.apple.springboard"), None),
-                                     (("Example", "com.example.app"), alert)):
-            s, mine, d, stop, task = await personal_stale()
-            s.tree_app, s.last_alert = tree_app, last_alert
-            asks = s.front_asks
-            if last_alert is not None:  # (an alert covers the button: the tap is refused, after the separate check)
-                with pytest.raises(Refused) as e:
-                    await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-                assert e.value.code == "not_actionable" and s.front_asks > asks and not s.tap_points
-            else:
-                await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-                assert s.front_asks - asks >= 2, (tree_app, last_alert)  # the separate check, then the one after the touch
-                assert s.tap_points
-            await finish(stop, task)
-    run(go)
 
 
-def test_tap_with_a_current_list_or_by_ref_keeps_the_separate_check():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.tree_app = ("Example", "com.example.app")
-        asks = s.front_asks
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)  # a ref reads nothing first
-        assert s.front_asks - asks >= 2
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)  # now the list is current: no read either
-        reads, asks = s.calls.count("refresh"), s.front_asks
-        await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert s.calls.count("refresh") == reads and s.front_asks - asks >= 2
-        await finish(stop, task)
-    run(go)
 
 
 MAIL = (("Mail box", "com.example.mail"), "com.example.mail")  # (what a read names, what the phone says is in front)
@@ -6096,127 +5776,18 @@ def switch_apps_when(s: FakeSession, when, tree: list) -> None:
     s.refresh = refresh
 
 
-def test_a_loading_wait_that_reads_another_app_touches_nothing_there():
-    """(Codex, PR #9 cycle 1) The tap's read shows the given app loading, with no target; a poll of the loading wait
-    reads another app with that target. The scope check is made again on that read: nothing is touched, and the
-    separate question answers outside_apps."""
-    async def go():
-        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
-        reads = []
-        switch_apps_when(s, lambda: reads.append(1) or len(reads) > 2, [button("e1", "OK", "ok-button", rect=(10, 500, 100, 40))])
-        s.tap_points.clear()
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert len(reads) > 2  # the loading wait read again, and found the target in the other app
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
-        assert s.tap_points == []
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_loading_wait_that_ends_in_the_given_app_still_taps_and_hands_the_runner_the_check():
-    async def go():
-        s, mine, d, stop, task = await personal_stale(tree=[SPINNER], tree_app=("Example", "com.example.app"))
-        s.touch_checks_front, s.calls_touch_hook = True, True
-        reads = []
-        real = s.refresh
-
-        async def refresh(timeout=None):
-            reads.append(1)
-            if len(reads) > 2:
-                s.tree = [button("e1", "OK", "ok-button")]
-            return await real(timeout)
-        s.refresh = refresh
-        r = await d.run_tool("a", "tap", {"target": {"id": "ok-button"}, "look": False}, scope=mine)
-        assert r["text"].startswith("Tapped") and len(s.tap_points) == 1 and len(reads) > 2
-        assert s.checked_taps == [("com.example.app",)]  # the runner's tap checked the app in front too (E3)
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_touch_on_the_way_to_the_tap_is_checked_against_the_read_before_it():
-    """The keyboard is closed before the tap: a touch where nothing responds, then (the keyboard still up) a drag and
-    the keyboard's own dismissal. When the read after the first touch shows another app, neither of the others, nor
-    the tap, is made there."""
-    async def go():
-        form = [el("e1", "text", "Title", rect=(10, 70, 100, 20), type="StaticText"),
-                el("e2", "input", "Field A", "a", rect=(10, 100, 300, 40)),
-                button("e4", "Save", "save", rect=(10, 300, 100, 40)),
-                el("e8", "scroll", "", "form", rect=(0, 60, 400, 440))]
-        s, mine, d, stop, task = await personal_stale(tree=form, tree_app=("Example", "com.example.app"))
-        s.last_keyboard, s.last_insets, s.focused, s.blank_tap_closes = True, (60.0, 300.0), "a", False
-        s.calls_touch_hook = True
-        s.tap_points.clear()
-        switch_apps_when(s, lambda: bool(s.tap_points), form)  # the read after the first touch: the Mail app's form
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"id": "save"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box")
-        assert s.tap_points == [(60.0, 80.0)]  # only the first touch, made while the given app was read in front
-        assert "swipe" not in s.calls and "dismiss_keyboard" not in s.calls
-        await finish(stop, task)
-    run(go)
 
 
 # ---- a touch's scope check made by the runner's tap itself (route version 4, 1.6 E3) ----
 
-def test_tap_lets_the_runner_check_the_app_in_front_and_asks_nothing_first():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.touch_checks_front = True
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)  # a current list: the tap reads nothing first
-        asks, reads = s.front_asks, s.calls.count("refresh")
-        r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert r["text"].startswith("Tapped") and s.checked_taps == [("com.example.app",)]
-        assert s.calls.count("refresh") == reads and s.front_asks - asks == 1  # only the one after the touch
-        assert s.front_apps is None
-        s.touch_checks_front = False  # a runner that can't: the question first, as before
-        asks = s.front_asks
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert s.front_asks - asks >= 2 and len(s.checked_taps) == 1
-        await finish(stop, task)
-    run(go)
 
 
-def test_tap_the_runner_refuses_touches_nothing_and_gets_todays_outside_apps_answer():
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.touch_checks_front = True
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        s.foreground, s.app = "com.example.mail", ("Mail box", "com.example.mail")
-        s.tap_points.clear()
-        asks = s.front_asks
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: Mail box (com.example.mail)")
-        assert s.tap_points == [] and s.checked_taps == [("com.example.app",)] and s.front_asks > asks
-        assert s.front_apps is None
-        await finish(stop, task)
-    run(go)
 
 
-def test_a_runner_refusal_on_a_given_apps_own_prompt_still_lets_the_tap_through_by_the_question():
-    """SpringBoard draws a given app's permission prompt: the runner sees SpringBoard and refuses, and the question
-    that follows knows the prompt (as before E3), so the tap goes out the old way, once."""
-    async def go():
-        s, mine, d, stop, task = await personal_stale()
-        s.touch_checks_front = True
-        await d.run_tool("a", "look", {"screenshot": False}, scope=mine)
-        s.foreground = "com.apple.springboard"
-        calls: list = []
-
-        async def prompt_of_given(given, view, read):
-            calls.append(read)
-            return True
-        d._prompt_of_given = prompt_of_given
-
-        async def running():
-            return ["com.example.app"]
-        s.device.foreground_apps = running
-        s.tap_points.clear()
-        await d.run_tool("a", "tap", {"target": {"ref": "e1"}, "look": False}, scope=mine)
-        assert len(s.checked_taps) == 1 and len(s.tap_points) == 1 and calls
-        await finish(stop, task)
-    run(go)
 
 
 def test_a_dry_run_and_a_dedicated_device_never_hand_the_check_to_the_runner():

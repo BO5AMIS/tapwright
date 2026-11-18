@@ -2,7 +2,6 @@
 WebSocket and the agent API, all behind one token; and starting, finding and stopping it.
 Wire format: docs/VIEWER-PROTOCOL.md."""
 import asyncio
-import dataclasses
 import hashlib
 import hmac
 import json
@@ -20,10 +19,10 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import otp as otplib, policy, store, trace, uxcheck
+from . import otp as otplib, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
-from .daemon import Scope
+from .daemon import BUNDLE_ID, SYSTEM_APPS
 from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
@@ -47,6 +46,7 @@ NO_KEY_PAGE = (
 WHOLE_PHONE = ("dedicated", "phone")  # the X-Tapwright-Mode values that mean every app (--dedicated, --phone)
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 DEFAULT_PORT = 8417
+RECORDING_KEEPALIVE = 5.0  # seconds: how long a recording's stream may be silent before it sends a picture-less part
 IDLE_LIMIT = 30 * 60  # seconds without viewers or requests before the daemon stops itself
 
 
@@ -106,6 +106,29 @@ def _hv(request, name: str, default: str | None = None) -> str | None:
     if value is None:
         return default
     return urllib.parse.unquote(value) if request.headers.get("x-tapwright-encoding") == "percent" else value
+
+
+def resolve_app(app: str, names: dict[str, str]) -> tuple[str | None, str | None]:
+    """(the one bundle id an app named in --apps or a call stands for, why it stands for none) (review 1.7 A-M4): an
+    installed bundle id is itself; a name, ignoring case, must be the name of exactly ONE installed app (two apps that
+    show the same name prove neither), else of one of iOS's own apps; a bundle id that isn't installed (iOS's own apps
+    aren't listed) is compared as written. When the phone can't list its apps (`names` empty), a name is compared as
+    written too."""
+    q = app.strip()
+    if q in names:
+        return q, None
+    low = q.casefold()
+    hits = sorted(b for b, n in names.items() if n and n.strip().casefold() == low)
+    if len(hits) > 1:
+        return None, f'"{q}" is the name of {len(hits)} installed apps ({", ".join(hits)}); name it by its bundle id'
+    if hits:
+        return hits[0], None
+    builtin = next((b for n, b in SYSTEM_APPS.items() if n.casefold() == low), None)
+    if builtin is not None:
+        return builtin, None
+    if BUNDLE_ID.match(q) or not names:
+        return q, None
+    return None, f'no installed app is named "{q}"'
 
 
 def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Ceiling | None = None) -> Starlette:
@@ -178,7 +201,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
         if not isinstance(app, str) or not app.strip():
             return _error("bad_params", 'send {"app": "<app id>"}', 400)
-        found = await daemon.otp_handover(app) if hasattr(daemon, "otp_handover") else None
+        try:
+            caller = repr(request.scope.get("client"))  # the proved connection, never a body-supplied client id
+            found = await daemon.otp_handover(app, caller=caller) if hasattr(daemon, "otp_handover") else None
+        except Refused as e:  # internal cleanup failure or a scheduled run already owns the phone; no code goes out
+            return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
         if found is None:
             return _error("not_found", "no one-time code", 404)
         return JSONResponse(otplib.answer(found), headers={"Cache-Control": "no-store"})
@@ -201,25 +228,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", "the body must be a JSON object", 400)
         # X-Agent-Client is the name both tools share; X-Tapwright-Client is the older one, still accepted
         client = _hv(request, "x-agent-client") or _hv(request, "x-tapwright-client") or "anonymous"
-        # Personal mode unless the caller says the device is dedicated (to testing, `dedicated`, or to automation,
-        # `phone`, §24.4; both are every app): a caller that names no apps gets none.
-        apps = tuple(a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip())
-        mode = _hv(request, "x-tapwright-mode")
-        dedicated = mode in WHOLE_PHONE
-        scope = None if dedicated else Scope(apps)
-        # What the daemon was started with is a ceiling: a call may only narrow it (AGENT-TOOLS §18.10)
-        if ceiling is not None and (why := ceiling.refuse_scope(apps, dedicated, mode)) is not None:
-            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
-        # The safety policy (docs/AGENT-TOOLS.md 11.1): none sent is the built-in one; a bad one is refused
-        sent = _hv(request, "x-tapwright-policy")
-        try:
-            rules = policy.loads(sent, header=True) if sent else None
-        except ValueError as e:
-            return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
-        if ceiling is not None:
-            rules, why = ceiling.check_policy(rules)  # the daemon's own policy when the call sent none
-            if why is not None:
-                return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        # 1.7.5: legacy app/policy headers do not restrict device access.
+        # Request authentication remains mandatory.
+        scope, rules = None, None
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
         sent_ux = _hv(request, "x-tapwright-ux-rules")
         try:
@@ -228,13 +239,11 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", f"the ux rules this agent was started with are refused: {e}", 400)
         # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
+        apps = [a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip()]
+        if client.startswith("schedule-") and len(apps) == 1:
+            via["app_hint"] = apps[0]  # route launch context, never an allowlist
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
-        if rules is not None and rules.file is not None and via.get("via") == "call" \
-                and (ceiling is None or ceiling.policy is None or rules.file != ceiling.policy.file):
-            # The model writes a thin call's command line: a grants file it names is never in force (§19.6: only a
-            # person makes a grant). Only the policy file `tapwright serve` was started with brings grants.
-            rules = dataclasses.replace(rules, file=None)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved
         sent_maps = _hv(request, "x-tapwright-maps")
         if sent_maps is not None and (not os.path.isabs(sent_maps) or "\x00" in sent_maps):
@@ -281,20 +290,24 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
 
     async def unlock(request):
         """`POST /api/phone/unlock` (§22.3, §18.6): a scheduled run found the phone locked and asks the daemon to unlock
-        it with the vault's `phone.passcode` (the accounts file the run names, within serve's --accounts ceiling). The
-        answer is fixed words: `{"ok", "code", "message"}`, never a value. Only the daemon types the passcode."""
+        it with `phone.passcode`. The passcode comes only from the vault file `tapwright serve --accounts` names: a
+        request that names another file is refused and nothing is typed (review 1.7, H2: a caller's own file would be a
+        way to guess). The answer is fixed words: `{"ok", "code", "message"}`, never a value."""
         problem = denied(request)
         if problem is not None:
             return problem
         sent = _hv(request, "x-tapwright-accounts")
         if sent is not None and (not os.path.isabs(sent) or "\x00" in sent):
             return _error("bad_params", "--accounts must be an absolute file path", 400)
-        path = sent
         if ceiling is not None:
-            path, refused = ceiling.check_accounts(sent, False)
+            _, refused = ceiling.check_accounts(sent, False)
             if refused is not None:
                 return _error(refused[0], refused[1], HTTP_STATUS[refused[0]])
-        result = await daemon.unlock_phone(path)
+        elif sent is not None:
+            return _error("not_allowed", "the phone's passcode is typed only from the vault file tapwright serve was "
+                                         "started with (--accounts), and this one was started with none; nothing was "
+                                         "typed", HTTP_STATUS["not_allowed"])
+        result = await daemon.unlock_phone()
         return JSONResponse({"ok": result.ok, "code": result.code, "message": result.message})
 
     async def notification_check(request):
@@ -312,10 +325,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
         if not isinstance(app, str) or not app.strip() or len(app) > 200:
             return _error("bad_params", 'send {"app": "<bundle id>"}', 400)
-        if ceiling is not None and (why := ceiling.refuse_scope((app,), False, None)) is not None:
-            return _error("not_allowed", why, HTTP_STATUS["not_allowed"])
+        app = app.strip()
         try:
-            keys = await daemon.notification_keys(app.strip())
+            keys = await daemon.notification_keys(app)
         except Refused as e:
             return _error(e.code, str(e), HTTP_STATUS.get(e.code, 500))
         return JSONResponse({"keys": keys}, headers={"Cache-Control": "no-store"})
@@ -387,20 +399,45 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if problem is not None:
             return problem
 
+        # `?for=recording` (tapwright record-video): no frame from while Notification Center was open for a read, nor
+        # from while the phone was being unlocked (its keypad lights each key: 1.7.8, M1)
+        hide = request.query_params.get("for") == "recording"
+        wait = RECORDING_KEEPALIVE if hide else 15
+
+        def keepalive(hidden: bool) -> bytes:
+            """A part with no picture, so a recorder sees the line is alive while nothing is sent (a still screen, or
+            frames that are left out), and is told when frames are being left out."""
+            note = "X-Hidden: notification-center\r\n" if hidden else ""
+            return (f"Content-Type: image/jpeg\r\nContent-Length: 0\r\nX-Keepalive: 1\r\n{note}\r\n"
+                    "\r\n--frame\r\n").encode()
+
         async def parts():
             async with daemon.pump.watching() as hub:
-                seq, sent = 0, None
+                seq, sent, told, last_out = 0, None, 0.0, time.monotonic()
                 yield b"--frame\r\n"  # each part then ends with the next boundary, so a browser shows it at once
                 while True:
-                    frame = await hub.next_after(seq, timeout=15)
+                    frame = await hub.next_after(seq, timeout=wait)
                     if frame is None:
                         if hub.closed:
                             return
+                        if hide:
+                            last_out = time.monotonic()
+                            yield keepalive(daemon.recording_covers(hub.mono()))
                         continue
                     seq = frame.seq
+                    if hide and daemon.recording_hides(hub, frame):
+                        if time.monotonic() - told >= 1.0:
+                            told = last_out = time.monotonic()
+                            yield keepalive(True)
+                        continue
                     picture = getattr(frame, "picture", None)
                     if picture is not None and picture is sent:
-                        continue  # a still screen's picture, published again for the settle: the viewer has it
+                        # a still screen's picture, published again for the settle: the viewer has it. A recorder still
+                        # needs to hear that the line is alive (the copies come faster than the idle wait ends)
+                        if hide and time.monotonic() - last_out >= RECORDING_KEEPALIVE:
+                            last_out = time.monotonic()
+                            yield keepalive(daemon.recording_covers(hub.mono()))
+                        continue
                     sent = picture
                     w, h = daemon.session.screen
                     try:
@@ -410,13 +447,19 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                     turn = getattr(daemon.session, "turn", 0)
                     if turn and picture is None:  # landscape: the WebDriverAgent frame comes as captured, portrait
                         jpeg = await daemon.turned(frame.seq, jpeg, turn)
+                    mono = ""
+                    if hide and (arrived := hub.arrival_of(frame.seq)) is not None:
+                        mono = f"X-Mono-Ms: {round(arrived * 1000)}\r\n"  # arrival on a clock a wall-clock step can't move
                     head = (f"Content-Type: image/jpeg\r\nContent-Length: {len(jpeg)}\r\n"
-                            f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\nX-Coverage: screen\r\n"
+                            f"X-Seq: {frame.seq}\r\nX-Captured-At: {frame.at}\r\n{mono}X-Coverage: screen\r\n"
                             f"X-Source: wda\r\nX-Size: {round(w)}x{round(h)}\r\n\r\n")
+                    last_out = time.monotonic()
                     yield head.encode() + jpeg + b"\r\n--frame\r\n"
 
-        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame",
-                                 headers={"Cache-Control": "no-store"})
+        headers = {"Cache-Control": "no-store"}
+        if hide:
+            headers["X-Hides"] = "notification-center"  # the recorder refuses a daemon that doesn't say this
+        return StreamingResponse(parts(), media_type="multipart/x-mixed-replace; boundary=frame", headers=headers)
 
     async def ws_allowed(websocket: WebSocket) -> bool:
         """The checks both WebSockets share: token (header or same-origin cookie), Host and Origin."""

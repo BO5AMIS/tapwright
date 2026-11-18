@@ -57,11 +57,16 @@ def draft_text(text: str, scrub=None) -> str:
     return plain if len(plain) <= DRAFT_LIMIT else f"{plain[:DRAFT_LIMIT]}…(+{len(plain) - DRAFT_LIMIT})"
 
 
-def draft_caption(word: str, app: str | None, text: str | None) -> str:
-    """`Send this in Wayfare? "<the field's text>"`; the word is the policy word that matched."""
+ONE_TIME_CODE = "A one-time code is in this draft."  # said whenever a draft holds one (review 1.7, H3)
+
+
+def draft_caption(word: str, app: str | None, text: str | None, code: bool = False) -> str:
+    """`Send this in Wayfare? "<the field's text>"`; the word is the policy word that matched. `code`: the draft holds a
+    one-time code, which the text shows only as its placeholder, so the caption says it in plain words."""
     where = clean(app) if app else "the app in front"
     said = f' "{text}"' if text is not None else " (no text found in the field)"
-    return f"{word[:1].upper()}{word[1:]} this in {where}?{said}"
+    warn = f" {ONE_TIME_CODE}" if code else ""
+    return f"{word[:1].upper()}{word[1:]} this in {where}?{said}{warn}"
 
 
 def draft_choices(word: str) -> list[str]:

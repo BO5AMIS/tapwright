@@ -8,7 +8,8 @@ its last check). Neither ends in `.json`, so neither is taken for a schedule.
 On Windows a time schedule is a Task Scheduler task that wakes the PC (`WakeToRun`, which only an XML definition can
 set). A file trigger is polled by a task that does not wake the PC: it runs while the PC is awake (1.14.1). So is
 a notification trigger: its poll asks the running daemon for the digests of that app's notifications, never their text
-(`new_notifications`), and `<name>.seen` keeps what its last check saw. Other systems get the
+(`new_notifications`), and `<name>.seen` keeps what its last check saw. The digests are HMACs under a random key kept
+beside the schedules (`notification-trigger.key`), so one can't be tried against every one-time code. Other systems get the
 launchd or cron entry to add, printed, since 1.14 doesn't say how a schedule starts there.
 """
 from __future__ import annotations
@@ -18,11 +19,13 @@ import datetime
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -37,6 +40,11 @@ VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 POLL_MINUTES = 2  # a file trigger's folder, or a notification trigger's app, is looked at this often while the PC is awake
 TASK_FOLDER = "Tapwright"
 SETTLE_SECONDS = 2.0  # a file touched this recently may still be being written: it counts at the next check
+CLIENT = "schedule-"  # a scheduled run's client id is this and the schedule's name (the daemon tells its calls apart by it)
+# the daemon's `busy` to a scheduled run's first call while someone else has the phone (Codex, PR #12 cycle 1, M2): nothing
+# was done, and the run waits and asks again within its 10 minutes
+ADMISSION_BUSY = "the phone is in use; a scheduled run waits for it"
+PHONE_LOCK = ".phone.lock"  # beside the run locks: one run or trigger check on the phone at a time (no schedule is named so)
 
 
 class ScheduleError(ValueError):
@@ -54,6 +62,12 @@ def file_of(name: str, where: Path | None = None) -> Path:
 
 def lock_of(name: str, where: Path | None = None) -> Path:
     return (where or folder()) / f"{name}.lock"
+
+
+def phone_lock_of(where: Path | None = None) -> Path:
+    """The machine-wide phone lock (review 1.7 B-H1): held by a scheduled run from its wait for the phone to the end of
+    its drive, and by a notification trigger's check, so two runs never overlap and a check never runs inside a run."""
+    return (where or folder()) / PHONE_LOCK
 
 
 def seen_of(name: str, where: Path | None = None) -> Path:
@@ -189,14 +203,29 @@ def names(where: Path | None = None) -> list[str]:
     return sorted(p.stem for p in base.glob("*.json")) if base.is_dir() else []
 
 
-def write(s: Schedule, where: Path | None = None) -> Path:
+@contextmanager
+def edit_lock(where: Path | None = None):
+    """Schedule creation and route replacement share this lock, so a new hold cannot race a route write."""
     base = where or folder()
     base.mkdir(parents=True, exist_ok=True)
-    path = file_of(s.name, base)
-    tmp = base / f"{s.name}.json.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(s.to_json(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    lock = base / ".edit.lock"
+    token = pidlock.take(lock)
+    if token is None:
+        raise ScheduleError("schedules or their routes are being changed; try again in a moment")
+    try:
+        yield
+    finally:
+        pidlock.release(lock, token)
+
+
+def write(s: Schedule, where: Path | None = None) -> Path:
+    with edit_lock(where):
+        base = where or folder()
+        path = file_of(s.name, base)
+        tmp = base / f"{s.name}.json.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(s.to_json(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return path
 
 
 def read_values(s: Schedule) -> dict[str, str]:
@@ -217,12 +246,13 @@ def read_values(s: Schedule) -> dict[str, str]:
 
 
 # ---- a file trigger -----------------------------------------------------------------------------------------------------
-def listing(directory: str) -> dict[str, int]:
-    """The files in a trigger's folder, name to modification time (ns); folders aren't files."""
+def listing(directory: str) -> dict[str, int] | None:
+    """The files in a trigger's folder, name to modification time (ns); None when the scan fails, not an empty folder."""
     try:
-        return {e.name: e.stat().st_mtime_ns for e in os.scandir(directory) if e.is_file()}
+        with os.scandir(directory) as entries:
+            return {e.name: e.stat().st_mtime_ns for e in entries if e.is_file()}
     except OSError:
-        return {}
+        return None
 
 
 def write_seen(name: str, held: dict[str, int], where: Path | None = None) -> None:
@@ -239,6 +269,8 @@ def new_files(s: Schedule, where: Path | None = None, now_ns: int | None = None)
     assert s.trigger and "file" in s.trigger
     now_ns = time.time_ns() if now_ns is None else now_ns
     now_held = listing(s.trigger["file"])
+    if now_held is None:
+        return []  # Keep the last successful snapshot; recovery must not make old files appear new.
     try:
         before = json.loads(seen_of(s.name, where).read_text(encoding="utf-8"))
         if not isinstance(before, dict):
@@ -268,6 +300,8 @@ def new_notifications(s: Schedule, keys: list[str], where: Path | None = None) -
         before = json.loads(seen_of(s.name, where).read_text(encoding="utf-8"))
         if not isinstance(before, dict) or before.get("notification") is not True or not isinstance(before.get("seen"), dict):
             before = None
+        elif before.get("keyed") != KEYED:  # (digests of an older version, unkeyed: noted again, never a run)
+            before = None
     except (OSError, ValueError):
         before = None
     if before is None:
@@ -284,7 +318,45 @@ def new_notifications(s: Schedule, keys: list[str], where: Path | None = None) -
 def _write_seen_keys(name: str, seen: dict[str, int], where: Path | None) -> None:
     base = where or folder()
     base.mkdir(parents=True, exist_ok=True)
-    seen_of(name, base).write_text(json.dumps({"notification": True, "seen": seen}), encoding="utf-8")
+    seen_of(name, base).write_text(json.dumps({"notification": True, "keyed": KEYED, "seen": seen}), encoding="utf-8")
+
+
+# ---- the notification trigger's key (review 1.7, L5) ----
+KEYED = 1  # the seen record's digests are HMACs under the trigger's key (an older record's aren't: it is noted again)
+TRIGGER_KEY_FILE: Path | None = None  # None: <schedules folder>/notification-trigger.key (the tests set their own)
+
+
+def trigger_key_path() -> Path:
+    return TRIGGER_KEY_FILE if TRIGGER_KEY_FILE is not None else folder() / "notification-trigger.key"
+
+
+def trigger_secret() -> bytes | None:
+    """The notification trigger's random key, kept beside the schedules (made once, readable by this user only): its
+    digests (Notification.key) are HMACs under it, so a digest can't be tried against every code. Made by publishing it
+    whole (pidlock.publish_new), so two processes making it at once agree on one. None when it can't be read or made:
+    the check then reads nothing."""
+    path = trigger_key_path()
+    for _ in range(2):
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeDecodeError):
+            return None
+        if text is not None:
+            # (a key file that isn't one is never replaced here: a person removes it, and the trigger notes anew)
+            return bytes.fromhex(text) if re.fullmatch(r"[0-9a-f]{64}", text) else None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        key = secrets.token_hex(32)
+        made = pidlock.publish_new(pidlock.Deps(), str(path), key + "\n")
+        if made == "published":
+            return bytes.fromhex(key)
+        if made == "error":
+            return None
+    return None
 
 
 # ---- the system's scheduler ---------------------------------------------------------------------------------------------
@@ -413,18 +485,20 @@ class Scheduler:
 
     # -- other systems: what to add
     def instructions(self, s: Schedule) -> str:
-        exe = shutil.which("tapwright") or " ".join(self.command)
-        run = f"{exe} run-schedule {s.name}"
+        found = shutil.which("tapwright")
+        command = [found] if found else self.command
+        exe, *lead = command
+        run = f"{' '.join(command)} run-schedule {s.name}"
         if s.trigger is not None:
             check = f"{run} --if-triggered"
             if self.platform == "darwin":
-                return plist(s, exe, ["run-schedule", s.name, "--if-triggered"], None)
+                return plist(s, exe, [*lead, "run-schedule", s.name, "--if-triggered"], None)
             what = "the folder" if "file" in s.trigger else "the app's notifications"
             return f"Add this line to your crontab (crontab -e); it looks at {what} every {POLL_MINUTES} minutes:\n" \
                    f"*/{POLL_MINUTES} * * * * {check}"
         assert s.at is not None
         if self.platform == "darwin":
-            return plist(s, exe, ["run-schedule", s.name], s.at)
+            return plist(s, exe, [*lead, "run-schedule", s.name], s.at)
         if m := TIME.match(s.at):
             days = "*" if m.group(3) == "daily" else "1-5"
             return f"Add this line to your crontab (crontab -e):\n{int(m.group(2))} {int(m.group(1))} * * {days} {run}"
@@ -509,11 +583,17 @@ def add(route: str, *, at: str | None = None, on_file: str | None = None, on_not
         return f"Error: {e}", 1
     notes: list[str] = []
     if s.trigger and "file" in s.trigger and not Path(s.trigger["file"]).is_dir():
-        notes.append(f"Note: the folder {s.trigger['file']} doesn't exist yet; the trigger fires when files appear in it.")
-    path = write(s, where)
+        notes.append(f"Note: the folder {s.trigger['file']} isn't available yet; the first successful check records "
+                     "existing files, then newly appearing files trigger the route.")
+    try:
+        path = write(s, where)
+    except (OSError, ScheduleError) as e:
+        return f"Error: {e}", 1
     s = dataclasses.replace(s, file=str(path))
     if s.trigger and "file" in s.trigger:
-        write_seen(s.name, listing(s.trigger["file"]), where)  # what is there now isn't new
+        held = listing(s.trigger["file"])
+        if held is not None:
+            write_seen(s.name, held, where)  # what is there now isn't new; a failed scan waits for the first success
     try:
         said = scheduler.install(s)
     except SchedulerError as e:
@@ -580,16 +660,29 @@ def unlock(name: str, where: Path | None = None, audit_folder: Path | None = Non
         check_name(name)
     except ScheduleError as e:
         return f"Error: {e}", 1
-    result = pidlock.unlock(lock_of(name, where), deps)
+    return _unlock(lock_of(name, where), f'The schedule "{name}" has no lock', f'The run lock of "{name}"',
+                   f"schedule {name} lock", audit_folder, deps)
+
+
+def unlock_phone(where: Path | None = None, audit_folder: Path | None = None,
+                 deps: pidlock.Deps | None = None) -> tuple[str, int]:
+    """`tapwright schedule unlock --phone`: remove a stuck phone lock (review 1.7 B-H1), as `unlock` does a run lock."""
+    return _unlock(phone_lock_of(where), "There is no phone lock", "The phone lock", "schedules phone lock",
+                   audit_folder, deps)
+
+
+def _unlock(path: Path, none: str, which: str, audited: str, audit_folder: Path | None,
+            deps: pidlock.Deps | None) -> tuple[str, int]:
+    result = pidlock.unlock(path, deps)
     if result.status == "none":
-        return f'The schedule "{name}" has no lock; nothing to remove.', 0
+        return f"{none}; nothing to remove.", 0
     if result.status == "live":
-        return (f'The run lock of "{name}" is held by a live process (pid {result.pid}); nothing was removed. Wait for the '
+        return (f"{which} is held by a live process (pid {result.pid}); nothing was removed. Wait for the "
                 "run to finish, or stop that process first."), 1
     done = [f"Removed {p} ({why})." for p, why in result.removed]
     if result.removed:
         auditlog.AuditLog(audit_folder).write(
-            "approval", name=f"schedule {name} lock", detail=f"unlocked ({'; '.join(why for _, why in result.removed)})")
+            "approval", name=audited, detail=f"unlocked ({'; '.join(why for _, why in result.removed)})")
     if result.status == "failed":
         return "\n".join([*done, f"Couldn't remove {result.failed or 'the lock'}: it changed or can't be deleted. "
                                  "Look at it and try again."]), 1
@@ -600,9 +693,19 @@ def stuck_locks(where: Path | None = None, deps: pidlock.Deps | None = None) -> 
     """For `doctor`: (schedule, lock path, why) for each run lock that is stuck (never a live one)."""
     found = []
     for n in names(where):
-        base = str(lock_of(n, where))
-        for path in (base, f"{base}.takeover"):
-            kind, pid = pidlock.state(path, deps)
-            if kind in ("dead", "empty", "unreadable"):
-                found.append((n, path, pidlock.stuck_words(kind, pid)))
+        found += [(n, path, why) for path, why in _stuck(lock_of(n, where), deps)]
+    return found
+
+
+def stuck_phone_lock(where: Path | None = None, deps: pidlock.Deps | None = None) -> list[tuple[str, str]]:
+    """For `doctor`: (lock path, why) when the phone lock is stuck (never a live one)."""
+    return _stuck(phone_lock_of(where), deps)
+
+
+def _stuck(lock: Path, deps: pidlock.Deps | None) -> list[tuple[str, str]]:
+    found = []
+    for path in (str(lock), f"{lock}.takeover"):
+        kind, pid = pidlock.state(path, deps)
+        if kind in ("dead", "empty", "unreadable"):
+            found.append((path, pidlock.stuck_words(kind, pid)))
     return found

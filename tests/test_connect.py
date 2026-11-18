@@ -29,12 +29,10 @@ def home(tmp_path: Path) -> Path:
     return tmp_path / "home"
 
 
-def test_it_refuses_without_apps_or_dedicated(tmp_path):
-    with pytest.raises(connect.ConnectError, match="--apps"):
-        connect.install("claude", [], False, home=home(tmp_path), runner=FakeClaude(), which=lambda n: "claude")
-    with pytest.raises(connect.ConnectError, match="together"):
-        connect.install("codex", ["a"], True, home=home(tmp_path))
-    assert not list(home(tmp_path).iterdir())  # nothing written
+def test_install_needs_no_app_allowlist(tmp_path):
+    connect.install("claude", [], False, home=home(tmp_path), runner=FakeClaude(), which=lambda n: "claude")
+    connect.install("codex", ["a"], True, home=home(tmp_path))
+    assert list(home(tmp_path).iterdir())
 
 
 def test_claude_removes_then_adds_and_installs_the_skill(tmp_path):
@@ -156,10 +154,10 @@ def test_cursor_project_file_and_refusing_bad_json(tmp_path):
     assert (bad / ".cursor" / "mcp.json").read_text(encoding="utf-8") == "{nope"
 
 
-def test_the_command_refuses_and_prints(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["tapwright", "install", "--client", "cursor"])
-    assert cli.main() == 1
-    assert "--apps" in capsys.readouterr().out
+def test_install_command_accepts_no_app_list(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["tapwright", "install", "--client", "cursor", "--project", str(tmp_path)])
+    assert cli.main() == 0
+    assert (tmp_path / ".cursor" / "mcp.json").is_file()
 
 
 def test_install_command_is_listed():
@@ -304,3 +302,22 @@ def test_install_keeps_and_replaces_the_ux_rules_file(tmp_path):
     assert codex_args(config)[-1] == str(other.resolve()) and any("replaced the earlier --ux-rules" in x for x in lines)
     with pytest.raises(connect.ConnectError, match="ux rules file"):
         connect.install("codex", ["a"], False, home=home(tmp_path), ux_rules=str(tmp_path / "missing.json"))
+
+
+
+def test_default_install_command_has_no_empty_app_argument(tmp_path):
+    args = connect.mcp_args([], False)
+    assert args == ["mcp"]
+    with pytest.raises(connect.ConnectError) as error:
+        connect.install_claude(args, None, which=lambda n: None)
+    assert str(error.value).endswith("claude mcp add --scope user tapwright -- tapwright mcp")
+
+
+def test_copyable_commands_preserve_empty_values_and_special_paths():
+    args = ["claude", "", "C:/User's Files/$screenshots"]
+    rendered = connect.command_text(args)
+    if connect.os.name == "nt":
+        assert rendered == "claude '' 'C:/User''s Files/$screenshots'"
+    else:
+        import shlex
+        assert shlex.split(rendered) == args

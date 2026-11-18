@@ -53,8 +53,8 @@ def installed_text(written: list[Path]) -> str:
         "",
         f"Claude Code reads the first (type /{NAME}), Codex and other agents the second (in Codex: ${NAME}).",
         "Start a new agent session to pick it up. The skill needs Tapwright's MCP server too:",
-        "  Claude Code:  claude mcp add tapwright -- tapwright mcp --apps <bundle id>",
+        "  Claude Code:  claude mcp add tapwright -- tapwright mcp",
         '  Codex:        in ~/.codex/config.toml:  [mcp_servers.tapwright]  command = "tapwright"  '
-        'args = ["mcp", "--apps", "<bundle id>"]',
-        "  Others:       register the stdio command `tapwright mcp --apps <bundle id>` under the name tapwright",
+        'args = ["mcp"]',
+        "  Others:       register the stdio command `tapwright mcp` under the name tapwright",
     ])

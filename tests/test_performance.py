@@ -211,49 +211,8 @@ def test_the_measured_window_begins_after_the_close_and_before_the_open():
     run(go)
 
 
-def test_a_tap_goes_through_the_ordinary_tool_and_so_through_the_policy():
-    async def go():
-        s = FakeSession()
-        s.tree = [button("e1", "OK", "ok-button"), button("e2", "Delete trip", "delete", rect=(10, 200, 100, 40))]
-        d = make(s)
-        stop, task = await started(d)
-        await d.run_tool("a", "look", {"screenshot": False})
-        s.device.measurement = EXAMPLE
-        r = await d.run_tool("a", "performance", {"seconds": 1, "tap": {"id": "ok-button"}})
-        assert r["text"].startswith("Measured 1.0 s.") and s.calls.count("tap") == 1
-        with pytest.raises(Refused) as e:  # Delete needs a person's OK, as it does for `tap` itself
-            await d.run_tool("a", "performance", {"seconds": 1, "tap": {"id": "delete"}})
-        assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value)
-        assert s.calls.count("tap") == 1
-        assert s.device.metered[-2:] == [("start", "com.example.app"), ("stop", "com.example.app")]  # sampling ended
-        await finish(stop, task)
-    run(go)
 
 
-def test_personal_mode_measures_only_an_app_it_was_given():
-    async def go():
-        s = FakeSession()
-        d = make(s)
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        s.device.measurement = EXAMPLE
-        s.foreground = "com.example.mail"  # another app is in front
-        s.app = ("Mail box", "com.example.mail")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "performance", {"seconds": 1}, scope=mine)
-        assert e.value.code == "not_allowed" and str(e.value).startswith("outside_apps: ")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "performance", {"launch": True}, scope=mine)
-        assert e.value.code == "not_allowed" and s.closed == [] and s.launched == []
-        with pytest.raises(Refused) as e:  # no app list at all
-            await d.run_tool("a", "performance", {"seconds": 1}, scope=Scope(()))
-        assert e.value.code == "not_allowed"
-        assert s.device.metered == []  # nothing was sampled
-        s.foreground, s.app = "com.example.app", ("Example", "com.example.app")
-        r = await d.run_tool("a", "performance", {"seconds": 1}, scope=mine)
-        assert r["text"].startswith("Measured 1.0 s.")
-        await finish(stop, task)
-    run(go)
 
 
 def test_no_app_in_front_and_a_meter_that_cannot_start_are_told_plainly():

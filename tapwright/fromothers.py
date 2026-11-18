@@ -92,9 +92,13 @@ def _messages(root: ET.Element, screen: tuple[float, float] | None) -> set[ET.El
 def _mail(root: ET.Element) -> set[ET.Element]:
     nodes = _subtree(root)
     marked: set[ET.Element] = set()
+    # Composing is told by the app's own views only: a mail's text (a line "Send", "Subject:" or "To" in its body, a
+    # hostile one on purpose) is inside a WebView and never switches the marking off (review 1.7 B-M9).
+    in_web = {n for web in nodes if _type(web) == "WebView" for n in web.iter()}
+    own = [n for n in nodes if n not in in_web]
     composing = any(_type(n) == "Keyboard" for n in nodes) or any(
         _COMPOSE_NAME.match(_says(n)) or _COMPOSE_NAME.match(n.get("name") or "")
-        or "compose" in (n.get("name") or "").casefold() for n in nodes)
+        or "compose" in (n.get("name") or "").casefold() for n in own)
     if not composing:
         for web in nodes:
             if _type(web) == "WebView":

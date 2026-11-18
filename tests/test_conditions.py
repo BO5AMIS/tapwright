@@ -109,20 +109,6 @@ def test_a_failed_close_of_a_not_running_app_does_not_stop_the_launch():
     run(go)
 
 
-def test_personal_mode_still_gives_only_the_given_apps():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        mine = Scope(("com.example.app",))
-        r = await d.run_tool("a", "open_app", {"app": "com.example.app", "language": "ar", "look": False}, scope=mine)
-        assert r["text"] == "Opened Example (com.example.app) in ar."
-        d.session.installed.append({"bundle_id": "com.other.app", "name": "Other", "version": "1", "build": "1",
-                                    "executable": "Other"})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "open_app", {"app": "com.other.app", "language": "ar"}, scope=mine)
-        assert e.value.code == "not_allowed" and d.session.launched == ["com.example.app"]
-        await finish(stop, task)
-    run(go)
 
 
 def test_recording_keeps_the_arguments_on_the_open_app_step(tmp_path):

@@ -50,6 +50,8 @@ class Refused(Exception):
         super().__init__(message)
         self.code = code
         self.draft = draft  # INTERNAL: the touch stopped at a draft (21.3); the daemon's error JSON carries it for a schedule run, no agent sees it
+        # INTERNAL: fixed gate codes/counts only, for failed hit checks in the action log (never UI content).
+        self.hit_check: dict | None = None
 
 
 @dataclass
@@ -79,6 +81,9 @@ class ClientView:
     typed_at: tuple[str, str] | None = None  # the place the agent typed text at: a move from there isn't a road (§18.2)
     place_seen: int = -1  # the screen generation `place` was worked out at: a person's input since makes it unknown
     tree: "ui.Tree | None" = None  # the tree of the agent's newest answer's read, for the place it shows
+    # (name, bundle id) of the app the agent's last touch or open_app was meant for, until its next look: type_text
+    # without a target types only there (1.7.8, X item 4)
+    aimed_app: tuple[str, str] | None = None
 
 
 class Controller:

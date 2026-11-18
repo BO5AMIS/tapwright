@@ -56,3 +56,20 @@ def _no_journey_left_running():
     journey.running.clear()
     yield
     journey.running.clear()
+
+
+@pytest.fixture(autouse=True)
+def _unlock_record_in_tmp(monkeypatch, tmp_path):
+    """The passcode unlock's record of attempts (unlock.py) and the notification trigger's key (schedules.py) live in the
+    real ~/.tapwright: never in a test."""
+    from tapwright import schedules, unlock
+    monkeypatch.setattr(unlock, "STATE_FILE", tmp_path / "unlock-record" / "unlock-state.json")
+    monkeypatch.setattr(schedules, "TRIGGER_KEY_FILE", tmp_path / "trigger-key" / "notification-trigger.key")
+
+
+@pytest.fixture(autouse=True)
+def _otp_marks_in_tmp(monkeypatch, tmp_path):
+    """A handed-over code's mark (otp.Codes, Codex PR #12 cycle 1 M4) is written to disk: never the owner's real
+    ~/.tapwright in a test. One folder per test, shared by every daemon the test makes (a restart keeps it)."""
+    from tapwright import otp
+    monkeypatch.setattr(otp, "USED_DIR", tmp_path / "otp-used")

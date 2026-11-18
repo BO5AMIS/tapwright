@@ -8,7 +8,9 @@ placeholder `${account.username}` or `${account.password}`, filled in at the mom
   - `apps` limits where an account may be used.
   - A file inside a git work tree that doesn't ignore it loads no accounts: any use says so.
   - `phone.passcode` is exposed nowhere, and typed by the tool itself only on the lock screen's passcode entry (unlock.py,
-    Tapwright 1.7). It is redacted like any value, as `<phone's passcode>`.
+    Tapwright 1.7), where it shows as dots. It is not in the text redactor: a 4 to 6 digit passcode replaced in answers
+    would turn every date, year and price on screen into a test of it (review 1.7, M2). Only the entry named `phone`
+    holds it.
 
 What the redaction guarantees (the threat model; Codex, PR #10 cycles 14, 15, 20 and 21):
   - Values: a username or password is 3 to 256 characters: at most 256 as written in the file, at least 3 once decoded,
@@ -57,7 +59,10 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
+
+if TYPE_CHECKING:
+    from . import vault
 
 from .control import Refused
 
@@ -185,20 +190,16 @@ class Loaded:
         if name not in self.names:
             raise Refused("not_found", f"no account called {name}; the accounts are: {', '.join(self.names) or 'none'}")
         found = self.accounts[name]
-        if found.apps is not None and bundle not in found.apps:
-            raise Refused("not_allowed", f"account {name} may be used only in {', '.join(found.apps)}; this is {bundle or 'no app'}")
         return found
 
     def entries(self) -> tuple[tuple[str, str, str], ...]:
         """(entry name, field, value) of every value this file holds that is kept out of text: an account's username and
-        password, and in a vault every other kind's fields too. (1.7) The phone's passcode as well, shown as
-        `<phone's passcode>`: the tool types it on the lock screen now, so it is a value like any other (§20.3)."""
+        password, and in a vault every other kind's fields too. Never the phone's passcode (review 1.7, M2): it is
+        typed only on the lock screen's keypad, where it shows as dots, so it never reaches text, and replacing a 4 to 6
+        digit number in every answer would tell the agent the passcode the first time a date or a price showed it."""
         found = _entries(self.accounts)
         found += tuple((e.name, f, v) for e in self.vault.values() if e.kind not in ("account", "phone")
                        for f, v in e.values.items() if v and not weak(v))
-        if isinstance(self.passcode, str) and self.passcode and not weak(self.passcode):
-            name = next((n for n, e in self.vault.items() if e.kind == "phone"), PHONE)
-            found += ((name, "passcode", self.passcode),)
         return found
 
     def reference(self, text: str, active: Account | None, secure: bool, ref: str, bundle: str | None) -> Typing | None:
@@ -219,9 +220,6 @@ class Loaded:
         if account_field is not None:
             return Typing(typed(text, active, secure, ref), active.name if active else None, "account", account_field)
         if otp_app is not None:
-            if otp_app != bundle:
-                raise Refused("not_allowed", f"${{otp.{otp_app}}} is typed only into {otp_app}; this is {bundle or 'no app'}. "
-                                             "Nothing was typed.")
             if otp_app not in self.otp:
                 raise Refused("bad_params", f"one-time codes are off for {otp_app}: the vault file's \"otp\" setting turns "
                                             "them on for an app (Tapwright §24).")
@@ -250,16 +248,6 @@ class Loaded:
         value = entry.values.get(wanted)
         if not value:
             raise Refused("bad_params", f'vault entry "{name}" has no {wanted}.')
-        if entry.apps is not None and bundle not in entry.apps:
-            raise Refused("not_allowed", f'vault entry "{name}" may be typed only in {", ".join(entry.apps)}; this is '
-                                         f"{bundle or 'no app'}. Nothing was typed.")
-        if entry.kind == "account" and wanted == "password" and not secure:
-            raise Refused("bad_params", f"an account's password goes only into a password field; {ref} is a text field.")
-        if entry.kind == "account" and wanted == "username" and secure:
-            raise Refused("bad_params", f"an account's username goes only into a text field that isn't secure; {ref} is a "
-                                        "password field.")
-        if entry.kind == FIXTURE and secure:
-            raise Refused("bad_params", f"a fixture is plain test data and never goes into a password field; {ref} is one.")
         return Typing(value, name, entry.kind, wanted)
 
     @functools.cached_property
@@ -1075,10 +1063,6 @@ def typed(text: str, active: Account | None, secure: bool, ref: str) -> str:
     value = active.password if which == "password" else active.username
     if not value:
         raise Refused("bad_params", f"account {active.name} has no {which}")
-    if which == "password" and not secure:
-        raise Refused("bad_params", f"an account's password goes only into a password field; {ref} is a text field.")
-    if which == "username" and secure:
-        raise Refused("bad_params", f"an account's username goes only into a text field that isn't secure; {ref} is a password field.")
     return value
 
 
@@ -1298,8 +1282,9 @@ def _loaded(path: str, data: object, how: str | None) -> Loaded:
         otp, otp_why = _read_otp(data.get("otp"))
         accounts = {n: Account(n, e.values.get("username"), e.values.get("password"), e.apps)
                     for n, e in entries.items() if e.kind == "account"}
-        phone = entries.get(PHONE) if PHONE in entries and entries[PHONE].kind == "phone" else \
-            next((e for e in entries.values() if e.kind == "phone"), None)
+        # only the entry named `phone` is the phone's passcode (review 1.7, L3): another entry of kind phone (an
+        # account's app PIN that an older `vault protect` moved into `<name>_phone`) is never typed on the lock screen
+        phone = entries.get(PHONE) if PHONE in entries and entries[PHONE].kind == "phone" else None
         notes = " ".join(n for n in (note, f"Note: the vault file {path}: {otp_why}." if otp_why else None) if n)
         return Loaded(path, accounts, phone.values.get("passcode") if phone else None, None, entries, otp, how,
                       notes or None, VERSION2)
@@ -1360,7 +1345,9 @@ class Store:
         """A one-time code handed over or typed (§20.4): kept out of text from now on, as `<one-time code>`, in the same
         single pass as every vault value."""
         if code and not weak(code):
-            self._keep((("", CODE_LABEL, code),))
+            # every form a notification writes it in: `123 456` and `123-456` as well as `123456` (Codex, PR #12 c1, H4)
+            from .notifications import code_forms
+            self._keep(tuple(("", CODE_LABEL, form) for form in code_forms(code)))
 
     def _keep(self, entries: "tuple[tuple[str, str, str], ...]") -> None:
         fresh = [e for e in entries if e not in self._ever]

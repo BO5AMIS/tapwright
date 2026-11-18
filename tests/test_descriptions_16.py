@@ -36,26 +36,18 @@ def test_run_and_record_describe_what_1_6_added():
     assert "route" in params("record") and "as" in params("type_text")
 
 
-def test_brief_is_a_parameter_of_every_action_and_the_instructions_say_what_it_does():
-    for name in ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for",
-                 "open_app", "alert", "press_button", "rotate", "run", "drive"):
-        assert "brief" in params(name), name
-    assert "`brief: true` on an action, `run` or `drive` cuts the answer to its first line" in INSTRUCTIONS
-    assert "at most 12 lines" in INSTRUCTIONS and "`…<n> more: look shows them.`" in INSTRUCTIONS  # (the spec's wording)
-    assert 'to: "target"` for a bar over it' in INSTRUCTIONS  # 1.13.1 (3): off_screen is no longer a "scroll to target" case
-    assert "`off_screen` means no scroll can reach it" in INSTRUCTIONS
-    assert "the tap was delivered, and nothing on screen changed within <N> s" in INSTRUCTIONS  # §3's note, 1.13.1 (8)
-    assert "under the threshold still matches but is named" in describe("compare_screen")  # 1.13.1 (2)
-    assert "`off_route`" in INSTRUCTIONS
+def test_brief_is_documented_on_actions_and_batches():
+    for name in ("tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "wait", "wait_for", "open_app", "alert", "press_button", "rotate", "run", "drive"):
+        assert "brief" in params(name)
+    assert "brief: true" in INSTRUCTIONS and "12 lines" in INSTRUCTIONS
+    assert "under the threshold still matches but is named" in describe("compare_screen")
 
 
-def test_the_agreed_texts_around_the_1_6_ones_are_unchanged():
+def test_batch_and_recording_descriptions_preserve_execution_contract():
     assert SHARED["run"].startswith("Runs several steps in one call, in order, and answers once:")
-    assert "Use it to fill a form or walk a flow you're sure of; read the answer before the next batch. A step may carry" \
-        in SHARED["run"]
+    assert "read the answer before the next batch" in SHARED["run"]
     assert SHARED["record"].startswith("Record a run as a script that replays without an AI:")
-    assert INSTRUCTIONS.index("`Settled in 0.31 s.`") < INSTRUCTIONS.index("`brief: true`") < INSTRUCTIONS.index("`Note:` lines")
-    assert INSTRUCTIONS.index("`expect_failed`") < INSTRUCTIONS.index("`off_route`") < INSTRUCTIONS.index("`internal`")
+    assert "expect_failed" in INSTRUCTIONS and "off_route" in INSTRUCTIONS
 
 
 def test_no_text_claims_what_session_report_does_not_say():

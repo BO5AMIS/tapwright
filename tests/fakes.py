@@ -308,6 +308,7 @@ class FakeSession:
         self.app_names: dict[str, str] = {}  # filled by read_app_names, as Session does at connect
         self.foreground: str | None = None  # the bundle id the phone shows
         self.tree_app: tuple[str, str] | None = None  # the root Application a read names (None: it names none)
+        self.read_app: tuple[str, str] | None = None  # what the newest read named (Session.read_app)
         self.front_asks = 0  # how many times foreground_bundle_id (the separate activeAppInfo question) was asked
         self.back_at: tuple[float, float] | None = None  # where the navigation bar's back button is (None: none)
         self.has_nav_bar = False  # a NavigationBar without a back button (back_at: one with it)
@@ -372,6 +373,12 @@ class FakeSession:
         self.hit_asks.append((x, y))
         return self.hit_answer
 
+    async def read_source(self, timeout=None):
+        """The tree's XML now (Session.read_source): `source_now` when a test set one, else the last read's."""
+        self._record("read_source")
+        self.last_source = getattr(self, "source_now", None) or self.last_source
+        return self.last_source
+
     def _record(self, name: str) -> None:
         self.calls.append(name)
         if name in self.fail:
@@ -417,7 +424,7 @@ class FakeSession:
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
-        self.items = list(self.tree)
+        self.items, self.read_app = list(self.tree), self.app
         return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
 
     async def read_scale(self, refresh=False):
@@ -463,15 +470,25 @@ class FakeSession:
         self._record(("audit", tuple(types)))
         return list(self.audit_issues)
 
+    async def peek_tree(self, timeout=None):
+        """A read that keeps nothing: `items` stay as they are (Session.peek_tree)."""
+        self._record("peek_tree")
+        return ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+
     async def refresh(self, timeout=None):
         self._record("refresh")
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        return ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        self.read_app = self.tree_app
+        if getattr(self, "on_tree", None) is not None:  # (as the real Session's reads do)
+            self.on_tree(tree)
+        return tree
 
     async def snapshot_from(self, tree):
         """The foreground app for a tree that was already read: the one extra request a final answer needs."""
         self._record("app")
+        self.read_app = self.app
         return Snapshot(tree, self.app, 3.0)
 
     async def apps(self):
@@ -509,6 +526,13 @@ class FakeSession:
         if self.center_open and getattr(target, "x", None) is not None:
             self._record("tap")
             self.tap_points.append((target.x, target.y))
+            if getattr(self, "center_tap_stays", False):  # the tap opened nothing: Notification Center is still down
+                spot = getattr(self, "center_open_spot", None)  # iOS 26: the row's Open action, shown after a first tap
+                if spot is not None and (target.x, target.y) == spot:
+                    self.center_open, self.foreground = False, self.center_opens
+                elif getattr(self, "center_after_tap", None) is not None:
+                    self.center_source = self.center_after_tap
+                return f"Tapped ({round(target.x)}, {round(target.y)})."
             self.center_open, self.foreground = False, self.center_opens
             return f"Tapped ({round(target.x)}, {round(target.y)})."
         hit = ui.resolve(self.items, target)  # a refused target never reaches the phone
@@ -530,11 +554,14 @@ class FakeSession:
         self._maybe_taken(hit.center)
         return f"Tapped {hit.line(actions=False)}."
 
-    async def type_text(self, text, replace=False, submit=False, target=None, at=None):
+    async def type_text(self, text, replace=False, submit=False, target=None, at=None, no_tap=False):
+        self.no_tap = no_tap  # (1.7.8) the daemon said the field has focus and no focusing tap may be made
         if target is not None:
             hit = ui.resolve(self.items, target)  # a missing or ambiguous field is refused, as in Session
             self.last_point = at or (hit if isinstance(hit, tuple) else hit.center)  # where the focusing tap went
         self._record("type_text")
+        if target is not None and isinstance(hit, ui.Element) and hit.role == "input":
+            self.focused = hit.identifier or hit.label  # successful targeted typing has acquired this field's focus
         self.typed.append((text, replace, submit, target))
         return f"typed {len(text)} characters"
 
@@ -605,7 +632,7 @@ class FakeSession:
         self.terminated.append(bundle_id)
         return f"closed {bundle_id}"
 
-    async def alert(self, action):
+    async def alert(self, action, *, name=None):
         self._record("alert")
         return f"alert {action}ed"
 
@@ -665,7 +692,7 @@ class DescribingSession(FakeSession):
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
-        self.items = list(self.tree)
+        self.items, self.read_app = list(self.tree), self.app
         tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, above=self.above, below=self.below)
         return Snapshot(tree, self.app, 3.0)
 

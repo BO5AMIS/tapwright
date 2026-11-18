@@ -9,7 +9,9 @@ skip is a `schedule` line in the audit log (§23).
 Before the route starts, the run checks what could stop it, in this order (§22.3): another run of this schedule going
 (the run lock, pidlock.py: `skipped: the previous run is still going`), the phone locked (`skipped: the phone is locked`,
 unless a passcode unlock is given), the phone in use by a person or an agent (it waits up to 10 minutes, then `skipped:
-the phone was in use`; a run is never queued behind another).
+the phone was in use`; a run is never queued behind another). A machine-wide phone lock (`.phone.lock` beside the run
+locks) is held from that wait to the end of the drive, and by a notification trigger's check, so two runs of different
+schedules never overlap and a check never runs inside a run: the one that finds it held waits as for a busy phone.
 """
 from __future__ import annotations
 
@@ -43,7 +45,7 @@ class Outcome:
     result: str  # the words: `done`, `failed at step 3 (expect)`, `skipped: the phone was in use`, ...
     text: str = ""  # what the run printed
     code: int = 0  # the exit code: 0 done or idle, 1 failed or stopped, 2 couldn't start, 3 skipped
-    report: str | None = None  # the report's .json path
+    report: str | None = None  # the operational .json path; only the redacted path in text is safe to display
 
 
 @dataclasses.dataclass
@@ -90,7 +92,7 @@ def find_route(s: schedules.Schedule) -> str:
 
 def classify(code: str, message: str, draft: bool = False) -> tuple[str, str]:
     """(status, result) of a refusal that ended the drive."""
-    first = message.strip().splitlines()[0][:200] if message.strip() else ""
+    first = message.strip().splitlines()[0][:200] if message.strip() else ""  # (the caller redacted it whole first)
     if draft:  # the daemon's internal flag for a stop at a draft (21.3), never the words of the message
         return "stopped", DRAFT
     if code == "not_allowed" and "needs_confirmation" in message or code == "needs_confirmation":
@@ -102,20 +104,63 @@ def classify(code: str, message: str, draft: bool = False) -> tuple[str, str]:
     return "failed", f"failed: {code}: {first}"
 
 
+INTERNAL = "failed: internal"
+
+
 def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> Outcome:
     """One run of schedule `name`, now. With `if_triggered` (the poll of a file trigger) it runs only when a file appeared
-    in the trigger's folder since the last check, and does nothing, silently, otherwise."""
+    in the trigger's folder since the last check, and does nothing, silently, otherwise. Whatever goes wrong inside ends
+    as `failed: internal`, with its audit line and report (review 1.7 B-L7: under `pythonw` a traceback is seen by
+    nobody)."""
     deps = deps or Deps()
-    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now)
+    began = deps.now()
+    # Retain this redactor through every exit, including unexpected failures after the vault changes or disappears.
+    # If establishing it fails unexpectedly, even the schedule name could be a value: show only the generic failure.
+    audit = auditlog.AuditLog(deps.audit_folder, now=deps.now, scrub=lambda text: INTERNAL)
+    try:
+        early, sure = early_scrubber(name, deps.where)
+        audit.scrub = early
+        return _run(name, if_triggered, deps, audit, sure)
+    except Exception as e:
+        detail = f"{INTERNAL} ({type(e).__name__})"
+        try:
+            audit.write("schedule", name=name, detail=detail)
+        except Exception:
+            pass
+        try:
+            return finish(name, deps, "failed", detail, None, began, code=1, used=False, scrub=audit.scrub)
+        except Exception:
+            try:
+                return Outcome("failed", audit.scrub(detail), audit.scrub(f"{name}: {detail}"), 1)
+            except Exception:
+                return Outcome("failed", INTERNAL, INTERNAL, 1)
+
+
+def _run(name: str, if_triggered: bool, deps: Deps, audit: auditlog.AuditLog, sure: bool) -> Outcome:
+    # the redactor comes first, from the vault the file names, before the schedule is validated: an error that quotes a
+    # value or a path ("with's caption must be a text, not ['@<email>.txt']") is redacted whole, then cut, in the audit
+    # line, the report and what is printed (§20.3; Codex, PR #12 cycle 3, H6). Where it can't be made, the error's own
+    # words are never shown
+    early = audit.scrub
     try:
         s = schedules.load(name, deps.where)
     except schedules.ScheduleError as e:
-        audit.write("schedule", name=name, detail=f"failed: {e}"[:300])
-        return finish(name, deps, "failed", f"failed: {e}", None, deps.now(), code=2)
+        result = cut(early, f"failed: {e}" if sure else WITHHELD.format(name=name), 300)
+        audit.write("schedule", name=name, detail=result)
+        return finish(name, deps, "failed", result, None, deps.now(), code=2, scrub=early)
+    # the run's redactor, from its own vault, before anything is written: every audit line and the report go through it,
+    # whole and before any cut (§20.3, §23; Codex, PR #12 cycle 2, H7)
+    loaded_scrub = scrubber(s)
+    audit.scrub = lambda text: loaded_scrub(early(text))
+    # a serve this run starts is started with the schedule's own vault file, so a scheduled unlock can type the
+    # passcode (the daemon types it only from its own --accounts); a serve already running keeps what it has
+    serve_args = getattr(deps.api(), "set_serve_args", None)
+    if callable(serve_args):
+        serve_args(["--accounts", s.accounts] if s.accounts else [])
     if if_triggered:
         if not s.trigger:
             return Outcome("failed", "failed: --if-triggered is for a schedule with a file or notification trigger",
-                           code=2, text=f'The schedule "{name}" has no trigger.')
+                           code=2, text=audit.scrub(f'The schedule "{name}" has no trigger.'))
         if "file" in s.trigger and not schedules.new_files(s, deps.where):
             return Outcome("idle", "nothing new")
         if "notification" in s.trigger and not notification_arrived(s, deps):
@@ -130,38 +175,114 @@ def run(name: str, *, if_triggered: bool = False, deps: Deps | None = None) -> O
         pidlock.release(schedules.lock_of(name, deps.where), token)
 
 
+def in_use(status: dict) -> bool:
+    """The phone is busy for a schedule (§22.3): a person or an agent drives, the daemon's own test says in use (a call in
+    flight or in the last 90 s, a person's input in the last 90 s, a scheduled run going), or the live view is paused."""
+    return status.get("driver") in ("person", "agent") or bool(status.get("in_use")) or bool(status.get("paused"))
+
+
+def take_phone(phone: Path, deps: Deps) -> str | None:
+    """The phone lock's token, or None while another run or check holds it (pidlock: a live holder is never displaced)."""
+    try:
+        phone.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return pidlock.take(phone, deps.lock)
+
+
 def notification_arrived(s: schedules.Schedule, deps: Deps) -> bool:
     """A notification trigger's check (§22.1): has a notification from its app appeared since the last check? Only while
     the PC is awake (the poll's task doesn't wake it) and the phone is live; never while a person or an agent uses the
-    phone, or the live view is paused: it waits for that, up to the run's own wait, and else looks again at the next
-    poll. Nothing is written for a check that finds nothing (no report, no audit line)."""
+    phone, a scheduled run holds the phone lock, or the live view is paused: it waits for that, up to the run's own
+    wait, and else looks again at the next poll. Nothing is written for a check that finds nothing (no report, no audit
+    line). The check holds the phone lock while it looks (review 1.7 B-H1)."""
     api = deps.api()
     waited = deps.monotonic()
+    phone = schedules.phone_lock_of(deps.where)
     while True:
-        try:
-            status = api.status()
-        except Exception:
-            return False
-        if not status or status.get("state") != "live":
-            return False  # (a locked or missing phone: the next poll looks again)
-        if not (status.get("driver") in ("person", "agent") or status.get("paused")):
+        token = take_phone(phone, deps)
+        if token is not None:
             try:
-                return schedules.new_notifications(s, api.notification_keys(s.trigger["notification"]), deps.where)
-            except api.DaemonError as e:
-                if e.code not in ("busy", "paused"):
-                    return False
-            except Exception:
-                return False
+                found = _check_once(s, deps, api)
+            finally:
+                pidlock.release(phone, token)
+            if found is not None:
+                return found
         if deps.monotonic() - waited >= deps.wait:
             return False
         deps.sleep(deps.poll)
 
 
+def _check_once(s: schedules.Schedule, deps: Deps, api: ModuleType) -> bool | None:
+    """One look for the trigger's notifications: True or False, or None when the phone is busy (look again later)."""
+    try:
+        status = api.status()
+    except Exception:
+        return False
+    if not status or status.get("state") != "live":
+        return False  # (a locked or missing phone: the next poll looks again)
+    if in_use(status):
+        return None
+    try:
+        return schedules.new_notifications(s, api.notification_keys(s.trigger["notification"]), deps.where)
+    except api.DaemonError as e:
+        return None if e.code in ("busy", "paused") else False
+    except Exception:
+        return False
+
+
 def end(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, status: str, result: str, began: datetime.datetime,
         code: int, text: str = "", picture: bytes | None = None, bundle: str | None = None, used: bool = True) -> Outcome:
+    """The run's audit line and report, both through the run's redactor (`audit.scrub`, made from its vault when the run
+    began): a vault value in an error (a file's name, a server's words) never reaches either (H7)."""
+    result = audit.scrub(result)
     audit.write("schedule", name=s.name, app=bundle, detail=result)
     return finish(s.name, deps, status, result, s, began, text=text, code=code, picture=picture, used=used,
-                  scrub=scrubber(s))
+                  scrub=audit.scrub)
+
+
+def cut(scrub: Callable[[str], str], text: str, n: int) -> str:
+    """`text` redacted whole, THEN cut to `n` characters: a cut first could leave part of a value (§20.3)."""
+    return scrub(text)[:n]
+
+
+WITHHELD = ("failed: the schedule \"{name}\" isn't valid. Its details aren't shown: the vault it names can't be read, so a "
+            "value in them couldn't be hidden. Check the schedule's file.")
+
+
+def early_scrubber(name: str, where: Path | None) -> tuple[Callable[[str], str], bool]:
+    """The run's redactor before its schedule is validated (Codex, PR #12 cycle 3, H6), from the `accounts` the file names,
+    read from its JSON as it stands, before any other field is checked. With it, whether the error's words may be shown:
+    True when the file names no vault (or there is no such schedule), or the vault loaded; False when the file can't be
+    read as a JSON object, or names a vault that can't be read or names it wrongly (its values can't be known)."""
+    def same(text: str) -> str:
+        return text
+    try:
+        schedules.check_name(name)
+        path = schedules.file_of(name, where)
+    except Exception:  # noqa: BLE001 - a bad name: its own error quotes only the name
+        return same, True
+    if not path.exists():
+        return same, True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001 - unreadable, or not JSON: what it names can't be known
+        return same, False
+    if not isinstance(data, dict):
+        return same, False
+    accounts = data.get("accounts")
+    if accounts is None:
+        return same, True
+    if not isinstance(accounts, str) or not accounts.strip():
+        return same, False
+    try:
+        from . import accounts as accountlib
+        loaded = accountlib.load(accounts)
+    except Exception:  # noqa: BLE001 - a vault that can't be read hides nothing
+        return same, False
+    if loaded.problem is not None:
+        return same, False
+    return (loaded.scrub if loaded.redacts else same), True
 
 
 def scrubber(s: schedules.Schedule) -> Callable[[str], str]:
@@ -182,7 +303,10 @@ def used_since(deps: Deps, began: datetime.datetime) -> tuple[dict[str, int], li
     only: an audit line never holds a value."""
     grants: dict[str, int] = {}
     vault: list[str] = []
-    for line in auditlog.read_lines(deps.audit_folder, since=began):
+    # Audit timestamps have millisecond precision. Comparing them with a finer start time drops valid uses written
+    # later in that same millisecond. Use their precision at the boundary; older milliseconds still stay out.
+    since = began.replace(microsecond=began.microsecond // 1000 * 1000)
+    for line in auditlog.read_lines(deps.audit_folder, since=since):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -200,19 +324,37 @@ def used_since(deps: Deps, began: datetime.datetime) -> tuple[dict[str, int], li
 def finish(name: str, deps: Deps, status: str, result: str, s: schedules.Schedule | None, began: datetime.datetime, *,
            text: str = "", code: int = 1, picture: bytes | None = None, used: bool = True,
            scrub: Callable[[str], str] | None = None) -> Outcome:
-    """Write the report (`.json` and `.md`) and return what to print."""
+    """Write the report (`.json` and `.md`) and return what to print. Every content value is redacted at this boundary;
+    filesystem paths remain operational, with separate redacted representations in reports and printed output."""
     scrub = scrub or (lambda t: t)
     ended = deps.now()
     grants, vault = used_since(deps, began) if used else ({}, [])
+    # Grant names are content even though the report uses them as dictionary keys. Combine names that redact alike.
+    safe_grants: dict[str, int] = {}
+    for grant, count in grants.items():
+        safe_name = scrub(grant)
+        safe_grants[safe_name] = safe_grants.get(safe_name, 0) + count
+    grants = safe_grants
+    vault = [scrub(n) for n in vault]
     base = (deps.runs or store.HOME / "runs")
     stem = f"{name}-{stamp(began)}"
     grants_line = "Grants used: " + (", ".join(f"{n} ({c})" for n, c in grants.items()) or "none")
     vault_line = "Vault names used: " + (", ".join(vault) or "none")
-    body = scrub(text).strip()
+    body = text.strip()
     data = {"version": 1, "tool": "tapwright", "schedule": name, "route": s.route if s else None, "status": status,
-            "result": scrub(result), "started": iso(began), "finished": iso(ended), "report": body,
+            "result": result, "started": iso(began), "finished": iso(ended), "report": body,
             "grants_used": grants, "vault_names_used": vault, "picture": f"{stem}.png" if picture else None}
-    lines = [f"# Scheduled run: {name}", "", f"Result: {scrub(result)}", f"Route: {s.route if s else '-'}",
+    # Schema keys stay fixed; all strings in the report's values pass through the same redactor, including metadata.
+    def redacted(value):
+        if isinstance(value, str):
+            return scrub(value)
+        if isinstance(value, list):
+            return [redacted(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redacted(item) for key, item in value.items()}
+        return value
+    data = redacted(data)
+    lines = [f"# Scheduled run: {name}", "", f"Result: {result}", f"Route: {s.route if s else '-'}",
              f"Started: {iso(began)}   Finished: {iso(ended)}", "", *([body, ""] if body else []), grants_line, vault_line,
              *([f"Picture: {stem}.png"] if picture else [])]
     path = base / f"{stem}.json"
@@ -220,13 +362,13 @@ def finish(name: str, deps: Deps, status: str, result: str, s: schedules.Schedul
         base.mkdir(parents=True, exist_ok=True)
         if picture:
             (base / f"{stem}.png").write_bytes(picture)
-        (base / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (base / f"{stem}.md").write_text(scrub("\n".join(lines)) + "\n", encoding="utf-8")
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         where = str(path)
     except OSError:
         where = None
-    shown = [f"{name}: {scrub(result)}", *([body] if body else []), grants_line, vault_line] + ([f"Report: {where}"] if where else [])
-    return Outcome(status, result, "\n".join(shown), code, where)
+    shown = [f"{name}: {result}", *([body] if body else []), grants_line, vault_line] + ([f"Report: {where}"] if where else [])
+    return Outcome(status, scrub(result), scrub("\n".join(shown)), code, where)
 
 
 def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: datetime.datetime) -> Outcome:
@@ -236,15 +378,35 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
         bundle = find_route(s)
     except schedules.ScheduleError as e:
         return end(s, deps, audit, "failed", f"failed: {e}", began, 2, used=False)
-    # the phone: locked, or in use (§22.3)
+    # the phone lock (review 1.7 B-H1): another schedule's run, or a trigger check, holds the phone as a driver would
+    phone = schedules.phone_lock_of(deps.where)
+    held: list[str] = []
+    try:
+        return _attempt_holding(s, deps, audit, began, api, values, bundle, phone, held)
+    finally:
+        if held:
+            pidlock.release(phone, held[0])
+
+
+def _attempt_holding(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: datetime.datetime,
+                     api: ModuleType, values: dict[str, str], bundle: str, phone: Path, held: list[str]) -> Outcome:
+    # the phone: locked, or in use (§22.3). The daemon admits the drive itself, in the step that counts it as running
+    # (M2): a `busy` it answers then is the phone in use as well, and the run waits and asks again
     waited = deps.monotonic()
     unlocked = False
     while True:
+        if not held and (token := take_phone(phone, deps)) is not None:
+            held.append(token)
+        if not held:  # another run or a trigger check is on the phone: in use, as for a person or an agent
+            if deps.monotonic() - waited >= deps.wait:
+                return end(s, deps, audit, "skipped", IN_USE, began, 3, bundle=bundle, used=False)
+            deps.sleep(deps.poll)
+            continue
         try:
             status = api.status()
         except Exception as e:
-            return end(s, deps, audit, "failed", f"failed: the phone's server didn't start ({str(e)[:150]})", began, 2,
-                       bundle=bundle, used=False)
+            return end(s, deps, audit, "failed", f"failed: the phone's server didn't start ({cut(audit.scrub, str(e), 150)})",
+                       began, 2, bundle=bundle, used=False)
         if status is None:
             return end(s, deps, audit, "failed", "failed: the phone's server didn't answer", began, 2, bundle=bundle,
                        used=False)
@@ -257,36 +419,43 @@ def attempt(s: schedules.Schedule, deps: Deps, audit: auditlog.AuditLog, began: 
             return end(s, deps, audit, "skipped", LOCKED, began, 3, bundle=bundle, used=False)
         if state != "live":
             detail = status.get("detail") or state
-            return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({str(detail)[:120]})", began, 2,
-                       bundle=bundle, used=False)
-        if not (status.get("driver") in ("person", "agent") or status.get("paused")):
-            break
+            return end(s, deps, audit, "failed", f"failed: the phone isn't connected ({cut(audit.scrub, str(detail), 120)})",
+                       began, 2, bundle=bundle, used=False)
+        if not in_use(status):
+            # the route, as a client that asks nobody. The daemon opens the route's app (the scope's one app) before it
+            # drives (M5), and refuses `busy` when another client or a person has the phone after all (M2)
+            args: dict = {"route": s.route, "screenshot": True}
+            given = dict(values)
+            if (account := given.pop("account", None)) is not None:
+                args["account"] = account
+            if given:
+                args["with"] = given
+            from . import policy
+            try:
+                api.set_scope([bundle], False)
+                api.set_policy(policy.load(s.policy) if s.policy else None)
+                api.set_accounts(s.accounts)
+                api.set_maps(s.maps)
+            except ValueError as e:
+                return end(s, deps, audit, "failed", f"failed: {e}", began, 2, bundle=bundle, used=False)
+            try:
+                answer = api.call("drive", args, f"{schedules.CLIENT}{s.name}", timeout=TIMEOUT)
+            except api.DaemonError as e:
+                if not (e.code == "busy" and str(e).startswith(schedules.ADMISSION_BUSY)):  # (else not admitted: waits)
+                    audit.write("schedule", name=s.name, app=bundle, detail="started")
+                    said = audit.scrub(str(e))  # (whole, before classify cuts it)
+                    state, result = classify(e.code, said, getattr(e, "draft", False))
+                    return end(s, deps, audit, state, result, began, 1, text=said, bundle=bundle)
+            except Exception as e:  # the server went away mid-run
+                audit.write("schedule", name=s.name, app=bundle, detail="started")
+                return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {cut(audit.scrub, str(e), 150)}", began,
+                           1, bundle=bundle)
+            else:
+                audit.write("schedule", name=s.name, app=bundle, detail="started")
+                break
         if deps.monotonic() - waited >= deps.wait:
             return end(s, deps, audit, "skipped", IN_USE, began, 3, bundle=bundle, used=False)
         deps.sleep(deps.poll)
-    # the route, as a client that asks nobody
-    args: dict = {"route": s.route, "screenshot": True}
-    given = dict(values)
-    if (account := given.pop("account", None)) is not None:
-        args["account"] = account
-    if given:
-        args["with"] = given
-    from . import policy
-    try:
-        api.set_scope([bundle], False)
-        api.set_policy(policy.load(s.policy) if s.policy else None)
-        api.set_accounts(s.accounts)
-        api.set_maps(s.maps)
-    except ValueError as e:
-        return end(s, deps, audit, "failed", f"failed: {e}", began, 2, bundle=bundle, used=False)
-    audit.write("schedule", name=s.name, app=bundle, detail="started")
-    try:
-        answer = api.call("drive", args, f"schedule-{s.name}", timeout=TIMEOUT)
-    except api.DaemonError as e:
-        state, result = classify(e.code, str(e), getattr(e, "draft", False))
-        return end(s, deps, audit, state, result, began, 1, text=str(e), bundle=bundle)
-    except Exception as e:  # the server went away mid-run
-        return end(s, deps, audit, "failed", f"failed: {type(e).__name__}: {str(e)[:150]}", began, 1, bundle=bundle)
     image = answer.get("image")
     picture = None
     if isinstance(image, str) and image:

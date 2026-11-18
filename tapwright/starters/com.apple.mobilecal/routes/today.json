@@ -1,0 +1,17 @@
+{
+  "format": "agent-tools-script",
+  "version": 2,
+  "name": "today",
+  "app": "com.apple.mobilecal",
+  "start": "calendar_day",
+  "end": "calendar_day",
+  "variables": [],
+  "steps": [
+    {
+      "tool": "tap",
+      "target": {
+        "id": "today-button"
+      }
+    }
+  ]
+}

@@ -15,13 +15,33 @@ import datetime
 import json
 import os
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
+
+from . import pidlock
 
 KINDS = ("grant", "revoke", "vault", "otp", "schedule", "approval", "repair")  # (repair: a script repair's trials and its adoption, §26.7)
 KEEP_DAYS = 90
 TOOL = "tapwright"
 _FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
+
+
+@contextmanager
+def _exclusive(folder: Path):
+    """Pruning and appending share one process-independent lock, so no acknowledged line is replaced."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / ".audit.lock"
+    deadline = time.monotonic() + 2.0
+    while (token := pidlock.take(path)) is None:
+        if time.monotonic() >= deadline:
+            raise OSError("the audit log is busy")
+        time.sleep(0.01)
+    try:
+        yield
+    finally:
+        pidlock.release(path, token)
 
 
 def default_folder() -> Path:
@@ -59,6 +79,13 @@ class AuditLog:
 
     def prune(self) -> None:
         """Remove entries older than KEEP_DAYS, by each line's own `t`. A line that can't be read is kept. Never raises."""
+        try:
+            with _exclusive(self.folder):
+                self._prune_locked()
+        except OSError:
+            pass
+
+    def _prune_locked(self) -> None:
         self._pruned_on = self.now().date()
         cutoff = self.now() - datetime.timedelta(days=KEEP_DAYS)
         try:
@@ -85,23 +112,35 @@ class AuditLog:
         if kind not in KINDS:
             raise ValueError(f"unknown audit kind {kind!r}")
         at = self.now()
-        if self._pruned_on != at.date():
-            self.prune()  # (a daemon that runs for months prunes once a day, not only when it starts)
         entry: dict[str, str] = {"t": _stamp(at), "tool": TOOL, "kind": kind}
         try:
             for key, value in (("app", app), ("name", name), ("detail", detail)):
                 if value is not None:
                     entry[key] = self.scrub(value)
             line = json.dumps(entry, ensure_ascii=False) + "\n"
-            self.folder.mkdir(parents=True, exist_ok=True)
-            path = self.folder / f"{entry['t'][:7]}.jsonl"
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
+            with _exclusive(self.folder):
+                if self._pruned_on != at.date():
+                    self._prune_locked()
+                path = self.folder / f"{entry['t'][:7]}.jsonl"
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
             return True
         except Exception:  # a scrub that fails, a full disk, a folder in the way: no line, so no grant
             return False
+
+
+def since_of(text: str) -> datetime.datetime:
+    """`--since`: a date (`2026-11-14`, from that day's start on this computer's clock) or an ISO time (`2026-11-14T09:30`,
+    this computer's clock unless it names a zone, `…Z` or `…+03:00`), as an aware time. ValueError for anything else."""
+    text = text.strip()
+    if len(text) == 10:
+        day = datetime.date.fromisoformat(text)
+        at = datetime.datetime(day.year, day.month, day.day)
+    else:
+        at = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return at if at.tzinfo is not None else at.astimezone()
 
 
 def read_lines(folder: Path | None = None, since: datetime.datetime | None = None) -> list[str]:

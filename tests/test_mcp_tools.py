@@ -25,8 +25,9 @@ EXPECTED = {
     "network": {"mode"},
     "viewer": set(),
     "close_app": {"app"},
-    "alert": {"action", "look", "screenshot", "brief"},
+    "alert": {"action", "look", "screenshot", "brief", "name", "dry_run"},
     "press_button": {"name", "look", "screenshot", "brief"},
+    "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
     "rotate": {"to", "look", "screenshot", "brief"},
     "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "account", "guide"},
@@ -96,7 +97,7 @@ def test_enums_are_literals():
     def enum(tool, arg):
         prop = tools[tool].input_schema["properties"][arg]
         return set(prop.get("enum") or [v for part in prop.get("anyOf", []) for v in part.get("enum", [])])
-    assert enum("alert", "action") == {"accept", "dismiss", "text"}
+    assert enum("alert", "action") == {"accept", "dismiss", "text", "cancel"}
     assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
     assert enum("scroll", "direction") == {"up", "down", "left", "right"}
     assert enum("scroll", "to") == {"start", "end", "target"}

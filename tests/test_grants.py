@@ -507,10 +507,13 @@ def test_a_live_lock_holder_is_never_displaced_and_nothing_is_written(setup, tmp
     token = pidlock.take(tmp_path / "policy.json.edit.lock")  # held by this live process
     assert token is not None
     book.lock_wait = 0.2
-    why = book.revoke_all()
-    assert isinstance(why, str) and "edit lock" in why and path.read_text(encoding="utf-8") == before
-    pidlock.release(tmp_path / "policy.json.edit.lock", token)
+    # the file isn't written under a live holder; the kill switch still works, by its `.revoked` mark (review 1.7 A-M5)
     assert book.revoke_all() == (["wayfare_posting"], [])
+    assert path.read_text(encoding="utf-8") == before and book.revoked_mark.exists()
+    assert book.active() == frozenset()
+    pidlock.release(tmp_path / "policy.json.edit.lock", token)
+    assert book.revoke_all() == ([], ["wayfare_posting"])  # (the next locked edit folds the mark into the file)
+    assert not book.revoked_mark.exists() and '"revoked"' in path.read_text(encoding="utf-8")
 
 
 def test_pause_doesnt_revoke(setup):

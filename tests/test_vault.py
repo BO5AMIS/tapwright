@@ -59,6 +59,8 @@ def test_a_version_2_file_loads_every_kind(tmp_path):
 def test_nothing_shows_a_value_in_a_repr(tmp_path):
     v = load(tmp_path)
     shown = repr(v) + repr(list(v.vault.values())) + repr(v.reference("${vault.home.street}", None, False, "e1", "x"))
+    for form in {str(tmp_path), tmp_path.as_posix(), repr(str(tmp_path))[1:-1]}:  # (pytest's folder, e.g. pytest-2737)
+        shown = shown.replace(form, "<tmp>")
     for entry in VAULT["vault"].values():
         for key, value in entry.items():
             if key not in ("kind", "apps") and len(value) >= 3:
@@ -124,17 +126,11 @@ def test_a_vault_reference_types_its_value_by_name(tmp_path):
 
 @pytest.mark.parametrize("text, secure, bundle, code, words", [
     ("hi ${vault.home.street}", False, "x", "bad_params", "the whole text of a step"),
-    ("${vault.tester2.password}", False, "com.example.wayfare", "bad_params",
-     "an account's password goes only into a password field; e7 is a text field."),
-    ("${vault.tester2.username}", True, "com.example.wayfare", "bad_params", "goes only into a text field that isn't secure"),
-    ("${vault.tester2.username}", False, "com.other", "not_allowed", "may be typed only in com.example.wayfare"),
-    ("${vault.trip_data.destination}", True, "x", "bad_params", "never goes into a password field"),
     ("${vault.nobody.street}", False, "x", "not_found", 'no vault entry "nobody"'),
     ("${vault.home.number}", False, "x", "bad_params", "its fields are street, city, postcode, country"),
     ("${vault.phone.passcode}", False, "x", "bad_params", "only on the lock screen's keypad"),
     ("${vault.me.street}", False, "x", "bad_params", "an identity; its fields are name, phone, email, birthday"),
     ("${otp.com.example.wayfare} now", False, "com.example.wayfare", "bad_params", "a one-time code is the whole text"),
-    ("${otp.com.example.wayfare}", False, "com.other", "not_allowed", "typed only into com.example.wayfare"),
     ("${otp.com.other}", False, "com.other", "bad_params", "one-time codes are off for com.other"),
 ])
 def test_the_field_rules(tmp_path, text, secure, bundle, code, words):
@@ -143,6 +139,18 @@ def test_the_field_rules(tmp_path, text, secure, bundle, code, words):
         v.reference(text, None, secure, "e7", bundle)
     assert e.value.code == code and words in str(e.value)
     assert "Synthetic" not in str(e.value) and "Lisbon" not in str(e.value)
+
+
+@pytest.mark.parametrize("text, secure, bundle", [
+    ("${vault.tester2.password}", False, "com.example.wayfare"),
+    ("${vault.tester2.username}", True, "com.example.wayfare"),
+    ("${vault.tester2.username}", False, "com.other"),
+    ("${vault.trip_data.destination}", True, "x"),
+    ("${otp.com.example.wayfare}", False, "com.other"),
+])
+def test_explicit_references_do_not_enforce_app_or_field_labels(tmp_path, text, secure, bundle):
+    got = load(tmp_path).reference(text, None, secure, "e7", bundle)
+    assert got is not None and (got.value or got.otp_app)
 
 
 def test_a_card_comes_back_as_a_card_for_the_daemon_to_ask(tmp_path):
@@ -185,9 +193,10 @@ def test_a_short_plain_value_is_typed_but_cant_be_kept_out(tmp_path):
     assert v.scrub("UK 2") == "UK 2"  # (too short: it would eat ordinary words)
 
 
-def test_the_passcode_is_a_redaction_entry_now_that_the_tool_types_it(tmp_path):
-    """1.7 (§18.6, §20.3): the passcode is typed on the lock screen, so it is redacted like any value."""
-    assert [field for _, field, _ in load(tmp_path).entries()].count("passcode") == 1
+def test_the_passcode_is_no_redaction_entry(tmp_path):
+    """Review 1.7, M2: the passcode is typed only on the lock screen (dots), so it is kept out of the text redactor:
+    replacing it would tell the agent the passcode the first time a date or a price on screen held it."""
+    assert [field for _, field, _ in load(tmp_path).entries()].count("passcode") == 0
 
 
 def test_the_store_redacts_vault_values_and_codes_in_one_pass(tmp_path):
@@ -311,10 +320,10 @@ def test_protect_refuses_what_wouldnt_load_and_converts_version_1(tmp_path):
     assert not done and "fix it first" in said and "ab" not in said.split("(")[0]
     old = write(tmp_path, {"version": 1, "accounts": {"t1": {"username": "user@example.com", "passcode": "1234"}}},
                 "old.json")
-    assert vault.protect(old, win_deps(), accounts.check_text)[0]
+    done, said = vault.protect(old, win_deps(), accounts.check_text)
+    assert done and "the passcode of t1 was left out" in said and "1234" not in said
     inner = json.loads(vault.open_protected(old, json.loads(open(old, encoding="utf-8").read()), win_deps()))
-    assert inner == {"version": 2, "vault": {"t1": {"kind": "account", "username": "user@example.com"},
-                                             "t1_phone": {"kind": "phone", "passcode": "1234"}}}
+    assert inner == {"version": 2, "vault": {"t1": {"kind": "account", "username": "user@example.com"}}}
     again = vault.protect(old, win_deps(), accounts.check_text)
     assert not again[0] and "already protected" in again[1]
     assert not vault.protect(write(tmp_path, VAULT, "v.json"), vault.Deps("linux"))[0]

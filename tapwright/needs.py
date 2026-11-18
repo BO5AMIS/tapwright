@@ -11,19 +11,23 @@ from .device import PASSCODE_WORDS
 PASSCODE = ("Enter the passcode on the phone (the XCTest prompt is up). Settings > Developer > Enable UI Automation "
             "stops it asking.")
 LOCKED = "Unlock the phone."
+# (1.7.8) the same, as an agent's note: it may call `unlock`, which types the passcode saved for this phone
+LOCKED_AGENT = ("The phone is locked: call unlock (it types the passcode saved for this phone), or ask the user to "
+                "unlock it.")
 DEVELOPER_MODE = ("Turn on Developer Mode: Settings > Privacy & Security > Developer Mode, restart the phone and "
                   "confirm.")
 NOT_TRUSTED = "Unlock the phone and tap Trust on \"Trust This Computer?\" (enter the passcode if it asks)."
 
 
-def from_state(state: str | None, detail: str | None, stuck_locked: bool = False) -> list[str]:
+def from_state(state: str | None, detail: str | None, stuck_locked: bool = False, agent: bool = False) -> list[str]:
     """From the daemon's own state and its detail line. `stuck_locked`: the last connect found the phone locked (the
-    state then reads connecting or reconnecting, not locked)."""
+    state then reads connecting or reconnecting, not locked). `agent`: said to an agent, which may call `unlock`
+    (doctor says it to a person)."""
     found = []
     if PASSCODE_WORDS in (detail or ""):
         found.append(PASSCODE)
     if state == "locked" or stuck_locked:
-        found.append(LOCKED)
+        found.append(LOCKED_AGENT if agent else LOCKED)
     return found
 
 
@@ -94,6 +98,8 @@ class Facts(NamedTuple):
     tasks_missing: tuple[str, ...] = ()  # schedules whose Task Scheduler task is gone
     tasks: int | None = None  # schedules found (None: not checked)
     vault_problem: str | None = None  # the vault file can't be used (its own words; never a value)
+    unlock_stopped: bool = False  # the passcode unlock stopped after a refused passcode (unlock.Ledger; review 1.7, H2)
+    polling: tuple[str, ...] = ()  # schedules with a notification trigger (they look at the phone every 2 minutes)
 
 
 class Stop(NamedTuple):
@@ -131,6 +137,11 @@ def unattended(f: Facts) -> list[Stop]:
     elif not f.passcode_given:
         stops.append(Stop("No passcode is given: if the phone locks during a run (Auto-Lock), nothing can unlock it, "
                           "and a scheduled run that finds it locked is skipped.", PASSCODE_FIX))
+    if f.passcode_given and f.unlock_stopped:
+        stops.append(Stop("The passcode unlock stopped after the phone refused the vault's passcode (or its record of "
+                          "attempts can't be read): nothing is typed on the lock screen until a person clears it.",
+                          "Check that the vault's phone entry holds the phone's passcode, then run tapwright "
+                          "unlock-reset."))
     if f.battery is not None and f.battery < LOW_BATTERY:
         stops.append(Stop(f"The battery is at {f.battery}%: the phone may switch itself off in a long run.",
                           "Charge it, and keep it on a cable during the run."))
@@ -143,6 +154,21 @@ def unattended(f: Facts) -> list[Stop]:
     return stops
 
 
+def unattended_notes(f: Facts) -> list[str]:
+    """What a person should know about the schedules, though nothing is wrong (review 1.7 B-L11)."""
+    notes: list[str] = []
+    if f.tasks:
+        notes.append("A scheduled run that falls due while this PC is off (or asleep with wake timers off) doesn't run "
+                     "later and leaves no line in the audit log; and a run happens only while you are logged on to "
+                     "Windows.")
+    for name in f.polling:
+        notes.append(f"The schedule \"{name}\" checks for notifications every 2 minutes while this PC is awake: each "
+                     "check pulls Notification Center down over the phone's screen for about a second. It waits while "
+                     "the tool or the live view uses the phone, but it can't see a person holding the phone; on a phone "
+                     "you use yourself, remove it when you don't need it (tapwright schedule remove).")
+    return notes
+
+
 def unattended_ready(f: Facts) -> list[str]:
     """What doctor checked and found ready for a long run, one line each (the passcode by presence only)."""
     ready: list[str] = []
@@ -153,8 +179,10 @@ def unattended_ready(f: Facts) -> list[str]:
     if f.developer_mode is True:
         ready.append("Developer Mode is on.")
     if f.passcode_given and f.vault_problem is None:
-        ready.append("The vault gives phone.passcode (never shown): the tool unlocks a locked phone on its lock screen, "
-                     "at most twice an hour, and stops after a refusal.")
+        ready.append("The vault gives phone.passcode (never shown): the tool unlocks a locked phone on its lock screen "
+                     "at a scheduled run's start, and with tapwright serve --phone --accounts FILE at a new call (never "
+                     "in the middle of a run: a lock stops it); at most twice an hour and 3 times a day, and it stops "
+                     "after a refusal.")
     if f.battery is not None and f.battery >= LOW_BATTERY:
         ready.append(f"The battery is at {f.battery}%.")
     if f.wake_timers is True:

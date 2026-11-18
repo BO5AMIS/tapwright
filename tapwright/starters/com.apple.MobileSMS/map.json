@@ -1,0 +1,70 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.apple.MobileSMS",
+  "places": {
+    "conversations": {
+      "key": {
+        "signature": "ac08b886349ff6e1",
+        "parts": {
+          "ids": [
+            "ConversationList",
+            "composeButton",
+            "filteringButton",
+            "magnifyingglass",
+            "optionsButton"
+          ],
+          "kinds": [
+            "nav",
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    },
+    "message_draft": {
+      "key": {
+        "signature": "6123ff5de4417c41",
+        "parts": {
+          "ids": [
+            "ComposeRecipientAddButton",
+            "ConversationList",
+            "ConversationTitle",
+            "MessageEntryView",
+            "composeButton",
+            "dictation",
+            "filteringButton",
+            "inputView",
+            "magnifyingglass",
+            "messageBodyField",
+            "optionsButton"
+          ],
+          "kinds": [
+            "nav",
+            "list",
+            "toolbar",
+            "nav",
+            "form",
+            "form"
+          ],
+          "tab": null,
+          "layer": "sheet"
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-01-01T00:00:00Z",
+      "named": true
+    }
+  },
+  "roads": [],
+  "routes": {
+    "compose_message": "routes/compose_message.json"
+  },
+  "reflexes": []
+}

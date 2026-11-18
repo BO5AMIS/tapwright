@@ -3,6 +3,7 @@
 import datetime
 import json
 import os
+import time
 
 import pytest
 
@@ -81,13 +82,15 @@ def test_revoke_all_marks_the_file_audits_each_and_lists_them_revoked(tmp_path):
     assert again.splitlines()[0] == "Every grant was already revoked (3)."
 
 
-def test_revoke_all_with_a_held_lock_changes_nothing(tmp_path):
+def test_revoke_all_with_a_held_lock_leaves_the_file_and_revokes_by_its_mark(tmp_path):
+    """Review 1.7 A-M5: a held lock never blocks the kill switch; the file is left as it is and `.revoked` revokes."""
     path, audit, book = make(tmp_path, [POST])
     held = pidlock.take(f"{path}.edit.lock")
     before = path.read_text("utf-8")
     book.lock_wait = 0.05
     done = book.revoke_all()
-    assert isinstance(done, str) and "edit lock" in done and path.read_text("utf-8") == before
+    assert not isinstance(done, str) and done[0] and path.read_text("utf-8") == before
+    assert book.active() == frozenset()
     pidlock.release(f"{path}.edit.lock", held)
 
 
@@ -116,6 +119,7 @@ def test_unlock_removes_a_dead_holders_lock_and_an_empty_one_and_audits_it(tmp_p
     assert code == 0 and text == f"Removed {lock} (held by pid 4242, which is not running)."
     assert not os.path.exists(lock)
     open(lock, "w", encoding="utf-8").write("")
+    os.utime(lock, (time.time() - 60, time.time() - 60))  # (left empty a minute ago: pidlock.EMPTY_AGE)
     text, code = grantscmd.run_unlock(str(path), audit_folder=tmp_path / "audit")
     assert code == 0 and text == f"Removed {lock} (empty (its holder stopped while writing it))."
     lines = [json.loads(x) for f in sorted((tmp_path / "audit").iterdir()) for x in f.read_text("utf-8").splitlines()]
@@ -143,8 +147,10 @@ def test_the_command_line_reaches_all_three(tmp_path, monkeypatch, capsys):
 
 def test_the_cli_cannot_be_reached_as_an_mcp_tool():
     from tapwright import mcp_server
-    names = {t.name for t in mcp_server.server._tool_manager.list_tools()}
-    assert not {n for n in names if "grant" in n or "unlock" in n or "revoke" in n}
+    tools = {t.name: t for t in mcp_server.server._tool_manager.list_tools()}
+    # (1.7.8: `unlock` is the phone's lock screen, with no arguments: it removes no policy lock and resets no record)
+    assert not {n for n in tools if "grant" in n or ("unlock" in n and n != "unlock") or "revoke" in n}
+    assert tools["unlock"].parameters.get("properties", {}) == {}
 
 
 # ---- the Grants: line ----

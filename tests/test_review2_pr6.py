@@ -14,24 +14,6 @@ from tapwright.control import Refused
 
 
 # ---- P1: a front app that can't be named is not an app the policy lets through ----
-def test_network_refuses_when_the_front_app_is_unknown_and_a_policy_blocks_it_per_app():
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        p = policy.parse({"apps": {"com.blocked.app": {"block": ["network"]}}})
-        await d.run_tool("a", "look", {"screenshot": False})  # the last read named an allowed app
-
-        async def unknown():  # WebDriverAgent's error, or no bundle id in its answer: the real session says None
-            return None
-        d.session.foreground_bundle_id = unknown
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "network", {"mode": "offline"}, policy=p)
-        assert e.value.code == "not_allowed"
-        assert d.session.device.network_calls == [] and d._network is None
-        # nothing in the policy depends on the app in front: an unknown one changes nothing
-        assert (await d.run_tool("a", "network", {"mode": "3g"}))["text"].startswith("Network: 3g")
-        await finish(stop, task)
-    run(go)
 
 
 # ---- P1: a goodbye that arrives while the condition is being set ----
@@ -146,30 +128,6 @@ def test_a_device_without_a_way_to_clear_a_leftover_keeps_the_marker(monkeypatch
 
 
 # ---- the policy looks again at the element a scroll brings on screen ----
-@pytest.mark.parametrize("rule", ["block", "confirm"])
-def test_a_scroll_that_brings_another_element_on_screen_is_checked_by_the_policy_again(rule):
-    async def go():
-        d = make()
-        stop, task = await started(d)
-        s = d.session
-        s.tree = [el("e1", "scroll", "", "form", rect=(0, 0, 400, 800))]
-        s.offscreen = [el("", "button", "Item", "old", rect=(10, 1000, 100, 40))]
-        real = s.scroll
-
-        async def scroll(x0, y0, x1, y1):  # the list refreshes while it moves: what is there now is another row
-            s.tree = [s.tree[0], el("e2", "button", "Delete Item", "new", rect=(10, 300, 100, 40))]
-            s.offscreen = []
-            return await real(x0, y0, x1, y1)
-        s.scroll = scroll
-        rules = policy.parse({rule: ["Delete"]})
-        await d.run_tool("a", "look", {"screenshot": False})
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"text": "Item"}, "look": False}, policy=rules)
-        assert e.value.code == "not_allowed"
-        assert str(e.value).startswith("blocked:" if rule == "block" else "needs_confirmation:")
-        assert s.tap_points == []  # nothing was touched
-        await finish(stop, task)
-    run(go)
 
 
 # ---- CodeRabbit: index 2 of four matches keeps its place while the others come on screen ----

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from pymobiledevice3.exceptions import NotPairedError, PasswordRequiredError
 
+from tapwright.errors import PHONE_LOCKED
 from tapwright import cli, needs
 from tapwright.device import PasscodeNeeded
 from fakes import FakeSession
@@ -101,15 +102,15 @@ def test_the_first_answer_to_an_agent_carries_them_once():
         d = make(s)
         stop, task = await started(d, until=("locked",))
         first = await d.run_tool("a", "look", {"screenshot": False})
-        assert first["text"].splitlines()[-1] == f"Note: {needs.LOCKED}"
+        assert first["text"].splitlines()[-1] == f"Note: {needs.LOCKED_AGENT}"  # (1.7.8: an agent may call unlock)
         second = await d.run_tool("a", "look", {"screenshot": False})
-        assert needs.LOCKED not in second["text"]
+        assert needs.LOCKED_AGENT not in second["text"]
         other = await d.run_tool("b", "look", {"screenshot": False})
-        assert f"Note: {needs.LOCKED}" in other["text"]
+        assert f"Note: {needs.LOCKED_AGENT}" in other["text"]
         # a refusal says its own (`locked`), and doesn't double it
         with pytest.raises(Exception) as e:
             await d.run_tool("c", "tap", {"target": {"x": 1, "y": 1}})
-        assert str(e.value) == "the phone is locked; ask the user to unlock it"
+        assert str(e.value) == PHONE_LOCKED
         await finish(stop, task)
     run(go)
 
@@ -120,8 +121,8 @@ def test_a_phone_locked_at_connect_is_told_on_the_first_answer_even_though_the_s
     from tapwright.device import PhoneLocked
 
     async def go():
-        for stuck, note, other in ((PhoneLocked("the phone is locked"), needs.LOCKED, needs.PASSCODE),
-                                   (PasscodeNeeded(), needs.PASSCODE, needs.LOCKED)):
+        for stuck, note, other in ((PhoneLocked("the phone is locked"), needs.LOCKED_AGENT, needs.PASSCODE),
+                                   (PasscodeNeeded(), needs.PASSCODE, needs.LOCKED_AGENT)):
             s = FakeSession()
             s.stuck = stuck
             d = make(s)
