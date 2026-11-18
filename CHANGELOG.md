@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.8 (unreleased)
+## 1.7.8 (2026-11-18)
 
 - New tool `unlock`: an agent unlocks a locked phone with the passcode saved for it (`phone.passcode` in the file
   Tapwright is started with, `--accounts FILE`), in every mode. The agent never sees or sends the passcode, and every
