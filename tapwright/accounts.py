@@ -1311,6 +1311,39 @@ def check_text(text: str) -> str | None:
     return loaded.problem.split(" can't be used: ", 1)[-1]
 
 
+TYPED_LABEL = "typed value"  # what a value typed in this session is shown as in a bug report: `<typed value>`
+PIECE = 12  # the gate looks for every piece of this many characters of each value (§20.3, §29.6)
+
+
+def gate(files: "dict[str, str]", entries: "tuple[tuple[str, str, str], ...]") -> str | None:
+    """The grep gate of the bug report (§29.6) over (file name, text): the first file that still holds a value, else None.
+    A file fails when the single-pass redactor would still change it (any form of a value, decoded any number of times),
+    or when it holds any 12-character piece of any form of a value. Each value and each text is decoded and normalized
+    WHOLE before the pieces are taken (Tapline's lesson: whole-value encodings alone miss mixed escapes). The placeholders
+    a redaction leaves (`<tester's password>`) are no value."""
+    redaction = Redaction(tuple(entries))
+    if not redaction.redacts:
+        return None
+    pieces: set[str] = set()
+    for _, _, value in entries:
+        for form, _, _ in _forms(value):
+            form = form.strip() or form
+            pieces.update(form[i:i + PIECE] for i in range(len(form) - PIECE + 1))
+    for name, text in files.items():
+        if redaction._spans(text, first=True):
+            return name
+        if not pieces:
+            continue
+        bare = redaction.placeholders.sub("\0", text) if redaction.placeholders is not None else text
+        for layer, _ in _levels(bare):
+            if layer is None:
+                continue
+            out = layer.out
+            if any(out[i:i + PIECE] in pieces for i in range(len(out) - PIECE + 1)):
+                return name
+    return None
+
+
 class Store:
     """The loaded files, each read again when it changes (its size or time), so an edit needs no restart. Every value ever
     loaded from any file stays in `scrub` for the daemon's life, even after the file changes: what the app still has in
@@ -1320,6 +1353,10 @@ class Store:
         self._held: dict[str, tuple[tuple[int, int], Loaded]] = {}
         self._ever: dict[tuple[str, str, str], None] = {}
         self._redaction = Redaction()
+        # (1.8.5, §29.6) the values typed in this session: kept out of a bug report only (an ordinary answer shows what
+        # the screen shows), with every vault value and code in the same single pass (`bug_scrub`)
+        self._typed: dict[tuple[str, str, str], None] = {}
+        self._bug_redaction: Redaction | None = None
 
     def get(self, path: str | None) -> Loaded:
         if not path:
@@ -1354,6 +1391,37 @@ class Store:
         if fresh:
             self._ever.update(dict.fromkeys(fresh))
             self._redaction = Redaction(tuple(self._ever))
+            self._bug_redaction = None
+
+    # ---- the bug report's redactor and its gate (AGENT-TOOLS §29.6) ----
+
+    def remember_typed(self, text: object) -> None:
+        """A value typed in this session (any `type_text`, the agent's or a script's), registered BEFORE it is sent
+        (Tapline's lesson): a bug report never shows it, whatever sink it reaches. A reference (`${vault.…}`), a placeholder
+        and a value too short to redact safely aren't kept (the first two stand for vault values, which are kept anyway)."""
+        if not isinstance(text, str) or not text or mentions(text) or weak(text):
+            return
+        entry = ("", TYPED_LABEL, text)
+        if entry not in self._typed:
+            self._typed[entry] = None
+            self._bug_redaction = None
+
+    def bug_values(self) -> tuple[str, ...]:
+        """Every value the bug report keeps out: each vault value ever loaded, each one-time code, each typed value."""
+        return tuple(dict.fromkeys(v for _, _, v in (*self._ever, *self._typed)))
+
+    def bug_scrub(self, text: str) -> str:
+        """One single-pass redactor over the vault's values (every form), the codes and the typed values (§29.6), longest
+        first: a value can't be left half-redacted by another's replacement."""
+        if self._bug_redaction is None:
+            self._bug_redaction = Redaction((*self._ever, *self._typed))
+        return self._bug_redaction.scrub(text)
+
+    def bug_gate(self, files: "dict[str, str]") -> str | None:
+        """The grep gate (§29.6): the first file whose text the redactor would still change, or that holds any form of a
+        value, or any 12-character piece of one (each value decoded and normalized WHOLE first, Tapline's lesson); None when
+        every file is clean. The values are read live, at the moment of the check."""
+        return gate(files, (*self._ever, *self._typed))
 
     def holds(self, text: str) -> bool:
         """Does the text hold any value ever loaded, or a placeholder?"""

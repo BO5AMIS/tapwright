@@ -467,7 +467,9 @@ class ExploreTools:
             d._NESTED.reset(tokens[0])
             self._explore_active = None
         await self.maps.flush()
-        folder, note = await self._explore_write(result, who, parsed.budget, began)
+        places = self.maps.data(root, bundle).get("places", {})  # (each finding's place's key, for the bug report: §29.5)
+        keys = {name: (place.get("key") or {}).get("signature") for name, place in places.items() if isinstance(place, dict)}
+        folder, note = await self._explore_write(result, who, parsed.budget, began, keys)
         if result.failure is not None:
             raise Refused(result.failure.code, self._safe_scrub(f"{result.failure} {explorereport.done_line(result, folder)}"))
         if result.stopped in explorereport.ERRORS:
@@ -476,12 +478,13 @@ class ExploreTools:
         return {"text": text + (f"\nNote: {note}" if note else ""), "image": None, "image_size": None}
 
     async def _explore_write(self, result: explore.Result, who: explore.Identity, budget: explore.Budget,
-                             began: datetime.datetime) -> tuple[Path | None, str | None]:
+                             began: datetime.datetime, place_keys: dict | None = None) -> tuple[Path | None, str | None]:
         """The run's folder (§25.10), or why none could be written; the run is never lost to a disk that refuses."""
         root = self.explore_home if self.explore_home is not None else store.HOME / "explore"
         ended = datetime.datetime.now(datetime.timezone.utc)
         try:
-            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._safe_scrub)
+            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._safe_scrub,
+                                           place_keys)
         except OSError as e:
             return None, self._safe_scrub(f"the report couldn't be written: {e.strerror or e}")
         return folder, None

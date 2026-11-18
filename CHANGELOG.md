@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.8.5, "the Bug Report"
+
+- New tool `bug_report` (and `tapwright bug`): one page for whoever fixes a bug, readable in a minute and holding nothing
+  private (AGENT-TOOLS 1.16.2 §29). A folder per bug under `~/.tapwright/bugs/<app id>/<bug id>/` with `report.md`,
+  `report.html` (the same page, one file, no script, every text escaped), `repro.json` (the finding's script, `${typed}`
+  for any typed value), `finding.json` (the finding with its `bug` record) and, only when allowed, `picture.jpg`. The page:
+  title, what happened, how to see it (steps written for a person, the last 15), reproduced, environment, where (the place
+  and its key's signature, the top 8 native frames with the app's own marked `*`, addresses and offsets dropped, and a
+  system sheet that was in front by its kind only), logs (20 lines at most), picture, seen before.
+- Three sources: a finding of an explore report (`finding`, `run` defaulting to the newest report of the app in front),
+  this session's last `run` or `replay` that stopped `expect_failed` (`from: "failure"`), and what you saw while driving
+  (`from: "now"` with a one-line `note` and `expected`: the last 10 touches of the app become the steps; a touch that
+  can't be named, such as a person's in the live view, starts the path after it; `unsupported` with `serve --no-log`).
+  `bug` shows a kept bug again, and `with_picture: true` adds its private picture while its source file still exists.
+- One bug, many sightings: the signature is the first 16 hex of a SHA-256 over the kind, the place's KEY (never its name:
+  a place is `place_<n>` until named, and an explore report now keeps each finding's place key, so a renamed place keeps
+  its bug), the first line of `got` with numbers, times, dates, hex and UUIDs as `#`, and for a crash its exception type
+  and top app frame's symbol. The same signature again adds to `seen` (count once per source, last time, builds) and
+  rewrites only the page's `Seen before` line. A finding with no place key is never merged. The newest 100 bugs of an app
+  are kept. `tapwright bug list [--app ID]` lists them.
+- Redaction at every sink (§29.6): one single-pass redactor over every vault value in every form, the one-time codes and
+  every value typed in this session (registered before it is typed; the explorer's public fake values are not), applied
+  before any cut, to the page, both files, the script, the finding, the title, the answer and the CLI. Paths are cut to
+  file names (no user folder). Before anything is written every text file is grepped for every form of every value and
+  every 12-character piece of each; a hit writes nothing and names the file, never the value. A redactor that fails hides
+  the text. A run folder is read only inside the explore home, and each file it names only inside it.
+- Not yet: the reproduction check (`verify`, `tapwright bug verify`) and `export` (a GitHub issue or a `.zip`) are a later
+  part of 1.8.5 and answer `unsupported`; a bug made from a finding says `Reproduced: not checked` with that reason.
+
 ## 1.8.0, "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A

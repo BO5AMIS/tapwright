@@ -187,12 +187,12 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
          path_from: str | None = None, path: list[dict] | tuple[dict, ...] = (), picture_file: str | None = None,
          test_app: bool = False, logs: list[str] | tuple[str, ...] = (), crash_reason: str | None = None,
          crash_frames: list[str] | tuple[str, ...] = (), component_stack: list[str] | tuple[str, ...] = (),
-         repro: str | None = None, count: int = 1) -> Finding:
+         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS) -> Finding:
     """A finding as §27.1 has it, made safe: all text redacted whole, then cut (a log line at 300 characters, at most 20
     lines, the top 8 frames, at most 10 issues). `picture_file` is where the picture was saved (`findings/f3.jpg`), None for
     none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding."""
-    if kind not in KINDS:
-        raise FindingError(f"kind is one of {', '.join(KINDS)}, not {kind!r}")
+    if kind not in kinds:  # (`kinds`: a bug report also takes `observed`, its own kind, §29.3)
+        raise FindingError(f"kind is one of {', '.join(kinds)}, not {kind!r}")
     if (crash_reason is not None or crash_frames) and kind != "crash":
         raise FindingError("only a crash finding has a crash")
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
@@ -280,7 +280,7 @@ def dumps(finding: Finding) -> str:
     return json.dumps(to_dict(finding), indent=2, ensure_ascii=False) + "\n"
 
 
-def parse(raw: object, scrub: Callable[[str], str]) -> Finding:
+def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KINDS) -> Finding:
     """A finding read from JSON text or a dict (either tool's), checked and redacted as `make` does; a key it doesn't know is
     ignored. A picture with no `private`, or any value but `false`, is private. `FindingError` for what isn't one."""
     if isinstance(raw, (str, bytes)):
@@ -321,4 +321,4 @@ def parse(raw: object, scrub: Callable[[str], str]) -> Finding:
                 picture_file=None if picture is None else text("file", picture),
                 test_app=picture is not None and picture.get("private") is False,
                 logs=lists["logs"], crash_reason=None if crash is None else text("reason", crash), crash_frames=frames,
-                component_stack=lists["component_stack"], repro=maybe("repro"), count=count)
+                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds)

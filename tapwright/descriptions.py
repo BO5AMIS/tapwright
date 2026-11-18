@@ -203,6 +203,15 @@ SHARED = {
         'prompt and asks no one. A person touching the phone pauses it; a locked phone ends it (it never unlocks). '
         'Not a step of `run`; a call can last its `minutes`.'
     ),
+    'bug_report': (
+        'One page for whoever fixes a bug, in a folder (`report.md`, `report.html`, `repro.json`, `finding.json`), '
+        'with nothing private in it. Give exactly one: `finding` (`"f3"`) with `run` (an explore report folder, '
+        'default `"last"`), `from: "failure"` (the last failed check of run or replay), `from: "now"` with `note` '
+        '(one line: what is wrong) and `expected` (what you saw while driving: the last 10 touches become the '
+        "steps), or `bug` (a kept bug's id). The same bug found again is one bug with a count. A private picture "
+        'goes in only with `with_picture: true`, when your user asked. Answers the title, `Reproduced:`, `Seen:` '
+        'and the folder.'
+    ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "
         "time and the tool's time, by tool), and waste to cut, each with its call numbers: looks right after an "

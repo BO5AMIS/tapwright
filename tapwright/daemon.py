@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
+from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, bugtool, changes, closest, compare,
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
@@ -1105,7 +1105,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
+class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -1400,6 +1400,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             message["code"] = code
         self.broadcast(message)
         if by == "person":
+            self._bug_person(kind)
             self.actions.write({"source": "tapwright", "by": "person", "tool": kind, "element": label, "ok": ok,
                                 "code": code, "app": self._bundle()})
         else:
@@ -2229,6 +2230,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             return await self._journey_tool(client_id, args, scope)
         if name == "explore":  # AGENT-TOOLS §25: its moves go through run_tool too, one at a time, each an ordinary action
             return await self._explore_tool(client_id, args, scope)
+        if name == "bug_report":  # AGENT-TOOLS §29: a page made from a finding, a failed check or the last touches
+            if scope is not None and not scope.apps:
+                raise Refused("not_allowed", NO_APPS)
+            return await self._bug_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2241,6 +2246,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             aimed = self._aim_for_recording(client_id, name, args)
             # the place the move starts on, for the step a recording saves (§26.6): worked out before the call, which moves it
             ran_on = self._place_before(self.control.client(client_id)) if client_id in self._recording else None
+            # (1.8.5, §29.3, §29.6) for a bug report: the touch as a road names it and the place it ran on; a typed value is
+            # kept out of every bug report from before it is sent
+            trail_from, trail_aim = self._bug_aim(client_id, name, args)
+            self._bug_typed(name, args)
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2265,6 +2274,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 if own:
                     _RESOLVED.reset(resolved_token)
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
+            self._bug_touch(name, args, trail_aim, trail_from)
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
                               place=ran_on[1] if ran_on is not None else None)
             return result
@@ -3316,6 +3326,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         done = 0
         marks: dict[str, int | None] = {}
         set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
+        i = 0
+        start_place = self._place_before(view)  # (1.8.5: where a failed check's path starts, §29.3)
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -3406,6 +3418,9 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             answer = await self._learn(view, "run", args, answer, {"from": place_then}, time.monotonic())
         # a failure adds the app's log from the failed step on, after the change block (AGENT-TOOLS §15.4)
         logs = await self._failure_logs(scope, i, marks) if failed else []
+        if not _NESTED.get():  # (1.8.5, §29.3) the agent's own run or replay: a failed check is kept for `from: "failure"`
+            await self._bug_failure_seen(client_id, failed, steps, i, start_place, place_then, logs,
+                                         steps[i - 1].get("expect") if failed and 0 < i <= len(steps) else None)
         answer["text"] = "\n".join([answer["text"], *logs, *step_notes])
         if failed:
             raise Refused(failed[0], answer["text"], draft=stopped_at_draft)

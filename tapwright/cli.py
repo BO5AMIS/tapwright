@@ -32,6 +32,8 @@
   tapwright unlock-reset
                      after the phone refused the vault's passcode, the passcode unlock types nothing until you check
                      phone.passcode and run this (at most 2 attempts an hour and 3 a day in any case)
+  tapwright bug <report folder> <finding id> [--with-picture] [--accounts FILE]; bug list [--app ID]
+                     a one-page bug report of an explore finding under ~/.tapwright/bugs (no phone needed)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -968,6 +970,65 @@ def explore(a, sleep=time.sleep) -> int:
     return 1 if found and int(found.group(1)) > 0 else 0
 
 
+def bug_cmd(a, out=print) -> int:
+    """`tapwright bug` (AGENT-TOOLS §29.3), with no phone: `bug <report folder> <finding id> [--with-picture]` makes a bug of
+    an explore report's finding, `bug list [--app ID]` lists the bugs kept. `bug verify` and `bug export` are part 2 of 1.8.5
+    (`unsupported` for now). Exit 0: a bug was made or updated (it reproduced or wasn't checked); 1: it didn't reproduce
+    (`0 of N`, part 2); 2: it couldn't be made. The redactor holds the values of `--accounts` (the vault file), the codes and
+    typed values being the daemon's; every file is grepped before it is written (§29.6)."""
+    from . import accounts as accountlib, bugmake, bugstore, bugtool, mapkeeper, store as storelib
+    words = list(a.what)
+    bugs = bugstore.BugStore(storelib.HOME / "bugs")
+    if words[:1] == ["list"]:
+        if len(words) != 1:
+            out("tapwright bug list takes no other word; --app ID narrows it to one app")
+            return 2
+        lines = bugs.listing(a.app)
+        out("\n".join(lines) if lines else "No bugs are kept.")
+        return 0
+    if words[:1] in (["verify"], ["export"]):
+        out(f"Error unsupported: bug {words[0]} is part of 1.8.5, not built yet.")
+        return 2
+    if len(words) != 2:
+        out("usage: tapwright bug <report folder> <finding id> [--with-picture] | bug list [--app ID]")
+        return 2
+    if a.verify:
+        out("Error unsupported: --verify: the reproduction check is part of 1.8.5, not built yet; leave --verify out.")
+        return 2
+    loaded = accountlib.load(a.accounts) if a.accounts else accountlib.NONE
+    if loaded.problem is not None:
+        out(f"tapwright bug: {loaded.problem}")
+        return 2
+    keep = accountlib.Store()
+    keep.remember(loaded)
+    maps = mapkeeper.Maps(getattr(a, "maps", None))
+    ctx = bugmake.Context(bugs, keep.bug_scrub, keep.bug_gate, lambda app: _map_or_none(maps, app))
+    home = storelib.HOME / "explore"
+    folder = Path(words[0]).expanduser()
+    try:
+        got = bugmake.read_run(home, folder if folder.is_absolute() else Path.cwd() / folder, words[1])
+        made = bugmake.from_run(ctx, got, with_picture=a.with_picture,
+                                reproduced={"checked": False, "why": bugtool.CHECK_NOT_BUILT})
+    except bugmake.BugError as e:
+        out(f"Error {e.code}: {ctx.safe()(str(e))}")
+        return 2
+    except bugstore.BugGateError as e:
+        out(f"Error not_allowed: the bug was not made: {e} Nothing was written.")
+        return 2
+    except (ValueError, OSError) as e:
+        out(f"Error bad_params: {ctx.safe()(str(e))}")
+        return 2
+    out(bugmake.answer(made, ctx.scrub, home=Path.home()))
+    return 0
+
+
+def _map_or_none(maps, app: str) -> dict | None:
+    try:
+        return maps.data(None, app)
+    except Exception:  # noqa: BLE001 - no map: no names and no keys from it
+        return None
+
+
 def pull_crash_beside(script: str) -> str | None:
     """The app's newest crash report (the daemon's `crash` with pull), copied to
     `<script dir>/<script name>.diff/<script name>.crash.ips`; its path, or None when there is none to copy."""
@@ -1169,6 +1230,13 @@ def main() -> int:
     p.add_argument("--adopt", action="store_true",
                    help="with --repair apply: when that run passed, replace the script with the repaired one, keeping the "
                         "original as <script>.orig.json (once). Only a person can do this: no tool call can")
+    p = sub.add_parser("bug", help="a one-page bug report from an explore report's finding (no phone needed); bug list")
+    p.add_argument("what", nargs="+", metavar="WORD", help="<report folder> <finding id>, or list")
+    p.add_argument("--with-picture", action="store_true", help="a private picture goes into the folder (your own request)")
+    p.add_argument("--verify", type=int, metavar="N", help="reproduction runs (part 2 of 1.8.5: not built yet)")
+    p.add_argument("--app", metavar="ID", help="bug list: one app's bugs only")
+    p.add_argument("--accounts", metavar="FILE", help="the vault file whose values the bug keeps out (§29.6)")
+    p.add_argument("--maps", metavar="DIR", help="the maps folder (default: the tool's home)")
     p = sub.add_parser("explore", help="search an app for what breaks, with no agent: the same search and report as the explore tool")
     p.add_argument("--minutes", type=float, metavar="N", help="time budget, 1 to 60 (default 10)")
     p.add_argument("--steps", type=int, metavar="N", help="move budget, 1 to 5000 (default 500)")
@@ -1338,6 +1406,8 @@ def main() -> int:
         return replay(a)
     if a.cmd == "explore":
         return explore(a)
+    if a.cmd == "bug":
+        return bug_cmd(a)
     if a.cmd == "skill":
         return skill(a)
     if a.cmd == "starters":

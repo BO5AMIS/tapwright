@@ -84,8 +84,11 @@ def with_repro(finding: findings.Finding) -> tuple[findings.Finding, dict | None
 
 
 def document(result: explore.Result, who: explore.Identity, budget: explore.Budget, started: datetime.datetime,
-             ended: datetime.datetime, scrub: Callable[[str], str]) -> tuple[dict, list[tuple[findings.Finding, dict | None]]]:
-    """`report.json` (§25.10) and the findings with their scripts. Every string is redacted whole."""
+             ended: datetime.datetime, scrub: Callable[[str], str],
+             place_keys: dict | None = None) -> tuple[dict, list[tuple[findings.Finding, dict | None]]]:
+    """`report.json` (§25.10) and the findings with their scripts. Every string is redacted whole. `place_keys`: each
+    finding's place's signature key as the map had it (1.8.5, §29.5: a bug is told by its place's key, and a place renamed
+    since keeps it); a key a tool doesn't know is ignored (§25.10)."""
     made = [with_repro(f) for f in result.findings]
     body = {
         "format": FORMAT, "version": VERSION, "app": who.app, "build": who.build, "tool": who.tool,
@@ -102,6 +105,10 @@ def document(result: explore.Result, who: explore.Identity, budget: explore.Budg
     }
     if result.stopped == "toggle_not_restored" and result.detail:
         body["stopped_detail"] = result.detail
+    keys = {f.place: {"signature": (place_keys or {})[f.place]} for f, _ in made
+            if f.place and isinstance((place_keys or {}).get(f.place), str)}
+    if keys:
+        body["place_keys"] = keys
     return findings.redact(body, scrub), made  # type: ignore[return-value]
 
 
@@ -178,11 +185,11 @@ def _write(path: Path, data: str | bytes) -> None:
 
 
 def write(root: Path, result: explore.Result, who: explore.Identity, budget: explore.Budget, started: datetime.datetime,
-          ended: datetime.datetime, scrub: Callable[[str], str]) -> Path:
+          ended: datetime.datetime, scrub: Callable[[str], str], place_keys: dict | None = None) -> Path:
     """Write the run's folder and return its path (the answer's `Report:` is `<folder>/report.md`)."""
     folder = folder_for(root, who.app, started)
     prune(folder.parent, KEEP - 1)  # (room for this run: the newest 20 stay)
-    body, made = document(result, who, budget, started, ended, scrub)
+    body, made = document(result, who, budget, started, ended, scrub, place_keys)
     kept = tuple(f for f, _ in made)
     folder.mkdir(parents=True, exist_ok=True)
     for f, script in made:

@@ -47,6 +47,8 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "journey": ("start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"),
     "explore": ("minutes", "steps", "depth", "from", "focus", "fill", "continue", "account", "guide"),
+    "bug_report": ("finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture",
+                   "export"),
 }
 # Names the daemon takes that the MCP tools' signatures don't have (tests/test_params.py holds the table to this)
 NOT_IN_MCP: dict[str, set[str]] = {t: {"index"} for t, names in ALLOWED.items() if "index" in names}

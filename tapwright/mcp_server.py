@@ -336,6 +336,19 @@ async def explore(minutes: float | None = None, steps: int | None = None, depth:
     return await _tool("explore", **{k: v for k, v in given.items() if v is not None})
 
 
+@server.tool(description=describe("bug_report"), structured_output=False)
+@_wire_names(**{"from": "source"})
+async def bug_report(finding: str | None = None, run: str | None = None,
+                     source: str | None = Field(default=None, alias="from"), note: str | None = None,
+                     expected: str | None = None, verify: int | bool | None = None, reset: str | None = None,
+                     account: str | None = None, bug: str | None = None, with_picture: bool | None = None,
+                     export: dict | None = None) -> CallToolResult:
+    # (`from` is Python's word: the argument is its alias. Each is sent only when given.)
+    given = {"finding": finding, "run": run, "from": source, "note": note, "expected": expected, "verify": verify,
+             "reset": reset, "account": account, "bug": bug, "with_picture": with_picture, "export": export}
+    return await _tool("bug_report", **{k: v for k, v in given.items() if v is not None})
+
+
 @server.tool(description=describe("record"), structured_output=False)
 async def record(start: bool = False, stop: bool = False, name: str | None = None,
                  path: str | None = None, route: str | None = None,
