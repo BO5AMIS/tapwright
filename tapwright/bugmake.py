@@ -64,6 +64,8 @@ def clean(raw: dict, scrub: Callable[[str], str]) -> dict:
     system = raw.get("system")
     if system is not None:
         out["system"] = system if system in bug.SYSTEM_SHEETS else "other"
+        if isinstance(out.get("picture"), dict):  # (§29.8) a picture with a system sheet in front is always private
+            out["picture"] = {**out["picture"], "private": True}
     return out
 
 
@@ -110,14 +112,18 @@ def road_names(ctx: Context, app: str, path: list[dict]) -> list[str | None]:
 def needs_person(ctx: Context, app: str, path: list[dict]) -> list[int]:
     """The steps whose target carries a word the policy or the explorer's floor holds (§11.1, §25.5): `(needs a person)`."""
     floor = explorefloor.Floor(ctx.rules, app)
-    found = []
-    for i, step in enumerate(path):
-        target = step.get("target") if isinstance(step.get("target"), dict) else {}
-        texts = [target.get("label"), target.get("text"),
-                 explorefloor.id_words(target["id"]) if isinstance(target.get("id"), str) else None]
-        if any(isinstance(t, str) and t and floor.named(t) is not None for t in texts):
-            found.append(i)
-    return found
+    return [i for i, step in enumerate(path) if person_word(floor, step) is not None]
+
+
+def person_word(floor: explorefloor.Floor, step: dict) -> str | None:
+    """The policy or floor word a step's target holds (its label, its text, its id as words), or None."""
+    target = step.get("target") if isinstance(step.get("target"), dict) else {}
+    texts = [target.get("label"), target.get("text"),
+             explorefloor.id_words(target["id"]) if isinstance(target.get("id"), str) else None]
+    for text in texts:
+        if isinstance(text, str) and text and (hit := floor.named(text)) is not None:
+            return hit.word
+    return None
 
 
 def script_for(finding: dict, script: dict | None, scrub: Callable[[str], str]) -> dict:
@@ -326,7 +332,7 @@ def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observe
 
 def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identity: dict, when: str, observed: Observed,
              place: str | None, place_key: dict | None, logs: list[str], picture: bytes | None, system: str | None,
-             with_picture: bool) -> bugstore.Made:
+             with_picture: bool, reproduced: dict | None = None) -> bugstore.Made:
     """The `observed` finding of what a person or an agent saw (§29.3), made into a bug. `identity`: app_version, build,
     tool_version, device {model, os}."""
     raw: dict = {"id": "f1", "kind": "observed", "app": app, "app_version": identity["app_version"],
@@ -339,7 +345,7 @@ def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identit
         raw["system"] = system
     finding = clean(raw, ctx.safe())
     return _make(ctx, finding, place_key=place_key, how="now", key=f"now/{when}", run=None, script=None, picture=picture,
-                 with_picture=with_picture, reproduced={"checked": False, "why": "not asked"},
+                 with_picture=with_picture, reproduced=reproduced or {"checked": False, "why": "not asked"},
                  extras={"steps_cut": observed.cut})
 
 

@@ -6,24 +6,28 @@ What the daemon keeps for it: every value typed in this session, registered befo
 never the explorer's public fake values), the last touches of the session (`_bug_trail`, what the action log says: a step as a
 road names it, the place it ran on, never a typed value), and each agent's last failed `run` or `replay` (`_bug_failures`).
 
-Part 2 of 1.8.5 adds the reproduction check (§29.4) and the export (§29.7): until then `verify` and `export` are refused as
-`unsupported`, and a bug made with the default check says `not checked` with the reason. `BugTools._bug_check` and
-`BugTools._bug_export` are the seams.
+The call makes the bug first, then checks it (§29.4, `_bug_check`: bugcheck.py, every move through the one dispatch gate),
+then exports it when asked (§29.7, `_bug_export`: bugexport.py, re-gated, with its audit line). A check that can't run never
+stops the bug from being made: the page says why.
 """
 from __future__ import annotations
 
 import asyncio
 import collections
 import datetime
+import json
 from pathlib import Path
 
-from . import bugmake, bugstore, explore, explorefloor, findings, store, ui
+from . import batch, bugcheck, bugexport, bugmake, bugstore, explore, explorefloor, findings, places, routes, store, ui
 from .control import Refused
 
 KEYS = ("finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture", "export")
 TRAIL = 50  # the touches the daemon keeps for `from: "now"` (it uses the last 10 of the app)
-NOT_BUILT = "part of 1.8.5, not built yet: the bug was not made; leave {what} out to make it now"
-CHECK_NOT_BUILT = "the reproduction check is part of 1.8.5, not built yet"
+NOT_ASKED = "not asked"
+NO_PHONE = "no phone connected"
+CHECK_BUSY = "stopped (busy): an explore is running on this phone"
+ACCOUNT_NOTE = ("Note: account isn't used: the check relaunches the app, which keeps its data (a sign-in included), and never "
+                "signs in.")
 NO_LOG = ('from "now" needs the action log, and it is off (tapwright serve --no-log): the last touches aren\'t known, so '
           "nothing can say how to see it.")
 NO_TOUCH = 'from "now": no touch in the action log of this app yet; drive to the bug first, then report it.'
@@ -41,8 +45,8 @@ def utc_ms(when: datetime.datetime) -> str:
 
 
 def parse(args: dict) -> dict:
-    """The call's arguments, checked (§29.3). `bad_params` names what is wrong; `verify` (a number of runs) and `export` are
-    `unsupported` until part 2."""
+    """The call's arguments, checked (§29.3), before anything is made. `bad_params` names what is wrong. The answer: the
+    source, `runs` (how many reproduction runs: the source's default when `verify` isn't given) and `export` (checked)."""
     unknown = [k for k in args if k not in KEYS]
     if unknown:
         raise Refused("bad_params", f"bug_report doesn't take {', '.join(unknown)}; it takes {', '.join(KEYS)}.")
@@ -68,17 +72,17 @@ def parse(args: dict) -> dict:
         raise Refused("bad_params", f'reset is "own" or "app", not {args["reset"]!r}')
     if args.get("account") is not None and not isinstance(args["account"], str):
         raise Refused("bad_params", "account is a vault account's name")
-    if verify not in (None, False, 0):
-        raise Refused("unsupported", "verify: the reproduction check is " + NOT_BUILT.format(what="verify"))
-    if args.get("export") is not None:
-        raise Refused("unsupported", "export is " + NOT_BUILT.format(what="export").replace("the bug was not made; ", ""))
+    export = bugexport.check(args["export"]) if args.get("export") is not None else None
     if source == "finding" and (not isinstance(args["finding"], str) or not args["finding"].strip()):
         raise Refused("bad_params", 'finding is a finding\'s id, like "f3"')
     if source == "bug" and (not isinstance(args["bug"], str) or not args["bug"].strip()):
         raise Refused("bad_params", 'bug is a kept bug\'s id, like "bug_7bc2e91c152d416e"')
     if args.get("run") is not None and (not isinstance(args["run"], str) or not args["run"].strip()):
         raise Refused("bad_params", 'run is an explore report folder or "last"')
-    return {"source": source, "checked": verify is None and not (source == "from" and args["from"] == "now")}
+    now = source == "from" and args["from"] == "now"
+    default = 0 if now or source == "bug" else bugcheck.RUNS_DEFAULT
+    return {"source": source, "runs": bugcheck.runs_of(verify, default), "export": export,
+            "reset": args.get("reset") or "own", "account": args.get("account")}
 
 
 class BugTools:
@@ -178,8 +182,18 @@ class BugTools:
             self._bug_failures[client_id] = record
 
     # ---- the tool ----
+    _bug_pruned: bool = False
+
     def _bugs(self) -> bugstore.BugStore:
-        return bugstore.BugStore(self.bug_home if self.bug_home is not None else store.HOME / "bugs")
+        bugs = bugstore.BugStore(self.bug_home if self.bug_home is not None else store.HOME / "bugs")
+        if not self._bug_pruned:  # (§29.2: retention at start too; the daemon's first use of the bugs is its start for them)
+            self._bug_pruned = True
+            try:
+                for app in bugs.apps():
+                    bugs.prune(app)
+            except OSError:
+                pass
+        return bugs
 
     def _bug_explore_home(self) -> Path:
         home = getattr(self, "explore_home", None)
@@ -201,7 +215,9 @@ class BugTools:
             raise Refused("bad_params", "bug_report is a tool of its own, never a step of run or a script")
         parsed = parse(args)
         ctx = self._bug_context()
-        reproduced = {"checked": False, "why": CHECK_NOT_BUILT} if parsed["checked"] else {"checked": False, "why": "not asked"}
+        runs = parsed["runs"]
+        # (the bug is written first; a check that runs replaces this, a check that can't says why: §29.3, §29.4)
+        reproduced = bugcheck.not_checked(bugcheck.PENDING if runs else NOT_ASKED)
         with_picture = bool(args.get("with_picture"))
         try:
             if parsed["source"] == "bug":
@@ -216,16 +232,47 @@ class BugTools:
                 made = await asyncio.to_thread(bugmake.from_failure, ctx, failure, with_picture=with_picture,
                                                reproduced=reproduced)
             else:
-                made = await self._bug_now(ctx, client_id, scope, args, with_picture)
+                made = await self._bug_now(ctx, client_id, scope, args, with_picture, reproduced)
+            notes: list[str] = []
+            if runs:
+                made = await self._bug_checked(ctx, client_id, scope, made, runs, parsed, notes)
         except bugmake.BugError as e:
             raise Refused(e.code, ctx.safe()(str(e))) from None
         except bugstore.BugGateError as e:
             raise Refused("not_allowed", f"the bug was not made: {e} Nothing was written.") from None
         except findings.FindingError as e:
             raise Refused("bad_params", ctx.safe()(f"the finding can't be made into a bug: {e}")) from None
-        text = bugmake.answer(made, ctx.scrub, reason_shown=parsed["checked"] or parsed["source"] == "bug",
-                              home=Path.home())
-        return {"text": text, "image": None, "image_size": None}
+        now_unasked = parsed["source"] == "from" and args["from"] == "now" and not runs
+        text = bugmake.answer(made, ctx.scrub, reason_shown=not now_unasked, home=Path.home())
+        if parsed["export"] is not None:
+            held = ctx.store.read(made.finding["app"], made.meta["id"])
+            if held is None:
+                raise Refused("not_found", f"{made.meta['id']} can't be read back from its folder to export it.")
+            try:
+                said = await self._bug_export(held, parsed["export"])
+            except Refused as e:
+                # (the bug is made and kept: the refusal says so, and nothing was sent)
+                raise Refused(e.code, ctx.safe()(f"{e}\n{text}")) from None
+            notes.append(ctx.safe()(said))
+        return {"text": "\n".join([text, *notes]), "image": None, "image_size": None}
+
+    async def _bug_checked(self, ctx: bugmake.Context, client_id: str, scope, made: bugstore.Made, runs: int, parsed: dict,
+                           notes: list[str]) -> bugstore.Made:
+        """The reproduction check of the bug just made or named (§29.4), written into its folder. A check that can't run is
+        written as `not checked` with why, unless the bug holds a real check already (then that one stays and a note says
+        why this one didn't run)."""
+        held = ctx.store.read(made.finding["app"], made.meta["id"])
+        if held is None:
+            raise Refused("not_found", f"{made.meta['id']} can't be read back from its folder to check it.")
+        if parsed["account"] is not None:
+            notes.append(ACCOUNT_NOTE)
+        result = await self._bug_check(held, runs, parsed["reset"], parsed["account"], client_id=client_id, scope=scope)
+        before = held.meta.get("reproduced") or {}
+        if result.get("checked") is False and before.get("checked") is not False and not made.new:
+            notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
+            return made
+        checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new)
+        return checked
 
     def _bug_app_hint(self) -> str | None:
         front = self._bundle()
@@ -268,7 +315,8 @@ class BugTools:
             return await asyncio.to_thread(bugs.add_picture, held, picture, ctx.gate)
         return bugstore.Made(held.meta, held.folder, False, held.title, held.finding)
 
-    async def _bug_now(self, ctx: bugmake.Context, client_id: str, scope, args: dict, with_picture: bool) -> bugstore.Made:
+    async def _bug_now(self, ctx: bugmake.Context, client_id: str, scope, args: dict, with_picture: bool,
+                       reproduced: dict | None = None) -> bugstore.Made:
         """`from: "now"` (§29.3): the screen now and the last touches of the action log."""
         note = bugmake.check_note(args.get("note"), "note", True)
         expected = bugmake.check_note(args.get("expected"), "expected", False)
@@ -307,7 +355,7 @@ class BugTools:
         return await asyncio.to_thread(
             bugmake.from_now, ctx, app=bundle, note=note, expected=expected, identity=identity, when=when,
             observed=observed, place=place, place_key=key, logs=await self._bug_logs(bundle), picture=picture,
-            system=system_of(snap.tree), with_picture=with_picture)
+            system=system_of(snap.tree), with_picture=with_picture, reproduced=reproduced)
 
     async def _bug_logs(self, bundle: str) -> list[str]:
         """The app's last 20 log lines of any level (§29.3), each `HH:MM:SS.mmm level text`; redacted when the bug is made."""
@@ -325,14 +373,76 @@ class BugTools:
             out.append(f"{at.strftime('%H:%M:%S')}.{at.microsecond // 1000:03d} {e.level} {e.text}")
         return out
 
-    # ---- part 2's seams (§29.4, §29.7) ----
-    async def _bug_check(self, held: bugstore.Kept, runs: int, reset: str, account: str | None) -> dict:
-        """The reproduction check (§29.4): `{"n", "of", "build", "when", "reset"}` or `{"checked": false, "why"}`. Part 2."""
-        raise Refused("unsupported", "verify: the reproduction check is " + NOT_BUILT.format(what="verify"))
+    # ---- the reproduction check (§29.4) and the export (§29.7) ----
+    async def _bug_check(self, held: bugstore.Kept, runs: int, reset: str, account: str | None, *, client_id: str = "",
+                         scope=None) -> dict:
+        """The reproduction check (§29.4): `{"n", "of", "build", "when", "reset"}` or `{"checked": false, "why"}`; never
+        raises for a check that can't run (the bug is made already). Every move is the agent's own call under the skip floor,
+        the ONE dispatch gate of 1.8.0 (`daemon._TOUCH_FLOOR`, judged on the element the touch really goes to), with nobody
+        asked: a step the floor holds is refused at dispatch and stops the check. A `${typed}` step or a step whose target
+        holds a policy or floor word stops it before anything is touched. `account` isn't used: the relaunch keeps data."""
+        d = _d()
+        app = held.app
+        try:
+            script = json.loads((held.folder / "repro.json").read_text("utf-8"))
+        except (OSError, ValueError, RecursionError):
+            script = None
+        target = bugcheck.target_of(held.finding, held.meta, script if isinstance(script, dict) else None)
+        if (why := bugcheck.why_not(target, reset)) is not None:
+            return bugcheck.not_checked(why)
+        rules = d._FLOOR_RULES.get() or d.safety.NONE  # (the caller's policy file only adds words to the floor)
+        floor = explorefloor.Floor(rules, app)
+        if (stop := bugcheck.person_step(target.steps, lambda s: bugmake.person_word(floor, s))) is not None:
+            return bugcheck.needs_person(*stop)  # (nothing is touched: the check would stop there anyway)
+        if (why := bugcheck.unaimed(target.steps)) is not None:
+            return bugcheck.not_checked(why)
+        try:
+            declared = script.get("variables") if isinstance(script, dict) and isinstance(script.get("variables"), list) else []
+            steps = routes.substitute(target.steps, {}, [v for v in declared if isinstance(v, str)])
+            batch.check_steps(steps, script=True)
+        except Refused as e:
+            return bugcheck.not_checked(f"its script can't be run ({e.code})")
+        if self.state == "locked":
+            return bugcheck.not_checked("stopped (locked)")
+        if self.state != "live":
+            return bugcheck.not_checked(NO_PHONE)
+        if self._explore_active is not None:
+            return bugcheck.not_checked(CHECK_BUSY)
+        self._explore_active = client_id or "bug_report"  # (no explore starts on the phone while the check runs)
+
+        def key_of(lang: str | None, tree) -> dict | None:
+            if tree is None or not places.has_structure(tree):
+                return None
+            key = places.read_place(tree, lang).key
+            return {"signature": key["signature"]} if isinstance(key.get("signature"), str) else None
+        port = bugcheck.DaemonCheck(self, client_id, scope, app, key_of)
+        tokens = (d._NESTED.set(True), d._DIALOG.set(None), d._CRASHES.set(port.phone.crashes), d._TOUCH_FLOOR.set(floor))
+        try:
+            self.ensure_logs(app)
+            build = await self._build_of(app) or "unknown"
+            return await bugcheck.check(port, target, steps, runs, build=build,
+                                        when=lambda: utc_ms(datetime.datetime.now(datetime.timezone.utc)),
+                                        scrub=self.accounts.bug_scrub)
+        except bugcheck.Stopped as e:
+            return bugcheck.not_checked(f"stopped ({e.code})")
+        except Refused as e:
+            return bugcheck.not_checked(f"stopped ({e.code})")
+        finally:
+            d._TOUCH_FLOOR.reset(tokens[3])
+            d._CRASHES.reset(tokens[2])
+            d._DIALOG.reset(tokens[1])
+            d._NESTED.reset(tokens[0])
+            self._explore_active = None
 
     async def _bug_export(self, held: bugstore.Kept, export: dict) -> str:
-        """The export (§29.7): a GitHub issue or a `.zip`, each re-gated, with its audit line. Part 2."""
-        raise Refused("unsupported", "export is part of 1.8.5, not built yet")
+        """The export (§29.7): a GitHub issue or a `.zip`, every text it sends grepped again with the live values (§29.6), and
+        one audit line (kind `export`) for each, a refused one too. No audit log: nothing is sent."""
+        ctx = self._bug_context()
+        log = getattr(self, "audit", None)
+
+        def audit(detail: str) -> bool:
+            return bool(log is not None and log.write("export", name="bug_report", app=held.app, detail=detail))
+        return await asyncio.to_thread(bugexport.export, held, export, ctx.gate, audit, Path.home())
 
 
 def system_of(tree: ui.Tree) -> str | None:

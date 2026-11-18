@@ -171,6 +171,9 @@ def _timeout(tool: str, args: dict) -> float:
         return EXPORT_TIMEOUT
     if tool == "explore":  # a search runs up to its `minutes` (AGENT-TOOLS §25.2)
         return exploretool.timeout_for(args)
+    if tool == "bug_report":  # its reproduction runs (§29.4) and its export (§29.7)
+        from . import bugcheck
+        return bugcheck.timeout_for(args)
     if tool == "replay" and args.get("repair") == "apply":  # the run, then the repaired file's own replay (§26.4)
         return scriptrepair.APPLY_TIMEOUT
     if tool == "media":

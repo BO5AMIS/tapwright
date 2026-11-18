@@ -32,8 +32,9 @@
   tapwright unlock-reset
                      after the phone refused the vault's passcode, the passcode unlock types nothing until you check
                      phone.passcode and run this (at most 2 attempts an hour and 3 a day in any case)
-  tapwright bug <report folder> <finding id> [--with-picture] [--accounts FILE]; bug list [--app ID]
-                     a one-page bug report of an explore finding under ~/.tapwright/bugs (no phone needed)
+  tapwright bug <report folder> <finding id> [--with-picture] [--verify N] [--accounts FILE]; bug list [--app ID];
+                     bug verify <bug id> [--verify N]; bug export <bug id> --to zip|issue [--repo O/N] [--yes]
+                     a one-page bug report of an explore finding under ~/.tapwright/bugs (the phone only to verify)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -970,13 +971,18 @@ def explore(a, sleep=time.sleep) -> int:
     return 1 if found and int(found.group(1)) > 0 else 0
 
 
-def bug_cmd(a, out=print) -> int:
-    """`tapwright bug` (AGENT-TOOLS §29.3), with no phone: `bug <report folder> <finding id> [--with-picture]` makes a bug of
-    an explore report's finding, `bug list [--app ID]` lists the bugs kept. `bug verify` and `bug export` are part 2 of 1.8.5
-    (`unsupported` for now). Exit 0: a bug was made or updated (it reproduced or wasn't checked); 1: it didn't reproduce
-    (`0 of N`, part 2); 2: it couldn't be made. The redactor holds the values of `--accounts` (the vault file), the codes and
-    typed values being the daemon's; every file is grepped before it is written (§29.6)."""
-    from . import accounts as accountlib, bugmake, bugstore, bugtool, mapkeeper, store as storelib
+def bug_cmd(a, out=print, ask=None, call=None) -> int:
+    """`tapwright bug` (AGENT-TOOLS §29.3):
+    - `bug <report folder> <finding id> [--with-picture] [--verify N]` makes a bug of an explore report's finding with no phone;
+      with `--verify` the daemon then checks it on the phone (§29.4);
+    - `bug list [--app ID]` lists the bugs kept;
+    - `bug verify <bug id> [--verify N]` checks a kept bug again, on the phone (through the daemon, as the tool does);
+    - `bug export <bug id> --to zip|issue [--repo owner/name] [--public] [--with-picture] [--yes] [--app ID]` (§29.7), with no
+      phone: GitHub asks `Send to GitHub? [y/N]`, and without a terminal `--yes` answers it.
+    Exit 0: a bug was made or updated and it reproduced or wasn't checked (or the export was written); 1: it was made and
+    didn't reproduce (`0 of N`); 2: it couldn't be made or sent, or a person, a pause or a refusal stopped it. The redactor
+    holds the values of `--accounts` (the vault file); every file is grepped before it is written or sent (§29.6)."""
+    from . import accounts as accountlib, bugmake, bugstore, mapkeeper, store as storelib
     words = list(a.what)
     bugs = bugstore.BugStore(storelib.HOME / "bugs")
     if words[:1] == ["list"]:
@@ -986,21 +992,27 @@ def bug_cmd(a, out=print) -> int:
         lines = bugs.listing(a.app)
         out("\n".join(lines) if lines else "No bugs are kept.")
         return 0
-    if words[:1] in (["verify"], ["export"]):
-        out(f"Error unsupported: bug {words[0]} is part of 1.8.5, not built yet.")
+    verify = getattr(a, "verify", None)
+    if verify is not None and not 1 <= verify <= 10:
+        out("Error bad_params: --verify is how many runs check it: 1 to 10")
         return 2
-    if len(words) != 2:
-        out("usage: tapwright bug <report folder> <finding id> [--with-picture] | bug list [--app ID]")
-        return 2
-    if a.verify:
-        out("Error unsupported: --verify: the reproduction check is part of 1.8.5, not built yet; leave --verify out.")
-        return 2
+    if words[:1] == ["verify"]:
+        if len(words) != 2:
+            out("usage: tapwright bug verify <bug id> [--verify N]")
+            return 2
+        return _bug_call({"bug": words[1], "verify": verify or 3}, out, call)
     loaded = accountlib.load(a.accounts) if a.accounts else accountlib.NONE
     if loaded.problem is not None:
         out(f"tapwright bug: {loaded.problem}")
         return 2
     keep = accountlib.Store()
     keep.remember(loaded)
+    if words[:1] == ["export"]:
+        return _bug_export_cmd(a, words, bugs, keep, out, ask)
+    if len(words) != 2:
+        out("usage: tapwright bug <report folder> <finding id> [--with-picture] [--verify N] | bug list [--app ID] | "
+            "bug verify <bug id> | bug export <bug id> --to zip|issue")
+        return 2
     maps = mapkeeper.Maps(getattr(a, "maps", None))
     ctx = bugmake.Context(bugs, keep.bug_scrub, keep.bug_gate, lambda app: _map_or_none(maps, app))
     home = storelib.HOME / "explore"
@@ -1008,7 +1020,7 @@ def bug_cmd(a, out=print) -> int:
     try:
         got = bugmake.read_run(home, folder if folder.is_absolute() else Path.cwd() / folder, words[1])
         made = bugmake.from_run(ctx, got, with_picture=a.with_picture,
-                                reproduced={"checked": False, "why": bugtool.CHECK_NOT_BUILT})
+                                reproduced={"checked": False, "why": "the check didn't finish" if verify else BUG_NOT_ASKED})
     except bugmake.BugError as e:
         out(f"Error {e.code}: {ctx.safe()(str(e))}")
         return 2
@@ -1018,7 +1030,95 @@ def bug_cmd(a, out=print) -> int:
     except (ValueError, OSError) as e:
         out(f"Error bad_params: {ctx.safe()(str(e))}")
         return 2
+    if verify:  # the bug is made; the phone checks it (the daemon finds it by its id, preferring the app in front)
+        return _bug_call({"bug": made.meta["id"], "verify": verify}, out, call)
     out(bugmake.answer(made, ctx.scrub, home=Path.home()))
+    return 0
+
+
+BUG_NOT_ASKED = "not asked: tapwright bug verify <bug id> checks it on the phone"
+
+
+def _bug_call(args: dict, out, call=None) -> int:
+    """A `bug_report` call to the daemon (the phone's side: the reproduction check), with the exit code of §29.3."""
+    from . import bugcheck, client
+    call = call or client.call
+    try:
+        answer = call("bug_report", args, "cli-bug", timeout=bugcheck.timeout_for(args))
+    except client.DaemonError as e:
+        out(f"Error {e.code}: {e}")
+        return 2
+    text = answer.get("text", "")
+    out(text)
+    return bug_exit(text)
+
+
+def bug_exit(text: str) -> int:
+    """The exit code of an answer (§29.3): 1 when it didn't reproduce (`0 of N`), 2 when a person, a pause or a refusal
+    stopped the check, else 0."""
+    lines = text.splitlines()
+    line = lines[1] if len(lines) > 1 else ""
+    if line.startswith("Reproduced: 0 of "):
+        return 1
+    stopped = ("stopped (", "needs a person")
+    if line.startswith("Reproduced: not checked (") and any(w in line for w in stopped):
+        return 2
+    if any(ln.startswith("Note: not checked this time (") and any(w in ln for w in stopped) for ln in lines):
+        return 2
+    return 0
+
+
+def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None) -> int:
+    """`tapwright bug export <bug id> --to zip|issue ...` (§29.7): no phone and no daemon; the audit line is written here."""
+    import sys
+    from . import auditlog, bugexport
+    from .control import Refused
+    if len(words) != 2 or getattr(a, "to", None) is None:
+        out("usage: tapwright bug export <bug id> --to zip | --to issue --repo owner/name [--public] [--with-picture] [--yes]")
+        return 2
+    bug_id = words[1]
+    holders = bugs.holders(bug_id)
+    app = getattr(a, "app", None)
+    if app is not None and app not in holders:
+        holders = []
+    elif app is not None:
+        holders = [app]
+    if not holders:
+        out(f'Error not_found: no bug "{bug_id}" is kept{f" for {app}" if app else ""}; tapwright bug list names them.')
+        return 2
+    if len(holders) > 1:
+        out(f"Error ambiguous: {bug_id} is a bug of {', '.join(holders)}: name the app with --app.")
+        return 2
+    held = bugs.read(holders[0], bug_id)
+    if held is None:
+        out(f'Error not_found: no bug "{bug_id}" is kept.')
+        return 2
+    raw: dict = {"to": a.to}
+    if a.to == "issue":
+        raw.update(repo=getattr(a, "repo", None), public=bool(getattr(a, "public", False)))
+        confirmed = bool(getattr(a, "yes", False))
+        if not confirmed and ask is None and sys.stdin is not None and sys.stdin.isatty():
+            ask = input
+        if not confirmed and ask is not None:
+            try:
+                confirmed = ask("Send to GitHub? [y/N] ").strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
+        raw["confirm"] = confirmed
+    if a.with_picture:
+        raw["with_picture"] = True
+    log = auditlog.AuditLog(scrub=keep.scrub)
+    try:
+        spec = bugexport.check(raw)
+        said = bugexport.export(held, spec, keep.bug_gate, lambda detail: log.write(
+            "export", name="bug_report", app=held.app, detail=detail), Path.home())
+    except Refused as e:
+        text = str(e)
+        if "needs_confirmation" in text:
+            text += " On the command line: answer y, or give --yes."
+        out(f"Error {e.code}: {text}")
+        return 2
+    out(said)
     return 0
 
 
@@ -1230,11 +1330,18 @@ def main() -> int:
     p.add_argument("--adopt", action="store_true",
                    help="with --repair apply: when that run passed, replace the script with the repaired one, keeping the "
                         "original as <script>.orig.json (once). Only a person can do this: no tool call can")
-    p = sub.add_parser("bug", help="a one-page bug report from an explore report's finding (no phone needed); bug list")
-    p.add_argument("what", nargs="+", metavar="WORD", help="<report folder> <finding id>, or list")
-    p.add_argument("--with-picture", action="store_true", help="a private picture goes into the folder (your own request)")
-    p.add_argument("--verify", type=int, metavar="N", help="reproduction runs (part 2 of 1.8.5: not built yet)")
-    p.add_argument("--app", metavar="ID", help="bug list: one app's bugs only")
+    p = sub.add_parser("bug", help="a one-page bug report from an explore report's finding (no phone needed); bug list, "
+                                   "bug verify, bug export")
+    p.add_argument("what", nargs="+", metavar="WORD",
+                   help="<report folder> <finding id>, or list, or verify <bug id>, or export <bug id>")
+    p.add_argument("--with-picture", action="store_true",
+                   help="a private picture goes into the folder, or into the export (your own request)")
+    p.add_argument("--verify", type=int, metavar="N", help="reproduction runs on the phone, 1 to 10 (bug verify: default 3)")
+    p.add_argument("--app", metavar="ID", help="bug list: one app's bugs only; bug export: the app whose bug it is")
+    p.add_argument("--to", choices=("zip", "issue"), help="bug export: a .zip next to the bug's folder, or a GitHub issue")
+    p.add_argument("--repo", metavar="OWNER/NAME", help="bug export --to issue: the repository")
+    p.add_argument("--public", action="store_true", help="bug export --to issue: the repository may be public")
+    p.add_argument("--yes", action="store_true", help="bug export --to issue: answer Send to GitHub? with yes (no terminal)")
     p.add_argument("--accounts", metavar="FILE", help="the vault file whose values the bug keeps out (§29.6)")
     p.add_argument("--maps", metavar="DIR", help="the maps folder (default: the tool's home)")
     p = sub.add_parser("explore", help="search an app for what breaks, with no agent: the same search and report as the explore tool")

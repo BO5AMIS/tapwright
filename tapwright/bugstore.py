@@ -213,6 +213,16 @@ class BugStore:
             page = bug.replace_section(page, "Reproduced", bug.reproduced_lines(meta, held.finding["kind"]))
         return self._rewrite(held, meta, page, gate, new=False)
 
+    def checked(self, held: Kept, reproduced: dict, gate: Callable[[dict[str, str]], str | None], *, new: bool = False) -> Made:
+        """The result of a reproduction check (§29.4): `reproduced` replaced, and the page's `Reproduced` and `Environment`
+        sections (the reset the check used) rewritten. The first finding stays."""
+        meta = json.loads(json.dumps(held.meta))
+        meta["reproduced"] = reproduced
+        page = (held.folder / "report.md").read_text("utf-8")
+        page = bug.replace_section(page, "Reproduced", bug.reproduced_lines(meta, held.finding["kind"]))
+        page = bug.replace_section(page, "Environment", bug.environment_lines(held.finding, meta))
+        return self._rewrite(held, meta, page, gate, new=new)
+
     def add_picture(self, held: Kept, picture: bytes, gate: Callable[[dict[str, str]], str | None]) -> Made:
         """`with_picture: true` on a kept bug (§29.2): its own private picture goes in, while its source file still exists."""
         meta = json.loads(json.dumps(held.meta))

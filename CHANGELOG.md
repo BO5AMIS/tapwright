@@ -26,8 +26,28 @@
   file names (no user folder). Before anything is written every text file is grepped for every form of every value and
   every 12-character piece of each; a hit writes nothing and names the file, never the value. A redactor that fails hides
   the text. A run folder is read only inside the explore home, and each file it names only inside it.
-- Not yet: the reproduction check (`verify`, `tapwright bug verify`) and `export` (a GitHub issue or a `.zip`) are a later
-  part of 1.8.5 and answer `unsupported`; a bug made from a finding says `Reproduced: not checked` with that reason.
+- The reproduction check (§29.4): `verify` (1 to 10 runs, `true` for 3; by default 3 for a finding or a failed check)
+  relaunches the app (its data kept), drives to the script's start over the map and runs `repro.json`, counting the runs
+  that end with the same signature: `3 of 3 runs`, `1 of 3 runs (flaky)`, or `0 of 3 runs: not reproduced`, which keeps
+  the bug. Every move is the agent's own call through the ONE dispatch gate of 1.8.0 (the skip floor, judged on the
+  element the touch really goes to after resolution and scroll), with nobody asked: a typed step or a step whose target
+  holds a floor or policy word stops the check before anything is touched (`not checked (step 3 needs a person (a typed
+  value))`), and a word only the actual recipient holds stops it at dispatch with no move of that step. A person, Pause
+  or a locked phone stops it (`stopped (busy)`); no explore starts while it runs. A check that can't run never stops the
+  bug from being made: the page says why (`no reset reached a known place`, `an unreachable place has no steps`, `reset
+  "app"` that Tapwright has no `app_command` for, `no phone connected`). A later check replaces the `Reproduced` line and
+  the reset line. `tapwright bug verify <bug id> [--verify N]` and `tapwright bug <folder> <finding> --verify N` check
+  through the daemon; exit 1 when it didn't reproduce, 2 when a person or a refusal stopped it.
+- Export (§29.7), only when your user asked: `{"to": "zip"}` writes `<bug id>.zip` next to the folder, with no network, a
+  fixed time and no user name or path; `{"to": "issue", "repo": "owner/name", "confirm": true}` opens a GitHub issue with
+  the user's own `gh` (title the page's, body `report.md`), and commits `repro.json` (and the picture when it may go) to
+  `qa-reports` under `.tapwright/bugs/<app folder>/<bug id>/`, so two apps' bugs with one id never share files. Without
+  `confirm`: `not_allowed: needs_confirmation`; a public repository, or one whose visibility can't be read, needs `public:
+  true`. A private picture goes only with the export's own `with_picture: true`. Every text sent is grepped again with the
+  live values and the export is refused if any is found (`export refused: a vault value was found in report.md.`, never
+  the value), nothing sent. A new audit kind `export`: one line per export, a refused one too, its detail the target and
+  the bug id, never content; with no audit line nothing is sent. `tapwright bug export <bug id> --to zip|issue [--repo
+  owner/name] [--public] [--with-picture] [--yes] [--app ID]` asks `Send to GitHub? [y/N]` (`--yes` without a terminal).
 
 ## 1.8.0, "the Explorer"
 

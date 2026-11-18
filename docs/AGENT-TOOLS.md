@@ -279,7 +279,7 @@ Arguments: `minutes`, `steps`, `depth`, `from`, `focus`, `fill`, `continue`, `gu
 ### bug_report
 
 One page for whoever fixes a bug (§29), in its own folder under `~/.tapwright/bugs/<app id>/<bug id>/`: `report.md`, `report.html`, `repro.json`, `finding.json` and, only when allowed, `picture.jpg`. Nothing private reaches any of it. Give exactly one source: `finding` (`"f3"`) with `run` (an explore report folder, default `"last"`: the newest explore report of the app in front), `from: "failure"` (this session's last `run` or `replay` that stopped `expect_failed`), `from: "now"` with `note` (one line, what is wrong) and optionally `expected` (what you saw while driving: the last 10 touches of the app become the steps), or `bug` (a kept bug's id, to show it again or add its picture). The same bug found again is one bug with a count, its builds and its sources. A private picture goes in only with `with_picture: true`, when your user asked. Answers the title, `Reproduced:`, `Seen:` and the folder.
-Tapwright 1.8.5 part 1: `verify` (the reproduction check, §29.4) and `export` (§29.7) answer `unsupported` for now; a bug made from a finding or a failure says `Reproduced: not checked (the reproduction check is part of 1.8.5, not built yet)`.
+The call makes the bug, then checks it, then exports it. `verify` (1 to 10 runs, `true` for 3; default 3 with `finding` and `from: "failure"`, none with `from: "now"` and `bug`) replays `repro.json` on the phone: each run relaunches the app (its data kept), drives to the start and runs the steps through the skip floor, asking nobody; it stops at the first step that would need a person (a typed value, Delete, Buy, Sign out and the like) without touching it, and a check that can't run still makes the bug and says why. `export`: `{"to": "zip"}` writes `<bug id>.zip` next to the folder (no network); `{"to": "issue", "repo": "owner/name", "confirm": true}` opens a GitHub issue with your user's `gh`, only when your user asked (a public repository also needs `public: true`). A private picture goes only with the export's own `with_picture: true`. Every export is grepped again for vault and typed values and refused if one is found.
 
 Arguments: `finding`, `run`, `from`, `note`, `expected`, `verify`, `reset`, `account`, `bug`, `with_picture`, `export`.
 
@@ -915,8 +915,8 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   since a place is `place_<n>` until a person names it (§29.8). An explore report keeps each finding's place key
   (`report.json`'s `place_keys`), so a place renamed since keeps its bug.
 - **`(needs a person)`** on a step means a word of the explorer's skip floor (§25.5) or of the policy file that `serve
-  --policy` was given: an agent's own touches have no policy gate since 1.7.5, but the reproduction check (part 2) will
-  pass the same floor as explore.
+  --policy` was given, or of the policy file the caller passes: an agent's own touches have no policy gate since 1.7.5, and
+  the reproduction check passes the same floor as explore.
 - **`from: "now"`** reads the touches the daemon logged for this session (the action log of §12; with `serve --no-log` it is
   `unsupported`): a target as `record` would save it (id, else label, else text; a ref is the element it named), and the
   place it ran on. A person's input in the live view is a point, which can't be written down: the path starts after it.
@@ -929,8 +929,37 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   ID]`; it needs no phone. `--accounts` is the vault file whose values the bug keeps out (the daemon's own redactor, with the
   session's typed values, is used by the tool). `from: "now"` and `from: "failure"` need the live session: `tapwright call
   bug_report '{…}'`.
-- **Part 2 of 1.8.5** adds §29.4 (the reproduction check, `verify`, `tapwright bug verify`) and §29.7 (`export`, `tapwright
-  bug export`). Until then they answer `unsupported`, and nothing is made.
+- **The reproduction check** (§29.4) runs on the daemon, every move as the agent's own call under the skip floor of §25.5:
+  the ONE dispatch gate of 1.8.0, judged on the element each touch really goes to after resolution and scroll, with nobody
+  asked and no grant (Tapline's lesson, C1). A `${typed}` step, or a step whose target (label, text, id as words) holds a
+  floor or policy word, stops the check before anything is touched: `not checked (step 3 needs a person (a typed value))`. A
+  word only the actual recipient holds stops it at dispatch, with no move of that step. The submit rule of §25.7 is
+  explore's only (a bug may be a form's). A person goes first as §25.9 says (`stopped (busy)`, `stopped (paused)`, `stopped
+  (locked)`); while it runs no explore starts.
+- **The reset** is Tapwright's own, a relaunch (`close_app`, `open_app`), which keeps data: `reset: relaunch only, data kept`.
+  Tapwright has no `app_command reset`, so `reset: "app"` isn't checked and says so; `account` isn't used (the relaunch keeps
+  a sign-in; the check never signs in). A run whose relaunch or way to the start (the map's proven roads, §18.4) fails isn't
+  made; with none made: `not checked (no reset reached a known place)`.
+- **What a run matches** (§29.4): the bug's signature, with the run's place key, `got` and crash facts as explore would make
+  them (`the app crashed: <reason>`, the first error log line, `it left the app`, `not_actionable: <why>`, a settle over
+  3 s); `expect_failed` the same step's `expect`; `a11y` and `ux` the first issues on the same place; `observed` the same
+  place key at the end; a dead end with no way back the same place with no back. A step that names a row of a list by its
+  place (written for a person) can't be run: `not checked` with why.
+- **A later check** of a kept bug (`{"bug": …, "verify": N}`, `tapwright bug verify`) replaces `Reproduced` and the reset line;
+  a check that can't run then leaves the last real check on the page and says why in a note.
+- **The CLI.** `tapwright bug <report folder> <finding id>` needs no phone and doesn't check (`not asked`); `--verify N` then
+  checks it through the daemon. `tapwright bug verify <bug id> [--verify N]` goes through the daemon (default 3 runs). A
+  `${typed}` step is never given a value from the command line in Tapwright 1.8.5: the check stops there, as the tool's does.
+  `tapwright bug export <bug id> --to zip | --to issue --repo owner/name [--public] [--with-picture] [--yes] [--app ID]`
+  needs no phone; GitHub asks `Send to GitHub? [y/N]`, `--yes` answers it without a terminal. Exit codes as §29.3.
+- **Export** (§29.7): the zip holds `<bug id>/report.md`, `report.html`, `repro.json`, `finding.json` and the picture when it
+  may go, at a fixed time, with no user name or path of this machine. A private picture left out changes what is sent (the
+  page says a private picture exists; `finding.json` says it wasn't included), never the folder. The issue commits
+  `repro.json` (and the picture) to `qa-reports` under `.tapwright/bugs/<app folder>/<bug id>/`. Every text sent is grepped
+  again with the live values (the vault's, the codes, the session's typed values) before anything is written or sent. One
+  audit line of kind `export` for each export, a refused one too: `zip ~/.tapwright/bugs/<app>/<bug id>.zip: <bug id>, picture
+  not sent`, `issue owner/name: <bug id>, refused (public repository)`; with no audit log (or a line that can't be written)
+  nothing is sent.
 
 ## 29. The bug report (v1.16)
 

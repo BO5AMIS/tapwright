@@ -52,12 +52,12 @@ def ctx_for(tmp_path: Path, keep: accountlib.Store | None = None, kept: int = bu
                            lambda app: map_data)
 
 
-NOT_BUILT = {"checked": False, "why": "the reproduction check is part of 1.8.5, not built yet"}
+NOT_ASKED = {"checked": False, "why": "not asked"}
 
 
 def make(ctx, home, run, with_picture=False, finding_id="f3"):
     got = bugmake.read_run(home, home / APP / run, finding_id)
-    return bugmake.from_run(ctx, got, with_picture=with_picture, reproduced=NOT_BUILT)
+    return bugmake.from_run(ctx, got, with_picture=with_picture, reproduced=NOT_ASKED)
 
 
 def every_text(folder: Path) -> str:
@@ -77,14 +77,14 @@ def test_a_bug_from_a_finding_has_its_folder_and_files(tmp_path):
     assert meta["source"] == {"how": "explore", "run": "20261114T091500Z", "finding": "f3"}
     assert meta["seen"]["count"] == 1 and meta["seen"]["builds"] == ["1.5.0 (220)"]
     assert meta["seen"]["sources"] == ["20261114T091500Z/f3"] and meta["picture_included"] is False
-    assert meta["reproduced"] == NOT_BUILT
+    assert meta["reproduced"] == NOT_ASKED
     page = (made.folder / "report.md").read_text("utf-8")
     assert page.startswith("# Crash on place_4: the app crashed: EXC_BAD_ACCESS")
     assert "A picture exists and is private." in page and len(page.splitlines()) <= 80
     assert json.loads((made.folder / "repro.json").read_text("utf-8"))["steps"][0] == {"tool": "tap", "target": {"id": "trips-tab"}}
     answer = bugmake.answer(made, ctx.scrub, home=tmp_path)
     assert answer.splitlines()[0] == f"New bug: {made.title}"
-    assert answer.splitlines()[1] == "Reproduced: not checked (the reproduction check is part of 1.8.5, not built yet)."
+    assert answer.splitlines()[1] == "Reproduced: not checked (not asked)."
     assert answer.splitlines()[2] == "Seen: 1 time, 2026-11-14, build 1.5.0 (220)."
     assert answer.splitlines()[3] == f"Folder: ~/bugs/{APP}/{made.meta['id']}"
 
@@ -294,3 +294,31 @@ def test_the_observed_finding_from_the_last_touches(tmp_path):
     assert json.loads((made.folder / "finding.json").read_text("utf-8"))["system"] == "share sheet"
     assert bugmake.answer(made, ctx.scrub, reason_shown=False).splitlines()[1] == "Reproduced: not checked."
     assert bug.BUG_ID.match(made.meta["id"])
+
+
+def test_a_picture_with_a_system_sheet_in_front_is_always_private():
+    raw = {"id": "f1", "kind": "crash", "app": APP, "app_version": "1", "build": "2", "tool": "tapwright", "tool_version": "1.8.5",
+           "when": "2026-11-14T09:21:07.512Z", "device": {"model": "iPhone16,1", "os": "iOS 19.1"}, "place": "place_4",
+           "path_from": "home", "path": [], "expected": "e", "got": "the app crashed: x",
+           "picture": {"file": "findings/f1.jpg", "private": False}, "logs": [], "count": 1, "system": "share sheet",
+           "crash": {"reason": "x", "frames": []}}
+    out = bugmake.clean(raw, lambda s: s)
+    assert out["system"] == "share sheet" and out["picture"]["private"] is True
+
+
+def test_retention_runs_at_the_daemons_first_use_of_the_bugs(tmp_path):
+    from tapwright.bugtool import BugTools
+    home = tmp_path / "explore"
+    ctx = ctx_for(tmp_path)
+    for i in range(3):
+        write_run(home, f"20261114T09150{i}Z", got=f"crash {chr(97 + i)}", place_keys={"place_4": {"signature": f"{SIG[:-1]}{i}"}})
+        make(ctx, home, f"20261114T09150{i}Z")
+    tools = BugTools()
+    tools.bug_home = tmp_path / "bugs"
+    import tapwright.bugstore as bs
+    real = bs.KEPT
+    bs.BugStore.__init__.__defaults__ = (1,)
+    try:
+        assert len(tools._bugs().bugs(APP)) == 1
+    finally:
+        bs.BugStore.__init__.__defaults__ = (real,)

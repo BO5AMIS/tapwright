@@ -282,6 +282,20 @@ def picture_lines(finding: dict, meta: dict, picture_file: str | None) -> list[s
     return ["A picture was taken, but its file is gone."]
 
 
+def environment_lines(finding: dict, meta: dict) -> list[str]:
+    """The Environment section: the app, the device, the tool and when, and the reset a check used (§29.1, §29.4)."""
+    when = finding["when"]
+    source = meta.get("source") or {}
+    origin = HOW_WORDS.get(source.get("how"), "explore") + (f", finding {source['finding']}" if source.get("finding") else "")
+    env = [f"- App: {finding['app']} {finding['app_version']} ({finding['build']})",
+           f"- Device: {finding['device']['model']}, {finding['device']['os']}",
+           f"- Tool: {finding['tool']} {finding['tool_version']}, found {when[:10]} {when[11:19]} UTC ({origin})"]
+    r = meta.get("reproduced") or {}
+    if r.get("checked") is not False and r.get("reset"):
+        env.append(f"- Reset before each run: {r['reset']}")
+    return env
+
+
 def _place_line(finding: dict, meta: dict) -> str:
     name = finding.get("place") or "an unnamed screen"
     key = meta.get("place_key")
@@ -327,17 +341,7 @@ def markdown(finding: dict, meta: dict, picture_file: str | None) -> str:
     section("How to see it", how)
 
     section("Reproduced", reproduced_lines(meta, finding["kind"]))
-
-    when = finding["when"]
-    source = meta.get("source") or {}
-    origin = HOW_WORDS.get(source.get("how"), "explore") + (f", finding {source['finding']}" if source.get("finding") else "")
-    env = [f"- App: {finding['app']} {finding['app_version']} ({finding['build']})",
-           f"- Device: {finding['device']['model']}, {finding['device']['os']}",
-           f"- Tool: {finding['tool']} {finding['tool_version']}, found {when[:10]} {when[11:19]} UTC ({origin})"]
-    r = meta.get("reproduced") or {}
-    if r.get("checked") is not False and r.get("reset"):
-        env.append(f"- Reset before each run: {r['reset']}")
-    section("Environment", env)
+    section("Environment", environment_lines(finding, meta))
 
     where = [f"- Place: {_place_line(finding, meta)}"]
     crash = finding.get("crash")

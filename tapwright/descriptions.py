@@ -208,8 +208,11 @@ SHARED = {
         'with nothing private in it. Give exactly one: `finding` (`"f3"`) with `run` (an explore report folder, '
         'default `"last"`), `from: "failure"` (the last failed check of run or replay), `from: "now"` with `note` '
         '(one line: what is wrong) and `expected` (what you saw while driving: the last 10 touches become the '
-        "steps), or `bug` (a kept bug's id). The same bug found again is one bug with a count. A private picture "
-        'goes in only with `with_picture: true`, when your user asked. Answers the title, `Reproduced:`, `Seen:` '
+        "steps), or `bug` (a kept bug's id). The same bug found again is one bug with a count. `verify` (1 to 10 "
+        'runs, `true` for 3; default 3 for `finding` and `from: "failure"`) replays it on the phone, relaunching the '
+        'app, through the skip floor; it stops before any step that needs a person and asks no one. A private picture '
+        'goes in only with `with_picture: true`, and `export` (`{"to": "zip"}`, or `{"to": "issue", "repo": '
+        '"owner/name", "confirm": true}`) only when your user asked. Answers the title, `Reproduced:`, `Seen:` '
         'and the folder.'
     ),
     'session_report': (
