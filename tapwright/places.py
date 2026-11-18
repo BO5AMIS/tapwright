@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import re
+import math
 import secrets
 import unicodedata
 from dataclasses import dataclass
@@ -222,7 +223,7 @@ def similarity(a: dict, b: dict) -> float:
     lists_agree = not (current(a) and current(b)) or _lists_agree(a, b)
     agree = {"ids": _ids_agree(a, b), "lists": lists_agree,
              "kinds": a.get("kinds") == b.get("kinds"), "tab": a.get("tab") == b.get("tab"), "layer": True}
-    return sum(WEIGHTS[part] for part, ok in agree.items() if ok)
+    return round(math.fsum(WEIGHTS[part] for part, ok in agree.items() if ok), 9)  # (exact: 1.0 for all, on every Python)
 
 
 def same_place(a: dict, b: dict, threshold: float = THRESHOLD) -> bool:
