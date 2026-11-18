@@ -242,8 +242,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                 rules = policy.loads(sent, header=True) if sent else None
             except ValueError as e:
                 return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
-            if rules is None and ceiling is not None:
-                rules = ceiling.policy  # (serve --policy: the daemon's own, when the call sent none)
+            if ceiling is not None and ceiling.policy is not None:
+                # serve --policy is always in force: a call's own policy is combined with it (every word of both), never
+                # put in its place, so a caller can only add to what the floor never touches
+                rules = ceiling.policy if rules is None else policy.combined(ceiling.policy, rules)
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
         sent_ux = _hv(request, "x-tapwright-ux-rules")
         try:

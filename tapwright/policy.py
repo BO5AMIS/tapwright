@@ -147,6 +147,31 @@ def parse(obj: object, *, header: bool = False) -> Policy:
     return Policy(_words(obj.get("confirm", []), "confirm"), _words(obj.get("block", []), "block"), apps, file, words)
 
 
+def _union(*lists: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """The words of every list, once each (ignoring case and spacing), in first-seen order; None when every list is None."""
+    if all(words is None for words in lists):
+        return None
+    out: dict[str, str] = {}
+    for words in lists:
+        for word in words or ():
+            out.setdefault(" ".join(word.split()).casefold(), word)
+    return tuple(out.values())
+
+
+def combined(daemon: Policy, call: Policy) -> Policy:
+    """`serve --policy` and a caller's own policy together, for the skip floor of explore and a repair's trials (§25.5): every
+    word of either, in each list (block, confirm, each app's own, `explore.skip`, `explore.submit`). A caller's policy only
+    adds to the daemon's; it never replaces it, so no word of `serve --policy` is lost. The daemon's file is kept."""
+    apps: dict[str, AppWords] = {}
+    for bundle in dict.fromkeys([*daemon.apps, *call.apps]):
+        a, b = daemon.apps.get(bundle, AppWords()), call.apps.get(bundle, AppWords())
+        apps[bundle] = AppWords(_union(a.confirm, b.confirm), _union(a.block, b.block))
+    words = ExploreWords(_union(daemon.explore.skip, call.explore.skip) or (),
+                         _union(daemon.explore.submit, call.explore.submit) or ())
+    return Policy(_union(daemon.confirm, call.confirm) or (), _union(daemon.block, call.block) or (), apps,
+                  daemon.file if daemon.file is not None else call.file, words)
+
+
 def loads(text: str, *, header: bool = False) -> Policy:
     """A policy from JSON text (`header`: the one the MCP server sends the daemon). ValueError when it isn't JSON or
     isn't a policy."""

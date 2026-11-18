@@ -35,7 +35,9 @@ ERRORS = ("paused", "busy", "locked")  # a stop that is an error (§25.9)
 ERROR_TEXT = {
     "paused": "paused by the user in the live view; ask them to resume.",
     "busy": "a person is using the phone; try again in a moment.",
-    "locked": "the phone locked, and explore never unlocks it: call unlock (or ask the user to unlock it), then explore again.",
+    # (1.7.8: iOS reports Notification Center pulled down over the app as locked, so the words say both; L9's style)
+    "locked": ("the phone reads as locked (or Notification Center is open over it): call unlock, or ask the user to unlock it, "
+               "then explore again (explore never unlocks it)."),
 }
 
 
