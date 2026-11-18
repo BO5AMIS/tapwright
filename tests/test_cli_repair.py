@@ -22,6 +22,7 @@ def ns(script, **kw):
 
 
 PASSED = {"text": "Ran 1 of 1 steps in 1.0 s, with 1 repair (not adopted).\nRepaired: step 1 tap id=old to id=new (score 1.00).\n"
+                  "Checked: replayed sign_in.repaired.json from the script's fresh start: all 1 steps passed.\n"
                   "Wrote sign_in.repaired.json and sign_in.repair.md. The original is unchanged."}
 
 
@@ -129,3 +130,30 @@ def test_a_schedule_file_has_no_repair_key(tmp_path):
     text = json.dumps({"version": 1, "tool": "tapwright", "route": "sign_in", "at": "09:00 daily", "repair": "apply"})
     parsed = schedules.parse("nightly", text)
     assert not hasattr(parsed, "repair") and "repair" not in json.dumps(parsed.to_json())  # ignored, never passed on
+
+
+# ---- W161: a repair is adopted only after its own file replayed green from the script's fresh start (§26.4) ----
+
+def test_adopt_refuses_a_script_that_cant_start_fresh_before_the_phone_is_asked(tmp_path, monkeypatch, capsys):
+    for original, why in (
+            ('{"format": "agent-tools-script", "version": 1, "name": "sign_in", "app": "com.example.app", "fresh": false, '
+             '"steps": [{"tool": "tap", "target": {"id": "old"}}]}', 'it says "fresh": false'),
+            ('{"format": "agent-tools-script", "version": 1, "name": "sign_in", '
+             '"steps": [{"tool": "tap", "target": {"id": "old"}}]}', "it names no app")):
+        calls = patched(monkeypatch, tmp_path)
+        script = files(tmp_path, original=original)
+        assert cli.replay(ns(script, repair="apply", adopt=True)) == 2
+        out = capsys.readouterr().out
+        assert "--adopt can't be used" in out and why in out and 'repair "suggest"' in out
+        assert calls == [] and (tmp_path / "sign_in.repaired.json").exists() and not (tmp_path / "sign_in.orig.json").exists()
+        assert json.loads(script.read_text("utf-8"))["steps"][0]["target"] == {"id": "old"} and audit(tmp_path) == []
+
+
+def test_adopt_needs_the_line_that_says_the_repaired_file_replayed_green(tmp_path, monkeypatch, capsys):
+    unchecked = {"text": "\n".join(line for line in PASSED["text"].splitlines() if not line.startswith("Checked: "))}
+    patched(monkeypatch, tmp_path, unchecked)
+    script = files(tmp_path)
+    assert cli.replay(ns(script, repair="apply", adopt=True)) == 0
+    assert "nothing was adopted" in capsys.readouterr().out
+    assert json.loads(script.read_text("utf-8"))["steps"][0]["target"] == {"id": "old"} and not (tmp_path / "sign_in.orig.json").exists()
+    assert audit(tmp_path) == []

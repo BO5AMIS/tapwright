@@ -15,11 +15,19 @@ BUNDLE = APP[1]
 
 
 class Flow(FakeSession):
-    """A phone whose tap on an element changes the screen: `goes[identifier or label] = the new screen's elements`."""
+    """A phone whose tap on an element changes the screen: `goes[identifier or label] = the new screen's elements`. Opening the
+    app again shows its first screen (`tree` as given) again, as a fresh start does: `apply` checks the repaired file by
+    replaying it from there."""
 
     def __init__(self, tree, goes=None):
         super().__init__()
         self.tree, self.goes = list(tree), dict(goes or {})
+        self.first = list(tree)
+
+    async def launch(self, bundle_id, arguments=None):
+        text = await super().launch(bundle_id, arguments)
+        self.tree = list(self.first)
+        return text
 
     async def tap(self, target, hold_ms=60):
         hit = ui.resolve(self.items, target)
@@ -52,8 +60,10 @@ def phone(tmp_path, session, **options):
 
 
 def script(tmp_path, steps, name="sign_in", **extra):
+    """A script that starts fresh (the app closed and opened again): `apply` repairs only such a script (§26.4, its file's
+    replay check). `fresh=False` in `extra` makes one that can't."""
     path = tmp_path / f"{name}.json"
-    path.write_text(json.dumps({"format": "agent-tools-script", "version": 1, "name": name, "app": BUNDLE, "fresh": False,
+    path.write_text(json.dumps({"format": "agent-tools-script", "version": 1, "name": name, "app": BUNDLE, "fresh": True,
                                 "steps": steps, **extra}, indent=2), "utf-8")
     return path
 
@@ -181,7 +191,9 @@ def test_apply_repairs_a_renamed_id_checks_it_and_writes_the_files_beside_the_sc
         lines = r["text"].split("\n")
         assert re.fullmatch(r"Ran 2 of 2 steps in \d+\.\d s, with 1 repair \(not adopted\)\.", lines[0]), lines[0]
         assert lines[1] == "Repaired: step 1 tap id=login-btn to id=login-button (score 1.00)."
-        assert lines[2] == "Wrote sign_in.repaired.json and sign_in.repair.md. The original is unchanged."
+        assert lines[2] == "Checked: replayed sign_in.repaired.json from the script's fresh start: all 2 steps passed."
+        assert lines[3] == "Wrote sign_in.repaired.json and sign_in.repair.md. The original is unchanged."
+        assert not list(tmp_path.glob("*.checking"))  # the checked file became the repaired one: nothing else is left
         assert path.read_bytes() == original  # never over the original
         fixed = json.loads((tmp_path / "sign_in.repaired.json").read_text("utf-8"))
         assert fixed["repaired"]["from"] == "sign_in.json" and fixed["repaired"]["tool"] == "tapwright" and fixed["repaired"]["count"] == 1
@@ -347,14 +359,15 @@ def test_a_policy_word_a_typing_step_a_native_back_and_other_tools_are_never_rep
 def test_a_step_in_a_draftsonly_route_is_never_repaired(tmp_path):
     from test_daemon_routes import GOES, explore, folder, screens
     async def go():
-        d = phone(tmp_path, MapSession(screens(), "welcome", GOES))
+        d = phone(tmp_path, FreshMap(screens(), "welcome", GOES))
         d.maps = mapkeeper.Maps(str(tmp_path / "maps"))
         stop, task = await started(d)
         await explore(d)
+        d.session.launch_at = "welcome"
         d.session.screens["welcome"] = screen("Welcome", ids=("continue-button", "w1", "w2"))
         d.session.at = "welcome"
         await d.run_tool("a", "look", {"screenshot": False})
-        route = {"format": "agent-tools-script", "version": 2, "name": "sign_in", "app": BUNDLE, "fresh": False, "start": "welcome",
+        route = {"format": "agent-tools-script", "version": 2, "name": "sign_in", "app": BUNDLE, "fresh": True, "start": "welcome",
                  "end": "login", "variables": [], "draftsOnly": True,
                  "steps": [tap({"id": "continue-btn"}, expect={"text": "Login"})]}
         path = tmp_path / "sign_in.json"
@@ -430,10 +443,24 @@ def test_a_repair_needs_its_audit_line(tmp_path):
 
 # ---- a new screen in the way, and what the map learns ----
 
-def mapped(tmp_path, goes=None):
+class FreshMap(MapSession):
+    """A MapSession whose app opens on `launch_at` (when set), as a fresh start opens an app on its first screen."""
+
+    launch_at: str | None = None
+
+    async def launch(self, bundle_id, arguments=None):
+        text = await super().launch(bundle_id, arguments)
+        if self.launch_at is not None:
+            self.at = self.launch_at
+        return text
+
+
+def mapped(tmp_path, goes=None, launch_at=None):
     from test_daemon_routes import GOES, screens
     all_screens = {**screens(), "promo": screen("Promo", ids=("dismiss-btn", "p1", "p2"))}
-    d = phone(tmp_path, MapSession(all_screens, "welcome", {**GOES, ("promo", "dismiss-btn"): "welcome", **(goes or {})}))
+    session = FreshMap(all_screens, "welcome", {**GOES, ("promo", "dismiss-btn"): "welcome", **(goes or {})})
+    session.launch_at = launch_at
+    d = phone(tmp_path, session)
     return d
 
 
@@ -455,7 +482,7 @@ def test_a_new_screen_in_the_way_is_cleared_by_a_proven_road_put_before_the_step
         with pytest.raises(Refused) as e:
             await replay(d, path)  # the plain replay stops: the promo is in the way
         assert e.value.code == "not_found"
-        d.session.at = "promo"
+        d.session.at = d.session.launch_at = "promo"  # the app opens on the promo now: the new screen in the way
         await d.run_tool("a", "look", {"screenshot": False})
         r = await replay(d, path, "apply")
         assert "with tap id=dismiss-btn before it (promo to welcome)" in r["text"]
@@ -475,7 +502,7 @@ def test_apply_that_passes_teaches_the_map_the_road_that_moved_and_nothing_else(
         await d.maps.flush()
         d.session.screens["welcome"] = screen("Welcome", ids=("continue-button", "w1", "w2"))
         d.session.goes[("welcome", "continue-button")] = "login"
-        d.session.at = "welcome"
+        d.session.at = d.session.launch_at = "welcome"
         await d.run_tool("a", "look", {"screenshot": False})  # (the screen changed under the daemon's last read)
         steps = [tap({"id": "continue-btn"}, place="welcome", expect={"text": "Login"})]
         path = script(tmp_path, steps)
@@ -581,5 +608,83 @@ def test_an_ambiguous_target_is_repaired_by_the_facts_and_saved_with_its_index(t
         assert "with 1 repair" in r["text"]
         fixed = json.loads((tmp_path / "sign_in.repaired.json").read_text("utf-8"))
         assert fixed["steps"][0]["target"] == {"id": "save", "index": 1}
+        await finish(stop, task)
+    run(go)
+
+
+# ---- W161: the repaired file is replayed from the script's fresh start before it is kept (§26.4, Tapline's lesson) ----
+
+class Remembers(Flow):
+    """An app that remembers a sign-in: once login-button has been tapped, it opens on Home, not on Welcome. A repair that
+    passes inside the run (the run goes on from the step) fails when its file is replayed from a fresh start."""
+
+    async def tap(self, target, hold_ms=60):
+        text = await super().tap(target, hold_ms)
+        if self.tree is not None and any(e.identifier == "go" for e in self.tree):
+            self.first = list(HOME)
+        return text
+
+
+def test_a_repair_whose_file_fails_from_a_fresh_start_writes_nothing_and_says_so(tmp_path):
+    async def go():
+        d = phone(tmp_path, Remembers(WELCOME, {"login-button": HOME}))
+        stop, task = await started(d)
+        path = script(tmp_path, RENAMED + [tap({"id": "go"})])
+        with pytest.raises(Refused) as e:
+            await replay(d, path, "apply")
+        text = str(e.value)
+        assert e.value.code == "not_found"
+        assert text.startswith("The repair run passed, but sign_in.repaired.json didn't pass when it was replayed from the "
+                               "script's fresh start: Ran 0 of 2 steps; stopped at step 1 (tap id=login-button)"), text
+        assert "Note: 1 repair was made; the repaired script failed its own replay, so nothing was written." in text
+        assert names(tmp_path) == ["sign_in.json"]  # no repaired file, no notes file, no check file left behind
+        assert repair_lines(tmp_path) == [
+            "step 1: tap id=login-btn to id=login-button (score 1.00), accepted",
+            "step 1: tap id=login-btn to id=login-button (score 1.00), rejected (the repaired script's own replay failed at step 1)"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_check_replays_the_emitted_file_itself_not_the_steps_in_memory(tmp_path, monkeypatch):
+    from tapwright import scriptrepair
+    real = scriptrepair.write_check
+
+    def spoiled(script_path, repaired):  # the file on disk differs from what the run holds in memory
+        out = real(script_path, repaired)
+        data = json.loads(out.read_text("utf-8"))
+        data["steps"][0]["target"] = {"id": "not-there"}
+        out.write_text(json.dumps(data), "utf-8")
+        return out
+    monkeypatch.setattr(scriptrepair, "write_check", spoiled)
+
+    async def go():
+        d = phone(tmp_path, Flow(WELCOME, {"login-button": HOME}))
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await replay(d, script(tmp_path, RENAMED + [tap({"id": "go"})]), "apply")
+        assert "stopped at step 1 (tap id=not-there)" in str(e.value) and names(tmp_path) == ["sign_in.json"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_apply_refuses_a_script_that_cant_start_fresh_and_touches_nothing(tmp_path):
+    async def go():
+        d = phone(tmp_path, Flow(WELCOME, {"login-button": HOME}))
+        stop, task = await started(d)
+        for extra, why in (({"fresh": False}, 'it says "fresh": false'), ({"app": None}, "it names no app")):
+            path = script(tmp_path, RENAMED + [tap({"id": "go"})], **extra)
+            with pytest.raises(Refused) as e:
+                await replay(d, path, "apply")
+            text = str(e.value)
+            assert e.value.code == "bad_params" and why in text, text
+            assert text.startswith('repair "apply" only keeps a repair after the repaired script has replayed green from the '
+                                   "script's start, and this script can't be started fresh")
+            assert 'Use repair "suggest"' in text
+        assert not {"tap", "launch", "terminate"} & set(map(str, d.session.calls))
+        assert names(tmp_path) == ["sign_in.json"] and repair_lines(tmp_path) == []
+        # suggest still works on it: it writes nothing and touches nothing
+        with pytest.raises(Refused) as e:
+            await replay(d, script(tmp_path, RENAMED, fresh=False), "suggest")
+        assert "Repair (suggest, not checked):" in str(e.value) and "tap" not in d.session.calls
         await finish(stop, task)
     run(go)

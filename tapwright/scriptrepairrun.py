@@ -63,6 +63,7 @@ class Run:
     learn: list[tuple] = dataclasses.field(default_factory=list)
     accepted: list[tuple[int, str]] = dataclasses.field(default_factory=list)  # (the original step, its phrase), for a later rejection
     start: int = 0  # where the run goes on from, in `work`
+    scope: object = None  # the call's scope, for the replay that checks the repaired file
 
 
 def renumbered(text: str, offset: int, total: int) -> str:
@@ -101,6 +102,9 @@ class RepairTools:
     async def _repair_replay(self, client_id: str, data: dict, scope, args: dict, path: pathlib.Path, mode: str,
                              drafts_only: bool) -> dict:
         """A loaded script's replay with `repair` (§26.5)."""
+        if mode == "apply" and (why := scriptrepair.why_not_fresh(data)) is not None:
+            # (before anything is touched: a repair is kept only after the emitted file replays green from the script's start)
+            raise Refused("bad_params", scriptrepair.apply_needs_fresh(why))
         steps, notes = await self._replay_prepare(client_id, data, scope)
         bundle = self._bundle() or ""
         if mode == "suggest":
@@ -125,7 +129,8 @@ class RepairTools:
     async def _apply(self, client_id, data, steps, notes, scope, args, path, bundle, drafts_only) -> dict:
         clock = self.control.clock
         run = Run(path, str(data.get("name") or path.stem), bundle,
-                  [Work(step, orig, n) for n, (step, orig) in enumerate(zip(steps, data["steps"]), 1)], clock(), list(notes))
+                  [Work(step, orig, n) for n, (step, orig) in enumerate(zip(steps, data["steps"]), 1)], clock(), list(notes),
+                  scope=scope)
         total = len(data["steps"])
         try:
             while True:
@@ -462,15 +467,54 @@ class RepairTools:
         first = f"Ran {n} of {n} steps in {seconds:.1f} s, with {k} {plural(k, 'repair', 'repairs')} (not adopted)."
         said = "Repaired: " + "; ".join(f"step {r.step} {scriptrepair.phrase(r)}" for r in run.repairs) + "."
         try:
-            written = scriptrepair.write_files(run.script, repaired, markdown)
+            checking = scriptrepair.write_check(run.script, repaired)
+        except OSError as e:
+            return {**answer, "text": "\n".join([first, said, f"Note: couldn't write the repaired script to check it "
+                                                              f"({e.strerror or e}); nothing was kept.", *run.notes])}
+        try:
+            checked = await self._check_repaired(client_id, run, checking)
+            written = scriptrepair.keep_checked(run.script, checking, markdown)
             wrote = f"Wrote {written[0]} and {written[1]}. The original is unchanged."
         except OSError as e:
             wrote = f"Note: couldn't write the repaired files ({e.strerror or e}); nothing was kept."
-            written = []
+            written, checked = [], ""
+        finally:
+            checking.unlink(missing_ok=True)
         if written:
             self._learn_repairs(run, build)
         rest = answer["text"].split("\n")[1:]
-        return {**answer, "text": "\n".join([first, said, wrote, *rest, *run.notes])}
+        return {**answer, "text": "\n".join([first, said, *([checked] if checked else []), wrote, *rest, *run.notes])}
+
+    async def _check_repaired(self, client_id: str, run: Run, checking: pathlib.Path) -> str:
+        """The repaired script, replayed as the file that was just written (not the steps in memory), from the script's fresh
+        start, before it is kept (§26.4; Tapline's lesson). It must run green: every step and every `expect`. The `Checked:`
+        line when it did. When it didn't, every accepted repair gets its `rejected` line, nothing is kept, and the answer is
+        that replay's failure with a note."""
+        name = run.script.with_name(f"{run.script.stem}.repaired.json").name
+        try:
+            data = batch.load_script(str(checking))
+            if scriptrepair.why_not_fresh(data) is not None:  # (apply refused this before it began; the file kept the keys)
+                raise Refused("bad_params", f"the repaired script can't be started fresh: {scriptrepair.why_not_fresh(data)}")
+            checked = await self._replay(client_id, data, run.scope, {"look": False})
+        except Refused as e:
+            first = str(e).split("\n")[0]
+            found = re.match(r"Ran \d+ of \d+ steps; stopped at step (\d+)", first)
+            where = f"at step {found.group(1)}" if found else f"({e.code})"
+            for step, phrase in run.accepted:
+                self._repair_audit(run, f"step {step}: {phrase}, rejected (the repaired script's own replay failed {where})")
+            run.accepted.clear()
+            n = len(run.repairs)
+            out = Refused(e.code, "\n".join([
+                f"The repair run passed, but {name} didn't pass when it was replayed from the script's fresh start: {first}",
+                *str(e).split("\n")[1:],
+                f"Note: {n} {plural(n, 'repair was', 'repairs were')} made; the repaired script failed its own replay, so "
+                "nothing was written."]))
+            out.tidied = True  # type: ignore[attr-defined]
+            raise out from None
+        ran = checked["text"].split("\n")[0]
+        found = re.match(r"Ran (\d+) of (\d+) steps", ran)
+        count = found.group(2) if found else str(len(data["steps"]))
+        return f"{scriptrepair.CHECKED}replayed {name} from the script's fresh start: all {count} steps passed."
 
     def _learn_repairs(self, run: Run, build: str | None) -> None:
         """A repair that passed becomes known on the map for this build (§26.5): a road that has the old move takes the new

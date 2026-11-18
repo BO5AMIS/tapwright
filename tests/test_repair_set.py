@@ -1,7 +1,8 @@
 """AGENT-TOOLS §26.8 on fakes: 20 recorded scripts of a trip-planning app (Wayfare-like, synthetic) replayed after deliberate changes
 to its screens: 5 renamed testIDs, 5 moved buttons, 5 new screens in the way and 5 real bugs where an `expect` fails. At least 12
 of the 15 repairable breaks are repaired correctly and 0 wrong repairs are applied; all 5 real bugs are reported and none is
-repaired. (The real set, on Wayfare, is a phone check.)"""
+repaired. (The real set, on Wayfare, is a phone check.) Every script starts fresh and the fake app opens on its first screen
+again (W161): `apply` keeps a repair only after its `.repaired.json` replays green from that start."""
 import json
 
 import pytest
@@ -78,7 +79,7 @@ def test_a_new_screen_in_the_way_is_cleared_by_the_proven_road(tmp_path, dismiss
         await d.run_tool("a", "map", {"name": "promo"})
         await d.run_tool("a", "tap", {"target": {"id": dismiss}})
         await d.maps.flush()
-        d.session.at = "promo"
+        d.session.at = d.session.launch_at = "promo"  # the app opens on the promo now (a fresh start shows it)
         await d.run_tool("a", "look", {"screenshot": False})
         steps = [tap({"id": "continue-btn"}, place="welcome", expect={"text": "Login"})]
         r = await replay(d, script(tmp_path, steps), "apply")

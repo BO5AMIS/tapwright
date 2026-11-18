@@ -477,6 +477,55 @@ def write_files(script: Path, repaired: dict, markdown: str) -> list[str]:
     return [out_json.name, out_md.name]
 
 
+# ---- the replay check of a repair: the emitted file itself, from the script's start (§26.4, Tapline's lesson) ----
+
+CHECKED = "Checked: "  # the line of `apply`'s answer that says the emitted file replayed green; `--adopt` needs it
+
+
+def why_not_fresh(data: dict) -> str | None:
+    """Why this script can't be started fresh (closed and opened again, then run from step 1), or None when it can. Only a
+    script that can is repaired by `apply` and adopted: its repaired file is checked by replaying it from that start."""
+    if not isinstance(data.get("app"), str) or not data["app"]:
+        return "it names no app, so its replay can't close and open the app to start it fresh"
+    if data.get("fresh", True) is False:
+        return 'it says "fresh": false, so its replay starts wherever the phone is, not from a fresh start of the app'
+    return None
+
+
+def apply_needs_fresh(why: str) -> str:
+    """The refusal of `apply` (and of `--adopt`) for a script that can't be started fresh."""
+    return (f"repair \"apply\" only keeps a repair after the repaired script has replayed green from the script's start, and "
+            f"this script can't be started fresh: {why}. Use repair \"suggest\" to see the likely fix, or give the script "
+            f"its \"app\" and \"fresh\": true")
+
+
+def check_path(script: Path) -> Path:
+    """Where the repaired script is written to be replayed before it is kept: beside the script, under a name no replay or
+    listing takes for a script (not `.json`). It becomes `<script>.repaired.json` by a rename once it has run green."""
+    return script.with_name(f"{script.stem}.repaired.json.{os.getpid()}.checking")
+
+
+def write_check(script: Path, repaired: dict) -> Path:
+    """The repaired script, written to its check file (a temporary file and a rename). The path."""
+    out = sibling(script, "repaired.json")
+    if script == out:
+        raise OSError("the repaired file would replace the script itself")
+    temp = check_path(script)
+    write_atomic(temp, json.dumps(repaired, indent=2, ensure_ascii=False) + "\n")
+    return temp
+
+
+def keep_checked(script: Path, checked: Path, markdown: str) -> list[str]:
+    """The checked file becomes `<script>.repaired.json` (a rename: the very bytes that replayed green), then
+    `<script>.repair.md` is written. Their names."""
+    out_json, out_md = sibling(script, "repaired.json"), sibling(script, "repair.md")
+    if script in (out_json, out_md):
+        raise OSError("the repaired file would replace the script itself")
+    os.replace(checked, out_json)
+    write_atomic(out_md, markdown)
+    return [out_json.name, out_md.name]
+
+
 # ---- adopt: a person's choice, on the command line only (§26.5) ----
 
 def adopt(script: Path, audit: Callable[[str], bool]) -> tuple[bool, str]:

@@ -833,7 +833,7 @@ def report(a) -> int:
 def replay(a) -> int:
     """`tapwright replay FILE…`: each script through the daemon's `replay` tool, its answer printed. Exit 0 when every
     script held, 1 when one stopped at a step, 2 when one couldn't start (no phone, no app, a bad file)."""
-    from . import batch, client
+    from . import batch, client, scriptrepair
     from .control import Refused
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
     whole = getattr(a, "phone", False)
@@ -852,10 +852,16 @@ def replay(a) -> int:
         path = str(Path(f).resolve()) if Path(f).exists() else str(batch.named(f))  # a file, else a saved name
         began = time.monotonic()
         try:
-            batch.load_script(path)  # a file that can't be read stops here, before the phone is asked
+            loaded = batch.load_script(path)  # a file that can't be read stops here, before the phone is asked
         except Refused as e:
             print(f"{f}: Error {e.code}: {e}")
             results.append((f, "error", str(e), 0.0))
+            continue
+        if adopt and (why := scriptrepair.why_not_fresh(loaded)) is not None:
+            # (a repair is adopted only after its file replayed green from the script's start: this one has no such start)
+            message = "--adopt can't be used: " + scriptrepair.apply_needs_fresh(why)
+            print(f"{f}: Error bad_params: {message}")
+            results.append((f, "error", message, 0.0))
             continue
         if whole:
             client.set_scope(apps, a.dedicated, True)
@@ -895,6 +901,10 @@ def adopt_repair(path: str, answer: str) -> str:
     script = Path(path)
     if f"Wrote {script.stem}.repaired.json" not in answer:
         return "nothing to adopt: that run made no repair, so it wrote no repaired script"
+    if not any(line.startswith(scriptrepair.CHECKED) for line in answer.splitlines()):
+        # (§26.4, Tapline's lesson: only a repaired file that replayed green from the script's start is adopted)
+        return (f"nothing was adopted: that run didn't say {script.stem}.repaired.json replayed green from the script's fresh "
+                "start, so it isn't adopted")
     try:
         data = batch.load_script(path)
     except Exception as e:  # noqa: BLE001 - a script that can't be read again isn't adopted over
