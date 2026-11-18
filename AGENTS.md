@@ -8,7 +8,7 @@ Follow [docs/setup.md](docs/setup.md). Install a pinned release in its own envir
 
 ## Working loop
 
-1. Use apps/open_app/open_url to navigate and look to inspect. Home, Settings, system alerts and cross-app flows are supported. The Home button is `press_button {"name": "home"}`.
+1. Use apps/open_app/open_url to navigate and look to inspect. Home, Settings, system alerts and cross-app flows are supported. The Home button is `press_button {"name": "home"}`. iOS reports the phone as locked while Notification Center is pulled down: `press_button home` closes it then (only when the screen proves it is Notification Center, never on the real lock screen).
 2. Prefer a stable id, then a fresh ref/label/text. Use fresh screenshot-grounded coordinates for UI that accessibility does not identify reliably. Do not reuse stale coordinates.
 3. Read the complete action response and verify what changed. Input delivery alone is not task success. Request screenshots when visual evidence matters.
 4. Use wait_for for loading, scroll to reach off-screen content, type_text for input (submit presses Return), toggle for switches and back for navigation.
@@ -16,6 +16,7 @@ Follow [docs/setup.md](docs/setup.md). Install a pinned release in its own envir
 5. Read alerts with alert action:text. Answer with accept/dismiss, optionally name:<exact button label>. cancel defaults to Cancel; localized names are supported. dry_run inspects without input.
 6. Batch known steps with run and meaningful expectations. Use record/replay and maps/drive for repeatable workflows. Audit, logs, crash, performance and compare_screen help QA.
 7. On timeout, inspect before retrying; the input may have arrived. On stale or ambiguous targets, inspect and resolve again. Respect pause, ownership and human input. Report actual signing/passcode/biometric gates without attempting to bypass them.
+8. A locked phone answers `locked`: call `unlock`, which types the passcode saved for this phone (the `--accounts` file's `phone.passcode`; you never see or send it) on iOS's lock screen. With none saved, or when `unlock` answers `locked` with its reason, ask the user to unlock the phone. Never Face ID, Touch ID or the XCTest passcode prompt: a person answers those. Locking the phone no longer stops an agent that has the passcode; the owner stops you with Pause in the live view.
 
 ## Judgment
 

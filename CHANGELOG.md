@@ -2,6 +2,18 @@
 
 ## 1.7.8 (unreleased)
 
+- New tool `unlock`: an agent unlocks a locked phone with the passcode saved for it (`phone.passcode` in the file
+  Tapwright is started with, `--accounts FILE`), in every mode. The agent never sees or sends the passcode, and every
+  rule of the passcode unlock holds: only on iOS's lock screen with its keypad proven, never on the XCTest prompt, at
+  most 2 attempts an hour and 3 a day, none after a refusal, and an audit line with the name only. With no passcode
+  saved it answers `locked` and the agent asks the user. A call of its own: as a step of `run`, `replay`, `drive` or a
+  journey it is refused. Every `locked` answer for a locked phone now says "call unlock (it types the passcode saved
+  for this phone), or ask the user to unlock it"; the owner stops an agent that has the passcode by pausing in the
+  live view.
+- `press_button home` closes Notification Center while the phone reads as locked. iOS sets SpringBoard's lock state
+  while Notification Center is pulled down over an unlocked phone, so every call, the home press that closes it too,
+  was refused `locked`. Home is pressed only when a fresh read proves that sheet (its header, its Clear button and an
+  enabled flashlight); on the real lock screen nothing is pressed.
 - Content another app draws inside the app in front (Safari's share sheet, X's photo picker) is listed where it is on
   the screen. XCTest gives its frames in the host view's own space, so "View More" was listed 531 points too high, and
   a tap on it opened the video behind while answering "Tapped". Frames are moved only when the tree shows it plainly:

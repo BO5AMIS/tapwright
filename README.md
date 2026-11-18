@@ -146,6 +146,7 @@ repository too.
 | `map` | the app's map, learned as you drive: the places Tapwright recognised, the roads (moves) between them, saved routes and reflexes, one line each, and where the app is now; `to` shows the shortest known way to a place and whether each road is proven on this build, `name` names the current place, `link` adds the link that reaches a place, `reflex` / `forget_reflex` and `forget` edit it. The file is `~/.tapwright/maps/<bundle id>/map.json` (`--maps DIR` on `serve`, `mcp` and `call` keeps it with a project); list-row text, typed text and secure values are never in it, and a navigation title only as a hash |
 | `compare_screen` | visual regression: the first call saves the screen as a reference picture, later calls answer `Matches` or `Differs` with where it changed and a picture with the changes in red; `threshold` and `ignore` (a clock, an ad) tune it, and the status bar is never compared |
 | `filmstrip` | several frames from the live stream in one numbered picture, for animations and loading states; `tap` first taps and films what it sets off |
+| `unlock` | unlocks a locked phone with the passcode saved for it (`--accounts FILE`, `phone.passcode`): the agent never sees or sends it, the tool types it only on iOS's lock screen (never the XCTest prompt), at most twice an hour and 3 times a day, and stops after a refusal. With none saved it answers `locked`: ask the user |
 | `notifications` | notifications from the whole phone's Notification Center, newest first, at most 20; `open: n` opens one. Notification Center is on the phone's screen for about a second while it is read; one-time codes are hidden |
 | `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
 
@@ -253,7 +254,7 @@ Screenshots, live view, video and saved `--screenshots` images show actual scree
 - Apple's automation sees what accessibility sees. Give important views accessibility
   identifiers (`testID` in React Native) and labels. Games and custom-drawn screens show
   little beyond their screenshot; `look` with `ocr: true` reads their text from the picture.
-- Face ID and Touch ID require the person. Configured ordinary phone unlock is available with `tapwright serve --phone`; genuine XCTest passcode prompts still require the person.
+- Face ID and Touch ID require the person. With the phone's passcode saved (`--accounts FILE`, `phone.passcode`) an agent unlocks a locked phone with `unlock`, and `tapwright serve --phone` does it by itself at a new call; genuine XCTest passcode prompts still require the person.
 - Before it lets a UI test start, iOS may ask for the passcode ("Enable UI Automation").
   Tapwright waits and tells the agent. Turn on Settings > Developer > Enable UI Automation
   on a test device, or an unattended run stops there.

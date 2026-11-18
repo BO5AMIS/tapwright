@@ -147,8 +147,10 @@ def test_the_command_line_reaches_all_three(tmp_path, monkeypatch, capsys):
 
 def test_the_cli_cannot_be_reached_as_an_mcp_tool():
     from tapwright import mcp_server
-    names = {t.name for t in mcp_server.server._tool_manager.list_tools()}
-    assert not {n for n in names if "grant" in n or "unlock" in n or "revoke" in n}
+    tools = {t.name: t for t in mcp_server.server._tool_manager.list_tools()}
+    # (1.7.8: `unlock` is the phone's lock screen, with no arguments: it removes no policy lock and resets no record)
+    assert not {n for n in tools if "grant" in n or ("unlock" in n and n != "unlock") or "revoke" in n}
+    assert tools["unlock"].parameters.get("properties", {}) == {}
 
 
 # ---- the Grants: line ----

@@ -111,6 +111,6 @@ Run `tapwright doctor` first.
 | Symptom | Fix |
 |---|---|
 | no iPhone found | unlock it; another cable or port; on Windows open Apple Devices once |
-| every call answers `locked` | the phone is locked, or shows a passcode screen: the user must act |
+| every call answers `locked` | the phone is locked: the agent calls `unlock` when a passcode is saved (`phone.passcode` in the `--accounts` file), else the user unlocks it; the XCTest passcode screen: the user must act |
 | `not_answering` | the app in front froze: `close_app`, then `open_app` |
 | WebDriverAgent doesn't start | phone unlocked, Developer Mode on; run `tapwright doctor --fix` (or `tapwright setup` again) |

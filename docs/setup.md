@@ -99,12 +99,24 @@ ones as the daemon's own settings.
   An agent says `account: "tester2"` in `drive`, and the tool types the values: a password only into a secure
   field, a username only into a text field. They are never in an answer, the action log, a map, a script or a
   report. The file may not sit inside a git work tree unless git ignores it. `tapwright doctor --accounts FILE`
-  checks it. An entry named `phone` with a `passcode` (only that name) unlocks a locked phone on its lock screen, and
-  only where nobody is meant to be at the phone: at the start of a scheduled run, and with `tapwright serve --phone
-  --accounts FILE` at the start of a new call. The passcode comes only from the file `tapwright serve --accounts`
-  names. A lock in the middle of a run stops it (`locked`): locking the phone is how you stop the agent. At most 2
+  checks it. An entry named `phone` with a `passcode` (only that name) unlocks a locked phone on its lock screen: by
+  itself at the start of a scheduled run and, with `tapwright serve --phone --accounts FILE`, at the start of a new
+  call; and in every mode when an agent calls `unlock` (1.7.8). The passcode comes only from the file `tapwright serve --accounts`
+  names. A lock in the middle of a run stops it (`locked`); the agent may then call `unlock`. At most 2
   attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
   passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
+  To save the passcode, add the `phone` entry to the same file, next to the accounts (`tapwright vault protect FILE`
+  encrypts the file):
+
+  ```json
+  {"version": 1, "accounts": {"phone": {"passcode": "<the phone's passcode>"},
+                               "tester2": {"username": "tester2@example.com", "password": "..."}}}
+  ```
+
+  Start Tapwright with that file (`tapwright mcp --accounts FILE`, or `tapwright serve --accounts FILE`). An agent
+  then calls `unlock` when the phone is locked, in every mode (1.7.8); without the entry it answers `locked` and
+  asks you to unlock the phone. With a passcode saved, locking the phone no longer stops an agent: Pause in the
+  live view does.
   **Experimental in 1.7:** on the test iPhone (Face ID, iOS 26) the unlock didn't yet find the passcode keypad. It
   answered `locked` and typed nothing. iOS also won't open the USB connection to a phone that is locked when the daemon
   starts. Plan unattended runs with the phone unlocked for now.
