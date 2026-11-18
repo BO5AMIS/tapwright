@@ -451,8 +451,14 @@ class FakeSession:
         self._record("peek_alert")
         return self.last_alert
 
-    async def photos_add(self, pictures):
-        self._record(("photos_add", tuple(name for name, _ in pictures)))
+    stage_gate: "asyncio.Event | None" = None  # while set and not set(): a video's copy to the phone takes that long
+
+    async def photos_add(self, pictures, sent=None):
+        self._record(("photos_add", tuple(p[0] for p in pictures)))
+        if self.stage_gate is not None and any(hasattr(p, "digest") for p in pictures):
+            await self.stage_gate.wait()
+        if sent is not None:
+            sent()
         if self.photos_gate is not None:
             await self.photos_gate.wait()
         self.photos = getattr(self, "photos", [])

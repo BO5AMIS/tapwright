@@ -33,6 +33,10 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # /wda/tw/hit: the element a touch at a point goes to), so a covered target is refused. Every v4 route is kept.
 # tw-16.15.3.6 (tw version 6) binds hit snapshots to the original AX element and process identity. The paired
 # client requires identity=verified and refuses unavailable or unproven v6 hit checks.
+# tw-16.15.3.7 (tw version 7, 1.7.9) adds videos to the photo add (`items`, a staged file moved into the library).
+# PIN PENDING (lead): the fork's branch tw/video built green but is not tagged yet. Tag it tw-16.15.3.7, let the
+# workflow release it, then set the "fork" row below to that tag, the release zip's sha256 and "fork-tw-16.15.3.7".
+# Until then `media add` with a video answers `unsupported` on the v6 runner this pin installs.
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),

@@ -71,9 +71,9 @@ UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock
 # `unlock` (1.7.8): the agent's own call; its refusals in fixed words (never a value)
 UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, replay, a route, drive or a journey (a lock "
                    "there ends them; call unlock after, then start again)")
-UNLOCK_NO_PASSCODE = ("the phone is locked, and no passcode is saved for this phone: ask the user to unlock it, or to save "
-                      "the passcode as phone.passcode in the accounts file Tapwright is started with (--accounts FILE; "
-                      "docs/setup.md)")
+UNLOCK_NO_PASSCODE = ("the phone reads as locked (or Notification Center is open over it), and no passcode is saved for "
+                      "this phone: ask the user to unlock it or close Notification Center, or to save the passcode as "
+                      "phone.passcode in the accounts file Tapwright is started with (--accounts FILE; docs/setup.md)")
 HOME_NOT_PROVEN = ("the phone reads as locked (or Notification Center is open where Tapwright can't prove it): call "
                    "unlock (it types the passcode saved for this phone), or ask the user to unlock the phone or close "
                    "Notification Center. Nothing was pressed.")
@@ -629,6 +629,11 @@ def _checked(name: str, args: dict) -> dict:
     if name == "type_text":
         if not isinstance(args.get("text"), str):
             raise Refused("bad_params", f"text must be a string, not {args.get('text')!r}")
+        if args["text"] == "" and args.get("submit") is not True:
+            # (1.7.9) nothing to type: the runner's keys route refuses no keys, which came back as an internal error
+            raise Refused("bad_params", "text is empty: give the characters to type (with submit: true, an empty text "
+                                        "presses Return only). A recorded secure field's text isn't saved: put a test "
+                                        "password in the script's \"text\" first.")
         for key in ("replace", "submit", "force"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
@@ -952,6 +957,7 @@ MEDIA_WATCH = 1.0  # seconds between looks for iOS's photo prompt while media wa
 MEDIA_PEEK = 3.0  # seconds one such look may take (the runner may be busy with the add itself)
 MEDIA_KEEP = 600.0  # seconds a cut-short add stays the one a repeated media call picks up
 PHOTO_WAIT_MAX = 130.0  # seconds the runner may be held by iOS's photo prompt (its add waits 120 s for the answer)
+UPLOAD_RATE = 1024 * 1024  # bytes a second a video's copy to the phone is allowed at least (slow Wi-Fi), before its add
 PHOTO_WAIT_BUSY = ("busy: the phone's runner is waiting for the person to answer iOS's photo prompt (from media) and "
                    "answers nothing else until they do, {left} s at most. Ask your user to answer it on the phone, "
                    "then try again.")
@@ -1105,6 +1111,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._media_lock = asyncio.Lock()  # makes a media add's lookup, start and claim of the photo wait one step
         # the add that iOS's photo prompt holds, and until when: the runner answers nothing else meanwhile (Codex, PR #8)
         self._photo_wait: "tuple[asyncio.Future, float] | None" = None
+        self._media_sent: "dict[asyncio.Future, asyncio.Event]" = {}  # an add's task -> set once its add went out
         self._media_adds: dict[str, tuple[tuple[tuple[str, str], ...], asyncio.Future, float]] = {}  # client -> an add iOS's prompt cut short, by its pictures (name, SHA-256), in order
         self._closing: set[asyncio.Future] = set()  # WebDriverAgent terminates after a close_app's kill, left to finish
         # A trial switch (TAPWRIGHT_AGENT_STREAM=0): tool calls don't open the JPEG stream, so an action settles
@@ -5091,20 +5098,21 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
         if self.state == "locked":
             raise Refused("locked", PHONE_LOCKED)
-        pictures: list[tuple[str, bytes]] = []
+        pictures: list[tuple[str, bytes] | medialib.Video] = []
         if add:
             try:
-                pictures = await asyncio.to_thread(medialib.read_pictures, add)
+                pictures = await asyncio.to_thread(medialib.read_media, add)
             except ValueError as e:
                 raise Refused("bad_params", str(e)) from None
+        videos = sum(isinstance(p, medialib.Video) for p in pictures)
         if self._photo_wait_left() is not None:
             # iOS's photo prompt holds the runner: nothing can be asked of it (its version, its access) until the person
             # answers. An add of the same pictures picks up the waiting one; anything else waits its turn (Codex, PR #8).
             if not add:
                 raise Refused("busy", PHOTO_WAIT_BUSY.format(left=max(1, round(self._photo_wait_left() or 1))))
-            names = [name for name, _ in pictures]
+            names = [p[0] for p in pictures]
             await self._media_adding(client_id, pictures, names, asks=True)
-            return _answer([medialib.added_text(names)], notes)
+            return _answer([medialib.added_text(names, videos)], notes)
         await self.wait_connected()
         try:
             version = await self._read(lambda: self.session.runner_version())
@@ -5112,18 +5120,20 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise Refused("internal", f"couldn't ask the runner which version it is ({e}); try again") from None
         if version < medialib.MIN_TW_VERSION:
             raise Refused("unsupported", medialib.OLD_RUNNER)
+        if videos and version < medialib.VIDEO_TW_VERSION:
+            raise Refused("unsupported", medialib.old_runner_for_video(version))
         access = await self._read(lambda: self.session.photos_access())
         if add:
             if access.get("add") in ("denied", "restricted"):
                 raise Refused("unsupported", "the runner may not add to the photo library: iOS has it denied. Ask the "
                                              "user to allow WebDriverAgentRunner in Settings > Privacy & Security > "
                                              "Photos, then try again.")
-            names = [name for name, _ in pictures]
+            names = [p[0] for p in pictures]
             # iOS asks the person on the first add (add access not decided yet), and the runner's add waits for the
             # answer with the runner's whole queue: nothing else it is asked, an alert read included, is answered
             # meanwhile. So the prompt is known from the access, before anything is sent (Codex, PR #8).
             await self._media_adding(client_id, pictures, names, asks=access.get("add") == "notDetermined")
-            return _answer([medialib.added_text(names)], notes)
+            return _answer([medialib.added_text(names, videos)], notes)
         held, earlier = medialib.held_by(client_id, self._media_earlier, everything)
         if not held:
             return _answer(["Nothing to remove: this agent has added no pictures that are still recorded (remove: "
@@ -5147,15 +5157,19 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         medialib.drop([e["id"] for e in held])
         return _answer([lead + medialib.removed_text(names[:deleted], len(held))], notes)
 
-    async def _media_adding(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str],
-                            asks: bool = False) -> None:
+    async def _media_adding(self, client_id: str, pictures: "list[tuple[str, bytes] | medialib.Video]",
+                            names: list[str], asks: bool = False) -> None:
         """The add, once. iOS asks the person whether the runner may use Photos and the runner's request waits for the
         answer, so the request runs as a task of its own and this call watches for a system alert in front: when one
         is up it stops waiting at once (needs_a_person), and nobody is held up behind it (`alert` can read the text).
         The request itself is never cancelled or sent twice: it goes on and records its pictures when it finishes, and
         the next media call with the same pictures picks it up instead of adding them again."""
         # the same pictures, in the same order: by their bytes, not their file names (Codex, PR #8)
-        same = tuple((name, hashlib.sha256(data).hexdigest()) for name, data in pictures)
+        same = tuple((p.name, p.digest) if isinstance(p, medialib.Video) else (p[0], hashlib.sha256(p[1]).hexdigest())
+                     for p in pictures)
+        # a video is copied to the phone before its add is sent: the photo wait allows for the copy, and is set again
+        # from the moment the add goes out (iOS asks only then)
+        copying = sum(p.size for p in pictures if isinstance(p, medialib.Video)) / UPLOAD_RATE
         # Look up, gate, create, register and claim the photo wait as one step, for every client at once: two calls
         # can't both find nothing and send pictures twice (CodeRabbit, PR #8), and two agents' first adds can't both
         # find no wait and both take it (Codex, PR #8 cycle 4). The lock is let go before the wait on the task.
@@ -5178,13 +5192,25 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
                     return None
                 await self.control.agent(gate)
-                task = asyncio.ensure_future(self._media_added(client_id, pictures, names))
+                went_out = asyncio.Event()
+                holder: list[asyncio.Future] = []
+
+                def sent() -> None:
+                    went_out.set()
+                    if holder and self._photo_wait is not None and self._photo_wait[0] is holder[0]:
+                        self._photo_wait = (holder[0], self.control.clock() + PHOTO_WAIT_MAX)
+                task = asyncio.ensure_future(self._media_added(client_id, pictures, names, sent))
+                holder.append(task)
+                self._media_sent[task] = went_out
+                task.add_done_callback(lambda done: self._media_sent.pop(done, None))
                 task.add_done_callback(lambda done: done.cancelled() or done.exception())  # (a failure is the waiter's, if any)
                 self._media_adds[client_id] = (same, task, now)
             if asks and not task.done() and (self._photo_wait is None or self._photo_wait[0] is not task):
                 # the wait starts with the add, once, inside the step: a call that picks the add up doesn't move its
                 # deadline (cycle 3), and no other add can start before it is claimed (cycle 4)
-                self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX)
+                went = self._media_sent.get(task)
+                self._photo_wait = (task, self.control.clock() + PHOTO_WAIT_MAX
+                                    + (copying if went is not None and not went.is_set() else 0.0))
 
                 def ended(done: asyncio.Future) -> None:
                     if self._photo_wait is not None and self._photo_wait[0] is done:
@@ -5194,6 +5220,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                             self.lost(f"the line dropped while the runner waited on iOS's photo prompt: {e}")
                 task.add_done_callback(ended)
         if asks and not task.done():
+            went_out = self._media_sent.get(task)
+            if copying and went_out is not None and not went_out.is_set():
+                # a video is still being copied to the phone: iOS asks once the add goes out
+                waiting = asyncio.ensure_future(went_out.wait())
+                try:
+                    await asyncio.wait({task, waiting}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    waiting.cancel()
             # iOS's prompt is on the phone (or about to be): the add goes on, and finishes when the person answers
             await asyncio.wait({task}, timeout=MEDIA_WATCH)  # (an answer already given lets it finish here)
             if not task.done():
@@ -5219,8 +5253,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         except Exception:
             return None
 
-    async def _media_added(self, client_id: str, pictures: list[tuple[str, bytes]], names: list[str]) -> None:
-        ids = await self._media_write(lambda: self.session.photos_add(pictures), "adding the pictures", queued=False)
+    async def _media_added(self, client_id: str, pictures: "list[tuple[str, bytes] | medialib.Video]", names: list[str],
+                           sent: "Callable[[], None] | None" = None) -> None:
+        ids = await self._media_write(lambda: self.session.photos_add(pictures, sent=sent), "adding the pictures",
+                                      queued=False)
         if len(ids) != len(names):
             if ids:  # what it did make stays recorded, so remove can take it
                 medialib.record(client_id, ids, names[:len(ids)])

@@ -142,6 +142,7 @@ Arguments: .
 ### media
 
 Add test pictures with add:[paths]; remove:true deletes pictures this daemon added. confirm is a deprecated compatibility argument. Apple's Photos permissions still apply. Use the Photos UI for general library workflows.
+Tapwright: also adds videos (mp4, mov, m4v; 200 MB each, 5 a call) once the phone's runner is current: an older one answers `unsupported`, naming `tapwright setup --force`. A video is copied to the phone first, so a big one takes a while.
 
 Arguments: `add`, `remove`, `confirm`.
 

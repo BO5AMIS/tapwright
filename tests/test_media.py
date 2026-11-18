@@ -502,7 +502,7 @@ def test_pictures_a_short_answer_did_make_stay_recorded(pictures):
         d = make()
         stop, task = await started(d)
 
-        async def short(pics):
+        async def short(pics, sent=None):
             d.session.calls.append("short")
             return ["ONLY/L0/001"]
         d.session.photos_add = short

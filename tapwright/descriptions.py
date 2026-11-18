@@ -200,6 +200,11 @@ SHARED = {
 }
 
 EXTRA = {
+    'media': (
+        "also adds videos (mp4, mov, m4v; 200 MB each, 5 a call) once the phone's runner is current: an older one "
+        "answers `unsupported`, naming `tapwright setup --force`. A video is copied to the phone first, so a big one "
+        'takes a while.'
+    ),
     'look': (
         'reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture '
         'that no element carries, as `o1`, `o2`… (a target ref).'

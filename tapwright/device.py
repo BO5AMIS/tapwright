@@ -17,6 +17,7 @@ import posixpath
 import re
 import sys
 import time
+from pathlib import Path
 
 from . import aio, store, trace
 from . import diagnostics
@@ -39,6 +40,7 @@ MJPEG_PORT = 9100  # WebDriverAgent's screen stream (MJPEG)
 MIN_TIMEOUT = 0.5  # seconds: the least any one request to WebDriverAgent is given
 KEEP_IDLE = 2.0  # seconds a kept connection may sit idle and still carry an action (see Device._on_kept)
 STOP_WAIT = 5.0  # seconds _stop_runner waits for the runner task to end after cancelling it
+STAGE_CHUNK = 4 * 1024 * 1024  # bytes of a video copied to the phone at a time (AFC reads in 4 MB too)
 TEST_SERVICE = "com.apple.dt.testmanagerd.remote"  # offered once the developer disk image is mounted
 
 
@@ -458,6 +460,68 @@ class Device:
         async with CrashReportsManager(self.rsd) as manager:
             stat = await manager.afc.stat(filename)
             return await _read_capped(manager.afc, filename, _size_of(stat))
+
+    # ---- staging videos for `media` (1.7.9) ----
+    async def _container(self, bundle_id: str):
+        """AFC rooted at the app's own container (house_arrest VendContainer). iOS vends it for an app signed with
+        get-task-allow, as Tapwright signs the runner (signing.py); the words of a refusal say what to do."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        from pymobiledevice3.services.house_arrest import HouseArrestService
+        try:
+            return await HouseArrestService.create(self.rsd, bundle_id)
+        except (PyMobileDevice3Exception, OSError) as e:
+            raise DeviceError(f"the phone wouldn't open the runner's container to copy the video into it ({e}); run "
+                              "`tapwright setup --force` to install the runner again, then try again") from None
+
+    async def stage_media(self, bundle_id: str, folder: str, files: list[tuple[Path, str]]) -> None:
+        """Copy each local file to its path (relative to the app's container) in a new `folder` there, in chunks: a
+        clip is never held in memory whole."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                await afc.makedirs(folder)
+                for local, remote in files:
+                    handle = await afc.fopen(remote, "w")
+                    try:
+                        with open(local, "rb") as f:
+                            while chunk := await asyncio.to_thread(f.read, STAGE_CHUNK):
+                                await afc.fwrite(handle, chunk)
+                    finally:
+                        await _close_file(afc, handle)
+            except PyMobileDevice3Exception as e:  # (before OSError: AFC's own errors are both)
+                raise DeviceError(f"copying the video to the phone failed ({e})") from None
+            except OSError as e:
+                raise DeviceError(f"the video couldn't be read on this computer ({e.strerror or e})") from None
+
+    async def unstage_media(self, bundle_id: str, folder: str) -> None:
+        """Remove a staged folder and what is left in it (the library moved what it added)."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                await afc.rm(folder, force=True)
+            except (PyMobileDevice3Exception, OSError) as e:
+                raise DeviceError(f"the staged video couldn't be removed ({e})") from None
+
+    async def sweep_media(self, bundle_id: str, older_than: float) -> None:
+        """Remove staged folders older than `older_than` seconds: leftovers of adds whose end wasn't known."""
+        from pymobiledevice3.exceptions import PyMobileDevice3Exception
+        from .media import STAGE_ROOT
+        afc = await self._container(bundle_id)
+        async with afc:
+            try:
+                if not await afc.exists(STAGE_ROOT):
+                    return
+                now = time.time()
+                for name in await afc.listdir(STAGE_ROOT):
+                    path = f"{STAGE_ROOT}/{name}"
+                    stat = await afc.stat(path)
+                    made = stat.get("st_mtime")
+                    if made is not None and now - made.timestamp() > older_than:
+                        await afc.rm(path, force=True)
+            except (PyMobileDevice3Exception, OSError) as e:
+                raise DeviceError(f"old staged videos couldn't be listed ({e})") from None
 
     # ---- network conditions (AGENT-TOOLS §16.4) ----
     async def set_network(self, mode: str) -> str:
