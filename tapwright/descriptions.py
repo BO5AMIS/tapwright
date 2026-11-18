@@ -199,9 +199,9 @@ SHARED = {
         'the screen. Optional: `minutes` (10), `steps` (500), `depth` (8), `from`, `focus` (place names), `fill` '
         '(`"none"`, `"test-data"`, `"fixture:<name>.<field>"`: only into fields whose id ends `-test-safe`), '
         '`continue` past a crash, `account` (a vault account marked `explore`, for the way back after a reset). It '
-        'skips anything the policy or Delete, Send, Post, Pay, Sign out hold, submits no form, allows no permission '
-        'prompt and asks no one. A person touching the phone pauses it. Not a step of `run`; a call can last its '
-        '`minutes`.'
+        'stays in one app, skips Delete, Send, Post, Pay, Sign out and the like, submits no form, allows no permission '
+        'prompt and asks no one. A person touching the phone pauses it; a locked phone ends it (it never unlocks). '
+        'Not a step of `run`; a call can last its `minutes`.'
     ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "

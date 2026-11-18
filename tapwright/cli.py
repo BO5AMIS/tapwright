@@ -920,8 +920,8 @@ def explore(a, sleep=time.sleep) -> int:
     if sum((bool(apps), a.dedicated, whole)) > 1:
         print("tapwright explore: --apps, --dedicated and --phone can't be used together.")
         return 2
-    if not apps and not a.dedicated and not whole:
-        print("tapwright explore: pass --apps <bundle id> (the app to search), or --dedicated (or --phone)")
+    if len(apps) > 1:  # (1.7.5: the phone is the agent's whole; --apps names the ONE app explore searches, §25.1)
+        print("tapwright explore: --apps names the one app to search; give one app, or none for the app in front")
         return 2
     try:
         rules = policies.load(a.policy) if getattr(a, "policy", None) else None
@@ -1168,7 +1168,7 @@ def main() -> int:
                                                   '"fixture:<name>.<field>"; default: type nothing')
     p.add_argument("--continue", dest="keep_going", action="store_true", help="go on after a crash")
     p.add_argument("--account", metavar="NAME", help='a vault account marked "explore": true, for the way back after a reset')
-    p.add_argument("--apps", metavar="APP", help="the one app to search, as a bundle id or exact name (personal mode)")
+    p.add_argument("--apps", metavar="APP", help="the one app to search, as a bundle id or exact name (default: the app in front)")
     p.add_argument("--dedicated", action="store_true", help="the phone is kept for testing")
     p.add_argument("--phone", action="store_true", help="the phone is dedicated to automation (1.7)")
     p.add_argument("--policy", metavar="FILE", help="the safety policy file (its confirm and block words are part of the skip floor)")

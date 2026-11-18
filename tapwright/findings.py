@@ -94,6 +94,21 @@ def redact(value: object, scrub: Callable[[str], str]) -> object:
     return value
 
 
+HIDDEN = "(hidden: the redactor failed on this text)"
+
+
+def safe_scrub(scrub: Callable[[str], str]) -> Callable[[str], str]:
+    """`scrub` that never lets text through when it fails (Tapline's lesson): an exception in the redactor hides the whole
+    text instead of passing it on unredacted or ending the run."""
+    def safe(text: str) -> str:
+        try:
+            out = scrub(text)
+        except Exception:  # noqa: BLE001 - whatever went wrong, the text is not shown
+            return HIDDEN
+        return out if isinstance(out, str) else HIDDEN
+    return safe
+
+
 def quote_from_others(text: str) -> str:
     """Text that others wrote (§21.1) is quoted as data, marked as in the element line."""
     return f'(from others) "{text}"'

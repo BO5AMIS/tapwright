@@ -75,7 +75,9 @@ def seen_of(element: ui.Element, items: list[ui.Element], screen: tuple[float, f
         out["bucket"] = bucket
     if element.type:
         out["component"] = element.type
-    if element.identifier and not private(element.identifier) and (stem := id_stem(element.identifier)):
+    # (an id that carries content, such as Calendar's `event-shown:<title>`, gives no stem either: review 1.7 B-L3/B-L4)
+    if element.identifier and not private(element.identifier) and ui.structural_id(element.identifier) \
+            and (stem := id_stem(element.identifier)):
         out["id_stem"] = stem
     return out
 

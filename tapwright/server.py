@@ -19,7 +19,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
-from . import otp as otplib, store, trace, uxcheck
+from . import otp as otplib, policy, store, trace, uxcheck
 from .ceiling import Ceiling
 from .control import STILL_WANTED, Refused
 from .daemon import BUNDLE_ID, SYSTEM_APPS
@@ -27,6 +27,7 @@ from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
 COOKIE = "tapwright_token"
+FLOOR_TOOLS = ("explore", "replay")  # the calls whose own moves pass the skip floor (explore; replay with repair)
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 # What a person sees when the link carries no valid key (2026-11-12: an agent opened `?token=SECRET`, and the old one
 # line, "Open the link that tapwright view prints", didn't tell the owner what to do)
@@ -231,6 +232,18 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         # 1.7.5: legacy app/policy headers do not restrict device access.
         # Request authentication remains mandatory.
         scope, rules = None, None
+        tool = request.path_params["name"]
+        if tool in FLOOR_TOOLS:
+            # (1.8) explore's and a repair's skip floor alone reads the caller's policy: its words only add to what those
+            # moves never touch (AGENT-TOOLS §25.5); it lets nothing through and restricts no other call. A bad one is refused,
+            # so a skip list the user wrote is never lost without a word.
+            sent = _hv(request, "x-tapwright-policy")
+            try:
+                rules = policy.loads(sent, header=True) if sent else None
+            except ValueError as e:
+                return _error("bad_params", f"the policy this agent was started with is refused: {e}", 400)
+            if rules is None and ceiling is not None:
+                rules = ceiling.policy  # (serve --policy: the daemon's own, when the call sent none)
         # The user's house rules (--ux-rules, AGENT-TOOLS §17.3): none sent is none; a bad set is refused
         sent_ux = _hv(request, "x-tapwright-ux-rules")
         try:
@@ -240,8 +253,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
         apps = [a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip()]
-        if client.startswith("schedule-") and len(apps) == 1:
-            via["app_hint"] = apps[0]  # route launch context, never an allowlist
+        if (client.startswith("schedule-") or tool == "explore") and len(apps) == 1:
+            via["app_hint"] = apps[0]  # route launch context, or the one app explore searches; never an allowlist
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved

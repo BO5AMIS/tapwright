@@ -54,7 +54,7 @@ def test_every_stop_ends_with_its_reason():
 def test_the_error_of_a_pause_a_busy_phone_or_a_lock_names_the_report_and_where_it_was_left(tmp_path):
     for stopped, said in (("paused", "paused by the user in the live view; ask them to resume."),
                           ("busy", "a person is using the phone; try again in a moment."),
-                          ("locked", "the phone is locked; ask the user to unlock it.")):
+                          ("locked", "the phone locked, and explore never unlocks it: call unlock (or ask the user to unlock it), then explore again.")):
         text = explorereport.error_text(result(stopped=stopped, steps=41, places=["a"] * 9, left_at="settings"), tmp_path, str)
         assert text == f"{said} Done: 41 steps, 9 places. Left at: settings. Report: {tmp_path / 'report.md'}"
 

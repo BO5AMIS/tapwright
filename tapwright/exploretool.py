@@ -1,10 +1,13 @@
 """The `explore` tool inside the daemon (docs/AGENT-TOOLS.md §25): the call, its checks, the phone side of the search engine
 (explore.py), the report (explorereport.py) and the answer. A mixin of Daemon, kept apart from daemon.py.
 
-Every move the search makes is an ordinary action through `Daemon.run_tool` (the agent's scope, the policy, the action log), made
-one at a time as the agent's own calls are, so a person's touch, a pause or a locked phone are the controller's: the phone side
-below turns them into `PhoneStop` between steps (§25.9). What `explore` adds is narrowing: it asks nobody (a touch the policy holds
-is refused as `needs_confirmation`, with no dialog and no live-view request) and no grant is looked at (`daemon._EXPLORING`).
+Every move the search makes is an ordinary action through `Daemon.run_tool` (the action log, Pause, a person first), made one
+at a time as the agent's own calls are, so a person's touch, a pause or a locked phone are the controller's: the phone side below
+turns them into `PhoneStop` between steps (§25.9). Since 1.7.5 the phone is the agent's whole (no app list, no policy word stops
+a touch); `explore` narrows that for its own moves: ONE app (the agent's, or the one `--apps` names), and the skip floor as the one
+dispatch gate of every move (`daemon._TOUCH_FLOOR`, checked on the element the touch really goes to): what it holds is refused as
+`needs_confirmation`, asked of nobody. It never unlocks the phone: a locked phone ends the run (`locked`). No picture is taken
+while the phone is being unlocked or Notification Center may be open (1.7.8).
 """
 from __future__ import annotations
 
@@ -19,7 +22,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import __version__, accounts as accountlib, explore, explorereport, findings, journey_report, mapkeeper, store, ui
+from . import (__version__, accounts as accountlib, explore, explorefloor, explorereport, findings, grants, journey_report,
+               mapkeeper, store, ui)
 from .control import AGENT_MAX_WAIT_S, Refused
 from .explore import Check, CrashFacts, Moved, PhoneStop, Watch
 
@@ -184,10 +188,10 @@ class DaemonPhone:
         return await self._act("open_url", {"url": link})
 
     async def alert(self, button: str) -> Moved:
-        """A permission prompt is never allowed: `dismiss` presses the alert's denial; an alert with one button is accepted."""
-        shown = self.d.control.client(self.cid).alert
-        only = shown is not None and len(shown[1]) == 1
-        return await self._act("alert", {"action": "accept" if only else "dismiss"})
+        """A permission prompt is never allowed: the button `safe_button` picked (a denial, a cancel, or an alert's only
+        button) is pressed by its name, so the button pressed is the one the floor judged (the dispatch gate checks it again)."""
+        deny = button.casefold() in {b.casefold() for b in explorefloor.DENY_BUTTONS}
+        return await self._act("alert", {"action": "dismiss" if deny else "accept", "name": button})
 
     async def type_text(self, target: ui.Target, text: str) -> Moved:
         return await self._act("type_text", {"target": self._aim(target), "text": text})  # (never `submit`, §25.6)
@@ -239,7 +243,7 @@ class DaemonPhone:
             if ring is not None and ring.added > mark:
                 shown = ring.shown()
                 new = shown[max(0, len(shown) - max(0, ring.added - mark - ring.unvouched)):]
-                errors = tuple(self.d.scrub_everywhere(e.text) for e in new if e.level == "error")
+                errors = tuple(self.d._safe_scrub(e.text) for e in new if e.level == "error")
         except Exception:  # noqa: BLE001 - no log is no finding
             errors = ()
         crash = None
@@ -261,7 +265,10 @@ class DaemonPhone:
     async def picture(self) -> bytes | None:
         """A picture of the screen, only while the explored app is in front, taken in one turn between two reads of that (§27.2:
         no picture of an app not given)."""
-        session = self.d.session
+        session, d = self.d.session, self.d
+        if d.unlocking():  # (1.7.8, M1) no picture while the phone is being unlocked
+            return None
+        asked = d.hub.mono()
 
         async def capture() -> tuple[str | None, bytes, str | None]:
             first = await session.foreground_bundle_id() or None
@@ -269,6 +276,8 @@ class DaemonPhone:
             return first, shot, await session.foreground_bundle_id() or None
         before, png, after = await self.d._read(capture)
         if before != self.bundle or after != before:
+            return None
+        if d.unlocked_since(asked) or d.center_since(asked):  # an unlock, or Notification Center, may be in it
             return None
         return await asyncio.to_thread(jpeg_of, png)
 
@@ -311,9 +320,15 @@ class ExploreTools:
     _explore_seq = itertools.count(1)
 
     async def _explore_app(self, scope) -> str:
-        """The ONE app to explore (§25.1): the app in front, else the one `open_app` started, else the only one given. Personal
-        mode: only an app the agent was given, and another app in front is `outside_apps`."""
+        """The ONE app to explore (§25.1): the one app the caller named (`tapwright explore --apps`, the call's app hint:
+        explore opens it when another is in front), else the app in front, else the one `open_app` started, else the only one
+        given. Personal mode (a scope, before 1.7.5): only an app the agent was given, and another app in front is
+        `outside_apps`. Never the home screen, Settings, Wallet or Passwords (the floor holds every screen of them)."""
         d = _d()
+        hint = d._APP_HINT.get()
+        if hint and scope is None:
+            bundle = hint if d.BUNDLE_ID.match(hint) else (await self._app(hint, partial=False))[0]
+            return self._explorable(bundle)
         given = await self._given(scope) if scope is not None else None
         try:
             front = await self._front(given) if given is not None else await self._front_now()
@@ -327,8 +342,20 @@ class ExploreTools:
             candidates.append(next(iter(given)))
         for bundle in candidates:
             if given is None or bundle in given:
-                return bundle
+                return self._explorable(bundle)
         raise Refused("not_found", "no app to explore: open the app with open_app first")
+
+    @staticmethod
+    def _explorable(bundle: str) -> str:
+        if bundle == _d().SPRINGBOARD or bundle in grants.NEVER_APPS:
+            raise Refused("not_allowed", f"explore doesn't search {bundle}: the home screen, Settings, Wallet and Passwords "
+                                         "are never explored; open the app to search with open_app first")
+        return bundle
+
+    def _safe_scrub(self, text: str) -> str:
+        """Every text explore puts out goes through the daemon's redactor; when the redactor fails the text is hidden
+        (findings.safe_scrub), never shown as it was."""
+        return findings.safe_scrub(self.scrub_everywhere)(text)
 
     def _explore_fill(self, parsed: Args, bundle: str) -> tuple[explore.Fill, str | None]:
         """`fill` and `account` checked against the vault (§25.6, §25.8): what they name must be marked `"explore": true`."""
@@ -373,7 +400,7 @@ class ExploreTools:
         model, system = getattr(rsd, "product_type", None), getattr(rsd, "product_version", None)
         device = findings.Device(str(model) if isinstance(model, str) and model else "iPhone",
                                  f"iOS {system}" if isinstance(system, str) and system else "iOS")
-        return explore.Identity(bundle, version, text, device, __version__, "tapwright", self.scrub_everywhere, False)
+        return explore.Identity(bundle, version, text, device, __version__, "tapwright", self._safe_scrub, False)
 
     async def _explore_tool(self, client_id: str, args: dict, scope) -> dict:
         started = time.monotonic()
@@ -414,15 +441,17 @@ class ExploreTools:
 
         def progress(line: str) -> None:
             channel.push({"type": "progress", "id": f"p{next(self._explore_seq)}", "message": line})
-        explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), d._POLICY.get(), who, budget=parsed.budget,
+        rules = d._FLOOR_RULES.get() or d.safety.NONE  # (the caller's policy file: its words only add to the floor)
+        explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), rules, who, budget=parsed.budget,
                                     start_place=parsed.start, focus=parsed.focus, continue_after_crash=parsed.keep_going,
                                     clock=self.control.clock, progress=progress, fill=fill, account=account)
         tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
-                  d._CRASHES.set(phone.crashes))
+                  d._CRASHES.set(phone.crashes), d._TOUCH_FLOOR.set(explorer.floor))  # (the one dispatch gate of its moves)
         began = datetime.datetime.now(datetime.timezone.utc)
         try:
             result = await explorer.run()
         finally:
+            d._TOUCH_FLOOR.reset(tokens[4])
             d._CRASHES.reset(tokens[3])
             d._DIALOG.reset(tokens[2])
             d._EXPLORING.reset(tokens[1])
@@ -431,10 +460,10 @@ class ExploreTools:
         await self.maps.flush()
         folder, note = await self._explore_write(result, who, parsed.budget, began)
         if result.failure is not None:
-            raise Refused(result.failure.code, self.scrub_everywhere(f"{result.failure} {explorereport.done_line(result, folder)}"))
+            raise Refused(result.failure.code, self._safe_scrub(f"{result.failure} {explorereport.done_line(result, folder)}"))
         if result.stopped in explorereport.ERRORS:
-            raise Refused(result.stopped, explorereport.error_text(result, folder, self.scrub_everywhere))
-        text = explorereport.answer(result, folder, self.scrub_everywhere)
+            raise Refused(result.stopped, explorereport.error_text(result, folder, self._safe_scrub))
+        text = explorereport.answer(result, folder, self._safe_scrub)
         return {"text": text + (f"\nNote: {note}" if note else ""), "image": None, "image_size": None}
 
     async def _explore_write(self, result: explore.Result, who: explore.Identity, budget: explore.Budget,
@@ -443,7 +472,7 @@ class ExploreTools:
         root = self.explore_home if self.explore_home is not None else store.HOME / "explore"
         ended = datetime.datetime.now(datetime.timezone.utc)
         try:
-            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self.scrub_everywhere)
+            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._safe_scrub)
         except OSError as e:
-            return None, self.scrub_everywhere(f"the report couldn't be written: {e.strerror or e}")
+            return None, self._safe_scrub(f"the report couldn't be written: {e.strerror or e}")
         return folder, None

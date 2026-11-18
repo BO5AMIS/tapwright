@@ -21,7 +21,7 @@ import dataclasses
 import pathlib
 import re
 
-from . import __version__, batch, closest, driving, explorefloor, places, repairanalysis, roads, scriptrepair, ui
+from . import __version__, batch, closest, driving, explorefloor, findings, places, repairanalysis, roads, scriptrepair, ui
 from .control import Refused
 from .repairanalysis import Break, Screen
 from .scriptrepair import Candidate, Repair, Work
@@ -238,7 +238,13 @@ class RepairTools:
             replacement["target"] = cand.target
             if cand.seen:
                 replacement["seen"] = cand.seen
-        ok, why = await self._run_steps(client_id, scope, [*before, replacement])
+        # the candidate's own moves pass the skip floor at dispatch, on the element each really goes to (§26.4): a repair
+        # never touches what explore would never touch, whatever the score chose (Tapline's lesson: ONE dispatch gate)
+        gate = _d()._TOUCH_FLOOR.set(explorefloor.Floor(_d()._FLOOR_RULES.get() or _d().safety.NONE, run.bundle))
+        try:
+            ok, why = await self._run_steps(client_id, scope, [*before, replacement])
+        finally:
+            _d()._TOUCH_FLOOR.reset(gate)
         if not ok:
             return Tried(False, why, inserted=before)
         checked = await self._check_one(client_id, scope, step, all_steps[at + 1] if at + 1 < len(all_steps) else None)
@@ -329,7 +335,7 @@ class RepairTools:
             await self.control.sleep(0.25)
 
     def _record_of(self, run: Run, original: Work, cand: Candidate, tried: Tried) -> Repair:
-        scrub = self.scrub_everywhere
+        scrub = findings.safe_scrub(self.scrub_everywhere)  # (a redactor that fails hides the text)
         orig = original.orig or original.step
         was = batch.redacted_content(orig.get("target"), scrub) if isinstance(orig.get("target"), dict) else None
         return Repair(original.index or 0, str(orig.get("tool")), cand.kind, was, cand.target, cand.seen, cand.score,
@@ -377,10 +383,10 @@ class RepairTools:
 
         def way(a: str, b: str) -> list[tuple[dict, dict]] | None:
             return self._proven_taps(root, shown, a, b, build)
-        policy = _d()._POLICY.get()
+        policy = _d()._FLOOR_RULES.get() or _d().safety.NONE  # (the caller's policy file only adds words to the floor)
         return Screen(items, screen, explorefloor.Floor(policy, shown or ""), getattr(tree, "back", None), here, near,
                       any(e.role == "scroll" for e in items) or any(e.y >= screen[1] for e in off), way,
-                      self.scrub_everywhere)
+                      findings.safe_scrub(self.scrub_everywhere))
 
     def _proven_taps(self, root, bundle, a: str, b: str, build) -> list[tuple[dict, dict]] | None:
         """The way from place `a` to place `b` that a repair may put in front of a step: a chain of proven roads, every move a
@@ -448,7 +454,7 @@ class RepairTools:
         clock = self.control.clock
         build = await self._build_of(run.bundle) if run.bundle else None
         at = scriptrepair.utc_now()
-        scrub = self.scrub_everywhere
+        scrub = findings.safe_scrub(self.scrub_everywhere)  # (a redactor that fails hides the text)
         repaired = scriptrepair.repaired_script(data, run.work, run.script, at, build, len(run.repairs), __version__, scrub)
         markdown = scrub(scriptrepair.repair_markdown(run.name, run.repairs, at, __version__, build))
         seconds = clock() - run.began

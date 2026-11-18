@@ -75,16 +75,20 @@ def test_a_touch_the_policy_holds_is_refused_as_needs_confirmation_with_no_dialo
         d = explored(tmp_path)
         stop, task = await started(d)
         await d.run_tool("a", "look", {"screenshot": False})
-        from tapwright import daemon as dm
-        token = dm._EXPLORING.set(True)
+        from tapwright import daemon as dm, explorefloor
+        tokens = (dm._EXPLORING.set(True), dm._TOUCH_FLOOR.set(explorefloor.Floor(policylib.NONE, BUNDLE)))
         try:
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "tap", {"target": {"label": "Delete everything"}, "look": False})
             assert e.value.code == "not_allowed" and "needs_confirmation" in str(e.value) and "explore" in str(e.value)
-            dry = await d.run_tool("a", "tap", {"target": {"label": "Delete everything"}, "dry_run": True})  # what it would meet
-            assert dry["text"].startswith("Would tap") and "needs a person's OK" in dry["text"]
+            assert '"Delete"' in str(e.value)
+            with pytest.raises(Refused) as e:  # a dry run meets the same gate: what the real touch would meet
+                await d.run_tool("a", "tap", {"target": {"label": "Delete everything"}, "dry_run": True})
+            assert "needs_confirmation" in str(e.value)
         finally:
-            dm._EXPLORING.reset(token)
+            dm._TOUCH_FLOOR.reset(tokens[1])
+            dm._EXPLORING.reset(tokens[0])
+        await d.run_tool("a", "tap", {"target": {"label": "Delete everything"}, "dry_run": True})  # an agent's own: no gate (1.7.5)
         assert not d._confirms  # no request was made: nobody was asked
         await finish(stop, task)
     run(go)

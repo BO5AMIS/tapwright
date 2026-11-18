@@ -42,10 +42,13 @@ def test_findings_are_exit_one(monkeypatch):
     assert cli.explore(flags()) == 1
 
 
-def test_it_needs_an_app_or_a_dedicated_phone_and_never_both(monkeypatch, capsys):
-    calls, _ = patched(monkeypatch, [])
-    assert cli.explore(flags(apps=None)) == 2 and cli.explore(flags(dedicated=True)) == 2 and calls == []
-    assert "pass --apps" in capsys.readouterr().out
+def test_it_searches_one_app_named_or_the_one_in_front_and_never_two_modes(monkeypatch, capsys):
+    # 1.7.5: no app list is needed to use the phone; --apps names the ONE app explore searches (none: the app in front)
+    calls, scopes = patched(monkeypatch, [{"text": "Explored 1 places in 0.1 min (3 steps), 0 findings."}])
+    assert cli.explore(flags(apps=None)) == 0 and scopes == [([], False, False)] and len(calls) == 1
+    assert cli.explore(flags(dedicated=True)) == 2 and len(calls) == 1
+    assert cli.explore(flags(apps="com.a.one,com.b.two")) == 2 and len(calls) == 1
+    assert "one app to search" in capsys.readouterr().out
 
 
 def test_a_stop_by_a_person_or_a_pause_is_exit_two_with_the_report_named(monkeypatch, capsys):

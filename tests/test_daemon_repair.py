@@ -338,7 +338,8 @@ def test_a_policy_word_a_typing_step_a_native_back_and_other_tools_are_never_rep
             with pytest.raises(Refused) as e:
                 await replay(d, script(tmp_path, [step]), "apply")
             assert why in str(e.value), (step, str(e.value))
-        assert "tap" not in d.session.calls and repair_lines(tmp_path) == []
+        # 1.7.5: no policy word stops the script's own step (its one tap of "Delete trip now"); no repair touched anything
+        assert d.session.calls.count("tap") == 1 and repair_lines(tmp_path) == []
         await finish(stop, task)
     run(go)
 

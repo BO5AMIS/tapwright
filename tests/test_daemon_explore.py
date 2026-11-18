@@ -191,13 +191,11 @@ def test_explore_is_no_step_of_run_and_is_off_in_a_journey(tmp_path):
     run(go)
 
 
-def test_personal_mode_nothing_runs_without_the_app_and_another_app_is_never_touched_or_shown(tmp_path):
+def test_explore_searches_one_app_and_another_app_is_never_touched_or_shown(tmp_path):
+    # 1.7.5: the phone is the agent's whole, and an app list no longer refuses; the one app `--apps` names is the app explored
     async def go():
         d = explored(tmp_path)
         stop, task = await started(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "explore", {}, Scope(()))
-        assert e.value.code == "not_allowed" and "no_apps" in str(e.value)
         r = await d.run_tool("a", "explore", {}, Scope((BUNDLE,)))
         folder = report_of(r)
         body = json.loads((folder / "report.json").read_text("utf-8"))

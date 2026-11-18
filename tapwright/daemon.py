@@ -27,7 +27,7 @@ from typing import NamedTuple
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
-               diagnostics, dialog, driving, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
+               diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
@@ -131,6 +131,14 @@ _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwrig
 # True while `explore` makes its own moves (AGENT-TOOLS §25.5): a touch the policy holds is never asked of a person (no dialog, no
 # live-view request) and no grant is looked at: the touch is refused as `needs_confirmation`, and a dry run says so.
 _EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exploring", default=False)
+# The skip floor of the move being made by `explore`, or by a repair's trial (§25.5, §26.4): set by them for their own moves
+# only. Since 1.7.5 no policy word stops an agent's touch, so this is the ONE dispatch gate those moves pass: `_last_checks`
+# reads it on the element the touch really goes to (after resolution and any scroll), dry runs included (_floor_gate).
+_TOUCH_FLOOR: contextvars.ContextVar["explorefloor.Floor | None"] = contextvars.ContextVar("tapwright_touch_floor", default=None)
+# The policy the caller sent (`tapwright mcp --policy`, `tapwright explore --policy`), for the skip floor alone: since 1.7.5 it
+# authorizes and restricts nothing else (the call's own policy is safety.NONE); its words only add to what explore and a
+# repair never touch, and its `explore` key is the user's skip list (§25.5).
+_FLOOR_RULES: contextvars.ContextVar["safety.Policy | None"] = contextvars.ContextVar("tapwright_floor_rules", default=None)
 # The crash reports `explore` has seen found while it runs (any call's crash check finds them first, and tells each once):
 # `_find_crash` adds each it returns, so the search can make a `crash` finding of it with its frames (§25.10).
 _CRASHES: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_explore_crashes", default=None)
@@ -453,6 +461,7 @@ def touch_name(tool: str) -> str:
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
+TOUCH_FLOOR_TOOLS = ("tap", "long_press", "toggle", "type_text")  # a point target of these has no element the floor can judge
 REACH_TOOLS = KEYBOARD_TOOLS  # AGENT-TOOLS §16.2: on a target in the tree but off screen they scroll to it first
 SCROLLED_THEN = "Scrolled to it, then "
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
@@ -1919,6 +1928,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         dialog supports platform moments that require a person's intervention."""
         # Legacy app lists can identify a scheduled route's launch app; they never limit access.
         app_hint = app_hint or (scope.apps[0] if scope is not None and len(scope.apps) == 1 else None)
+        floor_rules = policy  # (only explore's and a repair's skip floor reads it: _FLOOR_RULES)
         scope, policy = None, safety.NONE
         left = self._photo_wait_left()
         if left is not None and name not in PHOTO_WAIT_FREE:
@@ -1939,11 +1949,14 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             # phone first. Nothing was done; the run waits and asks again (Codex, PR #12 cycle 1, M2)
             raise Refused("busy", schedulelib.ADMISSION_BUSY)
         hint_token = _APP_HINT.set(app_hint)
+        rules_token = _FLOOR_RULES.set(floor_rules) if floor_rules is not None else None  # (a nested call keeps its caller's)
         try:
             with self._phone_use(client_id):
                 return await self._run_tool_counted(client_id, name, args, scope, policy, ux_rules, via, maps, dialog,
                                                     accounts)
         finally:
+            if rules_token is not None:
+                _FLOOR_RULES.reset(rules_token)
             _APP_HINT.reset(hint_token)
 
     async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
@@ -2899,8 +2912,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         run_grants = self._grants_run()
         try:
             if repair is not None:
-                return await self._repair_replay(client_id, data, scope, args, pathlib.Path(path), repair,
-                                                 named is not None and data.get("draftsOnly") is True)
+                # (a file that says draftsOnly is never repaired, wherever it lies: like `drafting`, it only holds back more)
+                return await self._repair_replay(client_id, data, scope, args, pathlib.Path(path), repair, drafting is not None)
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
@@ -6759,9 +6772,55 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
 
         Accessibility hit identity is incomplete on real devices. An unanswered or
         unrelated hit must not invent a covered-control error or an authorization gate.
+        The one exception is `explore`'s and a repair trial's own moves: their skip floor (_floor_gate).
         """
+        self._floor_gate(tool, a, element, bundle)
         point = aim(element) if element is not None and hit and aim is not None else None
         return element, point, ""
+
+    def _floor_gate(self, tool: str, a: dict, element: "ui.Element | None", bundle: str | None = None) -> None:
+        """The ONE dispatch gate of `explore`'s and a repair trial's moves (§25.5, §26.4; Tapline's lesson: checked on the
+        ACTUAL recipient, after resolution and scroll). Nothing when no floor is set (an agent's own call, 1.7.5). Else the
+        touch is refused `not_allowed: needs_confirmation` (`explore` and `check` skip it; a dry run is refused the same way,
+        so a dry run says what the real touch would meet) when what it goes to is held: an element (or what lies in it, or
+        over its centre) with a floor word, a screen the floor holds (a system sheet, Settings, a protected title), a field
+        never typed into, another app than the floor's, a point or a swipe (no element to judge), or an alert button other
+        than the one `safe_button` picks. `force` changes nothing here."""
+        floor = _TOUCH_FLOOR.get()
+        if floor is None:
+            return
+
+        def held(what: str, word: str | None = None) -> None:
+            said = f' (policy word "{word}")' if word else ""
+            raise Refused("not_allowed", f"needs_confirmation: {ui.clip(self.scrub_everywhere(what))} is on the skip "
+                                         f"floor{said}; explore and repair touch nothing it holds, and ask nobody.")
+        if tool == "alert":
+            if a.get("action") == "text":
+                return
+            shown, name = self.session.last_alert, a.get("name")
+            if shown is None or not isinstance(name, str) or explorefloor.safe_button(shown, floor) != name:
+                held(f"the alert button {name!r}" if isinstance(name, str) else "an alert answered without a button name")
+            return
+        if tool == "swipe":
+            held("a swipe")
+        if element is None:
+            target = a.get("target")  # (parsed by _checked: a ui.Target)
+            if isinstance(target, ui.Target) and target.point is not None and tool in TOUCH_FLOOR_TOOLS:
+                held(f"the point ({round(target.point[0])}, {round(target.point[1])})")
+            return
+        front = bundle or self._app_bundle()
+        if front != floor.app:
+            held(f"{element.role} in another app")
+        tree = getattr(self.session, "last_tree", None)
+        if tree is not None and (screen := floor.screen(tree, front)) is not None:
+            held("this screen", screen.word)
+        items = [e for e in self.session.items if not e.in_alert]
+        if tool == "type_text" and explorefloor.never_typed(element):
+            held(f"{element.role} {element.label or element.identifier}")
+        if (hit := floor.touch(element, items)) is not None:
+            held(f"{element.role} {explorefloor.name_of(element)}", hit.word)
+        if _EXPLORING.get() and tool != "type_text" and (hit := floor.may_submit(element, items)) is not None:
+            held(f"{element.role} {explorefloor.name_of(element)}", hit.word)  # (§25.7: a form's submit, unless its id is listed)
 
     async def _press(self, target: ui.Target, hold_ms: int, proven: bool = False) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4).

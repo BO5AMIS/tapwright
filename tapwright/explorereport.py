@@ -35,7 +35,7 @@ ERRORS = ("paused", "busy", "locked")  # a stop that is an error (§25.9)
 ERROR_TEXT = {
     "paused": "paused by the user in the live view; ask them to resume.",
     "busy": "a person is using the phone; try again in a moment.",
-    "locked": "the phone is locked; ask the user to unlock it.",
+    "locked": "the phone locked, and explore never unlocks it: call unlock (or ask the user to unlock it), then explore again.",
 }
 
 
