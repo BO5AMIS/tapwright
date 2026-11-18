@@ -303,6 +303,11 @@ def rows_at(source: str, point: tuple[float, float]) -> int:
 
 CENTER_TITLE = "notification center"
 LISTS = ("ScrollView", "CollectionView", "Table")
+# (1.7.8, X item 7) iOS 26 shows Notification Center as the cover sheet, with no title and no scroll view in the tree:
+# each notification is a `ListCell` holding its `NotificationShortLookView`, and the sheet's date is
+# `lockscreen-date-view` (both in the earlier real capture). A banner over an app or the home screen has neither.
+LIST_CELL = "ListCell"
+COVER_DATE = "lockscreen-date-view"
 
 
 def _kind(node: ET.Element) -> str:
@@ -312,26 +317,112 @@ def _kind(node: ET.Element) -> str:
 def is_center(source: str) -> bool:
     """Is Notification Center open in this tree, proven (review 1.7 B-M3)? SpringBoard's tree is not enough: the home
     screen and a banner are SpringBoard's too, and a swipe that was swallowed (Siri, Control Center, an alert) would read
-    as "no notifications". Proof is SpringBoard at the root and either Notification Center's own title, or a
-    notification inside a list (Notification Center's scroll view; a banner over an app is in none). On a doubt the
-    callers say NOT_OPENED and read nothing."""
+    as "no notifications". Proof is SpringBoard at the root and either Notification Center's own title, the cover
+    sheet's date on the screen (iOS 26), or a notification inside a list (Notification Center's scroll view, or iOS 26's
+    `ListCell`; a banner over an app is in none). On a doubt the callers say NOT_OPENED and read nothing."""
     if 'bundleId="com.apple.springboard"' not in source[:800]:
         return False
     try:
         root = ET.fromstring(source)
     except ET.ParseError:
         return False
+    screen = next((_rect(n) for n in root.iter() if _kind(n) == "Application"), _rect(root))
     for node in root.iter():
         if " ".join((node.get("label") or node.get("name") or "").split()).casefold() == CENTER_TITLE:
             return True
+        if node.get("name") == COVER_DATE:
+            # the cover sheet's date, drawn on the screen (a frame left off screen or with no size proves nothing)
+            x, y, w, h = _rect(node)
+            # (any part of it on the screen: past the right edge, or above the top, proves nothing; CodeRabbit, PR #18)
+            if (w > 0 and h > 0 and y + h > 0 and y < (screen[3] or float("inf")) and x + w > 0
+                    and x < (screen[2] or float("inf"))):
+                return True
     parents = {c: up for up in root.iter() for c in up}
     for node in root.iter():
         if _is_notification(node):
             up = parents.get(node)
             while up is not None:
-                if _kind(up) in LISTS:
+                if _kind(up) in LISTS or (up.get("name") == LIST_CELL and _kind(up) != "Application"):
                     return True
                 up = parents.get(up)
+    return False
+
+
+CLEAR_BUTTON = "clear-button"
+FLASHLIGHT = "flashlight-orb-button"
+
+
+ROW_TOLERANCE = 12.0  # points: the Clear button's vertical centre is within this of the header's (the same row)
+EDGE_TOLERANCE = 0.5  # points a frame may stand past the screen's edge and still count as on it (rounding)
+
+
+def _on_screen(rect: tuple[float, float, float, float], screen: tuple[float, float, float, float]) -> bool:
+    """The whole frame on the screen, with a size: a node in the tree that is off screen (scrolled away, or kept for
+    later) shows nothing."""
+    x, y, w, h = rect
+    sw, sh = screen[2], screen[3]
+    return (w > 0 and h > 0 and sw > 0 and sh > 0 and x >= -EDGE_TOLERANCE and y >= -EDGE_TOLERANCE
+            and x + w <= sw + EDGE_TOLERANCE and y + h <= sh + EDGE_TOLERANCE)
+
+
+def _in_notification(node: ET.Element, parents: dict[ET.Element, ET.Element]) -> bool:
+    """Is the node a notification's own text, or inside a notification (its ListCell, a Cell, its short look)? Its
+    words then come from an app, not from SpringBoard."""
+    up: ET.Element | None = node
+    while up is not None:
+        if _kind(up) == "Application":
+            return False
+        if _is_notification(up) or up.get("name") in (LIST_CELL, "NotificationTitle") or _kind(up) == "Cell":
+            return True
+        up = parents.get(up)
+    return False
+
+
+def center_over_unlocked(source: str) -> bool:
+    """Is this Notification Center pulled down over an UNLOCKED phone, proven? iOS sets SpringBoard's lock state while
+    the cover sheet is down, so WebDriverAgent answers "locked" then (phone check of 1.7.8, 2026-11-18). is_center is not
+    enough here: a really locked phone shows the same cover sheet, its date and its ListCells. Captured on iOS 26.5, the
+    pulled-down sheet has Notification Center's own header and its Clear button (value "Notification Center"), and an
+    enabled flashlight; the locked phone (dark, just locked with the side button) had neither, and a disabled
+    flashlight. All of these must hold (last Opus review of 1.7.8, H1):
+      - the header: a node (not a button) saying "Notification Center", wholly on the screen with a size, and neither a
+        notification's own text nor inside one (a notification titled "Notification Center" proves nothing);
+      - the Clear button (`clear-button`, value "Notification Center"), wholly on the screen, on the header's row
+        (vertical centres within ROW_TOLERANCE) and to its right;
+      - the flashlight, enabled (a disabled one fails the proof at once).
+    What it can't tell apart: a LIT lock screen scrolled to the same sheet (a notification woke it) may look the same,
+    and a Home press there may wake Face ID. Pause in the live view is the owner's stop (docs/AGENT-TOOLS.md)."""
+    if 'bundleId="com.apple.springboard"' not in source[:800]:
+        return False
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return False
+    screen = next((_rect(n) for n in root.iter() if _kind(n) == "Application"), _rect(root))
+    parents = {c: up for up in root.iter() for c in up}
+    headers: list[tuple[float, float, float, float]] = []
+    clears: list[tuple[float, float, float, float]] = []
+    flashlight = False
+    for node in root.iter():
+        name = node.get("name") or ""
+        if name == FLASHLIGHT:
+            if node.get("enabled") == "false":
+                return False  # (the locked phone's dark lock screen)
+            flashlight = True
+        said = " ".join((node.get("label") or name).split()).casefold()
+        if (said == CENTER_TITLE and name != CLEAR_BUTTON and _kind(node) != "Button"
+                and _on_screen(_rect(node), screen) and not _in_notification(node, parents)):
+            headers.append(_rect(node))
+        if (name == CLEAR_BUTTON and _kind(node) == "Button"
+                and " ".join((node.get("value") or "").split()).casefold() == CENTER_TITLE
+                and _on_screen(_rect(node), screen)):
+            clears.append(_rect(node))
+    if not flashlight:
+        return False
+    for hx, hy, hw, hh in headers:
+        for cx, cy, cw, ch in clears:
+            if abs((hy + hh / 2) - (cy + ch / 2)) <= ROW_TOLERANCE and cx + cw / 2 > hx + hw / 2:
+                return True
     return False
 
 

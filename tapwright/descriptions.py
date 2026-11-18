@@ -8,7 +8,7 @@ _CORE = "You can see and operate a real iPhone for QA, research, automation and 
 
 _CORE += (
     "\nErrors: `not_found` or `ambiguous`: inspect and choose a fresh target; `not_actionable`: disabled, off_screen, covered, under_tab_bar, behind_alert or no_action explains why the target cannot be reached.\n"
-    "`stale`: inspect again; `busy`: another input owner has priority; `paused`: the owner paused input; `locked`: the phone or XCTest requires unlocking.\n"
+    "`stale`: inspect again; `busy`: another input owner has priority; `paused`: the owner paused input; `locked`: the phone is locked (call `unlock`, which types the passcode saved for this phone; with none saved, ask the user), or the XCTest prompt needs the person.\n"
     "`not_answering`, `in_background`, `reconnecting`, `not_connected`: inspect connection/app state; `timeout`: inspect whether input arrived before retrying; `bad_params`: correct the call; `unsupported`: the platform lacks this operation.\n"
     "`not_allowed` can describe an unavailable session operation; it is no longer an app-list or button-word policy refusal. `expect_failed` and `off_route` stop a workflow; `internal` is a tool failure to report.\n"
     "`force` retains its geometry override; ordinary text/icon buttons do not need it. It is the user's own phone: follow the task.\n"
@@ -16,7 +16,7 @@ _CORE += (
     "`dry_run: true` on a touch or on `run` says what would happen without doing it.\n"
 )
 
-_TAPWRIGHT = 'apps lists installed apps; open_app and open_url navigate; press_button presses Home or volume; swipe drags between screen points.\nlook shows accessibility elements and optionally a screenshot/OCR. System UI may be absent from accessibility; use the current picture to choose coordinates when needed.\nalert text reads the current alert. accept/dismiss chooses its default action; name selects an exact visible button label, including localized labels. cancel defaults to a button named Cancel. Alerts also support dry_run.\nLegacy --apps, --dedicated, --policy and --no-policy options do not restrict device control in 1.7.5. --phone retains its separate configured automatic-unlock behavior.\nDo not claim that software can bypass a genuine XCTest passcode, trust, signing or biometric requirement. Report the actual platform gate.\n'
+_TAPWRIGHT = 'apps lists installed apps; open_app and open_url navigate; press_button presses Home or volume; swipe drags between screen points.\nlook shows accessibility elements and optionally a screenshot/OCR. System UI may be absent from accessibility; use the current picture to choose coordinates when needed.\nalert text reads the current alert. accept/dismiss chooses its default action; name selects an exact visible button label, including localized labels. cancel defaults to a button named Cancel. Alerts also support dry_run.\nLegacy --apps, --dedicated, --policy and --no-policy options do not restrict device control in 1.7.5. --phone retains its separate configured automatic-unlock behavior. A locked phone: call unlock, which types the passcode saved for this phone (you never see it); with none saved, ask the user to unlock it.\nDo not claim that software can bypass a genuine XCTest passcode, trust, signing or biometric requirement. Report the actual platform gate.\n'
 
 INSTRUCTIONS = _CORE + "\n\n" + _TAPWRIGHT
 
@@ -256,6 +256,14 @@ EXTRA = {
     'press_button': (
         'Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; '
         '`open_app` brings it back.'
+    ),
+    'unlock': (
+        'Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, '
+        '`phone.passcode`). You never see or send the passcode: the tool types it on iOS\'s own lock screen, never on '
+        'the XCTest prompt, at most twice an hour and 3 times a day, and never again after the phone refused it. '
+        'Answers with the screen once unlocked, or `The phone isn\'t locked.`; `locked` when no passcode is saved '
+        '(ask the user to unlock it) or the unlock couldn\'t be done (its reason). A call of its own: not a step of '
+        '`run`, `replay`, `drive` or a journey. The owner stops you by pausing in the live view.'
     ),
     'rotate': (
         'Turn the phone: `to` is `portrait`, `landscape_left` or `landscape_right`. For testing how an app looks '

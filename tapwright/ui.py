@@ -161,6 +161,11 @@ class Element:
     icon_only: bool = False  # a button whose label isn't visible text (see icon_only_button): a user's eyes show no label
     no_trait: bool = False  # a radio or checkbox that React Native types Other (see _no_trait): VoiceOver gets no control from it
     others: bool = False  # text the tool knows other people wrote (AGENT-TOOLS §21.1, fromothers.py); False claims nothing
+    # (1.7.8) inside a view another process draws (a share sheet, a photo picker), whose frames XCTest gives in that
+    # view's own space: "moved" (put on the screen by its host's place, see _place_hosted; `raw_rect` is the frame as
+    # XCTest gave it, which the hit test answers too), "unknown" (where it is can't be told), "" (an ordinary element)
+    placed: str = ""
+    raw_rect: tuple[float, float, float, float] | None = None
 
     @property
     def x(self) -> float:
@@ -803,7 +808,106 @@ def _parse(source: str, screen: tuple[float, float] | None) -> ET.Element:
     trace.parsed()
     if screen is not None and screen[0] > screen[1]:
         _upright_keyboard(root, screen)
+    _place_hosted(root)
     return root
+
+
+HOSTED_SLACK = 2.0  # points a frame may be off from where it is checked (WebDriverAgent rounds frames)
+HOSTED_OFFSET = 2 * HOSTED_SLACK  # points a host must be away from (0, 0), and a frame outside it, to count
+_CLIPPING_TYPES = frozenset(f"XCUIElementType{k}" for k in CLIPPING) | frozenset(CLIPPING)
+PLACED_ATTR, RAW_ATTR = "tw-placed", "tw-raw"  # what _place_hosted marks a node with
+
+
+def _place_hosted(root: ET.Element) -> None:
+    """Content another process draws (Safari's share sheet: ShareSheet.RemoteContainerView; X's photo picker) comes
+    with frames in its host view's own space, not the screen's: the share sheet at (9, 531) lists its content view at
+    (0, 0) with the host's own size, and "View More" 531 points above where it is (2026-11-17: the tap opened the video
+    behind). Those frames are put on the screen here, in place, only on strong evidence; a host that shows the tell
+    and whose frames can't all be in its own space is marked "unknown", and nothing in it is touched by its frame
+    (Daemon._hosted_proof).
+
+    A node C is such a host when:
+    - a direct child of C is about C's own size at about (0, 0): the tell, which no screen-space child has;
+    - C is really away from (0, 0) (more than HOSTED_OFFSET: a list scrolled 1 or 2 points under a bar isn't), on
+      the screen (not above or left of it, as a header scrolled up is), and not inside a scroll view's content
+      (a parallax header's pinned image is the tell's shape too; a share sheet or a picker is never scroll content);
+    and, among its descendants' frames (with area; a scroll view's content is left out, since it runs past the view):
+    - all fit inside (0, 0, C's width, C's height) (else "unknown");
+    - one lies clearly outside C's frame on the screen (else nothing says the frames aren't the screen's: left as is).
+    One walk finds the tells (linear: a deep React Native tree read 4x slower with a subtree walk at every node,
+    Opus review 7); only the few hosts' subtrees are walked again. Bottom-up: an inner host is placed in its parent's
+    space first, so an outer one sees screen frames, or its own space's when it is a host too."""
+    slack, offset = HOSTED_SLACK, HOSTED_OFFSET
+    hosts: dict[ET.Element, int] = {}  # host -> its depth
+    # (node, its parent, its depth, inside a scroll view's content); the root's frame is never a tell
+    stack: list[tuple[ET.Element, ET.Element | None, int, bool]] = [(root, None, 0, False)]
+    while stack:
+        node, parent, depth, scrolled = stack.pop()
+        if len(node):
+            inside = scrolled or (node.get("type") or node.tag) in _CLIPPING_TYPES
+            stack.extend((child, node, depth + 1, inside) for child in node)
+        if parent is None or scrolled or parent in hosts:
+            continue
+        try:  # (the cheap part first: nearly every node is away from (0, 0))
+            if abs(float(node.get("x", 0))) > slack or abs(float(node.get("y", 0))) > slack:
+                continue
+        except ValueError:
+            continue
+        x, y, w, h = _rect(node)
+        if w <= 0 or h <= 0 or abs(x) > slack or abs(y) > slack:
+            continue
+        px, py, pw, ph = _rect(parent)
+        if (abs(pw - w) <= slack and abs(ph - h) <= slack and max(abs(px), abs(py)) > offset and px >= -slack
+                and py >= -slack and _kind(parent) != "Application"):
+            hosts[parent] = depth - 1
+
+    def frames(node: ET.Element) -> list[tuple[float, float, float, float]]:
+        out, pending = [], list(node)
+        while pending:
+            n = pending.pop()
+            r = _rect(n)
+            if r[2] > 0 and r[3] > 0:
+                out.append(r)
+            if _kind(n) not in CLIPPING:
+                pending.extend(n)
+        return out
+
+    def mark(node: ET.Element, placed: str, dx: float = 0.0, dy: float = 0.0) -> None:
+        for n in node.iter():
+            if n is node:
+                continue
+            if n.get(RAW_ATTR) is None:
+                n.set(RAW_ATTR, ",".join(repr(v) for v in _rect(n)))
+            if n.get(PLACED_ATTR) != "unknown":
+                n.set(PLACED_ATTR, placed)
+            if dx or dy:
+                x, y, _, _ = _rect(n)
+                n.set("x", repr(x + dx))
+                n.set("y", repr(y + dy))
+
+    for host in sorted(hosts, key=lambda n: -hosts[n]):  # the deepest first
+        x, y, w, h = _rect(host)
+        inner = frames(host)
+        fits = all(r[0] >= -slack and r[1] >= -slack and r[0] + r[2] <= w + slack and r[1] + r[3] <= h + slack
+                   for r in inner)
+        if not fits:
+            mark(host, "unknown")
+            continue
+        if any(r[0] < x - offset or r[1] < y - offset or r[0] + r[2] > x + w + offset or r[1] + r[3] > y + h + offset
+               for r in inner):
+            mark(host, "moved", x, y)
+        # (the tell, everything fitting, nothing outside: these may well be screen frames; an ordinary screen)
+
+def _placed(node: ET.Element) -> tuple[str, tuple[float, float, float, float] | None]:
+    """What _place_hosted found for a node: its mark and the frame XCTest gave."""
+    placed, raw = node.get(PLACED_ATTR, ""), node.get(RAW_ATTR)
+    if not placed or raw is None:
+        return "", None
+    try:
+        values = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        return "unknown", None
+    return placed, (values if len(values) == 4 else None)  # type: ignore[return-value]
 
 
 def _upright_keyboard(root: ET.Element, screen: tuple[float, float]) -> None:
@@ -992,6 +1096,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 placeholder=_text(node.get("placeholderValue")),
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
+            candidate.placed, candidate.raw_rect = _placed(node)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had
@@ -1221,10 +1326,12 @@ def _plain(node: ET.Element) -> Element | None:
     if not worth or w <= 0 or h <= 0 or kind in ("Alert", "Keyboard"):
         return None
     enabled = node.get("enabled", "true") != "false" and "NotEnabled" not in traits
+    placed, raw = _placed(node)
     return Element("", role, label, identifier, value, rect, enabled, "Selected" in traits,
                    loose.checked if loose else (value == "1") if role == "switch" else None,
                    ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, _has_focus(node, role), name,
-                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")), no_trait=loose is not None)
+                   kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")),
+                   no_trait=loose is not None, placed=placed, raw_rect=raw)  # (a hosted one keeps its mark: CodeRabbit, PR #18)
 
 
 def _offscreen(node: ET.Element, out: list[Element], over: Element | None = None) -> None:
@@ -1501,7 +1608,10 @@ MAX_CANDIDATES = 5
 
 
 def _norm(text: str) -> str:
-    return text.strip().casefold()
+    """A selector's text and the screen's as they are compared: casefolded, every run of white space (a no-break or
+    narrow no-break space too: iOS writes U+202F before "PM") one plain space, as an element's line shows it. Otherwise
+    exact (1.7.8, X item 3: a photo cell's label as listed was not_found)."""
+    return " ".join(text.split()).casefold()
 
 
 def _inside(inner: Element, outer: Element) -> bool:
@@ -1645,6 +1755,8 @@ class Back(NamedTuple):
     bar: bool  # a NavigationBar is on screen
     point: tuple[float, float] | None  # the centre of its back button, if it has one
     dismiss: tuple[float, float] | None = None  # where a touch closes the popover that is open on top, if one is
+    # (1.7.8) the bar on top is in a view another process draws (_place_hosted): its button isn't touched by its frame
+    hosted: bool = False
 
 
 DISMISS_MARGIN = 60.0  # points a closing touch keeps from the screen's top (the status bar) and from the sheet
@@ -1721,7 +1833,11 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
     bars = [n for n in root.iter() if _kind(n) == "NavigationBar" and on_screen(_rect(n))]
     if not bars:
         return Back(False, None)
+    if any(n.get(PLACED_ATTR) == "unknown" for n in bars):
+        return Back(True, None, hosted=True)  # its frame isn't the screen's: which bar is on top can't be told
     bar = min(bars, key=lambda n: _rect(n)[1])
+    if bar.get(PLACED_ATTR):
+        return Back(True, None, hosted=True)  # (Opus review 5: never pressed without the phone's hit test)
     bar_x, _, bar_w, _ = _rect(bar)
     buttons = [n for n in bar.iter() if _kind(n) == "Button" and on_screen(_rect(n))]
 
@@ -1729,23 +1845,28 @@ def _back_of(root: ET.Element, screen: tuple[float, float],
         x, y, w, h = _rect(n)
         return x + w / 2, y + h / 2
 
+    def chosen(n: ET.Element) -> Back:
+        # a button of a hosted view inside an ordinary bar: its frame isn't the screen's, never pressed by it
+        # (CodeRabbit, PR #18)
+        return Back(True, None, hosted=True) if n.get(PLACED_ATTR) else Back(True, centre(n))
+
     for n in buttons:
         if _text(n.get("name")) == "BackButton" or _text(n.get("label")).lower() == "back":
-            return Back(True, centre(n))
+            return chosen(n)
     # A Back button the app lays on the bar as a sibling (X's profile page): listed after the bar, wholly on it, not
     # scrolling content (_on_bar), and told by its own name or label only: never a left-most guess (an avatar)
     order = {n: i for i, n in enumerate(root.iter())}
     after = max(order[n] for n in bar.iter())
     parents = parents if parents is not None else {child: up for up in root.iter() for child in up}
     for n in root.iter():
-        if (_kind(n) == "Button" and order[n] > after and on_screen(_rect(n)) and _on_bar(n, _rect(bar), parents)
-                and _is_back(n)):
+        if (_kind(n) == "Button" and order[n] > after and not n.get(PLACED_ATTR) and on_screen(_rect(n))
+                and _on_bar(n, _rect(bar), parents) and _is_back(n)):
             return Back(True, centre(n))
     left = [n for n in buttons if centre(n)[0] < bar_x + bar_w / 4]
     left.sort(key=lambda n: centre(n)[0])
     for n in left[:1]:
         if (_text(n.get("label")) or _text(n.get("name"))).lower() not in NOT_BACK:
-            return Back(True, centre(n))
+            return chosen(n)
     return Back(True, None)
 
 
@@ -1848,6 +1969,60 @@ def sheet_pull(box: tuple[float, float, float, float],
     return across, start, across, min(start + max(SHEET_PULL * h, SHEET_PULL_MIN), screen[1] - 2)
 
 
+DRAG_CLEAR = 12.0  # how far the keyboard reflex's drag keeps from anything that takes a touch (1.7.8, X item 1)
+DRAG_LENGTH = 40.0  # the keyboard reflex's pull down, in points
+DRAG_MIN = 20.0  # a shorter pull than this isn't tried
+
+
+def _touch_blocks(items: list[Element]) -> list[tuple[float, float, float, float]]:
+    """The frames a touch meant to do nothing must keep out of: what takes an action (a scroll view's empty area
+    does nothing), the text edit menu's items, and the bars that cover content."""
+    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
+    # the text edit menu over a field (Select, Paste) lists its items as `menuitem`, with no action: a touch on one
+    # selects or pastes (blank_point picked "Select" on the phone 2026-11-11, both orientations)
+    blocks += [e.rect for e in items if e.role == "menuitem" and not e.in_alert]
+    blocks += [e.rect for e in items if e.type in COVERING_BARS]
+    blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+    return blocks
+
+
+def _clearance(x: float, y: float, rects: list[tuple[float, float, float, float]]) -> float:
+    """How far the point is from the nearest of `rects` (0 inside one)."""
+    return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
+                for r in rects), default=math.inf)
+
+
+def dismiss_drag(items: list[Element], screen: tuple[float, float], top: float,
+                 bottom: float) -> tuple[float, float, float, float] | None:
+    """The keyboard reflex's short pull down in a scroll view above the keyboard (x0, y0, x1, y1), on passive content
+    only: every point of it at least DRAG_CLEAR from what takes a touch and BLANK_CLEAR from any image (a floating
+    button can show as only its icon). A short drag can land as a tap, so it must never start or end on a control:
+    in X's reply composer one opened the photo picker (2026-11-17). Near the top of the biggest such view first, then
+    across it and lower down; None when no such line fits, and the reflex doesn't drag."""
+    blocks, icons = _touch_blocks(items), [e.rect for e in items if e.role == "image" and not e.in_alert]
+    # (a view another process draws is left out: the drag has no hit test, and an unknown one's frame isn't the
+    # screen's: CodeRabbit, PR #18)
+    views = sorted((e for e in items if e.role == "scroll" and not e.in_alert and not e.placed and e.y + 60 < bottom
+                    and e.y + e.height > top), key=lambda e: e.width * e.height, reverse=True)
+
+    def passive(x: float, y: float, view: Element) -> bool:
+        return (view.x <= x < view.x + view.width and view.y <= y < view.y + view.height
+                and 0 <= x < screen[0] and top <= y < bottom
+                and _clearance(x, y, blocks) >= DRAG_CLEAR and _clearance(x, y, icons) >= BLANK_CLEAR)
+    for v in views:
+        middle = v.x + v.width / 2
+        xs = sorted({min(max(v.x + DRAG_CLEAR + i * BLANK_GRID / 2, v.x), v.x + v.width - 1)
+                     for i in range(int(v.width // (BLANK_GRID / 2)) + 1)} | {middle}, key=lambda x: abs(x - middle))
+        y0 = max(v.y, top) + 20
+        while y0 + DRAG_MIN <= min(v.y + v.height, bottom - 10):
+            y1 = min(y0 + DRAG_LENGTH, bottom - 10, v.y + v.height - 1)
+            for x in xs:
+                if y1 - y0 >= DRAG_MIN and all(passive(x, y0 + (y1 - y0) * k / 8, v) for k in range(9)):
+                    return x, y0, x, y1
+            y0 += BLANK_GRID / 2
+    return None
+
+
 def blank_point(items: list[Element], screen: tuple[float, float], top: float,
                 bottom: float) -> tuple[float, float] | None:
     """A point to touch that does nothing but take focus away from a text field: between `top` and `bottom` (the
@@ -1857,21 +2032,12 @@ def blank_point(items: list[Element], screen: tuple[float, float], top: float,
     the free point of a coarse grid farthest from what takes a touch, images and the band's edges (floating
     buttons sit near edges and corners), else None. A scroll view doesn't count as one that takes a touch: its
     empty area does nothing, and one often fills the whole screen."""
-    blocks = [e.rect for e in items if e.actions and e.role != "scroll" and not e.in_alert]
-    # the text edit menu over a field (Select, Paste) lists its items as `menuitem`, with no action: a touch on one
-    # selects or pastes (blank_point picked "Select" on the phone 2026-11-11, both orientations)
-    blocks += [e.rect for e in items if e.role == "menuitem" and not e.in_alert]
-    blocks += [e.rect for e in items if e.type in COVERING_BARS]
-    blocks += [bar.rect for e in items for bar in e.covered_by if bar.kind in COVERING_BARS]
+    blocks = _touch_blocks(items)
     icons = [e.rect for e in items if e.role == "image" and not e.in_alert]
 
     def free(x: float, y: float) -> bool:
         return (0 <= x < screen[0] and top <= y < bottom and not any(_holds(r, (x, y)) for r in blocks))
-
-    def clearance(x: float, y: float, rects: list[tuple[float, float, float, float]]) -> float:
-        """How far the point is from the nearest of `rects`."""
-        return min((math.hypot(max(r[0] - x, 0.0, x - r[0] - r[2]), max(r[1] - y, 0.0, y - r[1] - r[3]))
-                    for r in rects), default=math.inf)
+    clearance = _clearance
     # a touch inside a scroll view closes the keyboard in React Native (keyboardShouldPersistTaps defaults to
     # "never"); one on a header outside it often does nothing (seen on the phone 2026-11-12: 4 s lost each time)
     scrolls = [e.rect for e in items if e.role == "scroll" and not e.in_alert]

@@ -10,6 +10,7 @@ from fakes import FakeSession
 from test_daemon import finish, make, run, started
 from test_unlock import PASSCODE, Screen
 
+from tapwright import errors
 from tapwright import trace, unlock
 from tapwright.actionlog import ActionLog
 from tapwright.auditlog import AuditLog
@@ -133,7 +134,7 @@ def test_without_a_passcode_a_locked_phone_answers_as_before(tmp_path):
         stop, task = await started(d, until=("locked",))
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "ok-button"}})
-        assert e.value.code == "locked" and str(e.value) == "the phone is locked; ask the user to unlock it"
+        assert e.value.code == "locked" and str(e.value) == errors.PHONE_LOCKED
         assert d.lock_screen.pressed == [] and d.lock_screen.calls == []
         await finish(stop, task)
     run(go)

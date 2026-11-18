@@ -374,7 +374,7 @@ def test_retype_checks_original_field_after_another_agent_turn(new_focus):
             async def active():
                 return focus
 
-            async def is_field(element, expected):
+            async def is_field(element, expected, **where):
                 reads.append(expected.identifier)
                 return element == expected.identifier
 

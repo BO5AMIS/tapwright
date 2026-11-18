@@ -1,5 +1,103 @@
 # Changelog
 
+## 1.7.8 (2026-11-18)
+
+- New tool `unlock`: an agent unlocks a locked phone with the passcode saved for it (`phone.passcode` in the file
+  Tapwright is started with, `--accounts FILE`), in every mode. The agent never sees or sends the passcode, and every
+  rule of the passcode unlock holds: only on iOS's lock screen with its keypad proven, never on the XCTest prompt, at
+  most 2 attempts an hour and 3 a day, none after a refusal, and an audit line with the name only. With no passcode
+  saved it answers `locked` and the agent asks the user. A call of its own: as a step of `run`, `replay`, `drive` or a
+  journey it is refused. Every `locked` answer for a locked phone now says "call unlock (it types the passcode saved
+  for this phone), or ask the user to unlock it"; the owner stops an agent that has the passcode by pausing in the
+  live view. Not yet proven on a Face ID iPhone with iOS 26: there the passcode unlock didn't find the keypad in 1.7,
+  and then it types nothing and answers `locked` (docs/setup.md).
+- `press_button home` closes Notification Center while the phone reads as locked. iOS sets SpringBoard's lock state
+  while Notification Center is pulled down over an unlocked phone, so every call, the home press that closes it too,
+  was refused `locked`. Home is pressed only when a fresh read proves that sheet: its header and its Clear button on
+  the screen, on one row, the header not a notification's text, and an enabled flashlight. On the dark lock screen
+  nothing is pressed, and the answer says the phone reads as locked (or Notification Center is open where Tapwright
+  can't prove it). A lit lock screen showing the same sheet (a notification woke it) may pass the proof, and Home there
+  may wake Face ID; Pause in the live view is the owner's stop.
+- While the phone is being unlocked (from the wake to the check), no picture of the screen reaches an agent:
+  `filmstrip`, `compare_screen` and screenshots answer `busy` ("the phone is being unlocked"), a journey keeps no
+  picture, and `tapwright record-video` leaves those frames out as it does Notification Center's (iOS's keypad shows
+  each key as it is touched). The owner's live view still shows it. The keypad's keys write no trace line each.
+- The unlock checks Pause and a person's input again right before the first key, and wakes the lock screen at most 3
+  times in 10 minutes without typing (each wake presses Home and may swipe up: a Face ID try). After an unlock that
+  found the phone not locked, and after the automatic unlock of `serve --phone`, the next call no longer reads a stale
+  `locked`.
+- Content another app draws inside the app in front (Safari's share sheet, X's photo picker) is listed where it is on
+  the screen. XCTest gives its frames in the host view's own space, so "View More" was listed 531 points too high, and
+  a tap on it opened the video behind while answering "Tapped". Frames are moved only when the tree shows it plainly:
+  a direct child with the host's size at (0, 0), the host clearly away from (0, 0), on the screen and outside any
+  scroll view's content (a parallax header is not a host), every frame inside the host's own space, and some clearly
+  outside its place on the screen. A tap, toggle, long press, focusing tap or scroll on such an element goes out only
+  when the runner's hit test (route version 6) names that element, or an element inside it, at the touch point;
+  otherwise it is refused `covered` and nothing is touched. Where the frames can't be placed, elements in that view
+  are never touched by their frame, even with `force` (and `back` doesn't press a bar in such a view); a tap by point
+  still works. The check adds about 5 ms to a read of a deep React Native tree.
+- While the app in front isn't answering, `close_app` closes it at once. Before, a reconnect attempt in the meantime
+  made it answer `reconnecting: … look before acting` again and again (2 min 40 s with X). `press_button home` also
+  gets through: it asks the runner for the home screen without a session, once, with a 10 s cap, and only when the
+  phone says it isn't locked. With no answer in time, the answer says the home screen may still come up.
+- `type_text` at a point focuses the field at that point, with or without `force`. Before, it tapped the field's
+  centre, which in X's composer was under the app's floating toolbar, and the GIF picker opened. A point under the
+  keyboard (even with `force`) or under a control the app draws over the field is refused `covered`.
+- `type_text` with `replace` proves the field right before clearing it: it must be the one input at its place in a
+  fresh read (under the agent's point, or under the focusing tap when another field shares its label or identifier),
+  and the focused element's frame must be that input's. A label or identifier alone proves nothing: two posts of a
+  thread share a label, and a list may repeat one identifier on every row. Otherwise the answer is `stale` and
+  nothing is cleared or typed. Typing again without a tap is only for the very field typed into last.
+- A field that goes away while its focus is checked answers `stale`, not `internal` (while the focusing tap's focus is
+  awaited, it is checked again until the wait ends). When the keyboard was closed to
+  try the focusing tap again and the field didn't survive the new read, the answer is `stale`, not `not_found`.
+- The field that has the keyboard's focus is typed into even when the keyboard's accessory area is drawn over it
+  (Safari's address field). No tap is made on it; if the focus has moved meanwhile, the answer is `stale`.
+- `open_url` into Safari says when the link didn't show: Safari's address field shows another host, or Safari kept
+  the page that was open (same tab, same page, same text). Before, it answered "opened" while Safari stayed on a video.
+  A redirect to another host (a short link) gets no note.
+- The keyboard reflex's short drag runs only on passive content, every point of it at least 12 pt from anything that
+  takes a touch; with no such place it doesn't drag. When its touch opened another screen (X's photo picker took the
+  keyboard's place, and the agent's Post, Cancel or point tap then landed on the picker), the call stops with `stale`
+  and nothing else is touched. When nothing closed the keyboard, the answer says "couldn't close the keyboard first".
+- A label matches as the list shows it: a no-break or narrow no-break space (iOS writes one before "PM") or a run of
+  spaces counts as one plain space. A photo picker cell listed as "Video, twelve seconds, 17 November, 7:19 PM" was
+  `not_found` by that label.
+- `type_text` without a target types only into the app the agent's last touch or `open_app` went to. When another app
+  came to the front since (Safari, after a tap in Files), it answers `stale` and types nothing; a `look` clears it.
+  `open_app` also drops the field typed into last. The app in front is the one the typing's own read names, and the
+  refusal keeps the app the last touch went to, so the same call again is refused again.
+- `type_text`'s answer gives a field's value only as a read after the typing shows it. After a submit Safari's address
+  field is another element, and the answer gave the address from before the submit as if it were the new one.
+- Forgetting a reflex or a place always wins over a map save under way: an edit no longer takes a forgotten reflex
+  that the save had written back into the file for one it wants (the flaky CI test on ubuntu, Python 3.10).
+- Notification Center as iOS 26 shows it is recognised: a notification in a `ListCell`, or the cover sheet's date on
+  the screen, proves it open (it has no title and no scroll view there). A banner or the home screen still proves
+  nothing.
+- The agent guide and the skill say how to close the keyboard with the tools there are, and that X disables the
+  composer's Photo library button while the text holds a link (attach media first, then add the link). They don't
+  suggest `submit` to close the keyboard: what Return does is up to the app (it can submit a form or send).
+- Content another app draws (see above) is proven again where each touch goes: every later drag of a `scroll`, and a
+  double tap's second touch. The keyboard reflex never drags a scroll view in such content, `back` never presses a
+  Back button of it inside an ordinary bar, and an element of it below the screen keeps its mark, so `scroll` with
+  `to: "target"` refuses one whose place can't be told.
+- Typing again without a tap also checks that the focused element is still where the field is listed (an automatic
+  scroll can carry it off and bring another field with its identifier to its place). `replace` after a focusing tap,
+  with an identifier only one field has, clears it only where it is still under the tap, or where the content around
+  it moved with it (the keyboard scrolled the form); otherwise `stale`.
+- A tap by point that first closed the keyboard is checked against the read the reflex made: when a control now lies
+  under the point that wasn't there when the agent aimed (the reflex's drag scrolled it there), the answer is `stale`
+  and nothing else is touched; `force` touches there anyway. The app a touch is meant for is the one the newest read
+  before it names, and a cover-sheet date partly above the screen's top still proves Notification Center open.
+- A field the keyboard moves is typed into on the first try again (a chat composer with no label that rises with the
+  keyboard, a search field that narrows as Cancel comes in): when it is the only input on the screen before and after
+  the focusing tap and moved only up or down, it is the tapped one. With another input on the screen the proof by place
+  stands.
+- `back` with a sheet in front whose frames can't be placed is refused `covered` instead of touching beside it. While
+  such a frame is listed, the keyboard reflex uses only the keyboard's own dismiss key, and a target whose place can't
+  be told doesn't close the keyboard first. A refusal after a touch on the way (the reflex, a scroll to the target)
+  says "nothing else was touched". `look` and `open_url` set the app that typing without a target goes to.
+
 ## 1.7.7 (2026-11-17)
 
 - New: `tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]` records the live view as an H.264 MP4 in real

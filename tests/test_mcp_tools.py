@@ -27,6 +27,7 @@ EXPECTED = {
     "close_app": {"app"},
     "alert": {"action", "look", "screenshot", "brief", "name", "dry_run"},
     "press_button": {"name", "look", "screenshot", "brief"},
+    "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
     "rotate": {"to", "look", "screenshot", "brief"},
     "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",

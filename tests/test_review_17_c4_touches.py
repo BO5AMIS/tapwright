@@ -18,6 +18,7 @@ def real_dispatch(s, *, change=None, typing=False, delay="banner"):
     """Use the real banner guard, tap, fast route and HTTP dispatch; fake only phone responses."""
     s.sid, s.turn, s.fast_tap, s.fast_drag, s.tw_version = "synthetic", 0, True, True, 5
     s.typed_into, s.retyped = None, False
+    s.typed_place, s._placed_proof = None, None
     s.dispatched, s.banner_checks = [], 0
     s.input_point, s.before_input = None, None
     for name in ("_target", "_touching", "_clear_of_banner", "tap", "_fast_tap", "_fast_routes", "_call", "_timed"):
@@ -51,7 +52,8 @@ def real_dispatch(s, *, change=None, typing=False, delay="banner"):
             s.dispatched.append((path, payload))
         return {"value": None}
 
-    async def has_focus(field):
+    async def has_focus(field, **where):
+        s._placed_proof = "input"  # (proven by its place, as the real one does when it reads the tree)
         return "input"
 
     async def active():

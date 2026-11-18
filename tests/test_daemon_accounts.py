@@ -40,7 +40,7 @@ class TypingSession(MapSession):
         self.items, self.last_tree = list(items), shown
         return shown
 
-    async def type_text(self, text, replace=False, submit=False, target=None, at=None):
+    async def type_text(self, text, replace=False, submit=False, target=None, at=None, no_tap=False):
         out = await super().type_text(text, replace, submit, target, at)
         hit = ui_resolve(self.items, target)
         self.values[hit.identifier] = text

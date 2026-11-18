@@ -18,6 +18,7 @@ import re
 import secrets
 import time
 import unicodedata
+import urllib.parse
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager, nullcontext
@@ -37,8 +38,9 @@ from . import device as device_module
 from . import session as session_module
 from . import shot as shotlib
 from .control import TAP_MS, Controller, Refused, classify
+from .errors import PHONE_LOCKED
 from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
-                     Unanswered, PhoneNotFound)
+                     Unanswered, PhoneNotFound, PASSCODE_WORDS)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -52,17 +54,33 @@ RESOLVE_SETTLE = 1.0  # the longest a silent re-read waits for the screen to be 
 CAP = 2.0  # the longest an action's answer waits for the screen
 LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
+HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
+HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
 LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
-                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media"})
+                    "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media",
+                    "unlock"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
 UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
+# `unlock` (1.7.8): the agent's own call; its refusals in fixed words (never a value)
+UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, replay, a route, drive or a journey (a lock "
+                   "there ends them; call unlock after, then start again)")
+UNLOCK_NO_PASSCODE = ("the phone is locked, and no passcode is saved for this phone: ask the user to unlock it, or to save "
+                      "the passcode as phone.passcode in the accounts file Tapwright is started with (--accounts FILE; "
+                      "docs/setup.md)")
+HOME_NOT_PROVEN = ("the phone reads as locked (or Notification Center is open where Tapwright can't prove it): call "
+                   "unlock (it types the passcode saved for this phone), or ask the user to unlock the phone or close "
+                   "Notification Center. Nothing was pressed.")
+UNLOCK_BUSY = ("the phone is being unlocked: no picture of the screen is taken until that ends (its keypad shows each key "
+               "as it is touched); try again in a few seconds")
+UNLOCK_NOT_YET = ("the phone is locked, and the connection to it isn't up yet, so the passcode can't be typed now; try "
+                  "unlock again in a few seconds, or ask the user to unlock it")
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
@@ -130,6 +148,92 @@ _RESUME: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_resume
 _DOUBLE: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_double_tap", default=False)
 # what the double tap found changed under its second touch (1.13.1, item 6), for the journey's stress line
 _DOUBLE_CHANGED: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("tapwright_double_changed", default=None)
+
+
+SAFARI = "com.apple.mobilesafari"
+SAFARI_ADDRESS = ("TabBarItemTitle", "URL")  # the identifiers of Safari's address field (iOS 26's capsule bar; older bars)
+URL_NOT_LOADED = ("Safari {shows}; the link may not have loaded. Type it into the address bar (type_text with "
+                  "submit: true).")
+
+
+def _safari_page(items: list) -> tuple[str | None, str | None, frozenset]:
+    """Safari's address field's text, its open tab (TabDocument's UUID), and what the page shows (each element's role,
+    identifier and label; no values, which a playing video changes by itself)."""
+    address = next((e.value for e in items if e.role == "input" and e.identifier in SAFARI_ADDRESS
+                    and e.value and e.value != e.placeholder), None)
+    tab = next((m.group(1) for e in items if e.identifier.startswith("TabDocument?")
+                and (m := re.search(r"[?&]UUID=([^&]+)", e.identifier))), None)
+    # (text labels count: two articles can share every link; Opus review 10)
+    page = frozenset((e.role, e.identifier, e.label) for e in items
+                     if not e.identifier.startswith(("TabDocument?", "SafariWindow?")) and e.role != "slider")
+    return address, tab, page
+
+
+def _host_names(host: str) -> tuple[str, ...]:
+    """The link's host as Safari may show it: as written, and in Unicode for an international (xn--) name."""
+    host = host.lower().removeprefix("www.")  # (Safari leaves www. out)
+    try:
+        shown = host.encode("ascii").decode("idna") if "xn--" in host else host
+    except (UnicodeError, ValueError):
+        shown = host
+    return (host, shown.lower())
+
+
+def _url_not_shown(args: dict, box: dict, items: list, app: "tuple[str, str] | None", unchanged: bool) -> str | None:
+    """open_url into Safari: a note when Safari doesn't show the link (1.7.8, bug 7: with a video open, Safari kept its
+    tab and the call said "opened"). Its address field must show the link's host; with the host already open, the tab
+    must have changed or the page with it. None when it shows, or when it can't be told (another app, no address)."""
+    url = str(args.get("url") or "")
+    host = (urllib.parse.urlsplit(url).hostname or "") if url.lower().startswith(("http://", "https://")) else ""
+    if not host or (app or (None, None))[1] != SAFARI:
+        return None
+    address, tab, page = _safari_page(items)
+    if address is None:
+        return None
+    before, before_app = box.get("url_before") or ([], None)
+    address_before, tab_before, page_before = _safari_page(before) if before_app == SAFARI else (None, None, None)
+    if not any(name in address.lower() for name in _host_names(host)):
+        # another host: a note only when Safari still shows the address it showed before the call. One that changed
+        # is most likely a redirect (youtu.be to m.youtube.com, a short link, x.com): no note (Opus review 10)
+        return URL_NOT_LOADED.format(shows=f"shows {address}, not {host}") if address == address_before else None
+    if before_app != SAFARI:
+        return None
+    if unchanged or (tab is not None and tab == tab_before and page == page_before):
+        return URL_NOT_LOADED.format(shows="kept the open page")
+    return None
+
+
+HOSTED_UNKNOWN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and where it is on the "
+                  "screen can't be told; nothing was touched. Look with screenshot: true, then tap it by point.")
+HOSTED_BACK = ("covered: a navigation bar on screen is in a view another app draws (a share sheet, a picker), so where "
+               "back would touch can't be told; nothing was touched. Tap the back button you mean by label (the phone "
+               "confirms where that lands) or by point.")
+HOSTED_SHEET = ("covered: the sheet in front is in a view another app draws (a share sheet, a picker), and where it is on "
+                "the screen can't be told; nothing was touched. Close it by its own button (by label), or by point.")
+HOSTED_UNPROVEN = ("covered: {line} is in a view another app draws (a share sheet, a picker), and the phone couldn't "
+                   "confirm that a touch at ({x}, {y}) lands on it; nothing was touched. Look with screenshot: true, then "
+                   "tap it by point.")
+
+
+def _hit_is(hit: ui.Hit, element: ui.Element, source: str | None = None) -> bool:
+    """The hit test names this element: its type, name and label, and the frame XCTest gives it (a hosted view's own
+    space, as in the tree before it was placed); or an element inside it: within its frame, and its descendant in the
+    tree as XCTest gave it (`source`: a share sheet's cell answers with its image or its text, Opus review 11)."""
+    raw = element.raw_rect
+    if raw is None:
+        return False
+    if (hit.type == element.type and hit.name == element.name and hit.label == element.label
+            and all(abs(a - b) <= 1 for a, b in zip(hit.rect, raw))):
+        return True
+    x, y, w, h = hit.rect
+    within = x >= raw[0] - 1 and y >= raw[1] - 1 and x + w <= raw[0] + raw[2] + 1 and y + h <= raw[1] + raw[3] + 1
+    return (within and source is not None
+            and ui.hit_relation(source, dataclasses.replace(element, rect=raw), hit) == "inside")
+
+
+def _near_rect(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    """The same frame, to 2 points (the slack a re-read gives)."""
+    return all(abs(p - q) <= 2.0 for p, q in zip(a, b))
 
 
 def _same_control(a: ui.Element, b: ui.Element) -> bool:
@@ -310,6 +414,9 @@ NOTE_TAKEN_SYSTEM = ("{other} came to the front after the touch: a notification 
 SYSTEM_IN_FRONT = "the home screen, Notification Center or Control Center"
 RECHECK_WITHIN = 5.0  # seconds: a banner's theft shows within about one; later, the agent or a person moved on
 NOTE_KEYBOARD = "closed the keyboard first."
+REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't tell another screen from this one
+# (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
+NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
@@ -1449,7 +1556,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return Refused("locked", "the phone is asking for its passcode to allow UI automation; ask the user "
                                      "to enter it on the phone")
         if isinstance(self.stuck, PhoneLocked):
-            return Refused("locked", "the phone is locked; ask the user to unlock it")
+            return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
             return Refused("not_answering", f"{self.stuck}. close_app can still close it; then open_app it again.")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
@@ -1605,9 +1712,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def unlock_phone(self) -> "unlocklib.Result":
         """Unlock a locked phone with the passcode of serve's own vault (unlock.py has the rules). Never while paused or
         while a person drives: they are at the phone. The audit gets `vault` named `phone.passcode` for every passcode
-        typed; the log gets fixed words. On success the state is live at once. Its callers are the two places unattended
-        running is meant to happen (§19.5, review 1.7 H1): a scheduled run's start (`/api/phone/unlock`), and a new
-        top-level call to `tapwright serve --phone` (_hold_for_phone)."""
+        typed; the log gets fixed words. On success, and when the unlock found the phone not locked (WebDriverAgent said
+        so just now), the state is live at once (1.7.8, M2). Its callers: a scheduled run's start (`/api/phone/unlock`),
+        a new top-level call to `tapwright serve --phone` (_hold_for_phone), and the agent's `unlock` tool in every mode
+        (_unlock_tool; the owner's decision of 2026-11-18). Pause and a person's input are checked here and again right
+        before the first key (`may_type`, L2). From the wake to the end of the check no frame reaches an agent or a
+        recording (the unlock span, center_tool.py; M1)."""
         if self.control.paused:
             return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
         if self.control.person_active():
@@ -1617,23 +1727,37 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                     "" if self.state == "live" else "the phone isn't connected")
         passcode = self.passcode_for()
         source = unlocklib.Source.of(self._passcode_file())
+        generation = self.control.person_generation
 
         def audit(detail: str) -> None:
             if self.audit is not None:
                 self.audit.write("vault", name=unlocklib.AUDIT_NAME, detail=detail)
 
+        def may_type() -> "unlocklib.Result | None":
+            if self.control.paused:
+                return unlocklib.Result(False, "paused", "paused by the user in the live view; ask them to resume")
+            if self.control.person_generation != generation or self.control.person_active():
+                return unlocklib.Result(False, "busy", "a person is using the phone; try again in a moment")
+            return None
+
         async def attempt() -> "unlocklib.Result":
-            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source)
+            return await self.unlocker.unlock(self._lock_screen(), passcode, audit, source, may_type)
+        span = self._unlock_begin()
         try:
             result = await (attempt() if self.control.holds_turn() else self.control.read(attempt))
-        except Exception as e:  # (a reconnect under way: no key was typed by this, or unlock.py said so itself)
+        except Exception as e:  # (a reconnect under way; a key typed would have been caught in unlock.py itself)
             self.log(f"passcode unlock: couldn't run ({type(e).__name__})")
-            return unlocklib.Result(False, "failed", unlocklib.FAILED)
+            return unlocklib.Result(False, "not_run", unlocklib.NOT_RUN)
+        finally:
+            self._unlock_end(span)
         if result.code == "unlocked":
             self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
             if self.state == "locked":
                 self._set_state("live")
-        elif result.code not in ("not_locked", "no_passcode"):
+        elif result.code == "not_locked":
+            if self.state == "locked":  # (the unlock read /wda/locked false just now: no wait for the heartbeat)
+                self._set_state("live")
+        elif result.code not in ("no_passcode",):
             self.log(f"passcode unlock: {result.code}")
         return result
 
@@ -1990,7 +2114,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._greeted.add(client_id)
         # (the passcode prompt is a PhoneLocked too, and says its own note)
         locked = isinstance(self.stuck, PhoneLocked) and not isinstance(self.stuck, PasscodeNeeded)
-        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked)
+        lines = [f"Note: {item}" for item in needs.from_state(self.state, self.detail, locked, agent=True)
                  if item not in answer["text"]]
         loaded = self._loaded()
         if (problem := loaded.problem) is not None and problem not in answer["text"]:
@@ -3329,7 +3453,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # it open for 30 s after the last one, so the settle always has frames to read.
             # Not when there is no phone: the pump would only retry opening it.
             async with self.pump.watching() if self._connected.is_set() and self.agent_stream else nullcontext():
-                await self._hold_for_phone(client_id, name, dry=bool(args.get("dry_run")))
+                await self._hold_for_phone(client_id, name, dry=bool(args.get("dry_run")),
+                                           home=name == "press_button" and args.get("name") == "home")
                 await self._check_again(client_id, name)  # before personal mode's front check: see there
                 try:
                     answer = await self._run_tool(client_id, name, args)
@@ -3583,6 +3708,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return first + ("\n" + rest if rest else "")
 
     async def _run_tool_core(self, client_id: str, name: str, args: dict) -> dict:
+        if name == "unlock":
+            return await self._unlock_tool(client_id)
         if name not in ACTIONS and name not in READS and name not in SPECIAL:
             raise Refused("unsupported", f"no tool named {name!r}; the tools are "
                                          f"{', '.join([*READS, *SPECIAL, *ACTIONS])}")
@@ -3598,6 +3725,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             args = {**{k: v for k, v in args.items() if k != "index"}, "target": {**args["target"], "index": args["index"]}}
         args = _checked(name, args)
         shot = self._shot_args(args, default=name == "look", custom=name == "look")  # bad width: refused here
+        if self.unlocking() and (name in ("filmstrip", "compare_screen") or shot is not None or args.get("ocr")):
+            raise Refused("busy", UNLOCK_BUSY)  # (1.7.8, M1: the keypad shows each key as it is touched)
         # A bad target was refused by _checked, before anything is queued or sent. Any tool whose
         # arguments carry `target` goes through here, so the live-read rule in act() covers it too.
         target = args.get("target")
@@ -3606,6 +3735,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         notes = [NOTE_PERSON] if 0 <= view.seen < self.control.person_generation else []
         if name == "close_app" and isinstance(self.stuck, AppNotAnswering):
             return await self._close_stuck(self.stuck, args["app"], notes)
+        if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
+            return await self._home_stuck(self.stuck, notes)
         await self.wait_connected()
         if (taken := self._taken_notes.pop(client_id, None)) is not None:
             notes = [*notes, taken]
@@ -3639,6 +3770,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("unsupported", ocr.INSTALL)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
+            # another app that comes forward after the look (last Opus review, L)
+            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
             if given is None or (self.session.app or (None, None))[1] in given:
                 uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
@@ -3647,8 +3781,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_FEW}
             return answer
+        if name == "press_button" and args.get("name") == "home" and self.state == "locked":
+            return await self._home_over_center(notes)
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         call, settle = ACTIONS[name]
         if session_module.TRACE:
             self.log(f"trace {name} begins")
@@ -3729,9 +3865,16 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                             aim = pinned  # the element that came on screen, by its ref
             use = args if aim is target else {**args, "target": aim}
             # a person would close the keyboard before the touch
+            spot = aim.point if isinstance(aim, ui.Target) else None  # an agent's point: a raw touch, no hit test
+            under_before = self._control_at(spot, s.items) if spot is not None else None
             box["note"] = box.pop("closed", "") or ("" if dry else await self._close_keyboard(view, name, aim))
+            if box["note"] and spot is not None and not args.get("force"):
+                self._point_kept(view, spot, under_before)
             s.last_point = None
-            box["app"], s.top_touch = s.app, False  # the app the touch is meant for (see _taken_away)
+            # the app the touch is meant for (see _taken_away): the newest read's, the reflex's or a target's own read
+            # included, before the touch goes out (CodeRabbit, PR #18 cycle 2); else the last snapshot's
+            read_app = getattr(s, "read_app", None)
+            box["app"], s.top_touch = (read_app if isinstance(read_app, tuple) else s.app), False
             box["mark"] = self._mark()  # where the stream stands as the gesture goes out
             trace.baseline(box["mark"][1])
             trace.mark("resolved")
@@ -3742,6 +3885,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from
                 if aimed_at is not None and aimed_at[1] is not None and aimed_at[0] is not None and aimed_at[0].kind != "point":
                     touched.append((aimed_at[1], aimed_at[2]))
+            if name == "open_url":  # (1.7.8, bug 7) what Safari showed before, to tell whether the link loaded
+                box["url_before"] = (list(s.items), (view.app or (None, None))[1])
             box["back"] = getattr(getattr(s, "last_tree", None), "back", None)  # what `back` would press, before the touch
             box["title_before"] = _title_of(getattr(s, "last_tree", None))  # the title the screen showed before the touch
             box["began"] = time.monotonic()  # the note's "within N s" counts from here, not from the call's return
@@ -3758,11 +3903,25 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             handler = self._handlers.get(name)
             people = self.control.person_generation
             await self._last_checks(name, args, None, hit=False)
+            touched_first = bool(box.get("input"))  # the keyboard reflex or a scroll to the target touched already
             try:
-                return await (handler(view, use) if handler else call(s, use))
+                out = await (handler(view, use) if handler else call(s, use))
+                box["input"] = True  # (it ended: its answer says what it did)
+                return out
+            except Refused as e:
+                if touched_first and "nothing was touched" in str(e):
+                    # (last Opus review, M2) a touch on the way went out: the answer never says nothing was touched
+                    e.args = (str(e).replace("nothing was touched", "nothing else was touched"),)
+                raise
             finally:
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
                     fresh[0] = False
+                if (name in KEYBOARD_TOOLS and not dry and isinstance(box["app"], tuple)
+                        and box.get("input")):
+                    # the app this touch was meant for (1.7.8, X item 4). A refusal before any input (typing
+                    # without a target while another app is in front) keeps the old one: a retry the same way is
+                    # refused again, not typed into the app that came forward (CodeRabbit, PR #18)
+                    view.aimed_app = box["app"]
 
         execution_guard = None
 
@@ -3789,7 +3948,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             async def execution_guard() -> None:
                 self._require_connected()
                 if self.state == "locked":
-                    raise Refused("locked", "the phone is locked; ask the user to unlock it")
+                    raise Refused("locked", PHONE_LOCKED)
                 if self.control.paused:
                     raise Refused("paused", "the phone is paused; ask the user to resume it")
                 if self.control.person_generation != generation or self.control.person_active():
@@ -3798,6 +3957,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self.session.execution_guard = execution_guard
 
             async def touching(ms: float) -> None:
+                box["input"] = True  # an input of this call is going out (the aimed app is kept then: act)
                 if grant_call is not None:
                     grant_call.touched = True  # (a grant's use is never given back once a touch went out: A-L1)
                 if by_read:
@@ -3931,6 +4091,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 notes = [*notes, NOTE_HEALTH]
             elif box.get("hint"):
                 notes = [*notes, NOTE_DELIVERED.format(touch=touch_name(name), seconds=time.monotonic() - box["began"], hint=box["hint"])]
+            if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=True)):
+                notes = [*notes, said]
+            if name == "open_url" and isinstance(view.app, tuple):
+                view.aimed_app = view.app  # where the link went: the app its answer shows (last Opus review, L)
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
                                                  settled_line(done.seconds)], notes), view, shot, at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
@@ -3942,7 +4106,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                    snap=landed[0] if landed is not None else None,
                                    hint="" if done.capped else box.get("hint", ""),  # (a screen still moving: no "nothing changed")
                                    watched=time.monotonic() - box["began"], touch=touch_name(name))
-        if closed_first and view.read_keyboard:  # the tap focused another input: the keyboard is up again
+        if closed_first == NOTE_KEYBOARD and view.read_keyboard:  # the tap focused another input: the keyboard is up again
             answer["text"] = answer["text"].replace(f"\nNote: {closed_first}", "", 1)
         if isinstance(result, Toggled):
             # say only what the new list shows; if the switch can't be found again, claim nothing
@@ -3961,6 +4125,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                        alike_fields[0] if len(alike_fields) == 1 else None)  # renumbered in a first full list
             if now is not None:
                 answer["text"] = answer["text"].replace(str(result), result.verdict(now), 1)
+        if name == "open_url" and (said := _url_not_shown(args, box, view.items, view.app, unchanged=False)):
+            answer = {**answer, "text": f"{answer['text']}\nNote: {said}"}
+        if name == "open_url" and isinstance(view.app, tuple):
+            view.aimed_app = view.app  # where the link went: the app its answer shows (last Opus review, L)
         taken = await self._taken_away(view, box.get("app"), read=self.session.app)
         self._recheck_later(client_id, box.get("app"), taken)
         if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
@@ -4490,6 +4658,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
         view.opened = True
+        # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
+        # target goes only to it, and no field of the app before is typed into again
+        view.aimed_app, view.typed_field = (shown, bundle_id), None
+        self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
         elif not resume:  # (an app brought back as it is keeps the language it runs in)
@@ -4586,7 +4758,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 raise Refused("paused", "the phone is paused; ask the user to resume it")
             if self.control.person_generation != generation or self.control.person_active():
                 raise Refused("busy", "a person used the phone before delivery; look again before acting")
-            if self.stuck is not stuck or self.session.device is not device:
+            if not self._same_stuck(stuck) or self.session.device is not device:
                 raise Refused("reconnecting", "the phone connection changed; look before acting")
 
         async def close():
@@ -4603,6 +4775,171 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._wake.set()
         self._announce("agent", "close_app", label=stuck.name)
         return _answer([f"Closed {stuck.name} ({stuck.bundle_id}), which wasn't answering."], notes)
+
+    def _same_stuck(self, stuck: AppNotAnswering) -> bool:
+        """The same app still blocks the phone. Every reconnect attempt stores a new AppNotAnswering for it, so the
+        objects differ while the app is the same (1.7.8, bug 4: close_app lost that race for 2 min 40 s)."""
+        now = self.stuck
+        return isinstance(now, AppNotAnswering) and now.bundle_id == stuck.bundle_id
+
+    async def _home_stuck(self, stuck: AppNotAnswering, notes: list) -> dict:
+        """press_button home while the app in front is frozen: WebDriverAgent's home-screen route needs no session
+        (a session would wait on the frozen app); asked once, with a short cap."""
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        generation = self.control.person_generation
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if not self._same_stuck(stuck) or self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def home():
+            # (Opus review 9) a home press on a locked phone would light the lock screen (and may wake Face ID); to
+            # unlock, the agent calls `unlock` (1.7.8). Asked session-less (WebDriverAgent answers it without reading the frozen app); only "not locked" passes
+            try:
+                locked = (await device.http("GET", "/wda/locked", None, timeout=HOME_LOCK_CAP)).get("value")
+            except (ConnectionLost, DeviceError):
+                raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked; nothing was "
+                                               "pressed. close_app can still close it; then open_app it again.") from None
+            if locked is not False:
+                raise Refused("locked", "the phone is locked (or didn't say it isn't); call unlock (it types the "
+                                        "passcode saved for this phone), or ask the user to unlock it. Nothing was "
+                                        "pressed.")
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                await device.http("POST", "/wda/homescreen", {}, timeout=HOME_STUCK_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(home)
+        except ConnectionLost:
+            # no answer within the cap: WebDriverAgent may still carry it out (the `timeout` contract)
+            self.log(f"press_button home while {stuck.bundle_id} wasn't answering got no answer in {HOME_STUCK_CAP:g} s")
+            raise Refused("not_answering", f"{stuck}, and the phone didn't answer the home press in time; the home "
+                                           "screen may still come up: look before acting. close_app can still close "
+                                           "it; then open_app it again.") from None
+        except DeviceError:
+            raise Refused("not_answering", f"{stuck}, and the home screen didn't come up. close_app can still "
+                                           "close it; then open_app it again.") from None
+        self.log(f"pressed home while {stuck.bundle_id} wasn't answering")
+        self._wake.set()
+        self._announce("agent", "press_button", label="home")
+        return _answer([f"Pressed home while {stuck.name} ({stuck.bundle_id}) wasn't answering; look before acting."],
+                       notes)
+
+    async def _unlock_tool(self, client_id: str) -> dict:
+        """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with
+        the passcode saved in serve's own vault (`--accounts FILE`, `phone.passcode`), in every mode: personal,
+        dedicated and `--phone` alike. The agent never sees or sends the passcode; every rule of unlock.py holds (only
+        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 attempts an hour and 3 a day, none after a
+        refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
+        `drive` or a journey it is refused, and a lock there still ends them (§19.5). Paused: `paused`; a person at
+        the phone: `busy`. No passcode saved: `locked`, asking the user."""
+        if not self._top_level() or client_id in self._journeys:
+            raise Refused("bad_params", UNLOCK_TOP_ONLY)
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        if self.control.person_active():
+            raise Refused("busy", "a person is using the phone; try again in a moment")
+        if PASSCODE_WORDS in (self.detail or "") or isinstance(self.stuck, PasscodeNeeded):
+            raise Refused("locked", unlocklib.XCTEST)  # a person enters it there, never the tool
+        if self.state not in ("live", "locked"):
+            if isinstance(self.stuck, PhoneLocked):  # the connect found it locked: no session to type through yet
+                raise Refused("locked", UNLOCK_NOT_YET)
+            await self.wait_connected()
+        if self.state != "locked":
+            return _answer(["The phone isn't locked."], [])
+        if self.passcode_for() is None:
+            raise Refused("locked", UNLOCK_NO_PASSCODE)
+        result = await self.unlock_phone()
+        if result.code == "not_locked":
+            return _answer(["The phone isn't locked."], [])
+        if result.code in ("paused", "busy"):
+            raise Refused(result.code, result.message)
+        if result.code == "not_connected":  # (a reconnect between the check above and the unlock, L6)
+            raise self._not_connected()
+        if result.code == "no_passcode":  # (the vault changed between the two reads)
+            raise Refused("locked", UNLOCK_NO_PASSCODE)
+        if result.code != "unlocked":
+            raise Refused("locked", result.message or unlocklib.FAILED)
+        self._announce("agent", "unlock", caption="Unlocked the phone")
+        said = "Unlocked the phone with the passcode saved in the vault."
+        try:
+            seen = await self._run_tool_core(client_id, "look", {"screenshot": False})
+        except Exception as e:  # (the phone is unlocked and an attempt was used: never `internal` for the look, L7)
+            self.log(f"unlock: the look after it failed ({type(e).__name__})")
+            return _answer([said + " Look before acting."], [])
+        return {**seen, "text": said + "\n" + seen["text"]}
+
+    async def _home_over_center(self, notes: list) -> dict:
+        """press_button home while the phone reads as locked. iOS reports Notification Center pulled down over an
+        unlocked phone as locked (SpringBoard's lock state; phone check of 1.7.8), and every touch was refused, the home
+        press that closes it too. Home is pressed only when a fresh tree proves that sheet (notifications.
+        center_over_unlocked: its header and Clear button on the screen, on one row, not a notification's text, and an
+        enabled flashlight). A lit lock screen showing the same sheet (a notification woke it, scrolled to its history)
+        may pass that proof, and Home there may wake Face ID: under the owner's rule of 2026-11-18 a lock is no longer
+        the stop for an agent that may unlock; Pause in the live view is. When the proof fails nothing is pressed, and the
+        answer doesn't claim a lock it can't tell from that sheet (L9)."""
+        from .notifications import center_over_unlocked
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        generation = self.control.person_generation
+        locked = Refused("locked", HOME_NOT_PROVEN)
+
+        async def guard():
+            # (L1) It can't see the owner pressing the side button in the milliseconds between the tree read and the
+            # press: no lock signal apart from SpringBoard's (which says locked over Notification Center too) is known.
+            # The press would then light the lock screen; Pause, checked here, is the owner's stop.
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if self.session.device is not device:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def home():
+            try:
+                source = await self.session._source(HOME_STUCK_CAP)
+            except (ConnectionLost, DeviceError, AppNotAnswering):
+                raise locked from None
+            if not center_over_unlocked(source):
+                raise locked
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                await guard()
+                await device.http("POST", "/wda/homescreen", {}, timeout=HOME_STUCK_CAP)
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+
+        try:
+            await self.control.agent(home)
+        except ConnectionLost:
+            raise Refused("timeout", "the phone didn't answer the home press in time; Notification Center may still "
+                                     "close: look before acting") from None
+        except DeviceError:
+            raise Refused("internal", "the home press over Notification Center failed; look before acting") from None
+        self.log("pressed home over Notification Center (iOS reported the phone as locked while it was open)")
+        self._announce("agent", "press_button", label="home")
+        try:  # the sheet is gone: the next call needn't wait for the heartbeat to see the phone unlocked
+            if not await self.control.read(lambda: self._connected_only(self.session.locked)) \
+                    and self.state == "locked":
+                self._set_state("live")
+        except Exception:
+            pass  # (the heartbeat sets it)
+        return _answer(["Pressed home: Notification Center was open (iOS reports the phone as locked while it is); "
+                        "look before acting."], notes)
 
     async def _wait(self, view, args: dict, notes: list, shot) -> dict:
         """Sleep outside the phone's queue (a person may act meanwhile), then answer with what changed."""
@@ -4630,11 +4967,15 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _with_ocr(self, view, answer: dict) -> dict:
         """`look` with `ocr: true`: the text the picture shows that no element carries, as lines with refs o1, o2…
         after the list (before its notes). Read from the stream's newest frame when it is fresh, else a screenshot."""
-        frame = self.hub.latest
+        frame, asked = self.hub.latest, self.hub.mono()
         if frame is not None and self.hub.now_ms() - frame.at <= FRESH_FRAME * 1000:
+            if self.frame_private(frame):
+                raise Refused("busy", UNLOCK_BUSY)
             picture = await jpeg_of(frame)
         else:
             picture = await self._read(self.session.screenshot_png)
+            if self.unlocked_since(asked):
+                raise Refused("busy", UNLOCK_BUSY)
         seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
@@ -4749,7 +5090,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if self.control.paused:
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         pictures: list[tuple[str, bytes]] = []
         if add:
             try:
@@ -4912,7 +5253,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         `tap`), or from a cold start to the first settled screen (`launch`). The app's own process only. The taps and
         the close and open go through the ordinary tools, so personal mode and the safety policy apply to them."""
         if self.state == "locked":
-            raise Refused("locked", "the phone is locked; ask the user to unlock it")
+            raise Refused("locked", PHONE_LOCKED)
         scope, clock = _SCOPE.get(), self.control.clock
         bundle = await self._read(self.session.foreground_bundle_id) or self._bundle()
         if bundle in (None, SPRINGBOARD):
@@ -5015,6 +5356,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         frame = self.hub.latest
         if not fresh(frame):
             frame = await self.hub.next_after(after_seq, timeout=self.shot_wait)
+        if self.frame_private(frame):  # (1.7.8, M1) an unlock began while filming: the strip is refused
+            raise Refused("busy", UNLOCK_BUSY)
         if fresh(frame):
             try:
                 source = await jpeg_of(frame)
@@ -5025,7 +5368,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is not None:
                 return frame.seq, frame.at, source
-        return after_seq, self.hub.now_ms(), await self._read(self.session.screenshot_png)
+        asked = self.hub.mono()
+        shot = await self._read(self.session.screenshot_png)
+        if self.unlocked_since(asked):
+            raise Refused("busy", UNLOCK_BUSY)
+        return after_seq, self.hub.now_ms(), shot
 
     async def _filmstrip(self, client_id: str, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §14.4: `frames` pictures of the screen about `interval_ms` apart, from the live stream (a
@@ -5086,7 +5433,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             width = self._shot_args({"width": args["width"]}, default=True, custom=True)[0] \
                 if args.get("width") is not None else None
             if self.state == "locked":
-                raise Refused("locked", "the phone is locked; ask the user to unlock it")
+                raise Refused("locked", PHONE_LOCKED)
             done = await self._compare(view, args["name"], update=bool(args.get("update")), width=width,
                                        threshold=args.get("threshold"), ignore=args.get("ignore"), check=check)
             if (held := _COMPARED.get()) is not None:
@@ -5142,7 +5489,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         found = None if (update and not check) or keep else compare.find(name, folder, script["path"] if check and script else None)
         if found is None and check and not keep:
             return Compared("missing", [], notes, compare.missing(name), folder=folder)
+        asked = self.hub.mono()
         png = await self._read(self.session.screenshot_png)
+        if self.unlocked_since(asked):  # (1.7.8, M1) never a picture of the keypad, saved or compared
+            raise Refused("busy", UNLOCK_BUSY)
         if given is not None:  # the picture is saved or compared only if a given app was still in front for it
             await self._still_given(given)
         before, before_bytes = await asyncio.to_thread(compare.read, found) if found is not None else (None, None)
@@ -5279,6 +5629,18 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         target = a.get("target")
         if target is None:
             await self._silent_read(view)  # which inputs there are must be read now
+            # the app this very read names (the session's own `app` is the last snapshot's, from before a switch:
+            # CodeRabbit, PR #18); a read whose root names none falls back to it
+            read_app = (self._read_root or (None, False))[0]
+            front = read_app if isinstance(read_app, tuple) else (
+                self.session.app if isinstance(self.session.app, tuple) else None)
+            if (view.aimed_app is not None and front is not None and front[1] != view.aimed_app[1]
+                    and view.alert_now is None):  # (an OS alert's own field is typed into over any app)
+                # (1.7.8, X item 4) another app came to the front since the agent's last touch or open_app (Safari, after
+                # a tap in Files): its only input is no field the agent chose
+                raise Refused("stale", f"{front[0]} ({front[1]}) is in front now, not {view.aimed_app[0]} "
+                                       f"({view.aimed_app[1]}), where your last touch went. Nothing was typed; look, "
+                                       "then pass a target.")
             inputs = [e for e in view.items if e.role == "input"]
             if not inputs:
                 raise Refused("not_found", "No input on screen")
@@ -5305,12 +5667,27 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if (typed_secure := _TYPED_SECURE.get()) is not None:
             typed_secure.append(bool(field.secure))  # the field this call types into, for a recording
         forced, at = "", None
+        # 1.7.8 (bug 6): a point is where the agent saw the field, and the focusing tap goes there, never to the field's
+        # centre (X's composer: its centre was under the app's floating toolbar, and the tap opened the GIF picker)
+        point = target.point if target is not None and target.point is not None else None
+        # 1.7.8 (bug 5): the runner says this field has the keyboard's focus, so no tap is made (Session types into it
+        # as it is): whatever is drawn over it (the keyboard's accessory area, over Safari's address field) is no reason
+        # to refuse. Session is told not to tap: if the focus moved meanwhile, it refuses instead.
+        no_tap = bool(field.focused) and self.session.tw_version >= 5
         if a.get("force"):
+            if point is not None and (key := next((b for b in field.covered_by if b.kind == "Keyboard"
+                                                   and ui._holds(b.rect, point)), None)) is not None:
+                # (Opus review 11) a touch there presses a key: it types into the focused field and focuses nothing
+                raise Refused("not_actionable", f"covered: ({round(point[0])}, {round(point[1])}) is under {key.line}, "
+                                                f"even with force; aim at the part of {field.line(actions=False)} that "
+                                                "shows.")
             forced = self._forced(view, field)
+            at = point
         else:
             self._guard(view, field)
             # the focusing tap's hit test (Codex, PR #12 cycle 3, M2): typing isn't policed (§11.1), the touch is checked
-            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=self._touch_point)
+            aim = None if no_tap else self._typing_aim(point) if point is not None else self._touch_point
+            checked, at, _ = await self._last_checks("type_text", a, field, police=False, aim=aim)
             field = checked if checked is not None else field
             at = at or field.center  # an explicit checked point: Session must not choose its right-edge shortcut
         active = _ACCOUNT.get()
@@ -5329,11 +5706,21 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         a["text"] = real  # (the call's own copy: the log and a recording keep the placeholder)
         aimed = [at]
 
-        async def checked_again() -> None:
+        async def checked_again(reread: bool = False) -> None:
             # A code lookup or keyboard dismissal may have changed the field's visible geometry.
+            now = next((e for e in self.session.items if field.ref and e.ref == field.ref), None)  # (as listed now)
+            if now is None and reread:
+                # the field didn't survive the new read (X's composer lays itself out again and again while the
+                # keyboard is up): its ref names nothing now, and its old place proves nothing (1.7.8, bug 6)
+                raise Refused("stale", f"{field.line(actions=False)} moved as the keyboard closed; look again. "
+                                       "Nothing was typed.")
+            now = now or field
+            if point is not None and not ui._holds(now.rect, point):
+                raise Refused("stale", f"{now.line(actions=False)} is no longer under ({round(point[0])}, "
+                                       f"{round(point[1])}); look again. Nothing was typed.")
             if not a.get("force"):
-                now = next((e for e in self.session.items if field.ref and e.ref == field.ref), field)  # (as listed now)
-                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=self._touch_point)
+                aim = self._typing_aim(point) if point is not None else self._touch_point
+                _, aimed[0], _ = await self._last_checks("type_text", a, now, police=False, aim=aim)
                 aimed[0] = aimed[0] or now.center
         if using is not None and (using.kind == accountlib.CARD or using.otp_app is not None):
             await checked_again()
@@ -5341,8 +5728,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         self._touching(field)
 
         async def typed() -> None:
+            if not no_tap and field.placed:  # (the focusing tap: at a place the phone confirms, never the right-end shortcut)
+                aimed[0] = aimed[0] or field.center
+                await self._hosted_proof(next((e for e in self.session.items if e.ref == field.ref), field), aimed[0])
+            more = {"no_tap": True} if no_tap else {}
             await self.session.type_text(a["text"], replace=bool(a.get("replace", True)),
-                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0])
+                                         submit=bool(a.get("submit", False)), target=ui.Target(ref=field.ref), at=aimed[0],
+                                         **more)
         try:
             await typed()
         except Refused as e:
@@ -5351,10 +5743,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if not (view.read_keyboard and "didn't take focus" in str(e)):
                 raise
             await self._close_keyboard(view, "type_text", ui.Target(ref=field.ref), shown_inputs=True)
-            await checked_again()
+            await checked_again(reread=True)
             await typed()
         view.typed_field = (field.identifier, field.label, field.rect)  # §21.3: the draft a touch would send is read from it
-        done = Typed(f"Typed into {field.line(actions=False, place=False)}.")
+        # the field's line without the value it had before the keys (1.7.8, X item 5): the answer gives the value only as
+        # a read after the typing shows it (Typed.verdict). Safari's address field is another element once the page
+        # loads, and its old address read as if it were the new one
+        done = Typed(f"Typed into {dataclasses.replace(field, value='').line(actions=False, place=False)}.")
         retyped = NOTE_RETYPED if getattr(self.session, "retyped", False) else ""
         done.field, done.note = field, " ".join(n for n in (forced, retyped) if n)
         done.typed = real
@@ -5363,6 +5758,36 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return done
 
 
+
+    def _typing_aim(self, point: tuple[float, float]) -> "Callable[[ui.Element], tuple[float, float]]":
+        """The focusing tap of a type_text at a point: at that point, unless something is drawn over it there (the
+        keyboard, a bar, a control of the app's)."""
+        def aim(field: ui.Element) -> tuple[float, float]:
+            # a bar, or a control the app draws over the field there (X's ComposeButtonBarView: Opus review 11)
+            over = next((b for b in field.covered_by if ui._holds(b.rect, point)), None)
+            if over is not None:
+                raise Refused("not_actionable", f"covered: ({round(point[0])}, {round(point[1])}) is under "
+                                                f"{over.line}; aim at the part of {field.line(actions=False)} that shows.")
+            return point
+        return aim
+
+    async def _hosted_proof(self, element: ui.Element, at: tuple[float, float]) -> None:
+        """An element in a view another process draws (ui._place_hosted) is touched only where the phone confirms it
+        (1.7.8, bug 3: a share sheet's "View More" was listed 531 points off, and the tap opened the video behind with a
+        "Tapped" answer). Its frame was put on the screen by its host's place: the runner's hit test (route version 6,
+        which proves the element it names) must answer this very element at the touch point, with the frame XCTest
+        gives it. One whose place isn't known is never touched by its frame. Nothing to do for an ordinary element."""
+        if not element.placed:
+            return
+        line = element.line(actions=False)
+        if element.placed != "moved" or element.raw_rect is None:
+            raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=line))
+        try:
+            hit = await self.session.hit_at(*at)
+        except Refused:
+            hit = None
+        if hit is None or self.session.tw_version < 6 or not _hit_is(hit, element, getattr(self.session, "last_source", None)):
+            raise Refused("not_actionable", HOSTED_UNPROVEN.format(line=line, x=round(at[0]), y=round(at[1])))
 
     def _vault_names(self) -> tuple[str, ...]:
         """The vault entries that aren't accounts (those are listed as accounts), as `home (address)`: names only."""
@@ -5403,6 +5828,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             area = ui.scroll_of(view.items, hit)
             if area is None:
                 raise Refused("not_actionable", f"no_action: {hit.line(actions=False)} is not inside a scroll view")
+            if isinstance(hit, ui.Element) and hit.placed == "unknown":  # (its raw frame may lie in the app's own list)
+                raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=hit.line(actions=False)))
             self._touching(hit if isinstance(hit, ui.Element) else None)
         direction = a.get("direction") or (SCROLL_TO[to][0] if to else "down")  # _checked made `to` and it agree
         top, bottom = s.last_insets
@@ -5412,6 +5839,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         x0, y0, x1, y1 = ui.scroll_area_points(direction, area.rect if area else (0.0, 0.0, *s.screen),
                                                a.get("amount", ui.SCROLL_USABLE if to else 0.8), band)
         bounds = area.rect if area else (0.0, 0.0, *s.screen)
+        if area is not None and area.placed:
+            # (1.7.8, Opus review 5) a list in a view another process draws: dragged only where the phone confirms the
+            # drag starts in it, as a tap is; one whose place isn't known, never
+            await self._hosted_proof(area, (x0, y0))
         # Whether the tree shows what lies past the list's edge. Where it does (React Native renders a whole list),
         # the end is reached when a read after a drag shows nothing past it any more: no waiting for the pictures
         # to repeat, which over Wi-Fi took 4 to 14 s. A list that keeps only its visible rows shows nothing past
@@ -5437,6 +5868,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 # phone: 7 s for a list of 14 rows, 2026-11-13).
                 runs = self._drags_to_the_end(direction, bounds, length) if beyond else 1
                 for _ in range(max(1, min(runs, MAX_SCROLL_SWIPES - swipes))):
+                    if swipes and area is not None and area.placed:
+                        # a drag can move or close a hosted view: each later drag is proven where it starts too
+                        # (CodeRabbit, PR #18)
+                        await self._hosted_proof(area, (x0, y0))
                     await s.scroll(x0, y0, x1, y1)
                     swipes += 1
                     if not to:
@@ -5563,7 +5998,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if drags == MAX_SCROLL_SWIPES:
                     note = f"the target wasn't reached in {MAX_SCROLL_SWIPES} drags; scroll again to go on."
                     break
-                await s.scroll(*ui.scroll_step(move, (x, y, w, h)))
+                step = ui.scroll_step(move, (x, y, w, h))
+                if element.placed == "unknown":  # (1.7.8, Opus review 5: never by frames that can't be placed)
+                    raise Refused("not_actionable", HOSTED_UNKNOWN.format(line=element.line(actions=False)))
+                if area is not None and area.placed:
+                    await self._hosted_proof(area, (step[0], step[1]))
+                await s.scroll(*step)
                 seen.append(element.rect)
                 await self._silent_read(view)  # once the screen is still: where the element is now
         except Refused:
@@ -5600,8 +6040,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 field = ui.resolve(items, target)
             except Refused:
                 return False
-            if isinstance(field, tuple) or field.in_alert:
-                return False
+            if isinstance(field, tuple) or field.in_alert or field.placed == "unknown":
+                return False  # (an unknown place: _hosted_proof refuses it, nothing is touched; last Opus review, M2)
         if name == "type_text" and (field is None or field.role != "input"):
             return False  # it refuses typing into this itself
         if name == "type_text" and not shown_inputs and keyboard_top - field.y >= MIN_VISIBLE:
@@ -5628,7 +6068,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _dismiss_keyboard_now(self, view) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
-        dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else ""."""
+        dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else
+        NOTE_KEYBOARD_STAYED: the answer says so."""
         s = self.session
         top, bottom = s.last_insets
         top = SCROLL_TOP_INSET if top is None else top
@@ -5643,18 +6084,25 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # keyboard's own dismiss key, the touch last; the app is remembered, and the way that worked is said.
         order = ("drag", "dismiss", "blank") if app in self._outside_ignored else ("blank", "drag", "dismiss")
         tried = 0
+        before = [(e.role, e.label, e.identifier) for e in view.items]
+        # a frame that can't be placed (a hosted view's own space) is no screen place: no blank touch or drag is worked
+        # out while one is listed, only the keyboard's own dismiss key (last Opus review, M2)
+        unplaced = any(e.placed == "unknown" for e in [*view.items, *hidden])
         for step in order:
             if not view.read_keyboard:
                 break
+            if unplaced and step != "dismiss":
+                continue
             how = None
             if step == "blank" and blank is not None:
                 await s.tap(ui.Target(x=blank[0], y=blank[1]))
                 await self._silent_read(view)
                 if view.read_keyboard and app is not None:
                     self._outside_ignored.add(app)
-            elif step == "drag" and (drag := self._dismiss_drag(view.items, top, bottom)) is not None:
+            elif step == "drag" and (drag := ui.dismiss_drag([*view.items, *hidden], s.screen, top, bottom)) is not None:
                 # many lists close the keyboard when dragged (keyboardDismissMode on-drag, as a person flicks a list
-                # down to hide it); a short pull down at its top moves the content at most a little, and back
+                # down to hide it); a short pull down on passive content moves it at most a little, and back. It never
+                # starts or ends on a control (1.7.8, X item 1: one opened X's photo picker)
                 await s.swipe(*drag, duration_ms=250)
                 await self._silent_read(view)
                 how = "dragged the form a little"
@@ -5673,17 +6121,23 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if (earned := _REFLEXED.get()) is not None:
                     earned.append(reflex.keyboard(how))
             tried += 1
-        return "" if view.read_keyboard else NOTE_KEYBOARD
+            if self._reflex_opened(before, view.items):
+                # (1.7.8, X item 1) the reflex's own touch opened something (X's photo picker took the place of the
+                # keyboard): the touch the agent asked for would land on that, so nothing more goes out
+                view.moved = True
+                self.control.touched()
+                raise Refused("stale", "closing the keyboard opened another screen; nothing else was touched: look "
+                                       "again.")
+        return NOTE_KEYBOARD_STAYED if view.read_keyboard else NOTE_KEYBOARD
 
     @staticmethod
-    def _dismiss_drag(items: list[ui.Element], top: float, bottom: float) -> tuple[float, float, float, float] | None:
-        """A short pull down near the top of the biggest scroll view above the keyboard (x0, y0, x1, y1), or None."""
-        views = [e for e in items if e.role == "scroll" and not e.in_alert and e.y + 60 < bottom and e.y + e.height > top]
-        if not views:
-            return None
-        v = max(views, key=lambda e: e.width * e.height)
-        x, y = v.x + v.width / 2, max(v.y, top) + 20
-        return x, y, x, min(y + 40, bottom - 10)
+    def _reflex_opened(before: list[tuple[str, str, str]], after: list[ui.Element]) -> bool:
+        """Did a touch meant only to close the keyboard bring another screen? Fewer than half of what was listed
+        (role, label, identifier) is still listed. Closing the keyboard alone shows more, and takes nothing away."""
+        if len(before) < REFLEX_SCREEN_MIN:
+            return False
+        now = {(e.role, e.label, e.identifier) for e in after}
+        return sum(key in now for key in before) < len(before) / 2
 
     def _under_keyboard(self, target: ui.Target) -> bool:
         """Is the target an element the last read found past its scroll view's edge but still on the phone's
@@ -5905,6 +6359,29 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if a.get("dry_run"):
             raise DryRun(line)
 
+    @staticmethod
+    def _control_at(point: tuple[float, float], items: list[ui.Element]) -> ui.Element | None:
+        """The front-most element under the point that takes a touch (a scroll view's drag doesn't count), or None."""
+        x, y = point
+        return next((e for e in reversed(items) if e.actions and e.role != "scroll"
+                     and e.x <= x < e.x + e.width and e.y <= y < e.y + e.height), None)
+
+    def _point_kept(self, view, point: tuple[float, float], before: ui.Element | None) -> None:
+        """After the keyboard reflex touched the screen (a blank touch, a drag of the form): the agent's point must hold
+        what it held when the agent aimed it, by the read the reflex made. A control the reflex moved under the point
+        (a drag scrolled a button there) is stale, so a passive touch never becomes a control's (CodeRabbit, PR #18
+        cycle 2). `force` touches there anyway."""
+        now = self._control_at(point, self.session.items)
+        if now is None or (before is not None and _same_control(before, now)
+                           and _near_rect(before.rect, now.rect)):
+            return
+        view.moved = True
+        self.control.touched()
+        x, y = (round(c) for c in point)
+        raise Refused("stale", f"closing the keyboard moved {now.line(ref=False, actions=False, place=False)} under "
+                               f"({x}, {y}); nothing else was touched: look again, or pass force: true to touch there "
+                               "anyway.")
+
     def _element_at(self, point: tuple[float, float], items: list[ui.Element] | None = None) -> ui.Element | None:
         """The front-most element of the agent's list (or of `items`) whose rect contains the point (a later one is
         drawn over an earlier one), or None."""
@@ -6090,10 +6567,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return BATCH.get() is None and not _NESTED.get() and not _JOURNEY_OWN.get() and SCRIPT.get() is None
 
     def _unlocks_itself(self, client_id: str, name: str) -> bool:
-        """May this call unlock the locked phone with the vault's passcode (§18.6, §19.5; review 1.7, H1)? Only with
-        `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call that
-        needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a lock is the owner's
-        stop: `locked`, for a person to unlock (personal mode and `--dedicated` as in 1.6)."""
+        """May this call unlock the locked phone with the vault's passcode by itself (§18.6, §19.5; review 1.7, H1)? Only
+        with `tapwright serve --phone` (a phone the user dedicates to automation), at the start of a new top-level call
+        that needs the phone, outside a journey, with a passcode in serve's own vault. Everywhere else a call answers
+        `locked`, and the agent may call `unlock` (1.7.8, the owner's decision of 2026-11-18: every mode, top-level
+        only) or ask a person. With a passcode saved, Pause in the live view is the owner's stop, not the lock."""
         if not getattr(getattr(self, "ceiling", None), "phone", False) or client_id in self._journeys:
             return False
         if needs.phone_moment(self.state, self.detail) is not needs.UNLOCK:
@@ -6102,10 +6580,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return False
         return self.passcode_for() is not None
 
-    async def _hold_for_phone(self, client_id: str, name: str, *, dry: bool = False) -> None:
+    async def _hold_for_phone(self, client_id: str, name: str, *, dry: bool = False, home: bool = False) -> None:
         """Before a call. A step of a running `run`, `drive`, `replay`, route or journey moment never unlocks and never
-        waits out a lock: a lock there ends it with `locked` (the step's own refusal), because locking the phone is how
-        the owner stops the agent (AGENTS.md, §19.5). (iOS's XCTest prompt is no stop: a step still asks a person to
+        waits out a lock: a lock there ends it with `locked` (the step's own refusal; §19.5). The agent may then call
+        `unlock` as a call of its own (1.7.8), or ask a person. (iOS's XCTest prompt is no stop: a step still asks a person to
         enter the passcode there, as in 1.6.) A top-level call to `serve --phone` unlocks a locked phone with the vault's
         passcode (unlock.py; never on the XCTest prompt). Else, for an agent whose host has a dialog: if the phone is
         locked or asking for its passcode, ask a person and wait for it to clear (the daemon looks at the phone again by
@@ -6128,6 +6606,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if tried.code in ("busy", "paused"):
                 raise Refused(tried.code, tried.message)
         moment = self._phone_moment(name)
+        if home and moment is needs.UNLOCK:
+            # (1.7.8) iOS reports Notification Center pulled down as locked: press_button home decides from a fresh tree
+            # (_home_over_center) at once, instead of asking a person to unlock a phone that may not be locked
+            return
         if moment is not None and _DIALOG.get() is not None:
             async def cleared() -> bool:
                 return self._phone_moment(name) is None
@@ -6253,8 +6735,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         point = aim(element) if element is not None and hit and aim is not None else None
         return element, point, ""
 
-    async def _press(self, target: ui.Target, hold_ms: int) -> str:
-        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4)."""
+    async def _press(self, target: ui.Target, hold_ms: int, proven: bool = False) -> str:
+        """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4).
+        `proven`: the point target is an element's visible part, proven like the element (_hosted_proof)."""
         double = _DOUBLE.get()
         was = self._double_aim(target, self.session.items) if double else None
         done = await self.session.tap(target, hold_ms=hold_ms)
@@ -6291,6 +6774,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                         box.append(f"{said} is {now}")
                     return done
                 await self._last_checks("tap", {}, under, hit=False, bundle=front)  # (a raw second touch: no hit test)
+                if under is not None and (target.kind != "point" or proven):
+                    # an element another process draws is proven again where the second touch goes: the first touch
+                    # may have moved it, and the same name proves no place (CodeRabbit, PR #18)
+                    await self._hosted_proof(under, target.point or under.center)
                 await self.session.tap(target, hold_ms=hold_ms)
             except Refused:
                 self.control.touched()  # the first touch went out: a refused action doesn't advance the generation itself
@@ -6339,6 +6826,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if a.get("force"):
             # `force` skips the checks above and the hit test, never the policy
             _, _, said = await self._last_checks(tool, a, found, hit=False)
+            await self._hosted_proof(found, found.center)  # (`force` never touches a place that isn't known)
             self._dry(a, f"Would {word} {_brief(found)} at {round(found.center[0])},{round(found.center[1])}.{said}")
             self._touching(found)
             done = Noted(ui.without_place(await self._press(target, hold_ms)))  # at its centre, whatever is drawn there
@@ -6348,11 +6836,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         found, point, said = await self._last_checks(tool, a, found, aim=self._touch_point)
         at = point or found.center
+        await self._hosted_proof(found, at)
         self._dry(a, f"Would {word} {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
         if point is None:
             return ui.without_place(await self._press(target, hold_ms))
-        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms)
+        await self._press(ui.Target(x=point[0], y=point[1]), hold_ms, proven=True)
         return f"{verb} {found.line(actions=False, place=False)} at its visible part ({round(point[0])}, {round(point[1])})."
 
     def _moved_under(self, view, x: float, y: float) -> bool:
@@ -6482,6 +6971,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if not force:
             point, shown = aimed, self._touch_point(found)
         at = point or found.center
+        await self._hosted_proof(found, at)
         self._dry(a, f"Would toggle {_brief(found)} at {round(at[0])},{round(at[1])}.{said}")
         self._touching(found)
         await self.session.tap(ui.Target(ref=found.ref) if point is None else ui.Target(x=point[0], y=point[1]))
@@ -6533,8 +7023,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # (it can't be reached, and where the backdrop lets a touch through it would leave that screen with the
         # sheet open); one that shows is the sheet's own and is tapped as usual.
         if behind and not (back.point is not None and not any(ui._holds(e.rect, back.point) for e, _ in behind)):
+            if any(e.placed == "unknown" for e in (getattr(s, "front_items", None) or view.items)):
+                # the sheet's own frames aren't the screen's: beside it or its top edge can't be told (last Opus
+                # review, M2)
+                raise Refused("not_actionable", HOSTED_SHEET)
             self._dry(a, "Would close the sheet in front.")
             return await self._close_sheet(view)
+        if back.hosted:
+            raise Refused("not_actionable", HOSTED_BACK)
         if back.point is not None:
             self._dry(a, "Would tap the back button.")
             await self._back_before(view, a)
@@ -6810,6 +7306,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         width, labels = shot
         try:
             frame = view.read_frame if at_read else await self._newest_frame()
+            if self.frame_private(frame):  # (M1: an unlock ran when it was taken; a Note, the call itself is done)
+                raise Refused("busy", UNLOCK_BUSY)
             try:
                 source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
@@ -6818,7 +7316,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             if source is not None and turn and getattr(frame, "picture", None) is None:
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is None:
+                asked = self.hub.mono()
                 source = await self._read(self.session.screenshot_png)
+                if self.unlocked_since(asked):
+                    raise Refused("busy", UNLOCK_BUSY)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
             jpeg, size, skipped = await asyncio.to_thread(shotlib.render, source, self.session.screen, width, boxes)
         except Exception as e:

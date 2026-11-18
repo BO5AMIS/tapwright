@@ -6,6 +6,7 @@ import pytest
 from fakes import FakeSession, button
 from test_daemon import finish, make, run, started, until_stuck
 
+from tapwright.errors import PHONE_LOCKED
 from tapwright import needs
 from tapwright.control import Refused
 from tapwright.daemon import Scope
@@ -59,7 +60,7 @@ def test_cant_now_answers_the_usual_error_at_once():
         assert d.dialog_answer("a", "n1-x", "cant") is True
         with pytest.raises(Refused) as e:
             await asyncio.wait_for(call, 2)
-        assert e.value.code == "locked" and str(e.value) == "the phone is locked; ask the user to unlock it"
+        assert e.value.code == "locked" and str(e.value) == PHONE_LOCKED
         await finish(stop, task)
     run(go)
 

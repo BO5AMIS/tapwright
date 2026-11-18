@@ -399,7 +399,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         if problem is not None:
             return problem
 
-        # `?for=recording` (tapwright record-video): no frame from while Notification Center was open for a read
+        # `?for=recording` (tapwright record-video): no frame from while Notification Center was open for a read, nor
+        # from while the phone was being unlocked (its keypad lights each key: 1.7.8, M1)
         hide = request.query_params.get("for") == "recording"
         wait = RECORDING_KEEPALIVE if hide else 15
 
@@ -421,7 +422,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                             return
                         if hide:
                             last_out = time.monotonic()
-                            yield keepalive(daemon.center_covers(hub.mono()))
+                            yield keepalive(daemon.recording_covers(hub.mono()))
                         continue
                     seq = frame.seq
                     if hide and daemon.recording_hides(hub, frame):
@@ -435,7 +436,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
                         # needs to hear that the line is alive (the copies come faster than the idle wait ends)
                         if hide and time.monotonic() - last_out >= RECORDING_KEEPALIVE:
                             last_out = time.monotonic()
-                            yield keepalive(daemon.center_covers(hub.mono()))
+                            yield keepalive(daemon.recording_covers(hub.mono()))
                         continue
                     sent = picture
                     w, h = daemon.session.screen

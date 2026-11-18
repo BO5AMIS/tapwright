@@ -2,6 +2,7 @@
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
+import contextvars
 import io
 import os
 import re
@@ -27,6 +28,9 @@ BANNER_ID = "NotificationShortLookView"  # the identifier of a notification bann
 BANNER_WAIT, BANNER_POLL = 8.0, 0.5  # seconds: how long a read waits for a banner to leave, and how often it looks
 # TAPWRIGHT_TRACE=1: every request to WebDriverAgent is logged with how long it took (for profiling, e.g. over Wi-Fi)
 TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
+# The passcode unlock's keypad (unlock.PhoneLockScreen.press_keys): its requests write no trace line, neither the TRACE
+# log line nor trace.py's request count, so nothing gives the passcode's length (last Opus review of 1.7.8, L4)
+QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
@@ -91,7 +95,60 @@ def _field_key(field: ui.Element) -> str | None:
     """What says two reads show the same input: its identifier, else its label (None when it has neither)."""
     name = field.identifier or field.label
     return f"{field.role}:{name}" if name else None
-KEYS = {"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
+
+
+PLACE_SLACK = 2.0  # points a field's frame may differ between two reads (or WebDriverAgent's rect) and be the same place
+
+
+def _alike(e: ui.Element, field: ui.Element) -> bool:
+    """Would e pass for the field by name: an input of its role with its identifier (else, without one, its label)."""
+    return e.role == field.role and (e.identifier == field.identifier if field.identifier else e.label == field.label)
+
+
+def _near(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
+    return len(a) == len(b) and all(abs(p - q) <= PLACE_SLACK for p, q in zip(a, b))
+
+
+def _moved_with_content(field: ui.Element, now: ui.Element, before: list[ui.Element], after: list[ui.Element]) -> bool:
+    """Did the field move only as the content around it did (the keyboard scrolled the form after the tap)? It moved
+    up or down, not sideways and not resized, and another element with a name of its own, the one of its kind in
+    both lists, moved by the same distance. A field the app replaced by another with its key elsewhere has none."""
+    dy = now.y - field.y
+    if abs(now.x - field.x) > PLACE_SLACK or abs(now.width - field.width) > PLACE_SLACK:
+        return False
+
+    def key(e: ui.Element) -> tuple[str, str, str]:
+        return e.role, e.label, e.identifier
+
+    for e in before:
+        if e is field or not (e.identifier or e.label) or _alike(e, field):
+            continue
+        twins = [a for a in after if key(a) == key(e)]
+        if (len(twins) == 1 and sum(1 for b in before if key(b) == key(e)) == 1
+                and _near((twins[0].x, twins[0].y, twins[0].width), (e.x, e.y + dy, e.width))):
+            return True
+    return False
+
+
+def _sole_input(field: ui.Element, before: list[ui.Element], after: list[ui.Element], strict: bool) -> ui.Element | None:
+    """The fresh read's input that is the field, when the field is the only input in the agent's list and there is only
+    one in the fresh read too, and it moved up or down only (x within PLACE_SLACK; the same width too, except for the
+    check before a clear: a search field narrows as its Cancel button comes in). Else None (last Opus review, M1)."""
+    was = [e for e in before if e.role == "input"]
+    now = [e for e in after if e.role == "input"]
+    if len(was) != 1 or was[0] != field or len(now) != 1 or abs(now[0].x - field.x) > PLACE_SLACK:
+        return None
+    if not strict and abs(now[0].width - field.width) > PLACE_SLACK:
+        return None
+    return now[0]
+
+
+class _FieldGone(Exception):
+    """The element WebDriverAgent named a moment ago went stale while it was checked (the app redrew its view). The
+    caller says what happened so far (1.7.8, Opus review 8)."""
+
+
+KEYS ={"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 
 
 @dataclass
@@ -111,6 +168,8 @@ class Session:
         self.scale_read = False  # whether that read has happened, so an unknown scale isn't asked for again
         self.items: list[ui.Element] = []
         self.app: tuple[str, str] | None = None  # (name, bundle id) at the last read
+        # (name, bundle id) the newest read of any kind names (a tree-only read's root; None: it named none)
+        self.read_app: tuple[str, str] | None = None
         self.last_alert: ui.Alert | None = None  # the OS alert and keyboard state at the last snapshot
         self.last_keyboard = False
         self.last_tree: ui.Tree | None = None  # the tree of the last read, for the places the daemon recognises
@@ -122,6 +181,10 @@ class Session:
         # (field key, element id) of the input our last type_text verified and typed into, while nothing else has
         # touched the phone since: typing there again needs no tap. Every other action clears it.
         self.typed_into: tuple[str, str] | None = None
+        # where that input was listed then (x, y, width; a text view grows as it is typed into): typing there again
+        # without a tap needs the target listed at that very place, and its key the only one in the list (1.7.8)
+        self.typed_place: tuple[float, float, float] | None = None
+        self._placed_proof: str | None = None  # the element this type_text proved by its place in a fresh read
         self.offscreen: list[ui.Element] = []  # what the last read found outside the screen (for `off_screen`)
         # what a sheet hides, each with the element in front that names the sheet (for `covered`)
         self.behind: list[tuple[ui.Element, ui.Element | None]] = []
@@ -219,7 +282,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
-        self.scale = self.app = None
+        self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
         self.typed_into = None
@@ -236,7 +299,7 @@ class Session:
         full = path.replace("{sid}", self.sid)
         try:
             try:
-                if not TRACE:
+                if not TRACE or QUIET.get():
                     return await self._timed(method, path, full, payload, timeout)
                 began = time.monotonic()
                 try:
@@ -282,7 +345,7 @@ class Session:
         validate = getattr(self, "before_input", None) if input_request else None
         if validate is not None:
             await validate(self.input_point)
-        pending = trace.request(method, path)
+        pending = None if QUIET.get() else trace.request(method, path)
         token = device_module.BEFORE_SEND.set(guard if method == "POST" else None)
         try:
             answer = await self.device.http(method, full, payload, timeout)
@@ -499,7 +562,7 @@ class Session:
         request a tree-only read leaves out."""
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = await self._app(tree.app)
+        self.app = self.read_app = await self._app(tree.app)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
         self._seen_tree(tree)
@@ -563,6 +626,7 @@ class Session:
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
+        self.read_app = tree.app
         self._seen_tree(tree)
         return tree
 
@@ -801,17 +865,23 @@ class Session:
         return True
 
     async def type_text(self, text: str, replace: bool = False, submit: bool = False,
-                        target: ui.Target | None = None, at: tuple[float, float] | None = None) -> str:
+                        target: ui.Target | None = None, at: tuple[float, float] | None = None,
+                        no_tap: bool = False) -> str:
         """Type into the target (tapped first to focus it, at `at` when given: the part of it that shows),
         or into whatever has focus. A point names the input under it, not a touch: with none there,
-        nothing is typed."""
+        nothing is typed. `no_tap`: the read said the target has the focus, and no focusing tap may be made (something
+        is drawn over it); if the focus is elsewhere now, nothing is done."""
+        point = None  # the agent's own point: the input under it is the target, in the read and on the phone (1.7.8)
         if target is not None and target.point is not None:
-            field = ui.at_point(self.items, target.point, "input")
+            point = target.point
+            field = ui.at_point(self.items, point, "input")
             if field is None:
-                x, y = target.point
+                x, y = point
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes typing.")
             target = ui.Target(ref=field.ref)
-        element, hit, again, at_end = None, None, False, False
+        element, hit, again, at_end, what = None, None, False, False, "the field"
+        tapped: tuple[float, float] | None = None  # where the focusing tap went; None when no tap was made
+        self._placed_proof = None
         # with the keyboard already up, the focusing tap moves focus from another field, and iOS may swap in that
         # field's keyboard as the keys go out: some went missing on the phone ("abc" landed as "a", 2026-11-11)
         switched = self.last_keyboard
@@ -821,34 +891,57 @@ class Session:
             hit = ui.resolve(self.items, target)
             key = _field_key(hit) if not isinstance(hit, tuple) else None
             focused, self.typed_into = self.typed_into, None
-            if key and focused and focused[0] == key and await self._active_element() == focused[1]:
-                element, again = focused[1], True  # still focused by our own typing, nothing done since: no tap
-            elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
-                  and (element := await self._active_element()) is not None and await self._is_field(element, hit)):
-                # the runner's read says this very field has the keyboard focus (its `f`, never a guess from frames or
-                # labels: 1.6.2): a tap on it would only open iOS's caret menu (Select, Paste). Where the caret is
-                # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype.
-                # The element focused NOW must be that field (its name, else its place in a fresh read): the app may
-                # have moved the focus since the read, and a clear and the keys would go to another field, a value
-                # of the vault with them (CodeRabbit, PR #12, session.py)
-                switched = False
-            else:
-                element = None  # (a focused element that isn't the field is never typed into: focus it first)
-                # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
-                # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than
-                # WebDriverAgent's clear, measured on the phone 2026-11-11). Only where the field's middle shows
-                # (no `at`), there is room, and nothing is pressed after the text; the value is read back after.
-                at_end = (replace and not submit and at is None and isinstance(hit, ui.Element) and not hit.secure
-                          and hit.value not in ("", hit.placeholder) and len(hit.value) <= BACKSPACE_MAX
-                          and hit.width >= 2 * END_INSET)
-                if at_end:
-                    await self.tap(ui.Target(x=hit.x + hit.width - END_INSET, y=hit.y + hit.height / 2))
+            place, self.typed_place = self.typed_place, None
+            try:
+                if (key and focused and focused[0] == key and isinstance(hit, ui.Element) and point is None
+                        and self._unique(hit) and place is not None and _near((hit.x, hit.y, hit.width), place)
+                        and await self._active_element() == focused[1]
+                        and await self._where_listed(focused[1], hit)):
+                    # still focused by our own typing, nothing done since: no tap. Only for the very field typed into:
+                    # its key the one of its kind in the list, listed where it was (1.7.8, Opus review H1: two posts
+                    # labelled alike, and the keys for the second went into the first), and the focused element is
+                    # still there: an automatic scroll can carry it off and bring another input with its key to its
+                    # place (CodeRabbit, PR #18)
+                    element, again = focused[1], True
+                elif (isinstance(hit, ui.Element) and hit.focused and self.tw_version >= 5
+                      and (element := await self._active_element()) is not None
+                      and await self._is_field(element, hit, point=point, listed=hit.rect)):
+                    # the runner's read says this very field has the keyboard focus (its `f`, never a guess from frames
+                    # or labels: 1.6.2): a tap on it would only open iOS's caret menu (Select, Paste). Where the caret is
+                    # isn't known, so old text is cleared WebDriverAgent's way, and no focus moved: nothing to retype.
+                    # The element focused NOW must be that field (its name, else its place in a fresh read): the app may
+                    # have moved the focus since the read, and a clear and the keys would go to another field, a value
+                    # of the vault with them (CodeRabbit, PR #12, session.py)
+                    switched = False
+                elif no_tap:
+                    raise Refused("stale", f"the focus moved off {what} since the last read; look again. Nothing was "
+                                           "typed.")
                 else:
-                    await self.tap(target if at is None else ui.Target(x=at[0], y=at[1]))
-                # focus is what counts: with a hardware keyboard no software one shows
-                element = await self._has_focus(hit) if not isinstance(hit, tuple) else await self._active_element()
-                if element is None and not isinstance(hit, tuple):
-                    raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
+                    element = None  # (a focused element that isn't the field is never typed into: focus it first)
+                    # Old text to replace: the tap goes near the field's right end, where iOS puts the caret at the end
+                    # of short text, so backspaces can delete it in the same call as the new keys (0.45 s less than
+                    # WebDriverAgent's clear, measured on the phone 2026-11-11). Only where the field's middle shows
+                    # (no `at`), there is room, and nothing is pressed after the text; the value is read back after.
+                    at_end = (replace and not submit and at is None and isinstance(hit, ui.Element) and not hit.secure
+                              and hit.value not in ("", hit.placeholder) and len(hit.value) <= BACKSPACE_MAX
+                              and hit.width >= 2 * END_INSET)
+                    if at_end and isinstance(hit, ui.Element):
+                        tapped = (hit.x + hit.width - END_INSET, hit.y + hit.height / 2)
+                    elif at is not None:
+                        tapped = at
+                    else:
+                        x, y, _ = self._target(target)
+                        tapped = (x, y)
+                    await self.tap(target if tapped is None or (at is None and not at_end)
+                                   else ui.Target(x=tapped[0], y=tapped[1]))
+                    # focus is what counts: with a hardware keyboard no software one shows
+                    element = (await self._has_focus(hit, point=point, tapped=tapped) if not isinstance(hit, tuple)
+                               else await self._active_element())
+                    if element is None and not isinstance(hit, tuple):
+                        raise Refused("not_actionable", f"no_action: {what} didn't take focus.")
+            except _FieldGone:
+                raise Refused("stale", "the focused field went away while it was checked (the app redrew it); look "
+                                       "again. Nothing was typed.") from None
         note, keys = "", text + ("\n" if submit else "")
         field = hit if isinstance(hit, ui.Element) else None
         if replace and field is not None and not field.secure and field.value in ("", field.placeholder):
@@ -857,6 +950,18 @@ class Session:
             keys = "\b" * len(field.value) + keys  # the cursor is at the end of the old text: delete it
         elif replace:
             element = element or await self._active_element()
+            if element and field is not None and self._placed_proof != element:
+                # 1.7.8 (bug 6, Opus review H2): the clear wipes a field's text, so the field it goes to is proven right
+                # before it, by its place in a fresh read, never by a label or an identifier alone: two posts of a
+                # thread share a label, or a testID repeated on every row
+                try:
+                    proven = await self._is_field(element, field, strict=True, point=point, tapped=tapped,
+                                                  listed=None if tapped else field.rect)
+                except _FieldGone:
+                    proven = False
+                if not proven:
+                    raise Refused("stale", f"the focused field isn't {what} any more; look again. Nothing was cleared "
+                                           "or typed.")
             if element:
                 await self._call("POST", f"/session/{{sid}}/element/{element}/clear", {})
             else:
@@ -880,6 +985,7 @@ class Session:
             self.retyped = True
         if field is not None and element and not submit:  # return may move focus on; keys never do
             self.typed_into = (_field_key(field), element)
+            self.typed_place = (field.x, field.y, field.width)
         return f"typed {len(text)} characters" + (" and pressed return" if submit else "") + note
 
     async def retype(self, text: str) -> bool:
@@ -894,11 +1000,16 @@ class Session:
         return True
 
     async def is_focused(self, field: ui.Element) -> bool:
-        """Is this listed input the one WebDriverAgent says has focus (the keyboard's target)?"""
+        """Is this listed input the one WebDriverAgent says has focus (the keyboard's target)? Where its key isn't the
+        only one in the list, its place in a fresh read must be where it is listed. An element that went stale while
+        it was checked isn't (the caller says what that means)."""
         if field.role != "input":
             return False
         active = await self._active_element()
-        return bool(active) and await self._is_field(active, field)
+        try:
+            return bool(active) and await self._is_field(active, field, listed=field.rect)
+        except _FieldGone:
+            return False
 
     async def dismiss_keyboard(self) -> bool:
         """WebDriverAgent's own way of closing the keyboard, which presses no return. False when it refuses (the
@@ -925,44 +1036,119 @@ class Session:
             return None
         return None if value is None else str(value)
 
-    async def _has_focus(self, field: ui.Element) -> str | None:
+    async def _has_focus(self, field: ui.Element, point: tuple[float, float] | None = None,
+                         tapped: tuple[float, float] | None = None) -> str | None:
         """Wait until the active element is the target; that element's id, or None when it never is. The keyboard
         can scroll the field after the tap, so the pre-tap rect says nothing: the element's identifier (else its
-        label) is compared first, then its rect against where a fresh read of the tree shows the field now.
-        Without this, keys would land in the old field."""
+        label) is compared first when no other listed input has it, then its rect against where a fresh read of the
+        tree shows the field now (under the tap, when another input has its key too). Without this, keys would land in
+        the old field. An element that goes stale as the field takes focus (React Native redraws it) is "not yet";
+        raised (_FieldGone) only when the wait ends on it."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FOCUS_WAIT
         while True:
+            gone = False
             element = await self._active_element()
-            if element and await self._is_field(element, field):
-                return element
+            try:
+                if element and await self._is_field(element, field, point=point, tapped=tapped):
+                    return element
+            except _FieldGone:
+                gone = True
             if loop.time() >= deadline:
+                if gone:
+                    raise _FieldGone()
                 return None
             await asyncio.sleep(FOCUS_POLL)
 
-    async def _is_field(self, element: str, field: ui.Element) -> bool:
+    def _unique(self, field: ui.Element) -> bool:
+        """No other input in the list has this field's identifier (else its label): those alone can tell it."""
+        return bool(field.identifier or field.label) and sum(1 for e in self.items if _alike(e, field)) == 1
+
+    async def _is_field(self, element: str, field: ui.Element, strict: bool = False,
+                        point: tuple[float, float] | None = None, tapped: tuple[float, float] | None = None,
+                        listed: tuple[float, float, float, float] | None = None) -> bool:
+        """Is WebDriverAgent's element the listed field? Its identifier (else its label) proves it only where no other
+        listed input has it, and never `strict` (right before a clear) or for a point target. Otherwise the field is
+        found in a fresh read, as the one input there: under the agent's `point` when there is one; else, when its
+        key isn't the only one, under the focusing tap (`tapped`) or where it was `listed` (no tap was made; strict
+        too); and the element's rect must be that input's (XCTest's own frame against XCTest's own frame for content
+        another process draws). Raises _FieldGone when the element went stale meanwhile (1.7.8, Opus review H1, H2, 6)."""
+        unique = self._unique(field)
         wanted = field.identifier or field.label
-        if wanted:
+        if wanted and unique and not strict and point is None:
             got = await self._attribute(element, "name") if field.identifier else None
             if got is None and not field.identifier:
                 got = await self._attribute(element, "label")
             if got == wanted:
                 return True
-        now = await self._field_now(field)
+        at = point if point is not None else None if unique else tapped
+        place = None if at is not None else listed if (strict or not unique) else None
+        if not unique and at is None and place is None:
+            return False  # another input has its key, and nothing says where this one is
+        seen: list[ui.Element] = []
+        now = await self._field_now(field, at, place, seen)
+        if now is None and point is None and tapped is not None and at == tapped:
+            # nothing under the tap: the keyboard lifted the field (a chat composer with no label). With one input on
+            # the screen before and after, the focus can have gone nowhere else (last Opus review, M1)
+            now = _sole_input(field, self.items, seen, strict)
         if now is None:
             return False
-        box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
-        got_rect = tuple(box.get(k, float("inf")) for k in ("x", "y", "width", "height"))
-        return all(abs(a - b) <= 2 for a, b in zip(got_rect, now))
+        if (strict and at is None and place is None and tapped is not None
+                and not ui._holds(now.rect, tapped) and not _moved_with_content(field, now, self.items, seen)
+                and _sole_input(field, self.items, seen, strict) is not now):
+            # a clear after a focusing tap, the field's key the only one: the one input with it is the tapped one only
+            # where it is still under the tap, or where the content around it moved with it (the keyboard scrolled the
+            # form up). Another input with its key elsewhere isn't (CodeRabbit, PR #18)
+            return False
+        got_rect = await self._rect_of(element)
+        if got_rect is None or not _near(got_rect, now.raw_rect or now.rect):
+            return False
+        if strict or at is not None or place is not None:
+            self._placed_proof = element
+        return True
 
-    async def _field_now(self, field: ui.Element) -> tuple[float, float, float, float] | None:
-        """Where the tree shows the field now: the one input with its identifier (else its label), or None."""
+    async def _rect_of(self, element: str) -> tuple[float, ...] | None:
+        """XCTest's frame of WebDriverAgent's element; None when it won't say. Raises _FieldGone when the element went
+        stale: the one WebDriverAgent named a moment ago is gone (the app redrew its view: X's composer opened its GIF
+        picker, 2026-11-17). Was `internal` (1.7.8, bug 6); the caller words it."""
+        try:
+            box = (await self._call("GET", f"/session/{{sid}}/element/{element}/rect")).get("value") or {}
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            if "stale" in str(e).lower():
+                raise _FieldGone() from None
+            return None
+        return tuple(float(box.get(k, float("inf"))) for k in ("x", "y", "width", "height"))
+
+    async def _where_listed(self, element: str, field: ui.Element) -> bool:
+        """Is WebDriverAgent's element where the newest read lists the field (its x, y and width: a text view grows as
+        it is typed into; XCTest's own frame for content another process draws)?"""
+        got = await self._rect_of(element)
+        return got is not None and _near(got[:3], (field.raw_rect or field.rect)[:3])
+
+    async def _field_now(self, field: ui.Element, at: tuple[float, float] | None = None,
+                         place: tuple[float, float, float, float] | None = None,
+                         seen: list[ui.Element] | None = None) -> ui.Element | None:
+        """The field as the tree shows it now: the one input with its identifier (else its label), or None. With `at`,
+        the one input under that point; with `place`, the one input listed there (its x, y and width: a text view grows
+        as it is typed into). Another input there too, or none with the field's key: None. `seen` gets the whole
+        fresh list."""
         source = await self._source()
         if not isinstance(source, str):
             return None
-        same = [e for e in ui.read(source, self.screen).items if e.role == field.role
-                and (e.identifier == field.identifier if field.identifier else e.label == field.label)]
-        return same[0].rect if len(same) == 1 else None
+        fresh = ui.read(source, self.screen).items
+        if seen is not None:
+            seen.extend(fresh)
+        inputs = [e for e in fresh if e.role == field.role]
+        if at is not None:
+            inputs = [e for e in inputs if ui._holds(e.rect, at)]
+        elif place is not None:
+            inputs = [e for e in inputs if _near((e.x, e.y, e.width), place[:3])]
+        same = [e for e in inputs if _alike(e, field)]
+        if len(same) != 1 or ((at is not None or place is not None) and len(inputs) != 1):
+            return None
+        return same[0]
 
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None

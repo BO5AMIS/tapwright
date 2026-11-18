@@ -119,6 +119,10 @@ class JourneyTools:
         if not await self._journey_front_ok(jr, scope, text):
             jr.left_out += 1
             return
+        if self.unlocking():  # (1.7.8, M1) no picture while the phone is being unlocked
+            jr.left_out += 1
+            return
+        asked = self.hub.mono()
         try:
             if scope is not None:
                 # Personal mode: the picture is the phone's own screenshot, taken in one turn of the phone's queue
@@ -163,6 +167,9 @@ class JourneyTools:
                 if not await self._journey_bundle_ok(jr, scope, after):
                     jr.left_out += 1
                     return
+            if self.unlocked_since(asked) or (scope is None and self.frame_private(frame)):
+                jr.left_out += 1
+                return
             path = jr.folder / "screens" / f"{len(jr.frames) + 1:03d}.jpg"
             await asyncio.to_thread(journey_report.store_shot, source, path)
         except Exception as e:  # noqa: BLE001
