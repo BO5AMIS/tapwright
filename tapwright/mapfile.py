@@ -73,10 +73,10 @@ def invalid(data: object) -> str | None:
 
 
 # the keys whose string values are the screen's words in a map: a target's or a road's names (id, label, text), a link
-# (a place's, a move's), a place's identifiers and selected tab. Nothing else is content: not the format, the version,
+# (a place's, a move's), a place's identifiers, lists, inner families and selected tab. Nothing else is content: not the format, the version,
 # the app, the title key, a hash, a place's signature, a place's or a route's name, a reference or a time (those are made by the
 # code and a value in them would break the map: Codex, PR #10 cycle 5)
-CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url", "link", "ids", "tab", "sig", "word"})
+CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url", "link", "ids", "lists", "inner", "tab", "sig", "word"})
 
 
 def without_values(data: dict, scrub: Callable[[str], str]) -> dict:
@@ -151,9 +151,12 @@ def _same_place(a: dict, b: dict) -> bool:
     """Two records with one signature: one place? A screen with no identifiers is told from the others of its kinds by
     its title alone (places.locate), so two such records are one place only when a title hash is shared (or neither
     has a title); with identifiers the signature is the identity."""
-    parts = a["key"].get("parts")
-    if isinstance(parts, dict) and parts.get("ids"):
-        return True
+    parts, other = a["key"].get("parts"), b["key"].get("parts")
+    if isinstance(parts, dict) and places.identified(parts):
+        # (1.8.0, W168) a signature leaves out what lies inside a list with its own id: two screens in one scroll view
+        # of the same id share it, and only their parts tell them apart
+        both = places.current(parts) and isinstance(other, dict) and places.current(other)
+        return not both or places.same_place(parts, other)
     ta, tb = set(a.get("titles", {}).values()), set(b.get("titles", {}).values())
     return bool(ta & tb) or not (ta or tb)
 

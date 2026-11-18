@@ -40,6 +40,13 @@
   trial is an audit line of kind `repair`. Adopting is the user's: `tapwright replay FILE --repair apply --adopt`
   (JUnit carries the suggestion). Recorded steps now keep `place` and `seen` (role, screen area, component, and the id's
   stem, never text, and none for an id that carries content) so a repair can tell what moved.
+- A list scrolled differently is the same place (the map, routes, explore and repair). A place's key no longer counts
+  the identifiers inside a scrolling container (a React Native list's cards, a header that scrolls away): it goes by the
+  identifiers outside them, the lists' own identifiers, and, for a list without one, the families of its rows' ids
+  (`dest-card`, never the `kyoto` of `dest-card-kyoto`). Before, Back from a detail to a list left scrolled a few rows read
+  as another place, so explore called it a dead end, relaunched, and ended `cant_get_back` with little explored. Two
+  screens whose lists differ stay two places. A map saved before keeps its places and keys: a read is matched to an old
+  place when its fixed ids are all among the old place's ids; new places get the new key.
 
 ## 1.7.9 (2026-11-19)
 

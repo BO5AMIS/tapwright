@@ -1,9 +1,12 @@
 """Places: a screen the tool can recognise again (AGENT-TOOLS §18.1), and the names they go by.
 
-A place's key is a signature, built only from what doesn't change with content or language: the identifiers of the
-elements that aren't list rows, the kinds of the top-level containers, the selected tab, and what lies on top (a
-sheet or an alert). The keyboard isn't counted. `parts` keeps those pieces, so two reads can be compared part by
-part.
+A place's key is a signature, built only from what doesn't change with content, language or scrolling: the identifiers
+of the elements outside every scrolling container, the identities of those containers (a list by its own identifier),
+the kinds of the top-level containers, the selected tab, and what lies on top (a sheet or an alert). The keyboard isn't
+counted. What lies inside a list (its rows, a header that scrolls with them) moves with every scroll, so it decides
+nothing, except as the families of its identifiers for a list that has no identifier of its own (1.8.0, W168). `parts`
+keeps those pieces, so two reads can be compared part by part. A place saved before 1.8.0 keeps its parts; a read is
+compared with it by its fixed identifiers (they must all be among the old ones), so an older map still works.
 
 Never in a key, a name or the map file: a list row's text, a param's value, typed text, anything from a secure field.
 A navigation title is the one piece of content that is looked at: it breaks a tie between two places. It never names
@@ -27,7 +30,9 @@ from . import explored, names, ui
 # be tuned on the phone: AGENT-TOOLS §18.1 lets each tool tune its own). The weights: the ids are what tells screens
 # apart, the kinds and the tab say which family a screen belongs to, and a layer on top is another place outright.
 THRESHOLD = 0.8
-WEIGHTS = {"ids": 0.5, "kinds": 0.2, "tab": 0.15, "layer": 0.15}
+# (1.8.0, W168: `lists`, the identity of the screen's scrolling containers; 0.25 so two screens whose lists differ fall
+# under the threshold even when the tab bar's ids make their fixed ids look alike)
+WEIGHTS = {"ids": 0.45, "lists": 0.25, "kinds": 0.1, "tab": 0.1, "layer": 0.1}
 IDS_AGREE = 0.6  # the ids "agree" when this share of both reads' ids (Jaccard) are the same ones
 TIE = 0.01  # similarities this close are a tie, and the title decides
 HASH_CHARS = 16  # a title's HMAC, cut to this many hex characters (§18.9)
@@ -74,14 +79,50 @@ def _tab(tree: ui.Tree) -> str | None:
     return None
 
 
+_LAST_PART = re.compile(r"[-_. ]+[^-_. ]*$")
+_DIGITS = re.compile(r"\d+$")
+
+
+def stem(identifier: str) -> str:
+    """The family an identifier inside a list belongs to: without its last part (`dest-card-kyoto` and `dest-card-banff`
+    are `dest-card`, `lab-row-12` is `lab-row`), or without its trailing digits when it is one word (`row3` is `row`).
+    A list scrolled by ten rows shows other rows of the same families, so this is what can be compared across a scroll;
+    and the part that names the row's content (`kyoto`) never reaches the map."""
+    cut = _LAST_PART.sub("", identifier) if _LAST_PART.search(identifier) else _DIGITS.sub("", identifier)
+    return cut or identifier
+
+
 def parts_of(tree: ui.Tree) -> dict:
+    """The pieces of a place's key (1.8.0, W168: what doesn't scroll, so the same screen scrolled differently is one place):
+    `ids` the identifiers outside every scrolling container (fixed controls, a header above the list); `lists` the
+    top-level scrolling containers, each by its identifier ("" for one without); `inner` the families (`stem`) of the
+    identifiers inside them, which only count when a list has no identifier of its own."""
     layer = "alert" if tree.alert is not None else "sheet" if tree.behind else None
+    s = tree.structure
+    scrolled, named_lists = set(s.scrolled), {i for i in s.lists if i}
     # (an id is kept in the map as an answer shows it: a test account's value as its placeholder, §18.6)
-    return {"ids": [ui.shown(i) for i in tree.structure.ids], "kinds": list(tree.structure.kinds), "tab": _tab(tree), "layer": layer}
+    return {"ids": [ui.shown(i) for i in s.ids if i not in scrolled and i not in named_lists],
+            "lists": sorted(ui.shown(i) if i else "" for i in s.lists),
+            "inner": sorted({stem(ui.shown(i)) for i in scrolled}),
+            "kinds": list(s.kinds), "tab": _tab(tree), "layer": layer}
+
+
+def _scroll_free(parts: dict) -> dict:
+    """The parts a signature is made of: all but `inner` when every list has its own identifier (what a list shows at
+    the moment would make the same place another signature at every scroll)."""
+    if "lists" in parts and "" not in parts["lists"]:
+        return {k: v for k, v in parts.items() if k != "inner"}
+    return parts
 
 
 def signature(parts: dict) -> str:
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:HASH_CHARS]
+    return hashlib.sha256(json.dumps(_scroll_free(parts), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:HASH_CHARS]
+
+
+def identified(parts: dict) -> bool:
+    """Do these parts hold any identifier at all (a fixed one, a list's, or one inside a list)? Without one, only a
+    title can tell the place from another of the same kinds."""
+    return bool(parts.get("ids") or any(parts.get("lists", ())) or parts.get("inner"))
 
 
 _SCRIPTS = (("ar", "؀", "ۿ"), ("ar", "ݐ", "ݿ"), ("he", "֐", "׿"),
@@ -125,14 +166,61 @@ def read_place(tree: ui.Tree, lang: str | None = None) -> PlaceRead:
     return PlaceRead({"signature": signature(parts), "parts": parts}, title, language_of(title, lang))
 
 
+def current(parts: dict) -> bool:
+    """Parts made since 1.8.0 (W168), which tell what scrolls; a map saved before keeps its places' parts as they were."""
+    return isinstance(parts.get("lists"), list)
+
+
+def _identity(parts: dict) -> set[str]:
+    """What tells a place from others: its fixed identifiers, its lists' identifiers, and, for a list without one, the
+    families of the identifiers inside it."""
+    lists = parts.get("lists", ())
+    out = set(parts.get("ids", ())) | {f"list:{i}" for i in lists if i}
+    if "" in lists:
+        out |= {f"in:{s}" for s in parts.get("inner", ())}
+    return out
+
+
+def _ids_agree(a: dict, b: dict) -> bool:
+    if current(a) and current(b):
+        ids_a, ids_b = _identity(a), _identity(b)
+        union = ids_a | ids_b
+        return not union or len(ids_a & ids_b) / len(union) >= IDS_AGREE
+    if not current(a) and not current(b):  # (two records of an older map: as they were compared before)
+        ids_a, ids_b = set(a.get("ids", ())), set(b.get("ids", ()))
+        union = ids_a | ids_b
+        return not union or len(ids_a & ids_b) / len(union) >= IDS_AGREE
+    # a read now and a place saved before 1.8.0, whose ids hold the rows that were on screen then: the read's fixed ids
+    # and lists must all be among them (rows that scrolled since don't count); with none, the families inside the list
+    new, old = (a, b) if current(a) else (b, a)
+    old_ids = set(old.get("ids", ()))
+    fixed = set(new.get("ids", ())) | {i for i in new.get("lists", ()) if i}
+    if fixed:
+        return fixed <= old_ids
+    inner = set(new.get("inner", ()))
+    if inner:
+        return inner <= {stem(i) for i in old_ids}
+    return not old_ids
+
+
+def _lists_agree(a: dict, b: dict) -> bool:
+    """The same lists, by their identifiers; and what lies inside them of the same families, when both show any (one
+    family in common is enough: a list scrolled by ten rows still shows rows of its kind, while two screens an app wraps
+    in one scroll view of the same id, `settings-*` and `profile-*`, have none in common)."""
+    if a.get("lists") != b.get("lists"):
+        return False
+    inner_a, inner_b = set(a.get("inner", ())), set(b.get("inner", ()))
+    return not (inner_a and inner_b) or bool(inner_a & inner_b)
+
+
 def similarity(a: dict, b: dict) -> float:
     """How much of two reads' parts agree, 0 to 1 (WEIGHTS). A sheet or alert over one and not the other is another
-    place outright: 0."""
+    place outright: 0. Rows of a list never decide it (1.8.0, W168): a list scrolled by ten rows is the same place;
+    two different lists are not (`lists`, weighed so that alone it falls under the threshold)."""
     if a.get("layer") != b.get("layer"):
         return 0.0
-    ids_a, ids_b = set(a.get("ids", ())), set(b.get("ids", ()))
-    union = ids_a | ids_b
-    agree = {"ids": not union or len(ids_a & ids_b) / len(union) >= IDS_AGREE,
+    lists_agree = not (current(a) and current(b)) or _lists_agree(a, b)
+    agree = {"ids": _ids_agree(a, b), "lists": lists_agree,
              "kinds": a.get("kinds") == b.get("kinds"), "tab": a.get("tab") == b.get("tab"), "layer": True}
     return sum(WEIGHTS[part] for part, ok in agree.items() if ok)
 
@@ -231,7 +319,7 @@ def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
         if score < THRESHOLD:
             continue
         has_title = wanted is not None and place.get("titles", {}).get(read.lang) == wanted
-        if not read.key["parts"]["ids"] and not parts.get("ids") and not has_title:
+        if not identified(read.key["parts"]) and not identified(parts) and not has_title:
             continue
         fits.append((score, has_title, str(place.get("last", "")), name))
     if not fits:
