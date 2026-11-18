@@ -270,4 +270,4 @@ Tapwright: opens the authenticated whole-phone live view in a local browser for 
 
 ## Historical design
 
-[Pre-1.7.5 design notes](history/AGENT-TOOLS-pre-1.7.5.md) describe earlier and proposed behavior; they are not the current control contract.
+[AGENT-TOOLS 1.16.2](history/AGENT-TOOLS-pre-1.7.5.md) is still the shared contract with Tapline for the tools both have; this guide is Tapwright's own on top of it, and its app-scope, policy, grant and confirmation rules don't bind Tapwright's whole-phone control.
