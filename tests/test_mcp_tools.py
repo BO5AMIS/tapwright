@@ -30,7 +30,7 @@ EXPECTED = {
     "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
     "rotate": {"to", "look", "screenshot", "brief"},
-    "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "account", "guide"},
+    "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "guide"},  # (no account in 1.8.0: R180 M3)
     "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"},
     "audit": {"types"},

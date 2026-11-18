@@ -25,7 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import client, device, exploretool, hostdialog, policy, repair, ui, uxcheck
+from . import client, device, exploretool, hostdialog, policy, repair, scriptrepair, ui, uxcheck
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -169,6 +169,8 @@ def _timeout(tool: str, args: dict) -> float:
         return EXPORT_TIMEOUT
     if tool == "explore":  # a search runs up to its `minutes` (AGENT-TOOLS §25.2)
         return exploretool.timeout_for(args)
+    if tool == "replay" and args.get("repair") == "apply":  # the run, then the repaired file's own replay (§26.4)
+        return scriptrepair.APPLY_TIMEOUT
     return LONG_TIMEOUT if tool in ("run", "replay", "media", "drive") else TIMEOUT
 
 
@@ -323,10 +325,10 @@ async def drive(to: str | None = None, route: str | None = None, values: dict[st
 async def explore(minutes: float | None = None, steps: int | None = None, depth: int | None = None,
                   start: str | None = Field(default=None, alias="from"), focus: str | None = None,
                   fill: str | None = None, keep_going: bool | None = Field(default=None, alias="continue"),
-                  account: str | None = None, guide: str | None = None) -> CallToolResult:
+                  guide: str | None = None) -> CallToolResult:
     # (`from` and `continue` are Python's words: the arguments are their aliases. Each is sent only when given.)
     given = {"minutes": minutes, "steps": steps, "depth": depth, "from": start, "focus": focus, "fill": fill,
-             "continue": keep_going, "account": account, "guide": guide}
+             "continue": keep_going, "guide": guide}
     return await _tool("explore", **{k: v for k, v in given.items() if v is not None})
 
 

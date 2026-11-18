@@ -125,9 +125,9 @@ def test_a_toggle_that_cant_be_set_back_stops_the_run_and_names_it(tmp_path):
     phone.once.add("notify-switch")  # it flips once, then sticks
     explorer, maps = build(tmp_path, phone)
     result = run(explorer, maps)
-    assert result.stopped == "toggle_not_restored" and result.detail == "id=notify-switch"
+    assert result.stopped == "toggle_not_restored" and result.detail == "id=notify-switch, was off"  # (R180 M1: and what it was)
     from tapwright import explorereport
-    assert explorereport.stop_line(result) == "a toggle could not be set back (id=notify-switch)."
+    assert explorereport.stop_line(result) == "a toggle could not be set back (id=notify-switch, was off)."
     assert values(phone)["notify-switch"] is True  # left as it is: nothing else is touched to hide it
 
 

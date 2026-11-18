@@ -479,7 +479,11 @@ def write_files(script: Path, repaired: dict, markdown: str) -> list[str]:
 
 # ---- the replay check of a repair: the emitted file itself, from the script's start (§26.4, Tapline's lesson) ----
 
-CHECKED = "Checked: "  # the line of `apply`'s answer that says the emitted file replayed green; `--adopt` needs it
+CHECKED = "Checked: "
+# (review R180 M4) how long a client waits for `replay` with `repair: "apply"`: the run with its trials, then the repaired file's
+# own replay from a fresh start; about twice a plain replay's 200 s, and the trials' fresh starts
+APPLY_TIMEOUT = 480.0
+CALLER_LEFT = "the caller stopped waiting before the check ended, so nothing was kept"  # the line of `apply`'s answer that says the emitted file replayed green; `--adopt` needs it
 
 
 def why_not_fresh(data: dict) -> str | None:
@@ -516,13 +520,18 @@ def write_check(script: Path, repaired: dict) -> Path:
 
 
 def keep_checked(script: Path, checked: Path, markdown: str) -> list[str]:
-    """The checked file becomes `<script>.repaired.json` (a rename: the very bytes that replayed green), then
-    `<script>.repair.md` is written. Their names."""
+    """`<script>.repair.md` is written, then the checked file becomes `<script>.repaired.json` (a rename: the very bytes that
+    replayed green). Their names. On an OSError nothing new is left: the `.md` goes again when the rename fails, so an answer
+    that says "nothing was kept" is true (review R180 L8)."""
     out_json, out_md = sibling(script, "repaired.json"), sibling(script, "repair.md")
     if script in (out_json, out_md):
         raise OSError("the repaired file would replace the script itself")
-    os.replace(checked, out_json)
     write_atomic(out_md, markdown)
+    try:
+        os.replace(checked, out_json)
+    except OSError:
+        out_md.unlink(missing_ok=True)
+        raise
     return [out_json.name, out_md.name]
 
 

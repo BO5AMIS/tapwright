@@ -22,7 +22,7 @@ import pathlib
 import re
 
 from . import __version__, batch, closest, driving, explorefloor, findings, places, repairanalysis, roads, scriptrepair, ui
-from .control import Refused
+from .control import STILL_WANTED, Refused
 from .repairanalysis import Break, Screen
 from .scriptrepair import Candidate, Repair, Work
 
@@ -200,6 +200,23 @@ class RepairTools:
             why = analysis.reason[:1].upper() + analysis.reason[1:]
             run.notes.append(f"Note: no repair was made. {why}.")
             return False
+        # every move of the repair (each candidate's, a scroll toward the target, and the way back after a rejected one) passes the
+        # skip floor at dispatch, on the element each really goes to (§26.4; review R180 H1: the way back too): a repair never
+        # touches what explore would never touch, whatever the score or a saved road chose (Tapline's lesson: ONE dispatch gate)
+        gate = _d()._TOUCH_FLOOR.set(self._repair_floor(run))
+        try:
+            return await self._candidates(client_id, scope, run, at, analysis, screen, all_steps)
+        finally:
+            _d()._TOUCH_FLOOR.reset(gate)
+
+    @staticmethod
+    def _repair_floor(run: Run) -> explorefloor.Floor:
+        """The skip floor of a repair's own moves (the caller's policy file only adds words to it)."""
+        return explorefloor.Floor(_d()._FLOOR_RULES.get() or _d().safety.NONE, run.bundle)
+
+    async def _candidates(self, client_id: str, scope, run: Run, at: int, analysis: scriptrepair.Analysis, screen: Screen,
+                          all_steps: list[dict]) -> bool:
+        """The candidates tried in turn, under the repair's floor; True when one was accepted."""
         started = await self._repair_where()
         original = run.work[at]
         for candidate in analysis.list[:scriptrepair.MAX_CANDIDATES]:
@@ -243,13 +260,8 @@ class RepairTools:
             replacement["target"] = cand.target
             if cand.seen:
                 replacement["seen"] = cand.seen
-        # the candidate's own moves pass the skip floor at dispatch, on the element each really goes to (§26.4): a repair
-        # never touches what explore would never touch, whatever the score chose (Tapline's lesson: ONE dispatch gate)
-        gate = _d()._TOUCH_FLOOR.set(explorefloor.Floor(_d()._FLOOR_RULES.get() or _d().safety.NONE, run.bundle))
-        try:
-            ok, why = await self._run_steps(client_id, scope, [*before, replacement])
-        finally:
-            _d()._TOUCH_FLOOR.reset(gate)
+        # (the candidate's moves run under the repair's floor, which _repair_one holds for every move of the repair)
+        ok, why = await self._run_steps(client_id, scope, [*before, replacement])
         if not ok:
             return Tried(False, why, inserted=before)
         checked = await self._check_one(client_id, scope, step, all_steps[at + 1] if at + 1 < len(all_steps) else None)
@@ -426,7 +438,9 @@ class RepairTools:
     async def _back_at_start(self, client_id: str, scope, run: Run, started: tuple[str | None, str | None],
                              screen: Screen) -> bool:
         """After a trial that failed (§26.4): the app back on the place the step started on, by a proven road, else by `back`.
-        True when it is there, or never left."""
+        True when it is there, or never left. Every move goes through the dispatch gate (the floor _repair_one holds), and a
+        road with a move the floor holds (`Sign out` on the way back) is never driven: the app can't be taken back, and the
+        repair ends there (review R180 H1)."""
         view = self.control.client(client_id)
 
         async def moved() -> bool:
@@ -442,6 +456,9 @@ class RepairTools:
         if started[0] is not None and place is not None:
             road = self._proven_taps(self._maps_root(), self._bundle(), place, started[0], await self._build_of(self._bundle() or ""))
             if road is not None:
+                floor = _d()._TOUCH_FLOOR.get() or self._repair_floor(run)
+                if any(repairanalysis.road_held(floor, m, names) is not None for m, names in road):
+                    return False
                 ok, _ = await self._run_steps(client_id, scope, [m for m, _ in road])
                 if ok and not await moved():
                     return True
@@ -473,6 +490,13 @@ class RepairTools:
                                                               f"({e.strerror or e}); nothing was kept.", *run.notes])}
         try:
             checked = await self._check_repaired(client_id, run, checking)
+            if not await self._caller_waits():  # (review R180 M4) nobody would see it: never written after the client left
+                for step, phrase in run.accepted:
+                    self._repair_audit(run, f"step {step}: {phrase}, rejected ({scriptrepair.CALLER_LEFT})")
+                run.accepted.clear()
+                left = Refused("timeout", f"The repair run passed, but {scriptrepair.CALLER_LEFT}.")
+                left.tidied = True  # type: ignore[attr-defined]
+                raise left
             written = scriptrepair.keep_checked(run.script, checking, markdown)
             wrote = f"Wrote {written[0]} and {written[1]}. The original is unchanged."
         except OSError as e:
@@ -485,6 +509,18 @@ class RepairTools:
         rest = answer["text"].split("\n")[1:]
         return {**answer, "text": "\n".join([first, said, *([checked] if checked else []), wrote, *rest, *run.notes])}
 
+    @staticmethod
+    async def _caller_waits() -> bool:
+        """Is the call's client still waiting for the answer (server.py: it hasn't disconnected)? True when nobody can say
+        (MCP over stdio, the daemon's own calls), and when the question itself fails."""
+        wanted = STILL_WANTED.get()
+        if wanted is None:
+            return True
+        try:
+            return bool(await wanted())
+        except Exception:  # noqa: BLE001 - a question that can't be answered doesn't throw the checked repair away
+            return True
+
     async def _check_repaired(self, client_id: str, run: Run, checking: pathlib.Path) -> str:
         """The repaired script, replayed as the file that was just written (not the steps in memory), from the script's fresh
         start, before it is kept (§26.4; Tapline's lesson). It must run green: every step and every `expect`. The `Checked:`
@@ -495,7 +531,13 @@ class RepairTools:
             data = batch.load_script(str(checking))
             if scriptrepair.why_not_fresh(data) is not None:  # (apply refused this before it began; the file kept the keys)
                 raise Refused("bad_params", f"the repaired script can't be started fresh: {scriptrepair.why_not_fresh(data)}")
-            checked = await self._replay(client_id, data, run.scope, {"look": False})
+            # every step of the check goes through the dispatch gate, as the repair's own moves did (review R180 M6): a
+            # repaired target resolved again from scratch may land elsewhere, and this replay is still the repair's own run
+            gate = _d()._TOUCH_FLOOR.set(self._repair_floor(run))
+            try:
+                checked = await self._replay(client_id, data, run.scope, {"look": False})
+            finally:
+                _d()._TOUCH_FLOOR.reset(gate)
         except Refused as e:
             first = str(e).split("\n")[0]
             found = re.match(r"Ran \d+ of \d+ steps; stopped at step (\d+)", first)

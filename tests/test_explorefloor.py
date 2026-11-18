@@ -62,10 +62,11 @@ def test_a_users_skip_list_only_adds_to_the_floor():
     assert floor(skip=("Mute",)).element(button("Mute chat")) == explorefloor.Skip("skip_list", "Mute")
 
 
-def test_matching_is_whole_words_ignoring_case_and_on_the_label_or_text_only():
+def test_matching_is_whole_words_ignoring_case_on_the_label_text_and_id():
     assert why(policy.DEFAULT, "DELETE trip") == ("floor", "Delete")
     assert why(policy.DEFAULT, "Deleted items") is None  # a whole word
-    assert why(policy.DEFAULT, "Open", ident="delete-button") is None  # an id with a label is never matched (§11.1)
+    # (review R180 H2) the id is read beside the label: a label can be an icon's glyph or symbol name, the id says what it does
+    assert why(policy.DEFAULT, "Open", ident="delete-button") == ("floor", "Delete")
     assert why(policy.DEFAULT, "Don’t post", ) == ("floor", "Post")
 
 

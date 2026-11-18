@@ -8,14 +8,20 @@
   `~/.tapwright/explore/<app>/<time>/` (`report.json`, `report.md`, a picture and a repro script per finding): crashes
   with their stack, error-level log lines, dead ends, slow screens, refused touches, accessibility and usability issues.
   `minutes`, `steps`, `depth`, `from`, `focus`, `fill` (test values only into fields marked `-test-safe`, or a vault
-  fixture marked `"explore": true`), `continue` past a crash, `account` for the way back after a reset.
+  fixture marked `"explore": true`), `continue` past a crash. It never signs in again after a reset: §25.8's `account`
+  can't pass the skip floor (it would type a password and submit a form), so 1.8.0 refuses it in plain words.
 - What explore never does, on the whole-phone daemon of 1.7.5: it stays in one app (the one `--apps` names, else the
   app in front; never Home, Settings, Wallet or Passwords) and never touches what its skip floor holds: Delete, Buy,
   Send, Post, Pay, Sign out and the like, a card, account, privacy and security screens, a system share sheet, a
-  password field, another app, a point or a swipe. The floor is one gate checked as each move goes out, on the element
-  the touch really lands on after its lookup and any scroll (a dry run meets the same gate); a `--policy` file's words
+  password field, another app, a point or a swipe. It reads an element's label, value and id (an icon button's label may
+  be a glyph or an SF Symbol name such as `trash`; the id `delete-row` still holds it), and the common symbol names of
+  delete, send, share, pay and sign out are floor words. A switch with no id and no label is never flipped (listed as
+  skipped); a flip whose flip back a pause, a person or a locked phone prevented stops the run naming the switch and
+  what it was. The floor is one gate checked as each move goes out, on the element
+  the touch really lands on after its lookup and any scroll (a dry run meets the same gate, `force` too); a `--policy` file's words
   and its `explore.skip` list only add to it (a caller's policy is combined with `serve --policy`, never put in its
-  place). It answers a permission prompt with its denial, by the button's name;
+  place; a caller's `explore.submit` ids are limited to serve's list). An id that carries content is kept in no action
+  signature (the map and the report), as in `seen`. An alert over another app is never answered. It answers a permission prompt with its denial, by the button's name;
   submits no form; sets a flipped switch back; asks nobody. Pause and a person's input stop or hold it; a locked phone
   ends it with `locked` ("the phone reads as locked (or Notification Center is open over it)"), and explore never
   unlocks the phone (the agent may call `unlock`, then explore again). No
@@ -23,8 +29,11 @@
   the text instead of passing it on.
 - Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
   target, a new screen in the way) and touches nothing; `repair: "apply"` tries up to 3 candidates per break, each a real
-  touch through the same skip floor, accepts one only when its check holds and the whole script then runs to its end,
-  and keeps a repair only after the repaired file itself has replayed green from the script's fresh start; then it
+  touch through the same skip floor (and so is its way back after a rejected one: a saved road through Sign out is never
+  driven), accepts one only when its check holds and the whole script then runs to its end,
+  and keeps a repair only after the repaired file itself has replayed green from the script's fresh start, every step
+  through the skip floor (apply takes about twice as long as a plain replay: the client waits up to 8 minutes, and
+  nothing is kept when the client stopped waiting); then it
   writes `<script>.repaired.json` and `<script>.repair.md` beside the script (the original is unchanged). A script that
   can't start fresh (`"fresh": false`, or no app) is only suggested: `apply` and `--adopt` refuse it. A failing
   `expect`, a typing step, a native Back and a draftsOnly script are never repaired; at most 5 repairs a run; every

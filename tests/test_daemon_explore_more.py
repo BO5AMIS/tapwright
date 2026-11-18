@@ -110,7 +110,7 @@ def test_a_fixture_is_typed_by_reference_and_its_value_is_in_no_file_answer_or_l
     async def go():
         d = explored(tmp_path, actions=ActionLog(tmp_path / "log"))
         stop, task = await started(d)
-        r = await d.run_tool("a", "explore", {"fill": "fixture:trip.destination", "account": "tester2"}, accounts=vault(tmp_path))
+        r = await d.run_tool("a", "explore", {"fill": "fixture:trip.destination"}, accounts=vault(tmp_path))
         assert [t for t, *_ in d.session.typed] == [VALUE]  # typed on the phone, by reference
         await d.maps.flush()
         shown = r["text"] + every_text(tmp_path / "explore", tmp_path / "maps", tmp_path / "log")
@@ -121,13 +121,13 @@ def test_a_fixture_is_typed_by_reference_and_its_value_is_in_no_file_answer_or_l
     run(go)
 
 
-def test_fill_and_account_name_only_entries_marked_explore(tmp_path):
+def test_fill_names_only_entries_marked_explore(tmp_path):
     async def go():
         d = explored(tmp_path)
         stop, task = await started(d)
         loose = vault(tmp_path, marked=False)
         for bad in ({"fill": "fixture:trip.destination"}, {"fill": "fixture:home.street"}, {"fill": "fixture:trip.nothing"},
-                    {"fill": "fixture:ghost.x"}, {"account": "tester2"}):
+                    {"fill": "fixture:ghost.x"}):
             with pytest.raises(Refused) as e:
                 await d.run_tool("a", "explore", bad, accounts=loose)
             assert e.value.code in ("bad_params", "not_found") and VALUE not in str(e.value), bad

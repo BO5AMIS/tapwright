@@ -233,7 +233,7 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         # Request authentication remains mandatory.
         scope, rules = None, None
         tool = request.path_params["name"]
-        if tool in FLOOR_TOOLS:
+        if tool in FLOOR_TOOLS and (tool != "replay" or args.get("repair") is not None):
             # (1.8) explore's and a repair's skip floor alone reads the caller's policy: its words only add to what those
             # moves never touch (AGENT-TOOLS §25.5); it lets nothing through and restricts no other call. A bad one is refused,
             # so a skip list the user wrote is never lost without a word.

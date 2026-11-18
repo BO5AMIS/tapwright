@@ -36,6 +36,13 @@ SUBMIT_WORDS = ("Save", "Submit", "Continue", "Sign in", "Log in", "Sign up", "R
 SHEET_MARKERS = ("ActivityListView", "ActivityContentView")
 # an alert's answers the explorer may give, best first: it denies and cancels, it never allows (§25.5, §28.4)
 DENY_BUTTONS = ("Don't Allow", "Not Now", "Ask App Not to Track", "Cancel", "Dismiss", "Close", "Later", "No Thanks")
+# (review R180 H2) what an icon button's label is when it has no words: the SF Symbol's own name (`trash`, `paperplane.fill`,
+# `square.and.arrow.up`), which no word of the lists above matches. The floor holds these too: delete, send, share, pay, sign
+# out, block, report
+SYMBOL_WORDS = ("trash", "xmark.bin", "paperplane", "square.and.arrow.up", "arrow.up.message", "cart", "creditcard",
+                "dollarsign", "person.badge.minus", "person.crop.circle.badge.minus", "minus.circle",
+                "rectangle.portrait.and.arrow.right", "rectangle.portrait.and.arrow.forward", "door.left.hand.open",
+                "arrowshape.turn.up.right", "hand.raised", "exclamationmark.bubble")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NOT_WORD = re.compile(r"[^A-Za-z0-9]+")
 
@@ -57,10 +64,19 @@ def id_words(identifier: str) -> str:
 
 
 def name_of(element: ui.Element) -> str:
-    """What the floor matches a word against: the element's own label or text; an input's label only (what was typed in it
-    is data, §11.1); an element with neither, such as an icon button, its id split into words (§25.5, for the explorer only)."""
+    """What a refusal calls the element: its own label or text; an input's label only (what was typed in it is data, §11.1);
+    an element with neither, such as an icon button, its id split into words (§25.5, for the explorer only)."""
     own = element.label if element.role == "input" else element.text
     return own if own else id_words(element.identifier)
+
+
+def names_of(element: ui.Element) -> tuple[str, ...]:
+    """Every name the floor matches a word against: the label, the value and the id as words, always (review R180 H2). A
+    React Native icon button's label is its icon font's glyph (a private-use character) and a UIKit one's its SF Symbol name
+    (`trash`): its id (`delete-row`) is the only place its meaning shows. The floor only narrows, so another source can't
+    loosen it. An input's value is what was typed in it, data (§11.1): never matched."""
+    value = "" if element.role == "input" else element.value
+    return tuple(dict.fromkeys(t for t in (element.label, value, id_words(element.identifier)) if t))
 
 
 def _first(words: tuple[str, ...], text: str) -> str | None:
@@ -76,7 +92,8 @@ class Floor:
                  submit: tuple[str, ...] | None = None) -> None:
         own = rules.apps.get(app, policy.AppWords())
         self.app = app
-        self.floor_words = (*policy.DEFAULT_CONFIRM, *REACH_OTHERS, *grants.PAYMENT_WORDS, *grants.ACCOUNT_WORDS, *CARD_WORDS)
+        self.floor_words = (*policy.DEFAULT_CONFIRM, *REACH_OTHERS, *grants.PAYMENT_WORDS, *grants.ACCOUNT_WORDS, *CARD_WORDS,
+                            *SYMBOL_WORDS)
         self.policy_words = (*rules.block, *rules.confirm, *(own.block or ()), *(own.confirm or ()))
         self.skip_words = tuple(rules.explore.skip if skip is None else skip)
         self.submit_ids = frozenset(rules.explore.submit if submit is None else submit)  # ids the file lets it treat as a submit
@@ -95,8 +112,11 @@ class Floor:
         return None
 
     def element(self, element: ui.Element) -> Skip | None:
-        """The skip for one element, or None."""
-        return self.named(name_of(element))
+        """The skip for one element, or None: its label, its value and its id are each read (`names_of`); any hit holds it."""
+        for name in names_of(element):
+            if (hit := self.named(name)) is not None:
+                return hit
+        return None
 
     def recipients(self, element: ui.Element, items: list[ui.Element]) -> list[ui.Element]:
         """Every element a touch on `element` could land on or act through: itself, what lies inside its rect (a row's own
@@ -142,8 +162,9 @@ class Floor:
         if element.identifier and element.identifier in self.submit_ids:
             return None
         for each in self.recipients(element, items):
-            if (word := _first(SUBMIT_WORDS, name_of(each))) is not None:
-                return Skip("may_submit", word)
+            for name in names_of(each):
+                if (word := _first(SUBMIT_WORDS, _plain(name))) is not None:
+                    return Skip("may_submit", word)
         return None
 
 

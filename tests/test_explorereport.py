@@ -129,16 +129,17 @@ def test_the_defaults_and_the_ranges():
     assert exploretool.parse({"minutes": 1, "steps": 5000, "depth": 20, "fill": "test-data", "continue": True}).budget.depth == 20
     assert exploretool.parse({"fill": "fixture:trip_data.destination"}).fill == "fixture:trip_data.destination"
     for bad in ({"minutes": 0.5}, {"minutes": 60.1}, {"steps": 0}, {"steps": True}, {"depth": 0}, {"depth": "8"},
-                {"fill": "fixture:trip"}, {"fill": "Test-Data"}, {"from": ""}, {"focus": 3}, {"account": ""}, {"continue": 1}):
+                {"fill": "fixture:trip"}, {"fill": "Test-Data"}, {"from": ""}, {"focus": 3}, {"continue": 1}):
         with pytest.raises(Refused) as e:
             exploretool.parse(bad)
         assert e.value.code == "bad_params", bad
-    assert exploretool.timeout_for({}) == 660 and exploretool.timeout_for({"minutes": 60}) == 3660
+    # (review R180 L9) the budget, a minute for the report and 5 minutes for a person's waits, which `minutes` doesn't count
+    assert exploretool.timeout_for({}) == 960 and exploretool.timeout_for({"minutes": 60}) == 3960
 
 
 def test_the_mcp_timeout_holds_the_whole_budget():
     from tapwright import mcp_server
-    assert mcp_server._timeout("explore", {"minutes": 30}) == 1860 and mcp_server._timeout("explore", {}) == 660
+    assert mcp_server._timeout("explore", {"minutes": 30}) == 2160 and mcp_server._timeout("explore", {}) == 960
 
 
 # ---- the issue lines of audit and ux_check ----

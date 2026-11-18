@@ -871,7 +871,7 @@ def replay(a) -> int:
             # (a failed picture check writes its diff next to the script, and its message ends `(diff: <path>)`)
             answer = client.call("replay", {"path": path, **({"update_references": True} if getattr(a, "update_references", False) else {}),
                                             **({"repair": repair} if repair else {})},
-                                 "cli-replay", timeout=200.0)
+                                 "cli-replay", timeout=scriptrepair.APPLY_TIMEOUT if repair == "apply" else 200.0)
         except client.DaemonError as e:
             print(f"{f}: Error {e.code}: {e}")
             kind = "error" if e.code in START_CODES and not str(e).startswith("Ran ") else "failed"
@@ -922,7 +922,8 @@ def explore(a, sleep=time.sleep) -> int:
     """`tapwright explore`: the same search as the `explore` tool (AGENT-TOOLS §25.2), from the command line, with the same
     report. Exit 0: it ended and found nothing. 1: it ended with findings, a crash included. 2: it couldn't start (no phone,
     no app, a bad flag), or a person or a pause stopped it before the end (the report is still written). When the phone is
-    busy before the run starts it waits up to 10 minutes, then says `skipped: the phone was in use` and exits 2."""
+    busy with another agent's call before the run starts it waits up to 10 minutes, then says `skipped: the phone was in use`
+    and exits 2; a person on the phone at the start ends the run `busy` at once (exit 2, review R180 L10)."""
     import re
     from . import client, exploretool, policy as policies
     apps = [x.strip() for x in (a.apps or "").split(",") if x.strip()]
@@ -939,7 +940,7 @@ def explore(a, sleep=time.sleep) -> int:
         print(f"tapwright explore: the policy file can't be used: {e}")
         return 2
     args: dict = {k: v for k, v in (("minutes", a.minutes), ("steps", a.steps), ("depth", a.depth), ("from", a.start),
-                                    ("focus", a.focus), ("fill", a.fill), ("account", a.account)) if v is not None}
+                                    ("focus", a.focus), ("fill", a.fill)) if v is not None}
     if a.keep_going:
         args["continue"] = True
     client.set_scope(apps, a.dedicated, True) if whole else client.set_scope(apps, a.dedicated)
@@ -1177,7 +1178,6 @@ def main() -> int:
     p.add_argument("--fill", metavar="MODE", help='"test-data" (a fake value into fields whose id ends -test-safe) or '
                                                   '"fixture:<name>.<field>"; default: type nothing')
     p.add_argument("--continue", dest="keep_going", action="store_true", help="go on after a crash")
-    p.add_argument("--account", metavar="NAME", help='a vault account marked "explore": true, for the way back after a reset')
     p.add_argument("--apps", metavar="APP", help="the one app to search, as a bundle id or exact name (default: the app in front)")
     p.add_argument("--dedicated", action="store_true", help="the phone is kept for testing")
     p.add_argument("--phone", action="store_true", help="the phone is dedicated to automation (1.7)")

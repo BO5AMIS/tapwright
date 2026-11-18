@@ -26,9 +26,9 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, NoReturn, Protocol
 
-from . import explored, explorefloor, findings, mapfile, places, policy, roads, ui
+from . import explored, explorefloor, findings, links, mapfile, places, policy, roads, ui
 from .control import Refused
 
 MINUTES, STEPS, DEPTH = 10.0, 500, 8  # §25.2's defaults
@@ -51,6 +51,17 @@ MOVE_TOOLS = ("tap", "back")  # the moves a way is driven by: never a long_press
 
 
 _CODE = re.compile(r"^[a-z_]{1,40}$")
+NO_NAME = "no_name"  # a switch with no id and no label: skipped, never flipped (review R180 M2)
+
+
+def _sig_names(e: ui.Element) -> tuple[str | None, str | None, str | None]:
+    """(id, label, text) an action's signature may use (review R180 M5, the rule W158 gave `seen`): an id only when a
+    developer wrote it (ui.structural_id) and it holds no account's value; an id that carries content (Calendar's
+    `event-shown:<title>`) drops its label and text too, which say the same content, so the signature is `role@bucket`."""
+    if roads.content_id(e):
+        return None, None, None
+    ident = e.identifier if e.identifier and not ui.private(e.identifier) else None
+    return ident, e.label or None, e.value or None
 
 
 def _code(moved: "Moved") -> str:
@@ -91,6 +102,7 @@ class Moved:
     detail: str = ""
     settled: float = 0.0
     left: bool = False  # the daemon says another app came to the front after the touch (and brought the app back): §25.7
+    word: str | None = None  # a `not_allowed` refusal's policy word: the floor holds the element itself (review R180 L7)
 
 
 @dataclass(frozen=True)
@@ -341,6 +353,12 @@ class Explorer:
         one whose value can't be read is left untried (False). A flip that can't be shown to be restored stops the run."""
         element = action.element
         assert element is not None
+        if not element.identifier and not element.label:
+            # (review R180 M2) nothing names it but its place: after the flip it can't be told from another switch there, so
+            # it is never flipped (its value is its state, never its name), and the report lists it as skipped
+            self.skipped[(place, action.sig)] = Skipped(place, action.sig, NO_NAME)
+            self._mark(place, action.sig, "refused", code=NO_NAME)
+            return True
         items = [e for e in tree.items if not e.in_alert]
         held = self.floor.touch(element, items)
         if held is not None:
@@ -361,19 +379,28 @@ class Explorer:
         if moved.code is not None:
             await self._refused(place, action, moved)
             return True
-        now = await self._toggle_value(place, action)
+        # from the flip to the read after the flip back, nothing ends the run but a flip that can't be shown to be restored
+        # (review R180 M1): a pause, a person, a locked phone or the budget in between stops the run naming the switch left
+        # changed and what it was (it doesn't fight the person: the flip back is tried once, never waited for)
+        try:
+            now = await self._toggle_value(place, action)
+        except (PhoneStop, Halt) as stop:
+            self._toggle_lost(element, before, stop.reason)
         if now is not None and now.checked == before:  # the flip did nothing: nothing to set back
             self._mark(place, action.sig, "same")
             return True
         if now is None or now.checked is None:
-            self._toggle_lost(element)
-        self._spend()  # the flip back is a touch too (and one move for a pause: no gate between the two)
-        back = await self._moved(await self.phone.toggle(ui.Target(ref=now.ref), before))
+            self._toggle_lost(element, before)
+        self.steps += 1  # the flip back is a touch too, which the budget never refuses (one move with the flip, §25.7)
+        back = await self.phone.toggle(ui.Target(ref=now.ref), before)
         if back.code is not None:
-            self._toggle_lost(element)
-        again = await self._toggle_value(place, action)
+            self._toggle_lost(element, before, back.code)
+        try:
+            again = await self._toggle_value(place, action)
+        except (PhoneStop, Halt) as stop:
+            self._toggle_lost(element, before, stop.reason)
         if again is None or again.checked != before:
-            self._toggle_lost(element)
+            self._toggle_lost(element, before)
         self.flipped += 1
         watch = await self.phone.watch(mark)
         if watch.crash is not None:
@@ -395,9 +422,15 @@ class Explorer:
             return None
         return next((a.element for a in self._actions(look.tree, place, False) if a.sig == action.sig and a.element is not None), None)
 
-    def _toggle_lost(self, element: ui.Element) -> None:
-        """A flip that can't be shown to be restored ends the run (§25.7): the phone is left as it is."""
-        self.detail = f"id={element.identifier}" if element.identifier else f'label={element.label or element.value or "?"}'
+    def _toggle_lost(self, element: ui.Element, before: bool | None = None, why: str | None = None) -> NoReturn:
+        """A flip that can't be shown to be restored ends the run (§25.7): the phone is left as it is, and the stop names the
+        switch and the value it had (`id=notify-switch, was on`). `why`: what came between the flip and the flip back (a pause,
+        a person, a locked phone), said in a note."""
+        name = f"id={element.identifier}" if element.identifier else f'label={element.label or "?"}'
+        was = "" if before is None else f", was {'on' if before else 'off'}"
+        self.detail = f"{name}{was}"
+        if why is not None:
+            self.notes.append(f"the switch {name} was flipped and couldn't be set back ({why}); it is left changed{was}")
         raise Halt("toggle_not_restored")
 
     # ---- the run ----
@@ -577,8 +610,10 @@ class Explorer:
 
         def base(e: ui.Element, kind: str) -> tuple[str | None, dict | None]:
             at = explored.bucket(e.x, e.y, e.width, e.height, screen_w, screen_h)
-            sig = explored.signature(element_id=e.identifier or None, label=e.label or None, text=e.value or None,
-                                     role=e.role, position=at, scrub=self.who.scrub)
+            ident, label, text = _sig_names(e)
+            if kind == "toggle":
+                text = None  # (review R180 M2) a switch's value is its state ("1"/"0"): never its name
+            sig = explored.signature(element_id=ident, label=label, text=text, role=e.role, position=at, scrub=self.who.scrub)
             move = roads.move_of("tap", None, e, items, {}) if kind != "row" else None
             return sig, move["target"] if move and "target" in move and "x" not in move["target"] else None
 
@@ -624,7 +659,8 @@ class Explorer:
             rows = sorted(groups[key], key=lambda c: (c.y, c.x))
             if key >= 0:
                 s = lists[key]
-                list_sig = explored.signature(element_id=s.identifier or None, label=s.label or None, text=None, role="scroll",
+                ident, label, _ = _sig_names(s)
+                list_sig = explored.signature(element_id=ident, label=label, text=None, role="scroll",
                                               position=explored.bucket(s.x, s.y, s.width, s.height, screen_w, screen_h),
                                               scrub=self.who.scrub)
             else:
@@ -831,9 +867,11 @@ class Explorer:
             self.map.changed()
 
     async def _refused(self, place: str, action: Action, moved: Moved) -> None:
-        """A touch the phone refused (§25.4 item 7, §28.1): `not_actionable` covered or off screen is a finding."""
-        if moved.code == "not_allowed":
-            self._skip(place, action.sig, explorefloor.Skip("policy"))
+        """A touch the phone refused (§25.4 item 7, §28.1): `not_actionable` covered or off screen is a finding. A `not_allowed`
+        with a policy word (the floor holds the element itself) is a skip, kept for every build; any other `not_allowed` (another
+        app in front, a held screen seen for a moment) is `refused` for this build only (review R180 L7)."""
+        if moved.code == "not_allowed" and moved.word:
+            self._skip(place, action.sig, explorefloor.Skip("policy", moved.word))
         elif moved.code == "not_answering":
             await self._recover_from_crash(place)
         elif moved.code not in RETRY_CODES and moved.code is not None:
@@ -972,7 +1010,7 @@ class Explorer:
         if look.place is not None and await self._reach(place, proven_only=True):
             return True
         link = self.data.get("places", {}).get(place, {}).get("link")
-        if link and look.place is not None:
+        if link and look.place is not None and not links.variables(link):  # (a link that takes params isn't opened: R180 L3)
             self._spend()
             await self._moved(await self.phone.open_url(link))
             if (await self._look(True)).place == place:

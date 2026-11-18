@@ -160,14 +160,17 @@ def _union(*lists: tuple[str, ...] | None) -> tuple[str, ...] | None:
 
 def combined(daemon: Policy, call: Policy) -> Policy:
     """`serve --policy` and a caller's own policy together, for the skip floor of explore and a repair's trials (§25.5): every
-    word of either, in each list (block, confirm, each app's own, `explore.skip`, `explore.submit`). A caller's policy only
-    adds to the daemon's; it never replaces it, so no word of `serve --policy` is lost. The daemon's file is kept."""
+    word of either, in each list (block, confirm, each app's own, `explore.skip`). A caller's policy only adds to the daemon's;
+    it never replaces it, so no word of `serve --policy` is lost. The daemon's file is kept. `explore.submit` loosens the floor
+    (the ids explore may tap on a form), so it goes the other way: a caller's ids are limited to serve's list (the ids on both,
+    in serve's spelling); a caller that names none leaves serve's list as it is (the lead's ruling, review R180)."""
     apps: dict[str, AppWords] = {}
     for bundle in dict.fromkeys([*daemon.apps, *call.apps]):
         a, b = daemon.apps.get(bundle, AppWords()), call.apps.get(bundle, AppWords())
         apps[bundle] = AppWords(_union(a.confirm, b.confirm), _union(a.block, b.block))
-    words = ExploreWords(_union(daemon.explore.skip, call.explore.skip) or (),
-                         _union(daemon.explore.submit, call.explore.submit) or ())
+    asked = {" ".join(w.split()).casefold() for w in call.explore.submit}
+    submit = tuple(w for w in daemon.explore.submit if not asked or " ".join(w.split()).casefold() in asked)
+    words = ExploreWords(_union(daemon.explore.skip, call.explore.skip) or (), submit)
     return Policy(_union(daemon.confirm, call.confirm) or (), _union(daemon.block, call.block) or (), apps,
                   daemon.file if daemon.file is not None else call.file, words)
 

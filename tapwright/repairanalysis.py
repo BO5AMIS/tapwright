@@ -181,16 +181,21 @@ def _candidate(step: dict, brk: Break, screen: Screen, scored: Scored, here: str
                      seen_of(element, screen.items, screen.screen), place=here, names=roads.names_of(element))
 
 
+def road_held(floor: explorefloor.Floor, move: dict, names: dict) -> explorefloor.Skip | None:
+    """The skip floor's hold on one road move a repair would make (an inserted road, or its way back after a rejected trial):
+    a floor word in its target or in any name the element had (the id as words). None when the floor holds nothing."""
+    words = [*aim_names(move.get("target")), *(explorefloor.id_words(v) if k == "id" else v
+                                                for k, v in (names or {}).items() if isinstance(v, str))]
+    return next((hit for w in words if (hit := floor.named(w)) is not None), None)
+
+
 def _road(step: dict, expected: str, here: str, screen: Screen) -> Analysis:
     """A new screen in the way: the proven road from where the app is to the place the step expected, put before it."""
     road = screen.way(here, expected)
     if not road:
         return Analysis("none", reason=f"the step ran on {expected}, the app is on {here}, and no proven road of taps leads there")
-    for move, names in road:
-        words = [*aim_names(move.get("target")), *(explorefloor.id_words(v) if k == "id" else v
-                                                    for k, v in names.items() if isinstance(v, str))]
-        if any(screen.floor.named(w) is not None for w in words):
-            return Analysis("none", reason=f"a road move to {expected} can't be inserted: it carries a policy word")
+    if any(road_held(screen.floor, move, names) is not None for move, names in road):
+        return Analysis("none", reason=f"a road move to {expected} can't be inserted: it carries a policy word")
     moves = [move for move, _ in road]
     shown = ", ".join(step_name(m) for m in moves)
     return Analysis("ok", [Candidate("road", f"insert {shown} to reach {expected}, then {step_name(step)}", f"before it: {shown}",

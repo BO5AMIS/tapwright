@@ -31,7 +31,13 @@ NO_GUIDE = "guide isn't offered yet; explore chooses by itself."  # §25.1
 NOT_A_STEP = "explore is a tool of its own, never a step of run, a script or a route"  # §25.1
 IN_JOURNEY = ("in a journey, explore is off: a user can't run a search of the whole app; finish the journey, then use explore")
 ALREADY = "another explore is running on this phone; wait for it to end."
-KEYS = ("minutes", "steps", "depth", "from", "focus", "fill", "continue", "account", "guide")
+KEYS = ("minutes", "steps", "depth", "from", "focus", "fill", "continue", "guide")
+# (review R180 M3) §25.8's sign-in after a reset can't pass the skip floor on the daemon (the password is never typed, a form's
+# submit never tapped): 1.8.0 doesn't offer it, and says so in plain words
+NO_ACCOUNT = ("account isn't offered in Tapwright 1.8.0: explore never signs in again after a reset (the skip floor never "
+              "types a password or submits a form). Sign the app in with a test account before explore, and leave account "
+              "out; a reset that lands signed out ends that branch.")
+CLIENT_MARGIN = 5 * 60  # seconds: a person's waits are not counted in `minutes` (review R180 L9)
 FILL_HELP = 'fill must be "none", "test-data" or "fixture:<name>.<field>"'
 FIXTURE = re.compile(r"^fixture:([A-Za-z0-9_]{1,64})\.([A-Za-z0-9_]{1,64})$")
 READ_TRIES = 5  # a look that hits a dropped line is made again this many times, a second apart
@@ -53,17 +59,18 @@ class Args:
     focus: str | None
     fill: str
     keep_going: bool
-    account: str | None
 
 
 def parse(args: dict) -> Args:
     """The call's arguments, checked (§25.2): `bad_params` names what is allowed; any `guide` but `"none"` is `unsupported`."""
-    unknown = [k for k in args if k not in KEYS]
+    if args.get("account") is not None:
+        raise Refused("unsupported", NO_ACCOUNT)
+    unknown = [k for k in args if k not in KEYS and not (k == "account" and args[k] is None)]
     if unknown:
         raise Refused("bad_params", f"explore doesn't take {', '.join(unknown)}; it takes {', '.join(KEYS)}.")
     if args.get("guide") not in (None, "none"):
         raise Refused("unsupported", NO_GUIDE)
-    for key in ("from", "focus", "account"):
+    for key in ("from", "focus"):
         value = args.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise Refused("bad_params", f"{key} must be a non-empty name, not {value!r}")
@@ -80,13 +87,15 @@ def parse(args: dict) -> Args:
         budget = explore.Budget(**given).check()
     except ValueError as e:
         raise Refused("bad_params", str(e)) from None
-    return Args(budget, args.get("from"), args.get("focus"), fill, keep, args.get("account"))
+    return Args(budget, args.get("from"), args.get("focus"), fill, keep)
 
 
 def timeout_for(args: dict) -> float:
-    """How long the MCP client waits for the daemon's answer: the time budget and a minute for the report (§25.2)."""
+    """How long the client waits for the daemon's answer: the time budget, a minute for the report (§25.2), and a margin for
+    the time a person's touches made the run wait, which `minutes` doesn't count (review R180 L9)."""
     minutes = args.get("minutes")
-    return (float(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) else explore.MINUTES) * 60 + 60
+    budget = float(minutes) if isinstance(minutes, (int, float)) and not isinstance(minutes, bool) else explore.MINUTES
+    return budget * 60 + 60 + CLIENT_MARGIN
 
 
 def jpeg_of(png: bytes) -> bytes:
@@ -144,7 +153,10 @@ class DaemonPhone:
     def _own(self, tree: ui.Tree) -> ui.Tree:
         """Another app's screen never goes further than here: its elements are dropped, only that it is another app stays."""
         if tree.app is not None and tree.app[1] != self.bundle:
-            return dataclasses.replace(tree, items=[], offscreen=[], behind=[])
+            # an alert stays only when it is this app's own permission prompt: another app's alert is never answered
+            # (review R180 L1: after a link opened Safari, its "OK" is a touch in another app)
+            alert = tree.alert if tree.alert is not None and self.d._alert_ours(self.bundle, tree.alert, tree.app[1]) else None
+            return dataclasses.replace(tree, items=[], offscreen=[], behind=[], alert=alert)
         return tree
 
     # ---- moves ----
@@ -153,7 +165,8 @@ class DaemonPhone:
             return Moved(settled=took)
         code = "timeout" if e.code == "reconnecting" else e.code  # (nothing is learned from a dropped line: look, go on)
         word = str(e).split(":", 1)[0].strip().lower()
-        return Moved(code, word if DETAIL.match(word) else "", took)
+        held = POLICY_WORD.search(str(e)) if e.code == "not_allowed" else None
+        return Moved(code, word if DETAIL.match(word) else "", took, word=held.group(1) if held else None)
 
     async def _act(self, name: str, args: dict) -> Moved:
         began = self.d.control.clock()
@@ -357,8 +370,8 @@ class ExploreTools:
         (findings.safe_scrub), never shown as it was."""
         return findings.safe_scrub(self.scrub_everywhere)(text)
 
-    def _explore_fill(self, parsed: Args, bundle: str) -> tuple[explore.Fill, str | None]:
-        """`fill` and `account` checked against the vault (§25.6, §25.8): what they name must be marked `"explore": true`."""
+    def _explore_fill(self, parsed: Args, bundle: str) -> explore.Fill:
+        """`fill` checked against the vault (§25.6): the fixture it names must be marked `"explore": true`."""
         loaded = self._loaded()
         fill = explore.Fill()
         if parsed.fill == "test-data":
@@ -376,15 +389,7 @@ class ExploreTools:
             if entry.apps is not None and bundle not in entry.apps:
                 raise Refused("not_allowed", f'fill: the fixture "{name}" may be typed only in {", ".join(entry.apps)}')
             fill = explore.Fill("fixture", f"${{vault.{name}.{field}}}")
-        account = None
-        if parsed.account is not None:
-            self._vault_ready(loaded)
-            loaded.account(parsed.account, bundle)  # not_found, not_allowed and bad_params as `drive` gives them
-            entry = loaded.vault.get(parsed.account)
-            if entry is None or not entry.explore:
-                raise Refused("bad_params", f'account "{parsed.account}" isn\'t marked "explore": true in the vault file')
-            account = parsed.account
-        return fill, account
+        return fill
 
     @staticmethod
     def _vault_ready(loaded) -> None:
@@ -423,7 +428,7 @@ class ExploreTools:
             raise Refused("not_allowed", d.NO_APPS)
         parsed = parse(args)
         bundle = await self._explore_app(scope)
-        fill, account = self._explore_fill(parsed, bundle)
+        fill = self._explore_fill(parsed, bundle)
         root = self._maps_root()
         places = self.maps.data(root, bundle).get("places", {})
         for key, name in (("from", parsed.start), ("focus", parsed.focus)):
@@ -444,7 +449,7 @@ class ExploreTools:
         rules = d._FLOOR_RULES.get() or d.safety.NONE  # (the caller's policy file: its words only add to the floor)
         explorer = explore.Explorer(phone, explore.MapsPort(self.maps, root, bundle), rules, who, budget=parsed.budget,
                                     start_place=parsed.start, focus=parsed.focus, continue_after_crash=parsed.keep_going,
-                                    clock=self.control.clock, progress=progress, fill=fill, account=account)
+                                    clock=self.control.clock, progress=progress, fill=fill)
         tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
                   d._CRASHES.set(phone.crashes), d._TOUCH_FLOOR.set(explorer.floor))  # (the one dispatch gate of its moves)
         began = datetime.datetime.now(datetime.timezone.utc)

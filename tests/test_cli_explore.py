@@ -5,7 +5,7 @@ from tapwright import cli, client
 
 
 def flags(**more) -> argparse.Namespace:
-    base = dict(minutes=None, steps=None, depth=None, start=None, focus=None, fill=None, keep_going=False, account=None,
+    base = dict(minutes=None, steps=None, depth=None, start=None, focus=None, fill=None, keep_going=False,
                 apps="com.example.app", dedicated=False, phone=False, policy=None, accounts=None, maps=None)
     base.update(more)
     return argparse.Namespace(**base)
@@ -29,12 +29,11 @@ def patched(monkeypatch, answers):
 
 def test_it_sends_what_the_flags_say_and_exits_zero_when_nothing_was_found(monkeypatch, capsys):
     calls, scopes = patched(monkeypatch, [{"text": "Explored 5 places in 1.0 min (40 steps), 0 findings. Stopped: the frontier is empty."}])
-    code = cli.explore(flags(minutes=2.0, steps=50, start="home", fill="test-data", keep_going=True, account="tester2"))
+    code = cli.explore(flags(minutes=2.0, steps=50, start="home", fill="test-data", keep_going=True))
     assert code == 0 and scopes == [(["com.example.app"], False, False)]
     tool, args, timeout = calls[0]
-    assert tool == "explore" and args == {"minutes": 2.0, "steps": 50, "from": "home", "fill": "test-data", "account": "tester2",
-                                          "continue": True}
-    assert timeout == 180.0 and "Explored 5 places" in capsys.readouterr().out
+    assert tool == "explore" and args == {"minutes": 2.0, "steps": 50, "from": "home", "fill": "test-data", "continue": True}
+    assert timeout == 480.0 and "Explored 5 places" in capsys.readouterr().out
 
 
 def test_findings_are_exit_one(monkeypatch):

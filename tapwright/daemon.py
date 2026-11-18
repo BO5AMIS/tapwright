@@ -3885,6 +3885,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                     # the wait's reads replaced the list: what they found may be another app's screen, and the check
                     # above was on the first read only (Codex, PR #9 cycle 1)
                     self._scope_from_read(scoped)
+            if target is not None and target.kind != "point" and name in TOUCH_FLOOR_TOOLS and _TOUCH_FLOOR.get() is not None:
+                # (review R180 L6) explore's and a repair's moves: the gate judges the element before the keyboard reflex's
+                # touch or a reach scroll goes out, not only before the touch itself (it judges again on the element reached)
+                self._floor_pregate(name, args, target)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
                 if self._missing(s.items, dataclasses.replace(target, index=None)):
                     # an alert hides the app's elements: say so, not "not found". (When only the `index` is
@@ -5716,6 +5720,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         # to refuse. Session is told not to tap: if the focus moved meanwhile, it refuses instead.
         no_tap = bool(field.focused) and self.session.tw_version >= 5
         if a.get("force"):
+            self._floor_gate("type_text", a, field)  # (`force` changes nothing for the skip floor: review R180 L4)
             if point is not None and (key := next((b for b in field.covered_by if b.kind == "Keyboard"
                                                    and ui._holds(b.rect, point)), None)) is not None:
                 # (Opus review 11) a touch there presses a key: it types into the focused field and focuses nothing
@@ -6276,9 +6281,9 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
 
     async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> ui.Target | None:
         """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
-        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
-        has its say on the target first, and again on the element that came on screen when that isn't the one it
-        checked. Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
+        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. Under the skip
+        floor (explore's and a repair's moves) the dispatch gate judges the target before the scroll, and again the
+        element that came on screen as the touch goes out; an agent's own call has no gate (1.7.5). Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
         before: `off_screen`, or `not_found` further on. Returns the target to act on when it scrolled (the element
         that came on screen, by ref), else None."""
         if name not in REACH_TOOLS:
@@ -6294,6 +6299,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             raise
         if not isinstance(hit, ui.Element) or any(hit is e for e in view.items):
             return None  # (on screen already: the action touches it where it is)
+        self._floor_gate(name, args, hit)  # (no scroll toward what the floor holds: review R180 L6)
         said = ""
         shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
         area = ui.scroll_holding(view.items, hit, s.screen)
@@ -6798,8 +6804,14 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             if a.get("action") == "text":
                 return
             shown, name = self.session.last_alert, a.get("name")
+            if shown is not None and not self._alert_ours(floor.app, shown, bundle):
+                held("an alert over another app")  # (review R180 L1: nothing is touched while another app is in front)
             if shown is None or not isinstance(name, str) or explorefloor.safe_button(shown, floor) != name:
                 held(f"the alert button {name!r}" if isinstance(name, str) else "an alert answered without a button name")
+            return
+        if tool == "back":  # (review R180 H1) a way back is a move too: never in another app than the floor's
+            if (bundle or self._app_bundle()) != floor.app:
+                held("back in another app")
             return
         if tool == "swipe":
             held("a swipe")
@@ -6821,6 +6833,27 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             held(f"{element.role} {explorefloor.name_of(element)}", hit.word)
         if _EXPLORING.get() and tool != "type_text" and (hit := floor.may_submit(element, items)) is not None:
             held(f"{element.role} {explorefloor.name_of(element)}", hit.word)  # (§25.7: a form's submit, unless its id is listed)
+
+    def _alert_ours(self, app: str, alert: ui.Alert, bundle: str | None = None) -> bool:
+        """Is this alert one explore (or a repair) in `app` may answer: shown over that app, or its own permission prompt (iOS
+        draws it in SpringBoard; its title names the app)? Another app's alert (Safari's, after a link) is never answered
+        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the last read's."""
+        front = bundle or self._app_bundle()
+        if front == app:
+            return True
+        name = self.session.app_names.get(app) or ""
+        return front in (SPRINGBOARD, PROMPT_FRONT, None) and bool(name) and name in alert.title
+
+    def _floor_pregate(self, tool: str, a: dict, target: ui.Target) -> None:
+        """The gate on the element a target names, before anything is touched for it (a keyboard reflex, a reach scroll):
+        on the screen or past its edge. A target that doesn't resolve to one element is left to the action to refuse."""
+        s = self.session
+        try:
+            found = ui.resolve([*s.items, *self._off_screen_now()], target)
+        except Refused:
+            return
+        if isinstance(found, ui.Element):
+            self._floor_gate(tool, a, found)
 
     async def _press(self, target: ui.Target, hold_ms: int, proven: bool = False) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4).
@@ -6993,8 +7026,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         action, name = a["action"], a.get("name")
         if action == "cancel":
             name = name or "Cancel"
+        await self._last_checks("alert", a, None, hit=False)  # (first: a dry run meets the same gate, review R180 L5)
         self._dry(a, f"Would {action} alert" + (f" using {name!r}." if name else "."))
-        await self._last_checks("alert", a, None, hit=False)
         if name is not None:
             return await self.session.alert(action, name=name)
         return await self.session.alert(action)

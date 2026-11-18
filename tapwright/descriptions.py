@@ -198,7 +198,7 @@ SHARED = {
         'the map and writes a report folder (findings, each with a script that reaches it). Answers a summary, not '
         'the screen. Optional: `minutes` (10), `steps` (500), `depth` (8), `from`, `focus` (place names), `fill` '
         '(`"none"`, `"test-data"`, `"fixture:<name>.<field>"`: only into fields whose id ends `-test-safe`), '
-        '`continue` past a crash, `account` (a vault account marked `explore`, for the way back after a reset). It '
+        '`continue` past a crash. It never signs in again after a reset (sign the app in first). It '
         'stays in one app, skips Delete, Send, Post, Pay, Sign out and the like, submits no form, allows no permission '
         'prompt and asks no one. A person touching the phone pauses it; a locked phone ends it (it never unlocks). '
         'Not a step of `run`; a call can last its `minutes`.'

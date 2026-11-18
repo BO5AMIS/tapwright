@@ -53,6 +53,7 @@ NOT_IN_MCP: dict[str, set[str]] = {t: {"index"} for t, names in ALLOWED.items() 
 NOT_IN_MCP["replay"] = {"update_references"}
 NOT_IN_MCP["scroll"] = NOT_IN_MCP["scroll"] | {"force"}
 NOT_IN_MCP["wait_for"] = NOT_IN_MCP.get("wait_for", set()) | {"network_idle"}  # Tapline's: answered unsupported, not bad_params
+NOT_IN_MCP["explore"] = {"account"}  # §25.8's, not offered in Tapwright 1.8.0: answered unsupported in plain words (R180 M3)
 
 
 def unknown(tool: str, args: dict) -> list[str]:
