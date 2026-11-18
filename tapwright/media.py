@@ -31,11 +31,14 @@ VIDEO_TW_VERSION = 7  # the runner route version that adds videos
 VIDEO_BRANDS = frozenset({b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"qt  ",
                           b"M4V ", b"M4VH", b"M4VP", b"MSNV", b"dash", b"f4v ", b"XAVC",
                           b"3gp4", b"3gp5", b"3gp6", b"3g2a", b"mmp4"})  # (3GPP and phone cameras: review R179 L6)
-# a vendor's own major brand is still a video when its compatible brands (after the minor version) name an mp4 one
-COMPATIBLE_VIDEO = frozenset({b"isom", b"mp41", b"mp42"})
+# a vendor's own major brand is still a video when its compatible brands (after the minor version) name an mp4 one or
+# QuickTime's (Apple lets a QuickTime-compatible file prefer another major brand: CodeRabbit, PR #19)
+COMPATIBLE_VIDEO = frozenset({b"isom", b"mp41", b"mp42", b"qt  "})
 # an old QuickTime file may start with one of these atoms and no ftyp at all
 QUICKTIME_ATOMS = frozenset({b"moov", b"mdat", b"wide", b"free", b"skip", b"pnot"})
-HEAD = 64  # bytes kept to tell what a file is
+# a video's first bytes kept to tell what it is: the whole ftyp box, every compatible brand in it (CodeRabbit, PR #19:
+# 64 bytes cut the list at 12 brands), up to this cap (about 1000 brands; real files list a handful)
+FTYP_MAX = 4096
 STAGE_ROOT = "tmp/tapwright-media"  # where a video is copied in the runner's container (the runner takes files only there)
 CHUNK = 1024 * 1024
 
@@ -149,8 +152,8 @@ def _video(raw: str, path: Path, size: int) -> Video:
         with open(path, "rb") as f:
             before = Stamp.of(os.fstat(f.fileno()))
             while chunk := f.read(CHUNK):
-                if len(head) < HEAD:
-                    head += chunk[:HEAD - len(head)]
+                if len(head) < FTYP_MAX:
+                    head += chunk[:FTYP_MAX - len(head)]
                 digest.update(chunk)
             after = Stamp.of(os.fstat(f.fileno()))
     except OSError as e:
@@ -175,7 +178,8 @@ def looks_like(suffix: str, data: bytes) -> bool:
         if data[4:8] == b"ftyp":
             if data[8:12] in VIDEO_BRANDS:
                 return True
-            end = min(len(data), int.from_bytes(data[:4], "big"))  # compatible brands: byte 16 to the box's end
+            # compatible brands: byte 16 to the box's end (never a later atom's bytes), as far as `data` holds
+            end = min(len(data), int.from_bytes(data[:4], "big"))
             return any(data[i:i + 4] in COMPATIBLE_VIDEO for i in range(16, end - 3, 4))
         return suffix == ".mov" and len(data) >= 8 and data[4:8] in QUICKTIME_ATOMS
     return data[4:8] == b"ftyp"

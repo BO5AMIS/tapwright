@@ -11,7 +11,10 @@
   video add sweeps folders older than an hour (after a dropped line the reconnect stops the runner, so only that sweep
   removes them). An add whose end isn't known answers `timeout`, and the next `media` call with the same files says
   so once instead of adding them twice. While a video is copied and imported the heartbeat waits and other calls
-  answer `busy` ("a video is being added to Photos"), as for iOS's photo prompt. Videos need the runner's route
+  answer `busy` ("a video is being added to Photos"), as for iOS's photo prompt; no other add starts until it is done,
+  however long the copy takes. A pause or a person driving is checked again once the copy is done, right before the
+  add goes to the runner: paused, nothing is sent, the staged folder is removed and the add answers `paused`. A vendor
+  brand counts as a video by any mp4 or QuickTime compatible brand in its `ftyp` box. Videos need the runner's route
   version 7 (`tw-16.15.3.7`); an older runner answers `unsupported`, naming `tapwright setup --force`, and still adds
   pictures. The MCP client and `tapwright call media` wait up to 15 minutes. Not yet proven on the phone.
 - `type_text` with an empty text and `replace` (the default) clears the field, as in 1.7.8, without the empty key

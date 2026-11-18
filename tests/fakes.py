@@ -1,6 +1,7 @@
 """Stand-ins for tests: a clock that runs only when told, and (Task 5) a fake Session."""
 import dataclasses
 import asyncio
+import inspect
 import io
 import time
 
@@ -458,7 +459,9 @@ class FakeSession:
         if self.stage_gate is not None and any(hasattr(p, "digest") for p in pictures):
             await self.stage_gate.wait()
         if sent is not None:
-            sent()
+            done = sent()  # (the daemon's is a coroutine: it checks the pause again first)
+            if inspect.isawaitable(done):
+                await done
         if self.photos_gate is not None:
             await self.photos_gate.wait()
         self.photos = getattr(self, "photos", [])

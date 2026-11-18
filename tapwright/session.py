@@ -9,7 +9,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Awaitable, Callable
 
 from . import device as device_module
 from . import media, store, trace, ui
@@ -836,7 +836,7 @@ class Session:
         return value if isinstance(value, dict) else {}
 
     async def photos_add(self, pictures: "list[tuple[str, bytes] | media.Video]",
-                         sent: "Callable[[], None] | None" = None) -> list[str]:
+                         sent: "Callable[[], Awaitable[None]] | None" = None) -> list[str]:
         """Add pictures (file name, bytes) and videos (media.Video) to the photo library with add-only access; the
         local identifiers made, in order. It may wait for the person to allow the runner once. Never sent twice.
         Pictures alone go in route version 3's shape. A video is first copied into the runner's own container over
@@ -845,7 +845,8 @@ class Session:
         failed; after a timeout (the runner's own, or no answer) the library may still be moving it, so the runner
         removes the files when its change ends, and the next video add sweeps folders older than STAGE_STALE (after a
         dropped line the reconnect stops the runner, and only that sweep removes them). `sent()` is called right before
-        the add goes to the runner (after the copy)."""
+        the add goes to the runner (after the copy); it may refuse the add (a pause): then nothing is sent and the
+        staged folder is removed."""
         videos = [(i, item) for i, item in enumerate(pictures) if isinstance(item, media.Video)]
         if not videos:
             def encode() -> dict:
@@ -853,7 +854,7 @@ class Session:
                         "names": [name for name, _ in pictures]}
             body = await asyncio.to_thread(encode)  # (tens of MB: not on the event loop)
             if sent is not None:
-                sent()
+                await sent()
             value = (await self._call("POST", PHOTOS_ADD_PATH, body, timeout=PHOTOS_WAIT)).get("value")
             return _identifiers(value)
         runner = store.load_state().get("runner_id")
@@ -878,7 +879,7 @@ class Session:
                                   for i, item in enumerate(pictures)]}
             body = await asyncio.to_thread(encode_items)
             if sent is not None:
-                sent()
+                await sent()
             remove = False
             try:
                 answer = await self._call("POST", PHOTOS_ADD_PATH, body,

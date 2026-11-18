@@ -37,7 +37,7 @@ from .actionlog import ActionLog
 from . import device as device_module
 from . import session as session_module
 from . import shot as shotlib
-from .control import TAP_MS, Controller, Refused, classify
+from .control import STILL_WANTED, TAP_MS, Controller, Refused, classify
 from .errors import PHONE_LOCKED
 from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
                      Unanswered, PhoneNotFound, PASSCODE_WORDS)
@@ -992,6 +992,11 @@ VIDEO_PROMPT_BUSY = ("busy: a video is being added to Photos (from media), and i
                      "{left} s at most. If the photo prompt is on the phone, ask your user to answer it; then try "
                      "again.")
 HOLD_WORDS = {"prompt": PHOTO_WAIT_BUSY, "copy": VIDEO_BUSY, "video": VIDEO_BUSY, "video-prompt": VIDEO_PROMPT_BUSY}
+# (CodeRabbit, PR #19) one add at a time when a video is in it: whatever the first add's hold budget says, a second add
+# would queue behind its import on the runner, and the one hold can't cover both
+VIDEO_ADD_GOING = ("busy: another media add with a video is still going on (it is copied to the phone, then the photo "
+                   "library imports it), or a video add would queue behind another add that is still going on. Try "
+                   "again once it is done.")
 EARLIER_UNKNOWN = ("the earlier add of these same pictures or videos ended without an answer from the phone ({why}): the "
                    "photo library may still have added them. Check Photos > Recently Added first; if they aren't "
                    "there, call media again with them and they are added again.")
@@ -5287,6 +5292,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 if flight is not None and self._photo_wait_left() is None:
                     self._claim(task, flight)  # its hold ran out while it still goes on (the wait isn't moved: cycle 3)
             else:
+                going = [f for t, f in self._media_flights.items() if not t.done()]
+                if any(f.video_bytes for f in going) or (video_bytes and going):
+                    # an add with a video whose hold ran out (a copy slower than its budget) is still copying or
+                    # importing, or a video add would start behind another add: never two at once, since one hold
+                    # can't cover both and the second's end would clear it under the first (CodeRabbit, PR #19)
+                    raise Refused("busy", VIDEO_ADD_GOING)
+
                 async def gate() -> None:  # a person driving or a pause refuse it, as for a touch; the wait isn't held in the queue
                     return None
                 await self.control.agent(gate)
@@ -5294,7 +5306,17 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 flight = _Flight(asks=True if asks is None else asks, video_bytes=video_bytes)
                 own: list[asyncio.Future] = []
 
-                def sent() -> None:
+                async def sent() -> None:
+                    # Right before the add goes out (after a video's copy, which may take minutes): a pause or a person
+                    # driving since the gate is checked again, as for a touch. Paused: nothing is sent, the session
+                    # removes the staged folder, and the add answers `paused` (CodeRabbit, PR #19). The caller having
+                    # left doesn't stop it here: the add was asked for and goes on (STILL_WANTED is the call's, not
+                    # the add's).
+                    token = STILL_WANTED.set(None)
+                    try:
+                        await self.control.agent(gate)
+                    finally:
+                        STILL_WANTED.reset(token)
                     # the add goes out now: the pick-up window and the hold count from here, not from the copy's start
                     # (review R179 L1, L3); iOS asks (when it does) only now
                     flight.went_out.set()
@@ -5361,7 +5383,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             return None
 
     async def _media_added(self, client_id: str, pictures: "list[tuple[str, bytes] | medialib.Video]", names: list[str],
-                           sent: "Callable[[], None] | None" = None) -> None:
+                           sent: "Callable[[], Awaitable[None]] | None" = None) -> None:
         ids = await self._media_write(lambda: self.session.photos_add(pictures, sent=sent),
                                       f"adding the {medialib.named(names)}", queued=False)
         if len(ids) != len(names):

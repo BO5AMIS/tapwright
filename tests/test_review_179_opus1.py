@@ -80,7 +80,7 @@ def test_a_video_add_the_runner_timed_out_is_timeout_and_reported_once_before_it
         async def timed_out(items, sent=None):
             sent_adds.append([p[0] for p in items])
             if sent is not None:
-                sent()
+                await sent()
             raise device_module.RunnerTimedOut(TIMED_OUT)
         d.session.photos_add = timed_out
         e = await refused(d, {"add": clips[:1]})
