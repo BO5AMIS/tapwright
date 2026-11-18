@@ -24,7 +24,7 @@ Follow [setup reference](references/setup.md). Install a pinned release in its o
 7. On timeout, inspect before retrying; the input may have arrived. On stale or ambiguous targets, inspect and resolve again. Respect pause, ownership and human input. Report actual signing/passcode/biometric gates without attempting to bypass them.
 8. A locked phone answers `locked`: call `unlock`, which types the passcode saved for this phone (the `--accounts` file's `phone.passcode`; you never see or send it) on iOS's lock screen. With none saved, or when `unlock` answers `locked` with its reason, ask the user to unlock the phone. Never Face ID, Touch ID or the XCTest passcode prompt: a person answers those. Locking the phone no longer stops an agent that has the passcode; the owner stops you with Pause in the live view.
 
-For structured QA, use `journey` and `ux_check` with the [persona guide](references/personas.md). `media` imports and removes test fixtures; ordinary Photos UI is available for other library workflows.
+For structured QA, use `journey` and `ux_check` with the [persona guide](references/personas.md). `media` imports and removes test fixtures, pictures and videos (mp4, mov, m4v); ordinary Photos UI is available for other library workflows.
 
 ## Errors
 

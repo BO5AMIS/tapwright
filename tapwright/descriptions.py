@@ -40,8 +40,8 @@ SHARED = {
     'type_text': (
         'Type `text` into an input. `target` picks the input; without it, the focused input, else the only one, '
         'else `ambiguous`; with no input at all, `not_found`. `replace` (default true) clears the field first; '
-        "false appends. `submit: true` then presses the keyboard's submit key. `force` is as for `tap`. Answers "
-        '`Typed into <element>. Value is now "…"` and what changed.'
+        "false appends; an empty `text` with `replace` clears the field. `submit: true` then presses the keyboard's "
+        'submit key. `force` is as for `tap`. Answers `Typed into <element>. Value is now "…"` and what changed.'
     ),
     'scroll': (
         'Scroll content: `down` shows what is below. `direction` (default `down`), `amount` (0.1-1.0 of the '
@@ -200,6 +200,12 @@ SHARED = {
 }
 
 EXTRA = {
+    'media': (
+        "also adds videos (mp4, mov, m4v; 200 MB each, 400 MB and 5 a call) once the phone's runner is current: an older one "
+        "answers `unsupported`, naming `tapwright setup --force`. A video is copied to the phone first, so a big one "
+        'takes a while; meanwhile other calls answer `busy` ("a video is being added to Photos"). `tapwright call '
+        'media` waits up to 900 s.'
+    ),
     'look': (
         'reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture '
         'that no element carries, as `o1`, `o2`… (a target ref).'

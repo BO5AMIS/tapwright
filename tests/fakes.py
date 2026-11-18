@@ -1,6 +1,7 @@
 """Stand-ins for tests: a clock that runs only when told, and (Task 5) a fake Session."""
 import dataclasses
 import asyncio
+import inspect
 import io
 import time
 
@@ -451,8 +452,17 @@ class FakeSession:
         self._record("peek_alert")
         return self.last_alert
 
-    async def photos_add(self, pictures):
-        self._record(("photos_add", tuple(name for name, _ in pictures)))
+    stage_gate: "asyncio.Event | None" = None  # while set and not set(): a video's copy to the phone takes that long
+
+    async def photos_add(self, pictures, sent=None, asks=False):
+        self.photos_asks = asks
+        self._record(("photos_add", tuple(p[0] for p in pictures)))
+        if self.stage_gate is not None and any(hasattr(p, "digest") for p in pictures):
+            await self.stage_gate.wait()
+        if sent is not None:
+            done = sent()  # (the daemon's is a coroutine: it checks the pause again first)
+            if inspect.isawaitable(done):
+                await done
         if self.photos_gate is not None:
             await self.photos_gate.wait()
         self.photos = getattr(self, "photos", [])

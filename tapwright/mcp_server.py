@@ -160,6 +160,8 @@ def _first_answer_notice() -> str | None:
 
 TIMEOUT = 120.0
 LONG_TIMEOUT = 200.0  # a batch may take up to 120 s on the phone; media waits up to 150 s for iOS's question to the person
+MEDIA_TIMEOUT = 900.0  # media: a video is copied to the phone (400 MB at most), then the runner may wait 2 minutes for
+# iOS's question to the person and up to 10 for the library's import
 EXPORT_TIMEOUT = 600.0  # a journey's stop with export: the report is pushed to GitHub (journey_export)
 
 
@@ -167,7 +169,9 @@ def _timeout(tool: str, args: dict) -> float:
     """How long this client waits for the daemon's answer to one tool call."""
     if tool == "journey" and args.get("stop") and args.get("export") is not None:
         return EXPORT_TIMEOUT
-    return LONG_TIMEOUT if tool in ("run", "replay", "media", "drive") else TIMEOUT
+    if tool == "media":
+        return MEDIA_TIMEOUT
+    return LONG_TIMEOUT if tool in ("run", "replay", "drive") else TIMEOUT
 
 
 BRIEF_DEFAULT = False  # `tapwright mcp --brief`: every action and run asks for a brief answer unless it says otherwise

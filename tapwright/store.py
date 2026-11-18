@@ -33,10 +33,11 @@ SERVE_FILE = HOME / "serve.json"  # the running `tapwright serve`: port, pid, to
 # /wda/tw/hit: the element a touch at a point goes to), so a covered target is refused. Every v4 route is kept.
 # tw-16.15.3.6 (tw version 6) binds hit snapshots to the original AX element and process identity. The paired
 # client requires identity=verified and refuses unavailable or unproven v6 hit checks.
+# tw-16.15.3.7 (tw version 7, 1.7.9) adds videos to the photo add (`items`, a staged file moved into the library).
 WDA_SOURCES = {
     "appium": ("appium/WebDriverAgent", "v16.15.3",
                "2176793538d902f6b1e61291e9997f68d306541f222ea715d256a7c6ce9d4fc5", "16.15.3"),
-    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.6", "5562fb2c0df223ea675c7be57e0f70e8e26c692f20012b7ae9783f64c4a3a081", "fork-tw-16.15.3.6"),
+    "fork": ("bo5amis/WebDriverAgent", "tw-16.15.3.7", "50558af70c0a84adcdb70b5216ac36e4f806d08f9bc0aa976f326e9bfe9d23ac", "fork-tw-16.15.3.7"),
 }
 WDA_DEFAULT = "fork"
 WDA_VERSION = WDA_SOURCES[WDA_DEFAULT][3]
