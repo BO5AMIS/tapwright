@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.8.0, "the Explorer"
+
+- New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A
+  deterministic breadth-first walk of the screens nobody has driven yet: each new place and road goes to the app's map
+  (with an `explored` record per place, and a Coverage line in `map`), and the run ends with a report folder under
+  `~/.tapwright/explore/<app>/<time>/` (`report.json`, `report.md`, a picture and a repro script per finding): crashes
+  with their stack, error-level log lines, dead ends, slow screens, refused touches, accessibility and usability issues.
+  `minutes`, `steps`, `depth`, `from`, `focus`, `fill` (test values only into fields marked `-test-safe`, or a vault
+  fixture marked `"explore": true`), `continue` past a crash, `account` for the way back after a reset.
+- What explore never does, on the whole-phone daemon of 1.7.5: it stays in one app (the one `--apps` names, else the
+  app in front; never Home, Settings, Wallet or Passwords) and never touches what its skip floor holds: Delete, Buy,
+  Send, Post, Pay, Sign out and the like, a card, account, privacy and security screens, a system share sheet, a
+  password field, another app, a point or a swipe. The floor is one gate checked as each move goes out, on the element
+  the touch really lands on after its lookup and any scroll (a dry run meets the same gate); a `--policy` file's words
+  and its `explore.skip` list only add to it. It answers a permission prompt with its denial, by the button's name;
+  submits no form; sets a flipped switch back; asks nobody. Pause and a person's input stop or hold it; a locked phone
+  ends it with `locked`, and explore never unlocks the phone (the agent may call `unlock`, then explore again). No
+  picture is kept while the phone is being unlocked or Notification Center may be open. A redactor that fails hides
+  the text instead of passing it on.
+- Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
+  target, a new screen in the way) and touches nothing; `repair: "apply"` tries up to 3 candidates per break, each a real
+  touch through the same skip floor, accepts one only when its check holds and the whole script then runs to its end,
+  and writes `<script>.repaired.json` and `<script>.repair.md` beside the script (the original is unchanged). A failing
+  `expect`, a typing step, a native Back and a draftsOnly script are never repaired; at most 5 repairs a run; every
+  trial is an audit line of kind `repair`. Adopting is the user's: `tapwright replay FILE --repair apply --adopt`
+  (JUnit carries the suggestion). Recorded steps now keep `place` and `seen` (role, screen area, component, and the id's
+  stem, never text, and none for an id that carries content) so a repair can tell what moved.
+
 ## 1.7.8 (2026-11-18)
 
 - New tool `unlock`: an agent unlocks a locked phone with the passcode saved for it (`phone.passcode` in the file
