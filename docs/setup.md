@@ -117,7 +117,7 @@ ones as the daemon's own settings.
   then calls `unlock` when the phone is locked, in every mode (1.7.8); without the entry it answers `locked` and
   asks you to unlock the phone. With a passcode saved, locking the phone no longer stops an agent: Pause in the
   live view does.
-  **Experimental in 1.7:** on the test iPhone (Face ID, iOS 26) the unlock didn't yet find the passcode keypad. It
+  **Experimental (1.7, and `unlock` in 1.7.8 not yet tried there):** on the test iPhone (Face ID, iOS 26) the unlock didn't yet find the passcode keypad. It
   answered `locked` and typed nothing. iOS also won't open the USB connection to a phone that is locked when the daemon
   starts. Plan unattended runs with the phone unlocked for now.
 - **`--maps DIR`**: where each app's map is kept (`<DIR>/<bundle id>/map.json`, and its `routes/`). The default is

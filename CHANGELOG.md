@@ -9,7 +9,8 @@
   saved it answers `locked` and the agent asks the user. A call of its own: as a step of `run`, `replay`, `drive` or a
   journey it is refused. Every `locked` answer for a locked phone now says "call unlock (it types the passcode saved
   for this phone), or ask the user to unlock it"; the owner stops an agent that has the passcode by pausing in the
-  live view.
+  live view. Not yet proven on a Face ID iPhone with iOS 26: there the passcode unlock didn't find the keypad in 1.7,
+  and then it types nothing and answers `locked` (docs/setup.md).
 - `press_button home` closes Notification Center while the phone reads as locked. iOS sets SpringBoard's lock state
   while Notification Center is pulled down over an unlocked phone, so every call, the home press that closes it too,
   was refused `locked`. Home is pressed only when a fresh read proves that sheet (its header, its Clear button and an
