@@ -9,6 +9,7 @@ rename over the map; on Windows the rename can fail while the other tool has the
 retried. A file that doesn't parse, or isn't a map this tool reads, is left alone: `problem` says so and the tool keeps
 driving from memory without it.
 """
+import contextvars
 import copy
 import errno
 import json
@@ -31,6 +32,9 @@ RENAME_WAIT = 0.05
 _BUNDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _BUSY = (errno.EPERM, errno.EACCES, errno.EBUSY)
 _PROCESS_LOCK = threading.Lock()  # one thread of this process at a time; the lock file keeps the other processes out
+# (1.9.0, §30.4) True for a call made with --no-hints: a route that saved itself (`"auto": true`) is not read, listed or
+# driven, as 1.8.5 had none
+HIDE_AUTO: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_hide_auto", default=False)
 
 
 class MapError(RuntimeError):
@@ -403,7 +407,15 @@ class MapFile:
         """A saved route's file as a dict, or None when the map has no such route or its file can't be read."""
         return self._route_file(data.get("routes", {}).get(name))
 
-    def _route_file(self, rel: object) -> dict | None:
+    def visible(self, data: dict) -> list[str]:
+        """The map's route names, without those that saved themselves while HIDE_AUTO holds."""
+        names = list(data.get("routes", {}))
+        if not HIDE_AUTO.get():
+            return names
+        return [n for n in names if self._route_file(data["routes"][n], hide=False) is None
+                or self._route_file(data["routes"][n], hide=False).get("auto") is not True]
+
+    def _route_file(self, rel: object, hide: bool = True) -> dict | None:
         if not isinstance(rel, str):
             return None
         path = (self.folder / rel).resolve()
@@ -413,13 +425,15 @@ class MapFile:
             data = json.loads(path.read_text("utf-8-sig"))
         except (OSError, ValueError, RecursionError):
             return None
+        if hide and isinstance(data, dict) and data.get("auto") is True and HIDE_AUTO.get():
+            return None
         return data if isinstance(data, dict) else None
 
     def rename_in_routes(self, data: dict, renames: dict[str, str]) -> None:
         """A place was renamed: the saved routes that start or end there say the new name (a route's start and end are
         place names, and a route that names a place the map no longer has can't be driven). Never raises."""
         for rel in data.get("routes", {}).values():
-            route = self._route_file(rel)
+            route = self._route_file(rel, hide=False)
             if not route or not any(route.get(end) in renames for end in ("start", "end")):
                 continue
             for end in ("start", "end"):

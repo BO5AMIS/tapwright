@@ -544,6 +544,7 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
 def set_hints(hints: bool) -> None:
     """`tapwright mcp --no-hints` (AGENT-TOOLS §30.4): the instructions are 1.8.5's, and every call asks the daemon for
     answers without `Known:` and `Hint:` lines."""
+    hints = hints and not client.no_hints_env()  # (TAPWRIGHT_NO_HINTS=1 as --no-hints)
     server._lowlevel_server.instructions = instructions(hints)
     client.set_hints(hints)
 

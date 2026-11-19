@@ -171,6 +171,8 @@ class Element:
     # XCTest gave it, which the hit test answers too), "unknown" (where it is can't be told), "" (an ordinary element)
     placed: str = ""
     raw_rect: tuple[float, float, float, float] | None = None
+    # (1.9.0) in the keyboard's window but not one of its keys: an input accessory or toolbar the keyboard brings
+    by_keyboard: bool = False
 
     @property
     def x(self) -> float:
@@ -1109,6 +1111,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
             candidate.placed, candidate.raw_rect = _placed(node)
+            candidate.by_keyboard = keys_top is not None and not in_keyboard
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had

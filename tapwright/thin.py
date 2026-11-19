@@ -116,6 +116,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "refused (it is set when serve starts, not per call)")
     ap.add_argument("--client", metavar="NAME", default=None,
                     help="this agent's name, so its report and journey stay its own (default: the parent process id)")
+    ap.add_argument("--no-hints", action="store_true",
+                    help="1.8.5's answers and behaviour: no Known: or Hint: lines, no route that saves itself, no Done press "
+                         "(also TAPWRIGHT_NO_HINTS=1)")
     ap.add_argument("--json", action="store_true", help='print {"text", "image_path"} instead of the text')
     ap.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
                     help=f"how long to wait for the answer (default {CALL_TIMEOUT:g}; media {MEDIA_CALL_TIMEOUT:g}: a "
@@ -142,6 +145,8 @@ def _headers(a: argparse.Namespace, token: str, floor: bool = False) -> dict[str
         h["X-Tapwright-Policy"] = _json_line(a.policy, "policy")
     elif a.policy:
         print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
+    if getattr(a, "no_hints", False) or os.environ.get("TAPWRIGHT_NO_HINTS", "").strip().lower() in ("1", "true", "yes", "on"):
+        h["X-Tapwright-Hints"] = "off"  # (1.9.0, AGENT-TOOLS §30.4)
     if a.ux_rules:
         h["X-Tapwright-Ux-Rules"] = _json_line(a.ux_rules, "ux rules")
     if a.maps:

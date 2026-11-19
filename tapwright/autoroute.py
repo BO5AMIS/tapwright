@@ -24,13 +24,15 @@ from dataclasses import dataclass, field
 from . import ui
 
 NAV_TOOLS = ("tap", "back", "open_url")
-NEUTRAL = ("run", "look", "wait", "wait_for", "apps", "logs", "map", "audit", "ux_check", "session_report",
+NEUTRAL = ("look", "wait", "wait_for", "apps", "logs", "map", "audit", "ux_check", "session_report",
            "compare_screen", "viewer", "crash", "performance", "filmstrip")  # change nothing a route would need
 MAX_PENDING = 5  # scrolls kept at one place before its next step; more break the chain
 MAX_STEPS = 20  # a longer way isn't saved
 FAILS = 2  # a route whose replay fails this many times in a row is dropped
 NAME_MAX = 50
 FAIL_CODES = ("off_route", "not_found", "not_actionable", "expect_failed", "stale")  # a replay that failed, not one held up
+MAX_AUTO = 50  # (review 1.9.0 L3) routes that saved themselves, per app: past it the least used and oldest go
+RUN_NAVIGATION = ("tap", "back", "open_url", "scroll", "look", "wait", "wait_for")  # a run of only these types nothing
 
 
 @dataclass
@@ -74,8 +76,8 @@ class Chain:
         """A move from `here` that arrived at `dst`. `step`: the route step it is, None for one that can't be saved (it
         breaks the chain). Returns the whole way from the start to `dst` when it is a clean one to save, else None."""
         if dst == self.here:
-            if step is not None and step.get("tool") != "back":
-                self.taint()  # a tap that stayed: a form's value, a filter, a selection
+            if step is None or step.get("tool") != "back":
+                self.taint()  # a tap that stayed: a form's value, a filter, a selection (review 1.9.0 L1)
             return None
         if step is None:
             self.taint()
@@ -113,6 +115,53 @@ def step_of(move: dict | None) -> dict | None:
     if not any(k in kept for k in ("id", "label", "text")):
         return None
     return {"tool": "tap", "target": kept}
+
+
+def only_navigation(steps: object, strict: bool = False) -> bool:
+    """Are these `run` steps (or a saved route's) plain navigation (review 1.9.0 H1, H2)? Never typing, a toggle or any
+    other tool. `strict` (a route carried into one of the tool's): each step must also be one a route of its own would
+    keep (`step_of`, `scroll_step`), with nothing conditional."""
+    if not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict) or step.get("tool") not in RUN_NAVIGATION:
+            return False
+        if not strict:
+            continue
+        if "if" in step or step.get("optional"):
+            return False
+        tool = step["tool"]
+        if tool == "tap" and step_of({"tool": "tap", "target": step.get("target")}) is None:
+            return False
+        if tool == "open_url" and (not isinstance(step.get("url"), str) or "{" in step["url"]):
+            return False
+        if tool == "scroll" and scroll_step(step) is None:
+            return False
+    return True
+
+
+def given_nothing(route: dict) -> bool:
+    """Does this route replay with nothing the agent must give (§30.2): no variable, no account, no link value?"""
+    if route.get("variables"):
+        return False
+    steps = route.get("steps")
+    return isinstance(steps, list) and not any(
+        isinstance(s, dict) and s.get("tool") == "open_url" and "{" in str(s.get("url", "")) for s in steps)
+
+
+def over_cap(autos: list[dict], keep: int) -> list[str]:
+    """The names to drop so that at most `keep` of these routes (that saved themselves) stay: the least used, then the
+    least recently reached."""
+    if len(autos) <= keep:
+        return []
+
+    def rank(r: dict) -> tuple:
+        used = r.get("used")
+        reached = r.get("reached")
+        return (used if isinstance(used, int) and not isinstance(used, bool) else 0,
+                reached if isinstance(reached, str) else "")
+    ordered = sorted(autos, key=rank)
+    return [r["name"] for r in ordered[:len(autos) - keep]]
 
 
 def scroll_step(args: dict) -> dict | None:
@@ -176,7 +225,8 @@ def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
     the folder has (a twin in another case counts)."""
     if any(not h.auto and h.start == start and h.end == end and not h.variables for h in held):
         return None
-    mine = next((h for h in held if h.auto and h.end == end and h.start == start), None)
+    # (review 1.9.0 L3) one route of the tool's own per place, whatever start it was reached from
+    mine = next((h for h in held if h.auto and h.end == end), None)
     if mine is not None:
         return mine.name if (len(way) < mine.steps or mine.failed > 0) else None
     low = {t.lower() for t in taken}
@@ -195,7 +245,7 @@ def known(held: list[dict], here: str | None, reachable) -> list[str]:
     out = []
     for route in held:
         end, start = route.get("end"), route.get("start")
-        if not isinstance(end, str) or not isinstance(start, str) or end == here or route.get("variables"):
+        if not isinstance(end, str) or not isinstance(start, str) or end == here or not given_nothing(route):
             continue
         if not reachable(start):
             continue

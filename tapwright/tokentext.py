@@ -45,7 +45,8 @@ HINTS = {
 }
 # §30.3: when several apply, the first of these; none on a safety refusal
 ORDER = ("logs", "known_way", "form", "screenshot", "long_task")
-SAFETY_CODES = ("not_allowed",)  # needs_confirmation, a floor hold and every other refusal of the safety layer
+# needs_confirmation, blocked, a floor hold and a person's decline are `not_allowed`; a pause is `paused` (§30.3)
+SAFETY_CODES = ("not_allowed", "paused")
 
 LONG_TASK_CALLS = 20  # §30.3: from the session's 20th call, once
 KNOWN_WAY_TAPS = 3  # single taps in a row along known roads before the known-way hint

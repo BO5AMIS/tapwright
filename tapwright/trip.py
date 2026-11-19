@@ -85,6 +85,7 @@ class Trip:
         self.end = req.to or ""  # the place the call ends at
         self.goal = req.to or ""  # the place the moves go to: the call's `to`, or a route's start
         self.route: dict | None = None  # the route a call drives (`route`)
+        self.route_started = False  # its own steps began (only a failure from there counts against it: 1.9.0 H3)
         self.ran: list[tuple[str, int]] = []  # the routes run on the way: (name, steps)
         self.writes = True  # a replay reads the map and never writes it (§18.9)
         self.edges: list[roads.RouteEdge] = []
@@ -278,7 +279,7 @@ class Trip:
         file = self.d.maps.file(self.root, self.bundle)
         found = file.read_route(self.data, name)
         if found is None:
-            held = ", ".join(self.data.get("routes", {})) or "none yet"
+            held = ", ".join(file.visible(self.data)) or "none yet"
             raise Refused("not_found", f"no saved route called {name}; the routes are: {held}")
         routes.check({**found, "name": found.get("name", name)})
         return {**found, "name": name}
@@ -293,6 +294,7 @@ class Trip:
         try:
             await self.travel([] if way.kind == "here" else self.hops(way, here), here)
             if self.route is not None:
+                self.route_started = True
                 await self.run_route(self.route["name"], self.route)
                 await self.check_end(self.route)
         except Refused as e:
