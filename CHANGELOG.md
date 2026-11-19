@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.1 (2026-11-20)
+
+- The phone reconnects over USB again after it drops off USB and comes back. Once Tapwright had reached the phone
+  over the network, 1.9.0 failed every later USB connect with "couldn't open the developer tunnel over USB: 'tuple'
+  object has no attribute 'service'" (pymobiledevice3 11.57 and later), or quietly reused the old network connection
+  instead of USB (11.50 to 11.56).
+- Reaching the phone over the network (`--host`, or the same Wi-Fi) now works with pymobiledevice3 11.57 and later.
+  It failed there in 1.8.5 and 1.9.0.
+
 ## 1.9.0 (2026-11-19), "the Token Update"
 
 Fewer calls per task (AGENT-TOOLS 1.17 §30). Nothing is taken away: every 1.8.5 call, argument and answer still
