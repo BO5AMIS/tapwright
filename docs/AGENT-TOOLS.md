@@ -1455,27 +1455,33 @@ when the daemon restarts (an idle stop and a start, an update) under the same MC
 reconnect keeps them.
 
 ### 30.4 The keyboard over a target
-A tap whose target the keyboard covers (its centre over the keyboard's frame) closes it first. The order is 1.8.5's
-with one step added: a touch on passive space, a short drag of the form, then a Done (below), then the keyboard's own
-dismiss key; in an app that ignored a touch outside before, the drag comes first, then the Done and the dismiss key, and
-the touch last. A Done is never a key that names a submit: only a button named exactly `Done`, and only
-- an input accessory's or toolbar's button attached to the keyboard: in the keyboard's window, inside a toolbar or a
-  bar at most 60 pt tall on the keys' top edge, not one of its keys, touching that edge (2 pt at most). Never a sheet's
-  or a form's own button; or
-- the keyboard's Done key while the focused field is multiline (a text view), whose value can be read (not empty, not
-  its placeholder), and only when the tap's own target is a submit button the skip floor doesn't hold (the submit words:
-  Save, Submit, Continue, Confirm, Sign in...; never Send, Post, Buy or Delete), so the agent meant to submit anyway
-  (Wayfare's Notes, then Save trip). Done there usually adds a line or closes the keyboard, but React Native's
-  `submitBehavior="blurAndSubmit"` also runs the field's own submit handler, which no tree shows; so for any other
-  target (a chat composer's Send, a plain button) the tap is refused as in 1.8.5. The answer always says what Done did
-  to the field.
+A `tap`, `long_press`, `toggle` or `type_text` whose target the keyboard covers (its centre over the keyboard's frame)
+closes it first. The order is 1.8.5's with one step added: a touch on passive space, a short drag of the form, then a
+Done (below), then the keyboard's own dismiss key; in an app that ignored a touch outside before, the drag comes first,
+then the Done and the dismiss key, and the touch last. A Done is only ever a button named exactly `Done`, never return,
+Go, Send, Search, Next or Join. There are two, with separate rules:
 
-Never return, Go, Send, Search, Next or Join. If Done added exactly a line break at the end and the keyboard is still up
-with the field focused (the value read just before and after), it is taken back with one backspace, and the answer's
-`Note:` says so. If the keyboard closed with the line break in it, or the value changed any other way, the field isn't
-touched again and the `Note:` says a line break may have been added: check the field. Whatever Done did,
-WebDriverAgent's plain dismissal is still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`;
-otherwise the tap is refused `covered` as in 1.8.5, whose hint now says that Return can submit, send or add a line.
+- **The accessory's Done** (any of those touches): a button in the keyboard's input accessory, in a window of the
+  keyboard's own (never the app's window), inside a toolbar or a bar at most 60 pt tall whose bottom touches the keys'
+  top (2 pt at most), and not one of the keys. It is the keyboard's own close button; the target doesn't matter. Never a
+  sheet's or a form's own button.
+- **The keyboard's Done key** (a `tap` only, never a long press): while the focused field is multiline (a text view)
+  and its value can be read (not empty, not its placeholder), and only when the tap's own target is a submit button the
+  skip floor doesn't hold (the submit words: Save, Submit, Continue, Confirm, Sign in...; never Send, Post, Buy or
+  Delete), so the agent meant to submit anyway (Wayfare's Notes, then Save trip). Done there usually adds a line or
+  closes the keyboard, but React Native's `submitBehavior="blurAndSubmit"` also runs the field's own submit handler,
+  which no tree shows. The answer always says what it did to the field.
+
+For any other target (a chat composer's Send, a plain button, a long press) no Done key is pressed: the other ways,
+WebDriverAgent's dismiss key among them, are still tried, and the tap goes through if one of them closes the keyboard;
+only if none does is it refused `covered` as in 1.8.5.
+
+If the keyboard's Done key added exactly a line break at the end and the keyboard is still up with the field focused
+(the value read just before and after), it is taken back with one backspace, and the answer's `Note:` says so. If the
+keyboard closed with the line break in it, or the value changed any other way, the field isn't touched again and the
+`Note:` says a line break may have been added: check the field. Whatever Done did, WebDriverAgent's plain dismissal is
+still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`; otherwise the tap is refused
+`covered` as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
 ### 30.5 `--no-hints`
 `--no-hints` restores 1.8.5's behaviour entirely: no `Known:` and no `Hint:` line, no route saved by itself and none of

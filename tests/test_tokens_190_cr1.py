@@ -71,12 +71,12 @@ def test_a_match_clipped_above_the_keyboard_is_not_covered_by_it():
 
 def test_a_route_is_written_on_a_worker_thread(tmp_path, monkeypatch):
     threads = []
-    plain = mapfile.MapFile.write_route
+    plain = mapfile.MapFile.write_auto_route
 
-    def watched(self, name, route):
+    def watched(self, name, route, replaces):
         threads.append(threading.current_thread() is threading.main_thread())
-        return plain(self, name, route)
-    monkeypatch.setattr(mapfile.MapFile, "write_route", watched)
+        return plain(self, name, route, replaces)
+    monkeypatch.setattr(mapfile.MapFile, "write_auto_route", watched)
 
     async def go():
         d = mapped_trip(tmp_path)

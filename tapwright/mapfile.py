@@ -397,11 +397,55 @@ class MapFile:
         rel = f"routes/{name}.json"
         path = self.routes_dir / f"{name}.json"
         self.routes_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.routes_dir / f"{name}.json.{os.getpid()}.tmp"
+        tmp = self.routes_dir / f"{name}.json.{os.getpid()}.{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
-        os.replace(tmp, path)
-        self.update(lambda d: d["routes"].__setitem__(name, rel))
+
+        def publish(d: dict) -> None:  # (the file and the index under the map's lock, as every route writer does)
+            os.replace(tmp, path)
+            d["routes"][name] = rel
+        try:
+            self.update(publish)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         return path
+
+    def write_auto_route(self, name: str, route: dict, replaces: int | None) -> bool:
+        """(1.9.0; CodeRabbit, PR #22 cycle 2) Save a route that saved itself, only if the name is still free or still
+        holds the route of the tool's own it means to replace (`replaces`: that file's modification time, None for a free
+        name): checked and written under the map's lock, which every route writer takes, so a person's route saved
+        meanwhile is never overwritten. Whether it was written."""
+        rel = f"routes/{name}.json"
+        path = self.routes_dir / f"{name}.json"
+        self.routes_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.routes_dir / f"{name}.json.{os.getpid()}.{threading.get_ident()}.tmp"
+        tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
+        done = [False]
+
+        def publish(d: dict) -> None:
+            try:
+                stamp = path.stat().st_mtime_ns
+            except FileNotFoundError:
+                stamp = None
+            if stamp is not None:
+                held = self._route_file(rel, hide=False)
+                if held is None or held.get("auto") is not True or stamp != replaces:
+                    return  # a person's route, or another version: left as it is
+            elif replaces is not None or d.get("routes", {}).get(name) not in (None, rel):
+                return  # the route it meant to replace is gone, or the name now means something else
+            os.replace(tmp, path)
+            d["routes"][name] = rel
+            done[0] = True
+        try:
+            self.update(publish)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        return done[0]
 
     def read_route(self, data: dict, name: str) -> dict | None:
         """A saved route's file as a dict, or None when the map has no such route or its file can't be read."""

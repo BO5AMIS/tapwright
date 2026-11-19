@@ -1163,19 +1163,19 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 window, up = up, parents.get(up)
             if window is not n:
                 keyboard_windows[window] = min(_rect(n)[1], keyboard_windows.get(window, math.inf))
+    app_window = next((c for c in root if _kind(c) == "Window"), None)  # the app's own window: the first
+
     def _accessory_bar(node: ET.Element, keys_top: float) -> bool:
-        """(1.9.0; CodeRabbit, PR #22) Is this node in the keyboard's input accessory or toolbar: below the window, an
-        ancestor that is a Toolbar, or a bar at most ACCESSORY_MAX tall whose bottom touches the keys' top (2 pt)? Being
-        in the keyboard's window alone isn't enough."""
-        up = parents.get(node)
+        """(1.9.0; CodeRabbit, PR #22 cycles 1 and 2) Is this node in the keyboard's input accessory: in a window of the
+        keyboard's own (never the app's first window, whatever its toolbar), below it an ancestor that is a Toolbar, or a
+        bar at most ACCESSORY_MAX tall, whose bottom touches the keys' top (2 pt)? The one edge every Done check uses."""
+        up, bar = parents.get(node), False
         while up is not None and _kind(up) not in ("Window", "Application"):
-            if _kind(up) == "Toolbar":
-                return True
             _, y, _, h = _rect(up)
-            if 0 < h <= ACCESSORY_MAX and abs(y + h - keys_top) <= 2:
-                return True
+            if (_kind(up) == "Toolbar" or 0 < h <= ACCESSORY_MAX) and abs(y + h - keys_top) <= 2:
+                bar = True
             up = parents.get(up)
-        return False
+        return bar and up is not None and _kind(up) == "Window" and up is not app_window
     keyboard_rects = [_keyboard_view(n, parents, screen_rect) for n in root.iter()
                       if _kind(n) == "Keyboard" and _rect(n)[3] > 0]
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):

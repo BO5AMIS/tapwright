@@ -441,7 +441,6 @@ REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't t
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 DONE_KEYS = ("Done",)  # (1.9.0) exactly Done: never return, Go, Send, Search, Next or Join (they can submit)
-DONE_BAR_GAP = 2.0  # (review 1.9.0 M6) an accessory's Done touches the keys' top edge: 2 pt at most
 # (1.9.0) the refusal's hint when hints are on: Return's effect is the app's (KEYBOARD_HINT stays 1.8.5's, for --no-hints)
 KEYBOARD_HINT_190 = ("type_text into the field with submit: true presses Return, which closes the keyboard in many forms "
                      "but can also submit, send or add a line: use it only where that is what you want.")
@@ -4061,7 +4060,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
                         aimed = self._offscreen_under_keyboard(view, target)
-                        closed = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed)
+                        closed = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
@@ -4877,6 +4876,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if name is None or not routes.NAME.match(name) or self._route_held(name) is not None:
             return None, []
         before = next((r for r in found if r["name"] == name), None)
+        replaces = file.route_stamp(data, name) if before is not None else None
         others = [r for r in found if r.get("auto") is True and r["name"] != name]
         evict = autoroute.over_cap(others, autoroute.MAX_AUTO - 1)
         if evict:
@@ -4890,7 +4890,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                  "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0, "reached": mapfile.now()}
         route = batch.saved_script(route, self._redact, f"route {name}")
         routes.check(route)
-        file.write_route(name, route)  # (the file, then the map's index, under the map's lock)
+        if not file.write_auto_route(name, route, replaces):  # (checked again and written under the map's lock)
+            return None, []
         self.log(f"auto route {name} kept ({len(way)} step{'' if len(way) == 1 else 's'}, {start} > {end})")
         return name, [gone for gone in evict if self._drop_route_io(file, gone)]
 
@@ -5036,6 +5037,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 view.auto = None
             elif name == "drive":
                 self._chain_after_drive(view, args)
+            elif (name not in autoroute.NEUTRAL and name not in (*autoroute.NAV_TOOLS, "scroll", "run", "open_app")
+                  and name in ACTIONS and isinstance(view.auto, autoroute.Chain)):
+                # (CodeRabbit, PR #22 cycle 2) an action that isn't navigation breaks the way even when it skipped _learn
+                # (look: false): a switch flipped unseen still changes where the next tap leads
+                view.auto.taint()
             elif name == "type_text" or (name == "run" and not autoroute.only_navigation(args.get("steps"))):
                 # (review 1.9.0 H1; CodeRabbit, PR #22) any typing breaks the way, wherever it was made, a run's too (with
                 # look: false or trace: true it never reached _learn); a failed run leaves it unknown
@@ -6839,7 +6845,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
         aimed = self._keyboard_covers(view, target)
-        return await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed)
+        return await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
 
     def _keyboard_covers(self, view, target: ui.Target) -> "ui.Element | None":
         """The target's element when the keyboard lies over its centre (1.9.0); only then may a Done close it first."""
@@ -6854,7 +6860,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                       and b.rect[1] <= cy < b.rect[1] + b.rect[3] for b in hit.covered_by)
         return hit if covered else None
 
-    async def _press_done(self, view, app: str | None, aimed: "ui.Element | None" = None) -> bool | None:
+    async def _press_done(self, view, app: str | None, aimed: "ui.Element | None" = None,
+                          tool: str | None = None) -> bool | None:
         """(1.9.0, §30) A Done that closes the keyboard over a covered target, in a form that ignores a touch outside and a
         drag (Wayfare's trip form: its last field is a multiline Notes). Never a key that names a submit: only a button
         named exactly Done, and only (a) an input accessory's or toolbar's button attached to the keyboard, not one of its
@@ -6874,7 +6881,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return True
             self._no_done.add((app, place, "accessory"))
             return False
-        if not self._submit_aimed(aimed, view.items, app):
+        if tool != "tap" or not self._submit_aimed(aimed, view.items, app):
+            # (the multiline exception is for a tap only, never a long press: CodeRabbit, PR #22 cycle 2)
             # (lead's ruling on CodeRabbit 4628458079) in a multiline field Done may run the field's own submit handler: it
             # is pressed only when the agent's tap was going to submit anyway (a submit-worded button the floor doesn't hold)
             return None
@@ -6921,17 +6929,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     @staticmethod
     def _done_on_keyboard(view) -> "ui.Element | None":
-        """A button named exactly Done attached to the keyboard (review 1.9.0 M6): in the keyboard's window (its input
-        accessory or toolbar), not one of its keys, and touching the keys' top edge (a gap of DONE_BAR_GAP at most).
-        Never a sheet's or a form's own button, however close it sits."""
-        keyboard = next((b for e in view.items for b in e.covered_by if b.kind == "Keyboard"), None)
-        if keyboard is None:
+        """A button named exactly Done attached to the keyboard (review 1.9.0 M6): `by_keyboard` (ui.read) says it is in the
+        keyboard's own window, in its accessory bar or toolbar, whose bottom touches the keys' top (2 pt). That is the
+        one edge it is measured against (CodeRabbit, PR #22 cycle 2: the keyboard's frame here holds the suggestion strip,
+        so a second check against it could never pass with the strip shown). Never a sheet's or a form's own button."""
+        if not any(b.kind == "Keyboard" for e in view.items for b in e.covered_by):
             return None
-        top = keyboard.rect[1]
         for e in view.items:
             if (e.role == "button" and e.label == "Done" and e.enabled and not e.in_alert and e.by_keyboard
-                    and not any(b.kind == "Keyboard" for b in e.covered_by)
-                    and e.y + e.height <= top + DONE_BAR_GAP and top - (e.y + e.height) <= DONE_BAR_GAP):
+                    and not any(b.kind == "Keyboard" for b in e.covered_by)):
                 return e
         return None
 
@@ -6941,7 +6947,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return e
         return None
 
-    async def _dismiss_keyboard_now(self, view, covered: bool = False, aimed: "ui.Element | None" = None) -> str:
+    async def _dismiss_keyboard_now(self, view, covered: bool = False, aimed: "ui.Element | None" = None,
+                                    tool: str | None = None) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
         dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else
         NOTE_KEYBOARD_STAYED: the answer says so."""
@@ -6984,7 +6991,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             elif step == "dismiss" and ((covered and self._hints_wanted()) or app not in self._no_dismiss):
                 # (1.9.0) a Done first, for a covered target; never with --no-hints (1.8.5's behaviour). Whatever it did,
                 # WebDriverAgent's plain dismissal is still tried once where it hasn't failed (review 1.9.0 L2)
-                done = await self._press_done(view, app, aimed) if covered and self._hints_wanted() else None
+                done = await self._press_done(view, app, aimed, tool) if covered and self._hints_wanted() else None
                 if done:
                     how = "the keyboard's Done key"
                 elif view.read_keyboard and app not in self._no_dismiss:

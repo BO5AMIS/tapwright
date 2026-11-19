@@ -327,19 +327,20 @@ def test_m6_a_sheets_own_done_is_never_pressed():
 
 
 def test_m6_an_accessory_done_off_the_keys_edge_is_not_the_keyboards():
-    async def go():
-        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
-        s = d.session
-        far = button("e9", "Done", "", rect=(330, 440, 60, 40))  # 20 pt above the keys
-        far.by_keyboard = True
-        s.tree = [*s.tree, far]
-        await d.run_tool("a", "look", {"screenshot": False})
-        taps = len(s.tap_points)
-        with pytest.raises(Refused):
-            await d.run_tool("a", "tap", {"target": {"id": "low"}})
-        assert (360.0, 460.0) not in s.tap_points[taps:]
-        await finish(stop, task)
-    run(go)
+    # (the edge is measured where the tree is read, against the keys' top: CodeRabbit, PR #22 cycle 2)
+    app = node("Application", bundleId=BUNDLE, label="Example", x=0, y=0, width=400, height=800)
+    app.append(node("Window", x=0, y=0, width=400, height=800))
+    kwin = node("Window", x=0, y=0, width=400, height=800)
+    host = node("Other", x=0, y=0, width=400, height=800)
+    bar = node("Toolbar", x=0, y=436, width=400, height=44)  # ends 20 pt above the keys
+    bar.append(node("Button", label="Done", name="Done", x=330, y=438, width=60, height=40))
+    holder = node("Other", x=0, y=500, width=400, height=300)
+    holder.append(node("Keyboard", x=0, y=500, width=400, height=300))
+    host.extend([bar, holder])
+    kwin.append(host)
+    app.append(kwin)
+    tree = ui.read(ET.tostring(app, encoding="unicode"), (400.0, 800.0))
+    assert [e.by_keyboard for e in tree.items if e.label == "Done"] == [False]
 
 
 # ---- M7: an empty field gets no Done ----
