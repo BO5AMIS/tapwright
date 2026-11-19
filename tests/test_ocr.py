@@ -61,9 +61,11 @@ def test_without_the_extra_ocr_says_how_to_install_it(monkeypatch):
         monkeypatch.setattr(ocr, "available", lambda: False)
         d = make()
         stop, task = await started(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "look", {"ocr": True})
+        with pytest.raises(Refused) as e:  # (1.9.0 round 2: refused only with --no-hints, 1.8.5's way)
+            await d.run_tool("a", "look", {"ocr": True}, hints=False)
         assert e.value.code == "unsupported" and 'pip install "tapwright[ocr]"' in str(e.value)
+        r = await d.run_tool("a", "look", {"ocr": True})  # with hints: the look, and the note says how to install it
+        assert 'pip install "tapwright[ocr]"' in r["text"]
         await finish(stop, task)
     run(go)
 

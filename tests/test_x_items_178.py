@@ -55,9 +55,11 @@ def test_1_with_no_passive_line_there_is_no_drag_and_the_answer_says_the_keyboar
         d.session.tree = [el("e8", "scroll", "", "form", rect=(0, 60, 400, 440)), *rows,
                           el("e2", "input", "Field A", "a", rect=(10, 100, 300, 40))]
         await d.run_tool("a", "look", {"screenshot": False})
-        r = await d.run_tool("a", "tap", {"target": {"id": "row6"}})
+        r = await d.run_tool("a", "tap", {"target": {"id": "row6"}}, hints=False)  # (1.8.5's words: --no-hints)
         assert "swipe" not in d.session.calls
         assert STAYED[len("Note: "):] in r["text"] and KEYBOARD_NOTE not in r["text"], r["text"]
+        r = await d.run_tool("a", "tap", {"target": {"id": "row6"}})  # (1.9.0 round 2: the row is clear of the keyboard)
+        assert "the keyboard stays up" in r["text"] and STAYED[len("Note: "):] not in r["text"], r["text"]
         await finish(stop, task)
     run(go)
 
