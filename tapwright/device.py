@@ -186,9 +186,15 @@ async def _open_tunnel(userspace_tunnel, tunnel, make):
     """Open `tunnel`. Before 11.57 the tunnel always calls the module's provider, so a network service can only be
     handed in by replacing it: for this one open, undone after it, so a later open over USB gets the library's own
     provider again (1.9.0 left it replaced). The swap, the open and the undo are one step under a lock: a second
-    open meanwhile would take this open's provider for its original, or have its own undone before it runs."""
-    if make is None or _takes_factory(userspace_tunnel):
+    open meanwhile would take this open's provider for its original, or have its own undone before it runs. A USB
+    open takes the lock too: the tunnel reads the module's provider only once it holds its own lifecycle lock, so a
+    USB open queued there (behind a closing tunnel) would otherwise read a network open's swapped-in provider
+    (CodeRabbit, PR #24)."""
+    if _takes_factory(userspace_tunnel):
         return await tunnel.aopen()
+    if make is None:
+        async with _swap_lock():
+            return await tunnel.aopen()
 
     async def provider(serial, autopair, remotepairing_fallback=True):
         return await make(), None
@@ -278,8 +284,9 @@ class Device:
             for service in unclaimed:
                 try:
                     await service.close()
-                except (Exception, asyncio.CancelledError):
-                    pass
+                except Exception as closing:  # the open's own failure is the one to report
+                    self.log(f"closing the unused network service: {closing}")
+                # a cancellation while closing (CodeRabbit, PR #24) is not caught: it goes up in place of the failure
             if isinstance(e, Exception):
                 raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
             raise
