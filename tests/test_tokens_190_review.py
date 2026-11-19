@@ -62,15 +62,23 @@ def test_h1_a_submit_tap_that_leaves_a_form_is_never_saved_even_with_nothing_typ
 
 def test_h1_typing_with_look_false_breaks_the_way_too(tmp_path):
     async def go():
-        d = mapped(tmp_path)
-        stop, task = await started(d)
-        await d.run_tool("a", "open_app", {"app": BUNDLE})
-        await d.run_tool("a", "tap", {"target": {"id": "open-form"}})
-        await d.run_tool("a", "type_text", {"target": {"id": "email"}, "text": "x", "look": False})
-        await d.run_tool("a", "look", {"screenshot": False})
-        await d.run_tool("a", "tap", {"target": {"id": "plan-weekly"}})
-        assert set(saved(tmp_path)) == {"open_form"}
-        await finish(stop, task)
+        # (CodeRabbit, PR #22) a screen with one input and a plain way on: the same walk with and without the typing
+        screens = {"home": screen("Home", ids=("open-form", "h1"), tab="home"),
+                   "form": screen("Search", ids=("go-on", "f1"), inputs=("query",)),
+                   "inside": screen("Results", ids=("i1", "i2"))}
+        for typed in (False, True):
+            folder = tmp_path / ("typed" if typed else "plain")
+            d = mapped(folder, screens, {("home", "open-form"): "form", ("form", "go-on"): "inside"})
+            stop, task = await started(d)
+            await d.run_tool("a", "open_app", {"app": BUNDLE})
+            await d.run_tool("a", "tap", {"target": {"id": "open-form"}})
+            if typed:
+                await d.run_tool("a", "type_text", {"target": {"id": "query"}, "text": "x", "look": False})
+                await d.run_tool("a", "look", {"screenshot": False})
+            await d.run_tool("a", "tap", {"target": {"id": "go-on"}})
+            assert d.session.at == "inside"
+            assert ("go_on" in saved(folder)) is (not typed)
+            await finish(stop, task)
     run(go)
 
 
@@ -164,17 +172,22 @@ def test_m2_a_route_whose_way_needs_a_links_value_is_left_out(tmp_path):
         stop, task = await started(d)
         await d.run_tool("a", "open_app", {"app": BUNDLE})
         await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
-        data = d.maps.data(str(tmp_path), BUNDLE)
         start = saved(tmp_path)["open_list"]["start"]
         d.session.at = "lost"
+        d.session.goes[("lost", "app://home")] = "home"  # the link does lead home
         r = await d.run_tool("b", "look", {"screenshot": False})
         assert "Known:" not in r["text"]  # no way from here at all
-        data["places"][start]["link"] = "app://home/{id}"  # a way only by a link with a value to fill
+
+        def link(value):  # (through the map's own edit: the map in memory is replaced by its background saves)
+            d.maps.edit(str(tmp_path), BUNDLE, lambda m: m["places"][start].__setitem__("link", value))
+        link("app://home/{id}")  # a way only by a link with a value to fill
         r = await d.run_tool("c", "look", {"screenshot": False})
         assert "Known:" not in r["text"]
-        data["places"][start]["link"] = "app://home"  # a link with nothing to fill reaches it
+        link("app://home")  # a link with nothing to fill reaches it
         r = await d.run_tool("e", "look", {"screenshot": False})
         assert any(line.startswith("Known: open_list") for line in r["text"].splitlines())
+        r = await d.run_tool("e", "drive", {"route": "open_list"})  # and the drive it names gets there, given nothing
+        assert r["text"].startswith("Arrived at ") and d.session.at == "list"
         await finish(stop, task)
     run(go)
 

@@ -399,7 +399,7 @@ def test_a_place_reached_by_a_label_saves_a_route_named_by_its_place(tmp_path):
         await d.run_tool("a", "open_app", {"app": BUNDLE})
         await d.run_tool("a", "tap", {"target": {"text": "Open the list"}})
         kept = saved(tmp_path)
-        assert len(kept) == 1 and list(kept)[0].startswith("place_")
+        assert len(kept) == 1 and next(iter(kept)).startswith("place_")
         assert "open_the_list" not in kept
         await finish(stop, task)
     run(go)
