@@ -4048,7 +4048,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
             if given is None or (self.session.app or (None, None))[1] in given:
                 uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
-            if args.get("ocr"):
+            if args.get("ocr") and not no_ocr:  # (without the extra: the look and its note, never a read)
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_FEW}

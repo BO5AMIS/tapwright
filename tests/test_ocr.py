@@ -97,3 +97,20 @@ def test_a_half_installed_extra_counts_as_not_installed(monkeypatch):
     monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name in ("rapidocr", "onnxruntime", "PIL")
                         else (None if name == "numpy" else real(name, *a)))
     assert ocr.installed() is False
+
+
+def test_without_the_extra_the_look_never_reads_the_picture(monkeypatch):
+    """CI, 2026-11-19: with no OCR the look added its note and then still called ocr.read (numpy missing: a crash)."""
+    def boom(*a):
+        raise AssertionError("ocr.read was called without the extra")
+
+    async def go():
+        monkeypatch.setattr(ocr, "reader", None)
+        monkeypatch.setattr(ocr, "available", lambda: False)
+        monkeypatch.setattr(ocr, "read", boom)
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"ocr": True})
+        assert 'pip install "tapwright[ocr]"' in r["text"]
+        await finish(stop, task)
+    run(go)
