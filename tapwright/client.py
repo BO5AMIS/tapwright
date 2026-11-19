@@ -39,8 +39,10 @@ SCOPE: dict[str, str] = {}  # the headers that say what this process's agent may
 def set_scope(apps: list[str] | None = None, dedicated: bool = False, phone: bool = False) -> None:
     """Personal mode (the default): the agent may read and touch only `apps` (bundle ids or exact names).
     `dedicated`: the phone is kept for testing, so there is no limit. `phone` (1.7, §24.4): the phone is dedicated to
-    automation; every app, as `dedicated`. The daemon enforces it on every call."""
-    SCOPE.clear()
+    automation; every app, as `dedicated`. The daemon enforces it on every call. (Only the scope's own headers are
+    replaced: the maps, accounts and hints headers set before stay.)"""
+    for key in ("X-Tapwright-Mode", "X-Tapwright-Apps"):
+        SCOPE.pop(key, None)
     if phone:
         SCOPE["X-Tapwright-Mode"] = "phone"
     elif dedicated:
@@ -75,6 +77,20 @@ def set_maps(folder: str | None = None) -> None:
     else:
         # resolved as `serve --maps` holds it (Path.resolve(): symlinks too), so the ceiling's compare agrees (CodeRabbit, PR #20)
         SCOPE["X-Tapwright-Maps"] = str(Path(folder).expanduser().resolve())
+
+
+def set_hints(hints: bool = True) -> None:
+    """`tapwright mcp --no-hints` (AGENT-TOOLS §30.4): every call asks for 1.8.5's behaviour: no `Known:` or `Hint:` line,
+    no route that saves itself, no Done press. Hints on (the default) is sent as no header; TAPWRIGHT_NO_HINTS=1 turns
+    them off for every call this process makes (the MCP server, `tapwright replay`, `tapwright explore`)."""
+    if hints and not no_hints_env():
+        SCOPE.pop("X-Tapwright-Hints", None)
+    else:
+        SCOPE["X-Tapwright-Hints"] = "off"
+
+
+def no_hints_env() -> bool:
+    return os.environ.get("TAPWRIGHT_NO_HINTS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def set_accounts(file: str | None = None) -> None:
@@ -321,3 +337,7 @@ def shutdown(info: dict) -> None:
         _request(info, "POST", "/api/shutdown", {})
     except (OSError, ValueError, http.client.HTTPException):
         pass
+
+
+if no_hints_env():  # (1.9.0, §30.4) TAPWRIGHT_NO_HINTS=1: every call of this process, the command line's own too
+    SCOPE["X-Tapwright-Hints"] = "off"

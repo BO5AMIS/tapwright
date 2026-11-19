@@ -22,7 +22,7 @@ SAVED = el("e3", "text", "Saved", rect=(10, 300, 100, 20))
 def test_steps_are_checked_before_anything_runs():
     for bad, words in (([], "non-empty list"), ([{"tool": "look"}], "can't be a step"),
                        ([{"tap": 1}], 'must be an object with "tool"'),
-                       ([{"tool": "tap", "expect": {"text": "a", "id": "b"}}], "exactly one of text, id or label"),
+                       ([{"tool": "tap", "expect": {"text": "a", "label": "b"}}], "exactly one of text, id or label"),  # (id with text: round 2)
                        ([{"tool": "tap", "expect": {"text": "a", "value": "x"}}], "value goes with id or label"),
                        ([{"tool": "tap", "expect": {"id": "a", "timeout": 99}}], "timeout must be from 0.5 to 30"),
                        ([{"tool": "tap"}] * 51, "at most 50 steps")):

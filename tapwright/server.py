@@ -259,6 +259,8 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
             # route launch context, the one app explore searches, or the app whose bug a bug id two apps hold names (PR #21);
             # never an allowlist
             via["app_hint"] = apps[0]
+        if _hv(request, "x-tapwright-hints") == "off":
+            via["hints"] = False  # `tapwright mcp --no-hints` (AGENT-TOOLS §30.4)
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved

@@ -1094,12 +1094,13 @@ class Session:
         except _FieldGone:
             return False
 
-    async def dismiss_keyboard(self) -> bool:
+    async def dismiss_keyboard(self, keys: tuple[str, ...] = ()) -> bool:
         """WebDriverAgent's own way of closing the keyboard, which presses no return. False when it refuses (the
-        keyboard has no key to dismiss it with); a dead line still raises ConnectionLost."""
+        keyboard has no key to dismiss it with); a dead line still raises ConnectionLost. `keys` (1.9.0): names of the
+        keyboard's keys it may press to close it (its Done key), tried first."""
         self.typed_into = None
         try:
-            await self._call("POST", "/session/{sid}/wda/keyboard/dismiss", {})
+            await self._call("POST", "/session/{sid}/wda/keyboard/dismiss", {"keyNames": list(keys)} if keys else {})
         except ConnectionLost:
             raise
         except DeviceError:

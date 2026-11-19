@@ -171,6 +171,8 @@ class Element:
     # XCTest gave it, which the hit test answers too), "unknown" (where it is can't be told), "" (an ordinary element)
     placed: str = ""
     raw_rect: tuple[float, float, float, float] | None = None
+    # (1.9.0) in the keyboard's window but not one of its keys: an input accessory or toolbar the keyboard brings
+    by_keyboard: bool = False
 
     @property
     def x(self) -> float:
@@ -299,6 +301,7 @@ class Tree:
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
+ACCESSORY_MAX = 60.0  # (1.9.0) the tallest bar taken for the keyboard's input accessory
 COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar", "Keyboard"}  # what a touch at an element's centre can land on instead
 # A layer is a later child of some node, at most LAYER_MAX_DEPTH levels below the Application (deeper is React
 # Native's own nesting, where a header and a body both fill the screen), covering LAYER_COVER of the screen.
@@ -1109,6 +1112,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
             candidate.placed, candidate.raw_rect = _placed(node)
+            candidate.by_keyboard = keys_top is not None and not in_keyboard and _accessory_bar(node, keys_top)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had
@@ -1159,6 +1163,19 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 window, up = up, parents.get(up)
             if window is not n:
                 keyboard_windows[window] = min(_rect(n)[1], keyboard_windows.get(window, math.inf))
+    app_window = next((c for c in root if _kind(c) == "Window"), None)  # the app's own window: the first
+
+    def _accessory_bar(node: ET.Element, keys_top: float) -> bool:
+        """(1.9.0; CodeRabbit, PR #22 cycles 1 and 2) Is this node in the keyboard's input accessory: in a window of the
+        keyboard's own (never the app's first window, whatever its toolbar), below it an ancestor that is a Toolbar, or a
+        bar at most ACCESSORY_MAX tall, whose bottom touches the keys' top (2 pt)? The one edge every Done check uses."""
+        up, bar = parents.get(node), False
+        while up is not None and _kind(up) not in ("Window", "Application"):
+            _, y, _, h = _rect(up)
+            if (_kind(up) == "Toolbar" or 0 < h <= ACCESSORY_MAX) and abs(y + h - keys_top) <= 2:
+                bar = True
+            up = parents.get(up)
+        return bar and up is not None and _kind(up) == "Window" and up is not app_window
     keyboard_rects = [_keyboard_view(n, parents, screen_rect) for n in root.iter()
                       if _kind(n) == "Keyboard" and _rect(n)[3] > 0]
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):
@@ -1297,7 +1314,7 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         if not centred and not _reaches(node, screen):
             return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        named = (centred and bool(name) and name != label and name not in IOS_NOISE
+        named = (centred and bool(name) and name != label and name not in IOS_NOISE and name not in KEYBOARD_IDS
                  and kind not in ("Application", "Window", "NavigationBar") and structural_id(name))
         if named:
             ids.add(name)  # (an id that carries content never goes into a key: structural_id)
@@ -1929,6 +1946,10 @@ BLANK_CLEAR = 44.0
 # iOS's own views that carry an identifier but nothing to read or act on: listing them is noise (a first-time agent
 # asked what `image id=AdditionalDimmingOverlay` was, 2026-11-11; it is the dimming under the navigation bar)
 IOS_NOISE = frozenset({"AdditionalDimmingOverlay"})
+# (1.9.0, the phone check) what the keyboard and the text selection put in the tree while a field is being edited: never
+# part of a place's key, so a form with the keyboard up is the same place as without it
+KEYBOARD_IDS = frozenset({"dictation", "inputView", "_UITextSelectionRangeAdjustmentContainerView",
+                          "com.apple.text.grabber.leading", "com.apple.text.grabber.trailing"})
 SPRINGBOARD_ROOT = 'bundleId="com.apple.springboard"'  # in the tree's first element when SpringBoard is in front
 SHEET_BESIDE = 60.0  # points of screen a sheet must leave free on a side for a touch beside it
 SHEET_GRIP = 14.0  # how far below a sheet's top edge a finger takes hold to pull it down

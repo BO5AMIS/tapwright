@@ -84,6 +84,18 @@ class ClientView:
     # (name, bundle id) of the app the agent's last touch or open_app was meant for, until its next look: type_text
     # without a target types only there (1.7.8, X item 4)
     aimed_app: tuple[str, str] | None = None
+    # (1.9.0, AGENT-TOOLS 1.17 §30) the way from the app's start this session is on (autoroute.Chain), the apps whose
+    # `Known:` line was given, the hints given, the top-level calls made, single taps in a row along known roads, whether
+    # `logs` was read, and whether the last move went along a road the map had
+    auto: object | None = None
+    auto_begun: set = field(default_factory=set)  # (1.9.0 round 2) the apps whose way this session already began
+    known_told: set = field(default_factory=set)
+    hints_given: set = field(default_factory=set)
+    calls: int = 0
+    tap_streak: int = 0
+    logs_mark: dict = field(default_factory=dict)  # app: its log ring's count when this session last read logs (or first saw it)
+    done_taken_back: str | None = None  # what a Done key's new line taken back says, for the refusal that follows
+    road_known: bool | None = None
 
 
 class Controller:

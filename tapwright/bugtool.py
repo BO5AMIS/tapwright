@@ -385,7 +385,8 @@ class BugTools:
         except findings.FindingError as e:
             raise Refused("bad_params", ctx.safe()(f"the finding can't be made into a bug: {e}")) from None
         now_unasked = parsed["source"] == "from" and args["from"] == "now" and not runs
-        text = bugmake.answer(made, ctx.scrub, reason_shown=not now_unasked, home=Path.home())
+        text = bugmake.answer(made, ctx.scrub, reason_shown=not now_unasked, home=Path.home(),
+                              summary=self._hints_wanted())  # (1.9.0 round 2; --no-hints: 1.8.5's answer)
         if parsed["export"] is not None:
             held = ctx.store.read(made.finding["app"], made.meta["id"])
             if held is None:

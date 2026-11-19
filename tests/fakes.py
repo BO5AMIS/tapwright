@@ -524,8 +524,12 @@ class FakeSession:
         self._record("is_focused")
         return field.role == "input" and bool(self.focused) and self.focused in (field.identifier, field.label)
 
-    async def dismiss_keyboard(self):
+    async def dismiss_keyboard(self, keys=()):
         self._record("dismiss_keyboard")
+        self.dismiss_keys = [*getattr(self, "dismiss_keys", []), tuple(keys)]
+        if keys and getattr(self, "done_key", False):  # (1.9.0) the keyboard shows a Done key, and it closes it
+            self.last_keyboard = False
+            return True
         if self.dismiss_ok and self.dismiss_closes:
             self.last_keyboard = False
         return self.dismiss_ok

@@ -4,6 +4,48 @@ What Tapwright measures against, how, and the latest numbers. The targets are th
 [quality bar](QUALITY-BAR.md), the same for Tapwright and Tapline. The runner is the shared benchmark in
 Tapline's repository (`bench/`): it drives a tool through MCP exactly as an agent does.
 
+## Tokens: 1.9.0 against 1.8.5, 2026-11-19
+
+What an agent spends to get a task done. The same 21 tasks, run once each with Haiku, Sonnet and Opus as the
+session's model, every one in a brand-new Claude Code session (2.1.327) holding only Tapwright's MCP server and its
+skill, with the task in a user's plain words and no hints about the tool. The same iPhone 14 Pro Max (iOS 26.5, USB)
+and the demo app (Wayfare), reset before every run.
+
+| | 1.8.5 | 1.9.0 | Change |
+|---|---|---|---|
+| Tasks passed | 20 of 21 | 20 of 21 | |
+| Total tokens | 8.48M | 5.84M | **−31%** |
+| Model turns | 225 | 157 | −30% |
+| Tapwright calls | 218 | 151 | −31% |
+| Cost | $2.43 | $1.81 | −26% |
+| Time | 17.1 min | 13.7 min | −20% |
+
+| Tokens per model | 1.8.5 | 1.9.0 | Change |
+|---|---|---|---|
+| Haiku | 3.18M | 1.94M | −39% |
+| Sonnet | 2.06M | 1.82M | −12% |
+| Opus | 3.24M | 2.08M | −36% |
+
+| Tokens per task (three models together) | 1.8.5 | 1.9.0 | Change |
+|---|---|---|---|
+| Open a screen and read a value | 0.36M | 0.31M | −15% |
+| Change a setting, check it, change it back | 0.90M | 0.79M | −12% |
+| Fill in a form and save it | 1.79M | 0.94M | −48% |
+| Find the last item of a long list | 0.50M | 0.41M | −18% |
+| Explore a screen and file a bug report | 2.72M | 2.20M | −19% |
+| The form again, in a new session | 1.61M | 0.78M | −52% |
+| The long list again, in a new session | 0.60M | 0.41M | −30% |
+
+**What decides the cost is the number of turns:** every turn re-reads the whole conversation (about 28k tokens before
+the first call). Tapwright's own answers were a few thousand tokens per task, so 1.9.0 cuts turns: routes remembered
+by themselves (`Known:` and `drive {"route"}`), the key rules in the tool descriptions and answers, the keyboard
+handled before a tap it covers, and the core tools loaded with the session (turns spent loading tools: 29 to 2).
+
+**Notes.** One run per task and model: a per-task difference under about 15% is within run-to-run variance. Most of
+the saving is cached re-reads, so cost falls less than tokens. Loading the core tools up front adds about 5.7k tokens
+to a session's start. The one failure in each version is Haiku writing a file instead of calling `bug_report`. The
+harness, prompts and raw rows are kept with the project's drafts; `--no-hints` gives 1.8.5's behaviour.
+
 ## 1.0.0 against 1.6.0, 2026-11-13
 
 The same iPhone, the same lab and the same runner, once with 1.0.0 and once with 1.6.0, over USB and over Wi-Fi.

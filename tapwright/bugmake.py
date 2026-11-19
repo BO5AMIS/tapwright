@@ -527,9 +527,17 @@ def from_failure(ctx: Context, failure: dict, *, with_picture: bool, reproduced:
 
 # ---- the answer (§29.3) ----
 
-def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bool = True, home: Path | None = None) -> str:
+SUMMARY_CUT = 300  # (1.9.0 round 2) the characters of the report's "What happened" line an answer carries
+REPORT_WRITTEN = ("The report is written in the folder (report.md, report.html, repro.json): give the user the folder; "
+                  "there is nothing more to read or write.")
+
+
+def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bool = True, home: Path | None = None,
+           summary: bool = False) -> str:
     """The tool's answer. Only the app's text in it (the title's `got`, a check's reason) is read through the redactor
-    (review R185b H1): the id, the dates, the builds and the folder are the tool's own and shown as they are."""
+    (review R185b H1): the id, the dates, the builds and the folder are the tool's own and shown as they are. `summary`
+    (1.9.0 round 2, not with --no-hints): the report's own "What happened" line and its steps' count follow, and a line
+    that the report is complete, so an agent doesn't read the file (a Bash `cat` was a turn and a permission prompt)."""
     safe = findings.safe_scrub(scrub)
     seen = made.meta["seen"]
     times = f"{seen['count']} {'time' if seen['count'] == 1 else 'times'}"
@@ -545,6 +553,16 @@ def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bo
         n, of = r["n"], r["of"]
         line = f"Reproduced: {n} of {of} runs" + (": not reproduced." if n == 0 else " (flaky)." if n < of else ".")
     lines = [head, line, f"Seen: {times}, {str(seen['last'])[:10]}, {shown_builds}.", f"Folder: {shown_path(made.folder, home)}"]
+    if summary:
+        got = bug.one_line("; ".join(safe(str(made.finding.get("got") or "")).split("\n")))
+        expected = bug.one_line(safe(str(made.finding.get("expected") or ""))).rstrip(".")
+        happened = f"Expected: {expected}. Got: {got}" if expected else f"Got: {got}"
+        if len(happened) > SUMMARY_CUT:
+            happened = happened[:SUMMARY_CUT - 1].rstrip() + "…"
+        steps = len(made.finding.get("path") or [])
+        lines.append(f"What happened: {happened}")
+        lines.append(f"Steps to reproduce: {steps} in report.md." if steps else "Steps to reproduce: none written down.")
+        lines.append(REPORT_WRITTEN)
     return "\n".join(lines)
 
 

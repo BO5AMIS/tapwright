@@ -7,3 +7,4 @@ tapwright/skill/** text eol=lf
 docs/AGENT-TOOLS.md text eol=lf
 docs/QUALITY-BAR.md text eol=lf
 docs/VIEWER-PROTOCOL.md text eol=lf
+docs/history/AGENT-TOOLS-1.17.md -text

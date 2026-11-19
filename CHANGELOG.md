@@ -1,5 +1,81 @@
 # Changelog
 
+## 1.9.0 (2026-11-19), "the Token Update"
+
+Fewer calls per task (AGENT-TOOLS 1.17 §30). Nothing is taken away: every 1.8.5 call, argument and answer still
+works, and `--no-hints` gives 1.8.5's behaviour back.
+
+- Routes save themselves: the way a session went from the app's start to a screen (taps, back, open_url and the scrolls
+  before them) is kept as that screen's route in the app's map folder (`"auto": true`), with no `record` call, and
+  `drive {"route": "<name>"}` replays it in one call. A route is named by the name given with `map {"name"}`, else by
+  the id of the move that reaches the place, else `place_<n>`: never by a label or a title. Navigation only: any typing
+  (in a `run` too), a toggle, a tap that stays, a touch the policy held, and a tap that leaves a form by a control that
+  may submit it break the way from there; only a route the tool saved itself carries it on after a drive, a person's
+  route never. One
+  route per place: a shorter way replaces it, one whose own steps fail twice is dropped (not reaching its start never
+  counts; an end read while the screen was still coming in is judged on the same screen by its own ids, and set to
+  where it settles), and at most 50 per app. A person's route is never replaced. The keyboard's own ids are never part
+  of a place.
+- The first answer of a session that shows an app says what it can reach in one call with nothing to give, the most
+  used first, else the most recently reached: `Known: plan_trip, dest_card_kyoto (one call each: drive {"route":
+  "<name>"})`. Only routes that are strictly navigation are offered (no nested drive, typing, vault value, floor word
+  or link value such as `[id]`); a person's route that does more stays drivable by name. A name the redaction would
+  change is left out; none in a user's-eyes journey.
+- The MCP instructions begin with the shared token rules: known steps in one `run` with an `expect`, target by id, a
+  screenshot only to judge looks (`screenshot: false` on a `look` that only reads), use `Known:`, hand a long task's
+  driving to one small agent, a bug report is `bug_report`.
+- `Hint:` lines in the shared words, at most one per answer and each once per session (a daemon restart starts the
+  session again), none on a safety refusal or a pause, in the order logs > known way > form > screenshot > long task: the
+  app's own logged error or a crash since `logs` was last read (never a tool error), three taps along a known way, a
+  form opened (2 or more inputs and a button), a screenshot the text already covered, a long task (from the 20th call,
+  worded so a helper agent carries on).
+- A touch whose target the keyboard covers presses a Done when a touch outside and a drag don't close it (Wayfare's
+  trip form, whose last field is multiline), only ever a button named exactly Done, under two rules: the keyboard's own
+  input accessory Done (in the keyboard's window, its bar on the keys' edge) for any covered target; the keyboard's Done
+  key only for a `tap` on a submit button the floor doesn't hold (Save trip after Notes) while the focused field is
+  multiline and holds a readable value. Never return, Go, Send, Search, Next or Join. A line break the Done key adds at
+  the end is taken back with one backspace while the keyboard is still up and the field focused; if the keyboard closed
+  with it, or the value changed otherwise, it is left alone; the answer says either. If the screen changed after the
+  Done key closed the keyboard (it may have submitted the form), the call is refused `stale` and the tap never goes
+  through. The dismiss key is still tried; if nothing closes the keyboard the tap is refused as in 1.8.5, with a hint
+  that Return can submit.
+- `--no-hints` (on `tapwright mcp`, `serve` and `call`, or `TAPWRIGHT_NO_HINTS=1`): no `Known:` or `Hint:` lines, no
+  route saved by itself and none shown, no Done press; `mcp --no-hints` also gives 1.8.5's instructions.
+- Tests keep the tool's home in a folder of their own: a daemon test no longer writes maps or reports to
+  `~/.tapwright`.
+
+Round 2 (from the 21-run benchmark of 1.9.0, AGENT-TOOLS §30.1a, §30.4a):
+- The core tools load with the session: `open_app`, `open_url`, `look`, `tap`, `type_text`, `run`, `scroll`, `back`,
+  `toggle`, `wait_for` and `drive` carry `_meta {"anthropic/alwaysLoad": true}`, so Claude Code lists them without a
+  ToolSearch turn first; the others stay deferred. The listed schemas lose pydantic's `title` keys. `tapwright mcp
+  --lazy-tools` (or `TAPWRIGHT_LAZY_TOOLS=1`, or `--no-hints`) lists 1.8.5's tools byte for byte, all deferred.
+- The keyboard is told, not fought: `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`
+  (`presses the keyboard's Done first` when its accessory bar has one); a keyboard that stays up over a touch it doesn't
+  cover is said plainly in its own note (`the keyboard stayed up ...; it doesn't cover this target, so the tap went
+  ahead.`), beside the usual "report it as a finding" note when the touch changed nothing.
+- Route memory that gets used: the way begins at the session's first screen (an `open_url`, a first `look` or action),
+  not only after `open_app`; a search's result is kept as "scroll to it, tap it" by its id when a read of the screen
+  from before the typing held it, and the tap on it comes right after the search (never the typed text; such a route is
+  dropped after one failed replay; a search typed as the session's first call, or followed by any other call, keeps
+  nothing; "search" is a word of the field's id, label or placeholder, not a part of "research"); routes are kept per target, not
+  per place (a way via Lisbon no longer replaces one via Kyoto); each `Known:` name shows its way in ids,
+  `dest_card_lisbon (scroll to dest-card-lisbon, tap)`; and `map`'s listing ends with the `Known:` line too.
+- In `run`: `expect {"id": X, "text": T}` (that element shows that text) and `optional: true` on a `wait_for` (skipped
+  when nothing comes) are taken instead of refused; an `open_url` step's `expect` says when it waited out the app's
+  loading screen (within its own timeout, ending the moment it holds; the tool never opens a link again).
+- `look {"ocr": true}` without OCR installed answers the look with a note on how to install it; `bug_report`'s answer
+  carries the report's "What happened" line and its steps' count and says nothing more needs reading.
+- The form hint fires on 1 or more inputs and a submit-worded button (Save, Submit, Continue...), besides 2 or more
+  inputs and a button. This is Tapwright's own reading of AGENT-TOOLS 1.17 §30.3's "2 or more inputs" (which never
+  fired on Wayfare's trip form, one field and steppers), made while Tapline is paused. A screen with a search field
+  gets no form hint.
+- The instructions under the shared token rules lose Tapwright's 1.7.5-era lines (options that no longer restrict
+  anything), say a doubled line once, and add "Start with open_app (or a look at the app in front)"; the shared block is
+  unchanged. `logs` shows the app's own lines and counts a system framework's, saying how many are errors (`all: true`
+  shows every line).
+- `--no-hints` keeps giving 1.8.5's behaviour for all of these, with two exceptions that make nothing harder:
+  `expect {"id", "text"}` and `optional` on a `wait_for` are taken there too (1.8.5 refused them `bad_params`).
+
 ## 1.8.5 (2026-11-19), "the Bug Report"
 
 - New tool `bug_report` (and `tapwright bug`): one page for whoever fixes a bug, readable in a minute and holding nothing

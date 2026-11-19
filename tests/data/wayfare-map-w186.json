@@ -1,0 +1,319 @@
+{
+  "format": "agent-tools-map",
+  "version": 1,
+  "app": "com.bo5amis.tapwright.wayfare",
+  "titleKey": "a9c4b84c506c80f16192c2844d280c10",
+  "places": {
+    "place_1": {
+      "key": {
+        "signature": "07b3351d5effd7d1",
+        "parts": {
+          "ids": [
+            "explore-greeting",
+            "explore-list",
+            "explore-search",
+            "explore-title",
+            "tab-explore",
+            "tab-settings",
+            "tab-trips"
+          ],
+          "lists": [
+            ""
+          ],
+          "inner": [
+            "dest-card",
+            "dest-name",
+            "dest-price",
+            "dest-rating"
+          ],
+          "kinds": [
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-11-19T15:22:14Z"
+    },
+    "place_2": {
+      "key": {
+        "signature": "208aab3c6576a355",
+        "parts": {
+          "ids": [
+            "detail-scroll"
+          ],
+          "lists": [
+            ""
+          ],
+          "inner": [
+            "detail",
+            "detail-plan"
+          ],
+          "kinds": [
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-11-19T15:22:15Z"
+    },
+    "place_3": {
+      "key": {
+        "signature": "e48c925b3387d7fa",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "detail-scroll",
+            "trip-departure-minus",
+            "trip-departure-plus",
+            "trip-departure-value",
+            "trip-dest-name",
+            "trip-form",
+            "trip-nights",
+            "trip-notes",
+            "trip-reminder",
+            "trip-return-minus",
+            "trip-return-plus",
+            "trip-return-value",
+            "trip-save",
+            "trip-travellers-minus",
+            "trip-travellers-plus",
+            "trip-travellers-value"
+          ],
+          "lists": [
+            ""
+          ],
+          "inner": [
+            "detail",
+            "detail-plan"
+          ],
+          "kinds": [
+            "nav",
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {
+        "latin": "671edbb8f685eae6"
+      },
+      "last": "2026-11-19T15:22:16Z"
+    },
+    "place_4": {
+      "key": {
+        "signature": "96c15ba124d40434",
+        "parts": {
+          "ids": [
+            "BackButton",
+            "_UITextSelectionRangeAdjustmentContainerView",
+            "com.apple.text.grabber.leading",
+            "dictation",
+            "inputView",
+            "trip-departure-minus",
+            "trip-departure-plus",
+            "trip-departure-value",
+            "trip-dest-name",
+            "trip-form",
+            "trip-nights",
+            "trip-notes",
+            "trip-reminder",
+            "trip-return-minus",
+            "trip-return-plus",
+            "trip-return-value",
+            "trip-save",
+            "trip-travellers-minus",
+            "trip-travellers-plus",
+            "trip-travellers-value"
+          ],
+          "lists": [],
+          "inner": [],
+          "kinds": [
+            "nav"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {
+        "latin": "671edbb8f685eae6"
+      },
+      "last": "2026-11-19T15:22:24Z"
+    },
+    "place_5": {
+      "key": {
+        "signature": "8795efb1595c0850",
+        "parts": {
+          "ids": [
+            "tab-explore",
+            "tab-settings",
+            "tab-trips",
+            "trips-list",
+            "trips-title"
+          ],
+          "lists": [
+            ""
+          ],
+          "inner": [],
+          "kinds": [
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-11-19T15:15:12Z"
+    },
+    "place_6": {
+      "key": {
+        "signature": "da1cc5ad31ea74ca",
+        "parts": {
+          "ids": [
+            "dictation",
+            "explore-greeting",
+            "explore-list",
+            "explore-search",
+            "explore-search-clear",
+            "explore-title",
+            "inputView",
+            "tab-explore",
+            "tab-settings",
+            "tab-trips"
+          ],
+          "lists": [
+            ""
+          ],
+          "inner": [
+            "explore"
+          ],
+          "kinds": [
+            "list"
+          ],
+          "tab": null,
+          "layer": null
+        }
+      },
+      "link": null,
+      "titles": {},
+      "last": "2026-11-19T15:14:12Z"
+    }
+  },
+  "routes": {
+    "dest_card_kyoto": "routes/dest_card_kyoto.json"
+  },
+  "reflexes": [],
+  "roads": [
+    {
+      "from": "place_1",
+      "to": "place_2",
+      "move": {
+        "tool": "tap",
+        "target": {
+          "id": "dest-card-kyoto"
+        }
+      },
+      "names": {
+        "id": "dest-card-kyoto",
+        "label": "Kyoto, Kyoto, Japan",
+        "text": "Kyoto, Kyoto, Japan"
+      },
+      "by": "tapwright",
+      "seen": 3,
+      "failed": 0,
+      "ms": 1054,
+      "last": "2026-11-19T15:22:16Z",
+      "build": "1.0.0 (1)"
+    },
+    {
+      "from": "place_2",
+      "to": "place_3",
+      "move": {
+        "tool": "tap",
+        "target": {
+          "id": "detail-plan-trip"
+        }
+      },
+      "names": {
+        "id": "detail-plan-trip"
+      },
+      "by": "tapwright",
+      "seen": 1,
+      "failed": 0,
+      "ms": 474,
+      "last": "2026-11-19T15:05:49Z",
+      "build": "1.0.0 (1)"
+    },
+    {
+      "from": "place_2",
+      "to": "place_1",
+      "move": {
+        "tool": "tap",
+        "target": {
+          "id": "detail-back"
+        }
+      },
+      "names": {
+        "id": "detail-back",
+        "label": "Back",
+        "text": "Back"
+      },
+      "by": "tapwright",
+      "seen": 3,
+      "failed": 0,
+      "ms": 883,
+      "last": "2026-11-19T15:13:55Z",
+      "build": "1.0.0 (1)"
+    },
+    {
+      "from": "place_5",
+      "to": "place_6",
+      "move": {
+        "tool": "tap",
+        "target": {
+          "id": "tab-explore"
+        }
+      },
+      "names": {
+        "id": "tab-explore",
+        "label": "Explore",
+        "text": "Explore"
+      },
+      "by": "tapwright",
+      "seen": 1,
+      "failed": 0,
+      "ms": 641,
+      "last": "2026-11-19T15:14:12Z",
+      "build": "1.0.0 (1)"
+    },
+    {
+      "from": "place_6",
+      "to": "place_1",
+      "move": {
+        "tool": "tap",
+        "target": {
+          "id": "explore-search-clear"
+        }
+      },
+      "names": {
+        "id": "explore-search-clear",
+        "label": "Clear search",
+        "text": "Clear search"
+      },
+      "by": "tapwright",
+      "seen": 1,
+      "failed": 0,
+      "ms": 732,
+      "last": "2026-11-19T15:14:21Z",
+      "build": "1.0.0 (1)"
+    }
+  ]
+}

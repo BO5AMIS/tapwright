@@ -18,11 +18,12 @@ class Ceiling:
     accounts: str | None = None  # `serve --accounts FILE`: the test accounts file (§18.6); a call can't name another
     brief: bool = False  # `serve --brief`: answers are brief unless a call says `brief: false` (§13.4); not a limit
     maps: str | None = None  # `serve --maps DIR`: where the per-app map folders are (§18.9); a call can't move it
+    no_hints: bool = False  # `serve --no-hints` (§30.4): no Known: or Hint: lines in any answer; not a limit
 
     @property
     def is_set(self) -> bool:
         return bool(self.apps or self.dedicated or self.phone or self.policy is not None or self.no_dialog or self.accounts
-                    or self.brief or self.maps)
+                    or self.brief or self.maps or self.no_hints)
 
     def check_maps(self, sent: str | None) -> tuple[str | None, str | None]:
         """(the maps root this call uses, why it is refused). With no daemon root: the call's own, else none (the tool's

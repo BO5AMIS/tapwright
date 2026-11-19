@@ -27,7 +27,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "audit": ("types",),
     "ux_check": (),
     "media": ("add", "remove", "confirm"),
-    "logs": ("since", "level", "grep", "limit"),
+    "logs": ("since", "level", "grep", "limit", "all"),
     "crash": ("all", "pull"),
     "performance": ("launch", "seconds", "tap"),
     "filmstrip": ("frames", "interval_ms", "frame_width", "tap"),

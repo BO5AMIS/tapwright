@@ -1,0 +1,65 @@
+"""The token rules' words (AGENT-TOOLS 1.17 §30), in one place: a wording change Tapline and Tapwright agree on is one
+edit here. §30.1's block heads the MCP instructions; §30.2's `Known:` line and §30.3's `Hint:` lines are added to
+answers. `--no-hints` (§30.4) turns all of them off: the instructions and answers are then 1.8.5's, word for word.
+"""
+from __future__ import annotations
+
+# Tapwright's own replay call, filled into `<replay>` (§30.1, §30.2)
+REPLAY = 'drive {"route": "<name>"}'
+
+# §30.1, word for word in both tools (each fills <replay>)
+RULES = (
+    "Working well with this tool (fewer calls, fewer tokens):\n"
+    "- Read each answer: it says what changed. Don't look again just to check.\n"
+    "- When you know the next steps, send them as one `run`, with an `expect` on the steps that matter.\n"
+    "- Target by id when there is one.\n"
+    "- Ask for a screenshot only to judge how something looks (`screenshot: false` on a `look` that only reads); the text"
+    " answer is enough to act.\n"
+    "- `Known:` lists screens reachable in one call (" + REPLAY + "). Use it instead of tapping your way there.\n"
+    "- On a long or unknown task, hand the driving to one small, fast agent and check its result; never two drivers.\n"
+    "- A bug report is `bug_report`, not a file you write.\n"
+)
+
+KNOWN_MAX = 8  # §30.2: at most 8 names, then `+N more`
+
+
+def known_line(names: list) -> str | None:
+    """§30.2: `Known: <name>, <name>, ... (one call each: <replay>)`; None when nothing is known. (1.9.0 round 2,
+    Tapwright's own) a name given as `(name, way)` is shown with its way in ids, `dest_card_lisbon (scroll to
+    dest-card-lisbon, tap)`, and the names are then parted by `; ` (a way has commas of its own)."""
+    if not names:
+        return None
+
+    def one(entry) -> str:
+        if isinstance(entry, tuple):
+            name, way = entry
+            return f"{name} ({way})" if way else name
+        return entry
+    shown = [one(n) for n in names[:KNOWN_MAX]]
+    sep = "; " if any(isinstance(n, tuple) and n[1] for n in names[:KNOWN_MAX]) else ", "
+    more = f"{sep}+{len(names) - KNOWN_MAX} more" if len(names) > KNOWN_MAX else ""
+    return f"Known: {sep.join(shown)}{more} (one call each: {REPLAY})"
+
+
+# §30.3: the sentences word for word (Tapwright fills its own call). Keys are what "at most once per session" counts.
+HINTS = {
+    "form": "Hint: fill the fields and save in one `run`, with an `expect` on the save step.",
+    "known_way": "Hint: this way is known: `" + REPLAY.replace("{", "{{").replace("}", "}}").replace("<name>", "{name}")
+                 + "` reaches {name} in one call.",
+    "screenshot": "Hint: the text answer had the changes; ask for a screenshot only to judge how something looks.",
+    # (harmless to a helper too: a subagent's calls come over the same server)
+    "long_task": "Hint: on a long task, the main session can hand the driving to one small, fast agent; if you are that "
+                 "agent, carry on.",
+    "logs": "Hint: the app logged an error: `logs` shows it.",
+}
+# §30.3: when several apply, the first of these; none on a safety refusal
+ORDER = ("logs", "known_way", "form", "screenshot", "long_task")
+# needs_confirmation, blocked, a floor hold and a person's decline are `not_allowed`; a pause is `paused` (§30.3)
+SAFETY_CODES = ("not_allowed", "paused")
+
+LONG_TASK_CALLS = 20  # §30.3: from the session's 20th call, once
+KNOWN_WAY_TAPS = 3  # single taps in a row along known roads before the known-way hint
+
+
+def hint(kind: str, **fill: str) -> str:
+    return HINTS[kind].format(**fill) if fill else HINTS[kind]
