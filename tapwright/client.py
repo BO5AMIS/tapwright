@@ -198,10 +198,19 @@ def set_serve_args(args: list[str]) -> None:
     _SERVE_ARGS[:] = [str(a) for a in args]
 
 
+def daemon_args() -> list[str]:
+    """What an automatic start runs after `tapwright`: the flags `tapwright service install` saved when there are some
+    (1.9.2, review R191 M4: a daemon an agent starts after `serve --stop`, or before the logon task ran, keeps
+    --keep-alive and the vault), else `serve` with this process's own (a scheduled run's --accounts)."""
+    from . import service
+    saved = service.saved_args()
+    return saved if saved is not None else ["serve", *_SERVE_ARGS]
+
+
 def start_daemon() -> subprocess.Popen:
     """`tapwright serve` in the background: no console window, and it outlives the agent that
     started it (on Windows it leaves the agent host's job object when Windows allows that)."""
-    cmd = [sys.executable, "-m", "tapwright", "serve", *_SERVE_ARGS]
+    cmd = [sys.executable, "-m", "tapwright", *daemon_args()]
     quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
              "close_fds": True}
     if os.name != "nt":

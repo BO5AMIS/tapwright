@@ -1,6 +1,6 @@
 """The passcode unlock (AGENT-TOOLS §18.6, §11.5, §24.5; unlock.py). With fakes: no phone. The passcode is typed only
 when the lock screen's passcode entry is proven in SpringBoard's tree, never into an app or the XCTest prompt, at most
-twice an hour when it doesn't unlock (1.9.1: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
+twice an hour when it doesn't unlock (1.9.2: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
 import asyncio
 
 import pytest
@@ -18,7 +18,7 @@ def window(name: str = "SBCoverSheetWindow") -> ui.Element:
 
 def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True) -> list[ui.Element]:
     """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels, in the cover sheet's
-    window (1.9.1: find_entry requires it; cover=False leaves it out)."""
+    window (1.9.2: find_entry requires it; cover=False leaves it out)."""
     letters = {"2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"}
     items = []
     for i, d in enumerate("1234567890"):
@@ -185,7 +185,7 @@ def test_a_changed_passcode_in_the_file_may_be_tried_after_a_refusal():
 
 
 def test_an_unlock_that_works_is_never_limited():
-    """(1.9.1, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
+    """(1.9.2, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
     unlocked as often as it likes. The wakes that type are not counted either."""
     u, clock = unlocker()
     screen = Screen()
@@ -208,7 +208,7 @@ def test_at_most_two_failed_attempts_an_hour_even_after_a_reset():
     _refused_then_reset(u, clock, screen)
     _refused_then_reset(u, clock, screen)
     r = run(u.unlock(screen, PASSCODE))
-    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and "failed twice this hour" in r.message
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and r.message == unlock.LIMITED and "2 attempts this hour" in r.message
     clock.t += 3600
     screen.right = PASSCODE  # the phone's passcode is the file's again
     assert run(u.unlock(screen, PASSCODE)).code == "unlocked" and len(screen.pressed) == 3
@@ -221,7 +221,7 @@ def test_at_most_three_failed_attempts_a_day():
         _refused_then_reset(u, clock, screen)
         clock.t += 3600
     r = run(u.unlock(screen, PASSCODE))
-    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 3 and "3 times today" in r.message
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 3 and r.message == unlock.LIMITED_DAY
 
 
 def test_successes_between_failures_do_not_count():
@@ -456,7 +456,7 @@ def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothi
     assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2
 
 
-# ---- 1.9.1: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
+# ---- 1.9.2: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
 # After Software Update > Later, iOS showed "Enter Passcode to Update Tonight": window SBTransientOverlayWindow, a
 # "Passcode field", all ten digit keys and "Remind Me Later". Typing the passcode there schedules an iOS update. The tree
 # below is that screen's, ids and labels only (frames are placeholders in the keypad's usual places).

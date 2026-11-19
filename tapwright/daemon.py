@@ -69,6 +69,7 @@ LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back"
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
+UNLOCKS_NOTED = 10  # unlocks in an hour above which each one is noted in the log (they are never limited)
 # (W185) a connect that launched no runner because of the phone's lock state: a person is needed, and `unlock` can't help
 HELD_BEFORE_START = (NotUnlockedSinceRestart, LockedBeforeStart)
 UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
@@ -1215,6 +1216,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._turned: tuple | None = None  # ((frame seq, degrees), the turned JPEG): see turned()
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
+        self._phone_seen_at: float | None = None  # see phone_last_seen
         self.preset = os.environ.get("TAPWRIGHT_PRESET", "balanced")  # (a trial switch: the stream's preset at start)
         if self.preset not in PRESETS:
             self.preset = "balanced"
@@ -1386,8 +1388,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 queue.get_nowait()
             queue.put_nowait(message)
 
+    def phone_last_seen(self) -> float | None:
+        """(1.9.2, review R191 L4) When (monotonic) a phone was last known to be there: now while it is live or locked,
+        or stuck on a lock or the passcode prompt; else when that last ended; None: never. The idle stop waits for this to
+        be older than its limit, whatever the state's name (a `--address` phone that is away reads `reconnecting`)."""
+        if self.state in ("live", "locked") or isinstance(self.stuck, PhoneLocked):
+            return time.monotonic()
+        return self._phone_seen_at
+
     def _set_state(self, state: str, detail: str | None = None) -> None:
         changed = (state, detail) != (self.state, self.detail)
+        if self.state in ("live", "locked") or isinstance(getattr(self, "stuck", None), PhoneLocked):
+            self._phone_seen_at = time.monotonic()  # the phone was there until this change
         self.state, self.detail = state, detail
         watch = getattr(self, "watchdog", None)
         if watch is not None:
@@ -1746,7 +1758,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def _session_again_on_runner(self, s, error: Exception) -> bool:
-        """(1.9.1, plug and forget) A new session timed out on a runner that is still running and still answers /status
+        """(1.9.2, plug and forget) A new session timed out on a runner that is still running and still answers /status
         (11-19 05:48 and 05:51: an audit kept WebDriverAgent busy, POST /session got no answer in 30 s, and the reset
         that followed replaced the runner). Ask for the session once more on the same runner before anything is torn
         down: a new runner costs iOS's passcode prompt once its consent is about 8 h old. True when that worked; False
@@ -1762,6 +1774,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
         self.log(f"WebDriverAgent didn't answer ({error}), but its runner still answers: asking it for a session again")
         s.sid = None
+        before = getattr(device, "runner", None)
         try:
             await s.ensure()
         except (NotSetUp, PhoneLocked, AppNotAnswering):
@@ -1769,7 +1782,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Exception as again:
             self.log(f"the runner didn't give a session again ({again})")
             return False
-        self.log("kept the running runner")
+        # (review R191 L1) the second try can still replace the runner (its /status stopped answering meanwhile)
+        self.log("kept the running runner" if getattr(device, "runner", None) is before else "replaced the runner")
         return True
 
     async def supervise(self, stop: asyncio.Event) -> None:
@@ -1897,6 +1911,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._unlock_end(span)
         if result.code == "unlocked":
             self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
+            many = getattr(self.unlocker, "unlocks_last_hour", None)
+            count = many() if many is not None else 0
+            if count > UNLOCKS_NOTED:  # never limited (1.9.2), but a phone that keeps locking is said (review R191 L3)
+                self.log(f"passcode unlock: {count} unlocks in the last hour: the phone keeps locking (Auto-Lock, or "
+                         "SpringBoard restarting)")
             if self.state == "locked":
                 self._set_state("live")
         elif result.code == "not_locked":

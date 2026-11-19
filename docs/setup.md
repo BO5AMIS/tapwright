@@ -103,7 +103,7 @@ ones as the daemon's own settings.
   itself at the start of a scheduled run and, with `tapwright serve --phone --accounts FILE`, at the start of a new
   call; and in every mode when an agent calls `unlock` (1.7.8). The passcode comes only from the file `tapwright serve --accounts`
   names. A lock in the middle of a run stops it (`locked`); the agent may then call `unlock`. At most 2
-  attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
+  failed attempts an hour and 3 a day (an unlock that works isn't limited, from 1.9.2), kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
   passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
   To save the passcode, add the `phone` entry to the same file, next to the accounts (`tapwright vault protect FILE`
   encrypts the file):
@@ -237,9 +237,13 @@ tapwright service install --accounts ~/tapwright-vault.json
 creates a Windows logon task (hidden) that runs `tapwright serve --keep-alive` with the flags
 you give (`--apps`, `--accounts`, `--maps`, ...); `tapwright service status` and
 `tapwright service uninstall` check and remove it. On macOS and Linux the command prints the
-launchd agent or systemd user unit to add. After the phone restarts, unlock it once with its
-passcode and enter the passcode once more when it asks to allow UI automation; until the next
-restart it needs no one.
+launchd agent or systemd user unit to add. A daemon an agent starts (after `tapwright serve
+--stop`, say) uses the same flags. After the phone restarts, unlock it once with its passcode and
+enter the passcode once more when it asks to allow UI automation. A daemon restart (`serve
+--stop`, an upgrade) more than about 8 hours after you last entered it asks once too, and a phone
+that locks by itself needs the passcode in the vault (`--accounts`) to be unlocked. Otherwise it
+needs no one. `TAPWRIGHT_RESTART_GATE=0` turns off the check that holds the runner after a phone
+restart until its first unlock.
 
 ### The live view as video
 

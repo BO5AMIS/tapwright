@@ -1338,7 +1338,8 @@ def main() -> int:
     q.add_argument("--since", metavar="DATE|TIME", help="only the lines since then: 2026-11-14 or 2026-11-14T09:30")
     q.add_argument("--delete", action="store_true", help="delete the audit log")
     sub.add_parser("unlock-reset", help="after a refused passcode, let the passcode unlock try the vault's "
-                                        "phone.passcode again (check it first); the limits of 2 an hour and 3 a day stay")
+                                        "phone.passcode again (check it first); the limits of failed attempts (2 an hour, 3 a "
+                                        "day) stay")
     p = sub.add_parser("vault", help="the vault file (--accounts): protect a plain one with this system's protection")
     p.add_argument("action", choices=["protect"],
                    help="protect: write FILE in this system's protected form (Windows DPAPI, the macOS keychain); "
@@ -1394,9 +1395,10 @@ def main() -> int:
     sv = p.add_subparsers(dest="service_cmd", required=True)
     q = sv.add_parser("install", help="a logon task (Windows) that runs `tapwright serve --keep-alive` with these flags; "
                                       "elsewhere, the launchd or systemd entry to add")
-    q.add_argument("--apps", metavar="APP[,APP]")
-    q.add_argument("--dedicated", action="store_true")
-    q.add_argument("--phone", action="store_true")
+    only = q.add_mutually_exclusive_group()  # as serve's: one that serve refuses would fail at every logon (R191 L5)
+    only.add_argument("--apps", metavar="APP[,APP]")
+    only.add_argument("--dedicated", action="store_true")
+    only.add_argument("--phone", action="store_true")
     q.add_argument("--accounts", metavar="FILE", help="serve's vault file (the passcode unlock reads it; never copied)")
     q.add_argument("--maps", metavar="DIR")
     q.add_argument("--policy", metavar="FILE")
@@ -1405,6 +1407,9 @@ def main() -> int:
     q.add_argument("--no-log", action="store_true")
     q.add_argument("--brief", action="store_true")
     q.add_argument("--no-hints", action="store_true")
+    q.add_argument("--no-dialog", action="store_true")
+    q.add_argument("--video", action="store_true")
+    q.add_argument("--settle-on-video", action="store_true")
     sv.add_parser("uninstall", help="remove the logon task (a running daemon keeps running until serve --stop)")
     sv.add_parser("status", help="whether the logon task is there and the daemon runs")
     sub.add_parser("view")
@@ -1597,10 +1602,12 @@ def main() -> int:
         from . import service as servicelib
         svc = servicelib.Service()
         if a.service_cmd == "install":
-            if a.phone and (a.apps or a.dedicated):
-                print("Error: --phone can't be used with --apps or --dedicated")
+            try:
+                args = servicelib.serve_args(vars(a))
+            except servicelib.ServiceError as e:
+                print(f"Error: {e}")
                 return 2
-            text, code = svc.install(servicelib.serve_args(vars(a)))
+            text, code = svc.install(args)
         elif a.service_cmd == "uninstall":
             text, code = svc.uninstall()
         else:

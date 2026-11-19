@@ -5117,7 +5117,7 @@ def test_a_start_held_by_the_lock_state_says_why_and_never_offers_unlock(held):
 
 
 class _RunnerSession(FakeSession):
-    """(1.9.1) A session whose first `ensure` calls fail as scripted; its device has a runner that is alive or not and
+    """(1.9.2) A session whose first `ensure` calls fail as scripted; its device has a runner that is alive or not and
     whose /status answers or not."""
 
     def __init__(self, fails: list, runner_alive: bool = True, answers: bool = True):

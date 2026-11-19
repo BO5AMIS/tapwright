@@ -684,25 +684,30 @@ def _bind(port: int) -> socket.socket | None:
     return sock
 
 
-PHONE_GONE = ("no-device",)  # the daemon's states with no phone to keep (all others: one is plugged in or reachable)
-
-
-def phone_present(daemon) -> bool:
-    """(1.9.1, plug and forget) Is a phone connected, or being connected to? Then the daemon doesn't stop for idleness:
-    stopping ends the test runner, and iOS asks for the passcode at a new runner's start once its consent is about 8 h
-    old (serve.log 11-13 to 11-19), while a runner kept running is never asked. A phone waiting at that prompt counts
-    too: its start goes on once the passcode is in."""
-    state = getattr(daemon, "state", None)
-    return isinstance(state, str) and state not in PHONE_GONE
+def phone_seen_ago(daemon, now: float | None = None) -> float | None:
+    """(1.9.2, plug and forget) Seconds since a phone was last known to be there (0 while it is: live, locked, or stuck
+    on a lock or the passcode prompt); None: never. The daemon doesn't stop for idleness until this is older than the
+    idle limit: stopping ends the test runner, and iOS asks for the passcode at a new runner's start once its consent is
+    about 8 h old (serve.log 11-13 to 11-19), while a runner kept running is never asked. Read from the daemon's
+    phone_last_seen, whatever its state is called (review R191 L4: a `--address` phone that is away reads
+    `reconnecting`; a 2-minute USB drop reads `no-device`)."""
+    seen = getattr(daemon, "phone_last_seen", None)
+    if not callable(seen):
+        return None
+    at = seen()
+    if at is None:
+        return None
+    return max(0.0, (time.monotonic() if now is None else now) - at)
 
 
 async def _idle_watch(daemon, stop: asyncio.Event, limit: float, every: float = 30.0) -> None:
     while not stop.is_set():
         await asyncio.sleep(every)
         if daemon.pump.viewers == 0 and daemon.ws_clients == 0 and time.monotonic() - daemon.last_request > limit:
-            if phone_present(daemon):
-                continue  # the runner is kept (see phone_present); the first check after the phone is gone stops
-            daemon.log(f"no viewers or requests for {limit / 60:.0f} min and no phone: stopping")
+            ago = phone_seen_ago(daemon)
+            if ago is not None and ago <= limit:
+                continue  # a phone was there within the limit: its runner is kept (see phone_seen_ago)
+            daemon.log(f"no viewers or requests for {limit / 60:.0f} min and no phone for as long: stopping")
             stop.set()
 
 
@@ -801,8 +806,10 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set, ceiling=ceiling)
             server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
                                                    access_log=False, timeout_graceful_shutdown=3))
+            # (1.9.2) keep_alive and accounts: what `service status` compares with the service's flags (R191 M4)
             store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,
-                                    "started": int(time.time())})
+                                    "started": int(time.time()), "keep_alive": bool(keep_alive),
+                                    "accounts": getattr(ceiling, "accounts", None) if ceiling is not None else None})
             log.info("listening on http://127.0.0.1:%d", actual)
             print(f"Tapwright is serving on port {actual}; open the live view with `tapwright view`", flush=True)
             serving = asyncio.create_task(server.serve(sockets=[sock]))

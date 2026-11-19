@@ -186,6 +186,12 @@ def lock_gate_on() -> bool:
     return os.environ.get("TAPWRIGHT_LOCK_GATE") == "1"
 
 
+def restart_gate_on() -> bool:
+    """The restart check (NotUnlockedSinceRestart): on unless TAPWRIGHT_RESTART_GATE=0 (review R191 M3: the way out if
+    a phone reports its lock state otherwise than the phone check P2 found)."""
+    return os.environ.get("TAPWRIGHT_RESTART_GATE") != "0"
+
+
 class AppNotAnswering(ConnectionLost):
     """WebDriverAgent runs, but the app in front never answers it, so every read of the screen hangs behind
     that app (2026-11-10: a development build froze mid-reload and stayed in front for hours)."""
@@ -415,7 +421,7 @@ class Device:
         return self.runner is not None and not self.runner.done()
 
     async def _still_answers(self) -> bool:
-        """(1.9.1) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
+        """(1.9.2) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
         a runner busy with one long request (an audit's read of a big screen) can miss one /status, and replacing it costs
         iOS's passcode prompt once its consent is about 8 h old. A runner whose task ended isn't asked (see runner_alive)."""
         for ask in range(REUSE_ASKS):
@@ -432,22 +438,30 @@ class Device:
         launched. None when the phone couldn't say (an older iOS, no tunnel, another shape of answer)."""
         if self.rsd is None:
             return None
-        try:
+        rsd = self.rsd
+
+        async def read() -> object:
             from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
-            async with DeviceInfoService(self.rsd) as service:
-                answer = await asyncio.wait_for(service.get_lockstate(), LOCK_STATE_WAIT)
+            async with DeviceInfoService(rsd) as service:
+                return await service.get_lockstate()
+        try:
+            # the whole read, the service's connect included, under the cap (review R191 M2: a phone whose services
+            # stall hung the connect, and with it the reconnect that holds the daemon's exclusive control)
+            answer = await asyncio.wait_for(read(), LOCK_STATE_WAIT)
         except Exception:
             return None
         return LockState.of(answer)
 
     async def _lock_gate(self) -> "PhoneLocked | None":
-        """Why no runner may be launched now, or None. Never after a restart before the first unlock; with
-        TAPWRIGHT_LOCK_GATE=1, also not on a locked phone whose consent to UI automation is spent or not on record (a
-        launch would put the passcode prompt over the lock screen). A phone that can't say is never held."""
+        """Why no runner may be launched now, or None. Not after a restart before the first unlock, when the phone also
+        says its passcode is needed (a phone without a passcode reads "not unlocked since boot" until its first swipe:
+        review R191 M3), unless TAPWRIGHT_RESTART_GATE=0; with TAPWRIGHT_LOCK_GATE=1, also not on a locked phone whose
+        consent to UI automation is spent or not on record (a launch would put the passcode prompt over the lock
+        screen). A phone that can't say is never held."""
         state = await self.lock_state()
         if state is None:
             return None
-        if not state.unlocked_since_boot:
+        if not state.unlocked_since_boot and state.passcode_required and restart_gate_on():
             return NotUnlockedSinceRestart()
         if state.passcode_required and lock_gate_on() and grant_stale() is not False:
             return LockedBeforeStart()

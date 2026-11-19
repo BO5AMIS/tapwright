@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from tapwright import mcp_server
-from tapwright.descriptions import EXTRA, INSTRUCTIONS, SHARED, describe
+from tapwright.descriptions import EXTRA, INSTRUCTIONS, SHARED, SHARED_192, describe
 
 ROOT = Path(__file__).resolve().parent.parent
 CODES = ["not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", "locked", "in_background",
@@ -58,9 +58,9 @@ def test_every_tool_carries_its_description():
         if name in ONLY_HERE:
             expected = EXTRA[name]
         elif name in EXTRA:
-            expected = f"{SHARED[name]}\nTapwright: {EXTRA[name]}"
+            expected = f"{SHARED_192.get(name, SHARED[name])}\nTapwright: {EXTRA[name]}"
         else:
-            expected = SHARED[name]
+            expected = SHARED_192.get(name, SHARED[name])
         assert len(expected) >= 40 and tool.description == expected == describe(name), name
 
 

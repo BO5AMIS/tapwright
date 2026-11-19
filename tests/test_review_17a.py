@@ -102,7 +102,7 @@ def test_a_refused_passcode_is_not_typed_again_by_the_next_daemon(tmp_path):
 
 
 def test_at_most_three_failed_attempts_a_day_whichever_process_types_them(tmp_path):
-    """(1.9.1) Counted: attempts that don't unlock (here refused, then cleared by a person's unlock-reset); an unlock that
+    """(1.9.2) Counted: attempts that don't unlock (here refused, then cleared by a person's unlock-reset); an unlock that
     works is never counted (test_unlock.py)."""
     clock = Clock()
     for n in range(3):
