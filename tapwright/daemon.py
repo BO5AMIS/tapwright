@@ -440,7 +440,11 @@ REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't t
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
-DONE_KEYS = ("Done", "done")  # (1.9.0) the keyboard's own Done key: closes a form's keyboard that a touch outside doesn't
+DONE_KEYS = ("Done",)  # (1.9.0) exactly Done: never return, Go, Send, Search, Next or Join (they can submit)
+DONE_BAR_GAP = 60.0  # how far above the keyboard an accessory's or toolbar's Done button may lie
+# (1.9.0) the refusal's hint when hints are on: Return's effect is the app's (KEYBOARD_HINT stays 1.8.5's, for --no-hints)
+KEYBOARD_HINT_190 = ("type_text into the field with submit: true presses Return, which closes the keyboard in many forms "
+                     "but can also submit, send or add a line: use it only where that is what you want.")
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 # AGENT-TOOLS 1.13.1 (3): off_screen means no scroll can bring the element on screen, and says what to do then
@@ -4105,6 +4109,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 if touched_first and "nothing was touched" in str(e):
                     # (last Opus review, M2) a touch on the way went out: the answer never says nothing was touched
                     e.args = (str(e).replace("nothing was touched", "nothing else was touched"),)
+                if (taken := view.done_taken_back) is not None:  # (1.9.0) said, never silent
+                    view.done_taken_back = None
+                    e.args = (f"{e}\nNote: {taken}",)
                 raise
             finally:
                 if self.control.person_generation != people:  # a person acted while it waited for an OK (_aside)
@@ -4793,7 +4800,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         before = next((r for r in found if r["name"] == name), None)
         route = {**routes.route(name, bundle, start, end, [], [routes.escaped(step) for step in way]),
-                 "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0}
+                 "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0, "reached": mapfile.now()}
         route = batch.saved_script(route, self._redact, f"route {name}")
         routes.check(route)
         file.write_route(name, route)
@@ -4813,7 +4820,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         used = used if isinstance(used, int) and not isinstance(used, bool) else 0
         failed = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
         if worked:
-            route.update(used=used + 1, failed=0)
+            route.update(used=used + 1, failed=0, reached=mapfile.now())
         elif failed + 1 >= autoroute.FAILS:
             path = file.routes_dir / f"{name}.json"
             try:
@@ -4835,6 +4842,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             except OSError:
                 pass
         return None
+
+    def _hints_wanted(self) -> bool:
+        """--no-hints is off for this call (the call's and serve's)."""
+        return _HINTS.get() is not False and not getattr(self.ceiling, "no_hints", False)
 
     def _hints_on(self, client_id: str) -> bool:
         """Known: and Hint: lines (§30.2, §30.3): not with --no-hints (the call's or serve's), not for a scheduled run (no
@@ -4871,8 +4882,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 view.auto = None
             elif name == "drive":
                 self._chain_after_drive(view, args)
-            if name == "logs":
-                view.logs_read = True
+            bundle = (view.app or (None, None))[1]
+            if name == "logs" and bundle is not None:
+                view.logs_mark[bundle] = self._log_mark(bundle)  # read: only an error after this asks for logs again
             if not self._hints_on(client_id):
                 return text
             return self._with_hints(view, name, args, self._with_known(view, text), code)
@@ -4929,8 +4941,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
         def wants(kind: str) -> bool:
             return chosen is None and kind not in view.hints_given
-        # (after a failed check: a crash's own note names logs already, and a frozen app's says to close it)
-        if wants("logs") and not view.logs_read and code == "expect_failed":
+        # the app's own error or a crash since logs were last read; never a tool error (not_found and the like)
+        if wants("logs") and (CRASH_NOTE in text or self._app_errored(view)):
             chosen = "logs"
         if wants("known_way") and code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None:
             chosen = "known_way"
@@ -4948,6 +4960,29 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if chosen == "known_way":
             return f"{text}\n{tokentext.hint(chosen, call=self._known_call(view))}"
         return f"{text}\n{tokentext.hint(chosen)}"
+
+    def _log_mark(self, bundle: str) -> int:
+        ring = self._rings.get(bundle)
+        return ring.added if ring is not None else 0
+
+    def _app_errored(self, view) -> bool:
+        """Has the app in front logged an error of its own since this session's mark (its first answer of the app, or
+        its last `logs` read)?"""
+        bundle = (view.app or (None, None))[1]
+        if bundle is None:
+            return False
+        ring = self._rings.get(bundle)
+        if bundle not in view.logs_mark:
+            view.logs_mark[bundle] = ring.added if ring is not None else 0
+            return False
+        if ring is None:
+            return False
+        new = ring.added - view.logs_mark[bundle]
+        if new <= 0:
+            return False
+        shown = ring.shown()
+        recent = shown[max(0, len(shown) - new):]
+        return any(e.level == "error" and e.own for e in recent)
 
     def _known_call(self, view) -> str:
         """The one call that reaches the place the app is at: its saved route, else drive to the place."""
@@ -6654,30 +6689,65 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                    for b in hit.covered_by)
 
     async def _press_done(self, view, app: str | None) -> bool | None:
-        """(1.9.0) The keyboard's own Done key, for a target the keyboard covers in a form that ignores a touch outside and
-        a drag (React Native's multiline Notes with returnKeyType done: Wayfare's trip form). It is pressed only when the
-        keyboard shows a key named Done; a field whose Done key only added a new line gets that line taken out again, so
-        nothing typed is changed. Whether the keyboard closed; None when it wasn't tried (no Done key there before). It
-        is WebDriverAgent's dismissal with the key's name, which on an iPad also tries the hide key: when it fails, the plain
-        dismissal would too."""
+        """(1.9.0, §30) A Done that closes the keyboard over a covered target, in a form that ignores a touch outside and a
+        drag (Wayfare's trip form: its last field is a multiline Notes). Never a key that can submit: only a button named
+        exactly Done, and only (a) an input accessory or toolbar button just above the keyboard, not one of its keys, or (b)
+        the keyboard's Done key while the focused field is multiline (a text view), where Done can't submit. Never return,
+        Go, Send, Search, Next or Join. In (b), a new line the key added (the field's value is what it was plus a line
+        break, read just before and just after) is taken back with one backspace, and the answer says so
+        (`view.done_taken_back`). Whether the keyboard closed; None when nothing was pressed (the 1.8.5 ways decide)."""
         s = self.session
         where = (app, view.place[1] if view.place is not None else None)
         if where in self._no_done:
             return None
-        before = {(e.identifier, e.label): e.value for e in view.items if e.role == "input"}
+        accessory = self._done_above_keyboard(view)
+        if accessory is not None:  # (a)
+            await s.tap(ui.Target(x=accessory.center[0], y=accessory.center[1]))
+            await self._silent_read(view)
+            if not view.read_keyboard:
+                return True
+            self._no_done.add(where)
+            return False
+        field = await self._focused_input(view)
+        if field is None or field.type != "TextView":  # (b) only in a multiline field: elsewhere Done may submit
+            self._no_done.add(where)
+            return None
+        before = field.value
         self._touch_in_scope()  # (it goes out with no touch hook: checked here)
         if await s.dismiss_keyboard(DONE_KEYS):
             await self._silent_read(view)
             return not view.read_keyboard
         self._no_done.add(where)
         await self._silent_read(view)
-        for e in view.items:  # a multiline field whose Done key is its return: the new line it typed is taken back
-            old = before.get((e.identifier, e.label))
-            if e.role == "input" and isinstance(old, str) and isinstance(e.value, str) and e.value == old + "\n":
-                await s.key("backspace")
-                await self._silent_read(view)
-                break
+        now = next((e for e in view.items if e.role == "input" and (e.identifier, e.label) == (field.identifier, field.label)), None)
+        if (now is not None and isinstance(before, str) and isinstance(now.value, str) and now.value == before + "\n"
+                and await s.is_focused(now)):
+            await s.key("backspace")
+            await self._silent_read(view)
+            view.done_taken_back = (f"the keyboard's Done key added a new line to {now.line(ref=False, actions=False)}; "
+                                    "it was taken back with one backspace.")
         return not view.read_keyboard
+
+    @staticmethod
+    def _done_above_keyboard(view) -> "ui.Element | None":
+        """A button named exactly Done that the app shows just above the keyboard (an input accessory or a toolbar), not a
+        key of the keyboard: what a person taps to close it."""
+        keyboard = next((b for e in view.items for b in e.covered_by if b.kind == "Keyboard"), None)
+        if keyboard is None:
+            return None
+        top = keyboard.rect[1]
+        for e in view.items:
+            if (e.role == "button" and e.label == "Done" and e.enabled and not e.in_alert
+                    and not any(b.kind == "Keyboard" for b in e.covered_by)
+                    and e.y + e.height <= top + 1 and top - (e.y + e.height) <= DONE_BAR_GAP):
+                return e
+        return None
+
+    async def _focused_input(self, view) -> "ui.Element | None":
+        for e in view.items:
+            if e.role == "input" and await self.session.is_focused(e):
+                return e
+        return None
 
     async def _dismiss_keyboard_now(self, view, covered: bool = False) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
@@ -7340,8 +7410,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_actionable", f"under_tab_bar: {line} is under the tab bar iOS draws; {SCROLL_HINT}")
         scrolls = any(e.role == "scroll" and ui._holds(e.rect, element.center) for e in self.session.items)
         if over[0].kind == "Keyboard" and not scrolls:  # it stayed up; no scrolling moves a tab bar from under it
+            hint = KEYBOARD_HINT_190 if self._hints_wanted() else KEYBOARD_HINT
             raise Refused("not_actionable", f"covered: {line} is under the keyboard, and this app doesn't close it on a "
-                                            f"touch outside the field; {KEYBOARD_HINT}")
+                                            f"touch outside the field; {hint}")
         if over[0].kind in ui.COVERING_BARS:
             raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; {SCROLL_HINT}")
         raise Refused("not_actionable", f"covered: {line} is covered by {over[0].line}; move or close it first.")

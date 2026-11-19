@@ -92,7 +92,8 @@ class ClientView:
     hints_given: set = field(default_factory=set)
     calls: int = 0
     tap_streak: int = 0
-    logs_read: bool = False
+    logs_mark: dict = field(default_factory=dict)  # app: its log ring's count when this session last read logs (or first saw it)
+    done_taken_back: str | None = None  # what a Done key's new line taken back says, for the refusal that follows
     road_known: bool | None = None
 
 

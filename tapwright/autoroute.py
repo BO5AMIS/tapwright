@@ -144,17 +144,16 @@ def clean(text: str) -> str:
 
 
 def base_name(data: dict, end: str, last: dict) -> str:
-    """What a route to `end` is called (§30.2): the place's own name when a person named it, else the id (or label, or
-    text) of what the last step touched, else the place's name. Never a title: the map keeps titles only as hashes."""
+    """What a route to `end` is called (§30.2): the name given with `map {"name"}`, else the id of the move that reaches
+    the place (the developer's, not content), else the place's own `place_<n>`. Never a label, a text or a title: they are
+    the screen's words, and can be private."""
     place = data.get("places", {}).get(end, {})
     if place.get("named"):
         return end
     target = last.get("target") if isinstance(last, dict) else None
-    if isinstance(target, dict):
-        for key in ("id", "label", "text"):
-            value = target.get(key)
-            if isinstance(value, str) and not ui.private(value) and (name := clean(value)):
-                return name
+    ident = target.get("id") if isinstance(target, dict) else None
+    if isinstance(ident, str) and ui.structural_id(ident) and not ui.private(ident) and (name := clean(ident)):
+        return name
     return clean(end) or "place"
 
 
@@ -191,7 +190,8 @@ def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
 def known(held: list[dict], here: str | None, reachable) -> list[str]:
     """The names for §30.2's `Known:` line: saved routes with an end, that replay in one call with no value to give
     (`variables` empty), whose start `reachable(start)` says the app can get to from `here`, and that don't end where the
-    app is; the most used first, then by name. `held`: (name, route file) pairs as dicts with `name` added."""
+    app is; the most used first, else the most recently reached, then by name. `held`: route files as dicts with `name`
+    added."""
     out = []
     for route in held:
         end, start = route.get("end"), route.get("start")
@@ -200,5 +200,12 @@ def known(held: list[dict], here: str | None, reachable) -> list[str]:
         if not reachable(start):
             continue
         used = route.get("used")
-        out.append((-(used if isinstance(used, int) and not isinstance(used, bool) else 0), route["name"]))
-    return [name for _, name in sorted(out)]
+        reached = route.get("reached")
+        out.append((-(used if isinstance(used, int) and not isinstance(used, bool) else 0),
+                    "\U0010ffff" if not isinstance(reached, str) else _negated(reached), route["name"]))
+    return [name for *_, name in sorted(out)]
+
+
+def _negated(stamp: str) -> str:
+    """A UTC stamp (`2026-11-19T12:00:00Z`) that sorts newest first."""
+    return "".join(chr(0x10FFFF - ord(c)) if c.isdigit() else c for c in stamp)

@@ -13,7 +13,8 @@ RULES = (
     "- Read each answer: it says what changed. Don't look again just to check.\n"
     "- When you know the next steps, send them as one `run`, with an `expect` on the steps that matter.\n"
     "- Target by id when there is one.\n"
-    "- Ask for a screenshot only to judge how something looks; the text answer is enough to act.\n"
+    "- Ask for a screenshot only to judge how something looks (`screenshot: false` on a `look` that only reads); the text"
+    " answer is enough to act.\n"
     "- `Known:` lists screens reachable in one call (" + REPLAY + "). Use it instead of tapping your way there.\n"
     "- On a long or unknown task, hand the driving to one small, fast agent and check its result; never two drivers.\n"
     "- A bug report is `bug_report`, not a file you write.\n"
@@ -36,11 +37,13 @@ HINTS = {
     "form": "Hint: this screen is a form: fill it and save it in one `run`, with an `expect` on the save step.",
     "known_way": "Hint: this way is known: {call} reaches it in one call.",
     "screenshot": "Hint: the text answer already listed what changed; ask for a screenshot only to judge how something looks.",
-    "long_task": "Hint: on a long task, hand the driving to one small, fast agent and check its result (`run` for known steps).",
-    "logs": "Hint: `logs` shows the app's own log since this error.",
+    # (§30.3: harmless to a helper too: a subagent's calls come over the same server)
+    "long_task": "Hint: On a long task, the main session can hand the driving to one small, fast agent; if you are that "
+                 "agent, carry on.",
+    "logs": "Hint: the app logged an error or crashed: `logs` shows its own log.",
 }
 
-LONG_TASK_CALLS = 15  # a session's top-level calls after which the long-task hint may come
+LONG_TASK_CALLS = 20  # §30.3: from the session's 20th call, once
 KNOWN_WAY_TAPS = 3  # single taps in a row along known roads before the known-way hint
 
 
