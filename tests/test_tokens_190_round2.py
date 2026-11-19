@@ -334,3 +334,129 @@ def test_a_search_that_filters_the_list_still_keeps_the_result_by_its_id(tmp_pat
             {"tool": "tap", "target": {"id": "dest-card-lisbon"}}]
         await finish(stop, task)
     run(go)
+
+
+# ---- item 4: the failed calls an agent made, accepted or answered ----
+
+from tapwright import batch, bugmake, ocr as ocrlib  # noqa: E402
+
+
+def test_expect_with_an_id_and_a_text_checks_that_element_shows_that_text(tmp_path):
+    batch.check_expect({"id": "status", "text": "Saved"}, 1)  # no longer bad_params
+    with pytest.raises(Refused):
+        batch.check_expect({"id": "status", "text": "Saved", "gone": True}, 1)
+    with pytest.raises(Refused):
+        batch.check_expect({"text": "a", "label": "b"}, 1)
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "open-list"},
+                                                     "expect": {"id": "to-home", "text": "Label of to-home"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "l1"},
+                                                     "expect": {"id": "to-home", "text": "Saved", "timeout": 0.5}}]})
+        assert e.value.code == "expect_failed"
+        assert 'id "to-home" didn\'t show the text "Saved" within 0.5 s.' in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_optional_wait_for_in_a_run_is_skipped_when_nothing_comes(tmp_path):
+    batch.check_conditions({"tool": "wait_for", "text": "ok", "timeout": 2, "optional": True}, 1)  # no longer bad_params
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        r = await d.run_tool("a", "run", {"steps": [
+            {"tool": "wait_for", "text": "Never here", "timeout": 0.5, "optional": True},
+            {"tool": "tap", "target": {"id": "open-list"}}]})
+        assert r["text"].startswith("Ran 2 of 2 steps")
+        assert 'optional: "Never here" didn\'t appear within 0.5 s' in r["text"]
+        with pytest.raises(Refused) as e:  # not optional: it stops the run as before
+            await d.run_tool("a", "run", {"steps": [{"tool": "wait_for", "text": "Never here", "timeout": 0.5}]})
+        assert e.value.code == "timeout"
+        await finish(stop, task)
+    run(go)
+
+
+def test_look_with_ocr_but_no_ocr_installed_answers_the_look_with_a_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(ocrlib, "available", lambda: False)
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"screenshot": False, "ocr": True})
+        assert r["text"].startswith("Screen ") and "Note: " + daemon_module.NOTE_NO_OCR in r["text"]
+        assert 'pip install "tapwright[ocr]"' in r["text"]
+        with pytest.raises(Refused) as e:  # --no-hints: 1.8.5's refusal
+            await d.run_tool("a", "look", {"screenshot": False, "ocr": True}, hints=False)
+        assert e.value.code == "unsupported"
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_bug_reports_answer_carries_its_summary_so_the_file_isnt_read(tmp_path):
+    from test_daemon_bug import bugged
+
+    async def go():
+        d = bugged(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        with pytest.raises(Refused):
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "go-settings"},
+                                                     "expect": {"text": "Never on this screen", "timeout": 0.5}}]})
+        r = await d.run_tool("a", "bug_report", {"from": "failure"})
+        lines = r["text"].splitlines()
+        assert lines[0].startswith("New bug: Check failed on ") and lines[1].startswith("Reproduced: ")
+        assert any(line.startswith("Folder: ") for line in lines)
+        assert any(line.startswith("What happened: Expected: step 1 holds its check") for line in lines)
+        assert "Steps to reproduce: 1 in report.md." in lines and lines[-1] == bugmake.REPORT_WRITTEN
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_hints_keeps_1_8_5s_bug_answer(tmp_path):
+    from test_daemon_bug import bugged
+
+    async def go():
+        d = bugged(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        with pytest.raises(Refused):
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "go-settings"},
+                                                     "expect": {"text": "Never on this screen", "timeout": 0.5}}]},
+                             hints=False)
+        r = await d.run_tool("a", "bug_report", {"from": "failure"}, hints=False)
+        assert r["text"].splitlines()[-1].startswith("Folder: ") and "What happened" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_expect_after_a_link_waits_out_a_reloading_app_and_opens_the_link_again(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        loading = screen("Loading", texts=("Loading from Metro",))
+        d.session.screens["loading"] = loading
+        d.session.goes[("home", "example://explore")] = "loading"  # the link came while the app reloaded: it is lost
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        reads = {"n": 0}
+        refresh = d.session.refresh
+
+        async def reloading(timeout=None):
+            reads["n"] += 1
+            if d.session.at == "loading" and reads["n"] > 3:
+                d.session.at = "home"  # the reload is over: the app shows its first screen, not the link's
+                d.session.goes[("home", "example://explore")] = "list"
+            return await refresh(timeout)
+        d.session.refresh = reloading
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "open_url", "url": "example://explore",
+                                                     "expect": {"id": "dest-card-kyoto"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps") and d.session.at == "list"
+        assert "the link was opened once more" in r["text"]
+        await finish(stop, task)
+    run(go)

@@ -84,6 +84,7 @@ UNLOCK_BUSY = ("the phone is being unlocked: no picture of the screen is taken u
 UNLOCK_NOT_YET = ("the phone is locked, and the connection to it isn't up yet, so the passcode can't be typed now; try "
                   "unlock again in a few seconds, or ask the user to unlock it")
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
+NOTE_NO_OCR = "no OCR reading, so this look is the elements alone. " + ocr.INSTALL  # (1.9.0 round 2)
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
 OCR_REF = re.compile(r"o[1-9][0-9]*")
@@ -3450,10 +3451,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
+                    if step["tool"] == "open_url" and "expect" in step and self._hints_wanted():
+                        # (1.9.0 round 2) a link opened while the app reloads (Metro) is waited out, and sent once more
+                        await self._link_through_loading(client_id, view, scope, step, seen_notes)
                     missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
                               if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
+                if step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
+                    traced.append(batch.skipped(i, batch.optional_wait_skipped(step)))  # (1.9.0 round 2)
+                    done += 1
+                    continue
                 message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
                 step_notes += crash
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {message}")
@@ -3589,6 +3597,38 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return []
         return diagnostics.failure_logs(self._rings.get(bundle), step, mark + 1)
 
+    LOADING_WAIT = 30.0  # (1.9.0 round 2) the most a link's expect waits for the app to finish loading before its own wait
+
+    async def _link_through_loading(self, client_id: str, view, scope: "Scope | None", step: dict, notes: list[str]) -> None:
+        """(1.9.0 round 2) After an `open_url` step with an `expect`: when the app is on its own loading screen (React
+        Native's "Loading from Metro", a blank start: reflex.starting), wait until it can be used (at most LOADING_WAIT),
+        then, when what the step expects isn't there, open the link once more: a link that came while the app reloaded
+        was lost. The expect's own timeout starts after this, so a reload doesn't eat it. Nothing when the app wasn't
+        loading."""
+        expect = step["expect"]
+        kind = next((k for k in batch.EXPECT_KINDS if expect.get(k) is not None), None)
+        began = self.control.clock()
+        waited = False
+        while True:
+            await self._read(lambda: self._silent_read(view))
+            bundle = self._bundle()
+            tree = getattr(self.session, "last_tree", None)
+            if tree is None or bundle is None or reflex.starting(tree, bundle) not in ("loading", "empty"):
+                break
+            waited = True
+            if self.control.clock() - began >= self.LOADING_WAIT:
+                return
+            await self.control.sleep(0.25)
+        if not waited:
+            return
+        notes.append(f"the app was loading for {self.control.clock() - began:.1f} s after the link; waited for it.")
+        if kind is None or expect.get("gone") or "value" in expect or batch.shows_text(expect):
+            return
+        there = [*view.items, *self._off_screen_now()]
+        if self._missing(there, ui.parse_target({kind: expect[kind]})):
+            await self.run_tool(client_id, "open_url", {"url": step["url"], "look": False}, scope)
+            notes.append("the link was opened once more: the app had been loading when it came.")
+
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
                       notes: list[str] | None = None, fold: bool = False) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
@@ -3619,7 +3659,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """Wait up to the expectation's timeout for its text, id or label to hold. None when it did, else why not."""
         kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
         timeout = float(expect.get("timeout", batch.EXPECT_DEFAULT))
-        if "value" not in expect:
+        if batch.shows_text(expect):
+            kind = "id"  # (1.9.0 round 2) the element with that id shows that text: polled as a value is
+        if "value" not in expect and not batch.shows_text(expect):
             try:
                 await self.run_tool(client_id, "wait_for", {kind: expect[kind], "gone": bool(expect.get("gone")),
                                                             "timeout": timeout, "look": False}, scope)
@@ -3640,7 +3682,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 found = ui.resolve(view.items, target)
             except Refused:
                 found = None
-            if isinstance(found, ui.Element) and batch.has_value(found, expect["value"]):
+            if isinstance(found, ui.Element) and (batch.has_text(found, expect["text"]) if batch.shows_text(expect)
+                                                  else batch.has_value(found, expect["value"])):
                 return None
             if self.control.clock() >= deadline:
                 return batch.expect_failed(expect)
@@ -3977,10 +4020,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
-            if args.get("ocr") and not ocr.available():
-                raise Refused("unsupported", ocr.INSTALL)
+            no_ocr = bool(args.get("ocr")) and not ocr.available()
+            if no_ocr and not self._hints_wanted():
+                raise Refused("unsupported", ocr.INSTALL)  # (--no-hints: 1.8.5's refusal)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            if no_ocr:
+                # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
+                answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
             # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
             # another app that comes forward after the look (last Opus review, L)
             view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
