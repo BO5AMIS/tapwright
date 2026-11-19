@@ -383,10 +383,10 @@ def test_a_route_is_named_by_the_given_name_or_the_moves_id_never_its_words():
 
 
 def test_known_lists_the_most_used_first_else_the_most_recently_reached():
-    held = [{"name": "old", "start": "home", "end": "a", "reached": "2026-11-18T10:00:00Z"},
-            {"name": "new", "start": "home", "end": "b", "reached": "2026-11-19T10:00:00Z"},
-            {"name": "used", "start": "home", "end": "c", "used": 2, "reached": "2026-11-01T10:00:00Z"},
-            {"name": "never", "start": "home", "end": "d"}]
+    held = [{"name": "old", "start": "home", "end": "a", "steps": [], "reached": "2026-11-18T10:00:00Z"},
+            {"name": "new", "start": "home", "end": "b", "steps": [], "reached": "2026-11-19T10:00:00Z"},
+            {"name": "used", "start": "home", "end": "c", "steps": [], "used": 2, "reached": "2026-11-01T10:00:00Z"},
+            {"name": "never", "start": "home", "end": "d", "steps": []}]
     assert autoroute.known(held, "home", lambda start: True) == ["used", "new", "old", "never"]
 
 
@@ -411,9 +411,9 @@ from test_daemon import KEYBOARD_NOTE, keyboard_up  # noqa: E402
 from fakes import button  # noqa: E402
 
 
-def multiline(s):
-    """Field A, which has the focus, is a text view (React Native's multiline TextInput)."""
-    s.tree = [dataclasses.replace(e, type="TextView") if e.identifier == "a" else e for e in s.tree]
+def multiline(s, value="Bench trip"):
+    """Field A, which has the focus, is a text view (React Native's multiline TextInput) holding `value`."""
+    s.tree = [dataclasses.replace(e, type="TextView", value=value) if e.identifier == "a" else e for e in s.tree]
 
 
 def uncover_low_when_closed(s):
@@ -459,20 +459,22 @@ def test_an_accessory_done_button_above_the_keyboard_is_tapped_first():
     async def go():
         d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
         s = d.session
-        s.tree = [*s.tree, button("e9", "Done", "", rect=(330, 456, 60, 40))]  # a toolbar just above the keyboard (500)
+        done = button("e9", "Done", "", rect=(330, 460, 60, 40))  # the keyboard's accessory bar, on its top edge (500)
+        done.by_keyboard = True
+        s.tree = [*s.tree, done]
         await d.run_tool("a", "look", {"screenshot": False})
         taps = len(s.tap_points)
 
         async def accessory_closes(target, hold_ms=60):
             s._record("tap")
             s.tap_points.append((target.x, target.y))
-            if (target.x, target.y) == (360.0, 476.0):
+            if (target.x, target.y) == (360.0, 480.0):
                 s.last_keyboard = False
                 s.tree = [dataclasses.replace(e, covered_by=()) if e.identifier == "low" else e for e in s.tree]
             return "tapped"
         s.tap = accessory_closes
         r = await d.run_tool("a", "tap", {"target": {"id": "low"}})
-        assert (360.0, 476.0) in s.tap_points[taps:] and r["text"].endswith(KEYBOARD_NOTE)
+        assert (360.0, 480.0) in s.tap_points[taps:] and r["text"].endswith(KEYBOARD_NOTE)
         assert ("Done",) not in getattr(s, "dismiss_keys", [])  # no key of the keyboard was pressed
         await finish(stop, task)
     run(go)
@@ -484,7 +486,6 @@ def test_a_done_key_that_only_added_a_new_line_has_it_taken_back_and_said():
         s = d.session
         multiline(s)
         field = next(e for e in s.tree if e.identifier == "a")
-        field.value = "Bench trip"
         await d.run_tool("a", "look", {"screenshot": False})
 
         async def done_types_a_line(keys=()):
@@ -502,7 +503,7 @@ def test_a_done_key_that_only_added_a_new_line_has_it_taken_back_and_said():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "low"}})
         assert e.value.code == "not_actionable" and str(e.value).startswith("covered:")
-        assert "Note: the keyboard's Done key added a new line to" in str(e.value) and "taken back" in str(e.value)
+        assert "Note: the keyboard's Done key added a line break to" in str(e.value) and "taken back" in str(e.value)
         assert s.calls.count("key:backspace") == 1 and field.value == "Bench trip"
         with pytest.raises(Refused):  # the Done key isn't tried again on this screen
             await d.run_tool("a", "tap", {"target": {"id": "low"}})
@@ -517,7 +518,6 @@ def test_no_backspace_when_the_value_changed_otherwise():
         s = d.session
         multiline(s)
         field = next(e for e in s.tree if e.identifier == "a")
-        field.value = "Bench trip"
         await d.run_tool("a", "look", {"screenshot": False})
 
         async def done_changes_text(keys=()):
@@ -528,6 +528,7 @@ def test_no_backspace_when_the_value_changed_otherwise():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "low"}})
         assert "key:backspace" not in s.calls and "taken back" not in str(e.value)
+        assert "a line break may have been added; check its value." in str(e.value)  # (review 1.9.0 M7) said plainly
         await finish(stop, task)
     run(go)
 
