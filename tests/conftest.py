@@ -82,3 +82,12 @@ def _otp_marks_in_tmp(monkeypatch, tmp_path):
     ~/.tapwright in a test. One folder per test, shared by every daemon the test makes (a restart keeps it)."""
     from tapwright import otp
     monkeypatch.setattr(otp, "USED_DIR", tmp_path / "otp-used")
+
+
+@pytest.fixture(autouse=True)
+def _tool_home_in_tmp(monkeypatch, tmp_path):
+    """(1.9.0) What the tool keeps under its home at call time (maps, routes that save themselves, reports, bugs) goes to
+    a folder of the test's own, never the owner's real ~/.tapwright: a daemon test that opens an app and taps its way
+    somewhere now saves a route there by itself (AGENT-TOOLS 1.17 §30)."""
+    from tapwright import store
+    monkeypatch.setattr(store, "HOME", tmp_path / "tapwright-home")

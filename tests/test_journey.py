@@ -968,11 +968,13 @@ def test_m9_stop_never_loses_its_answer(monkeypatch, reports):
 
         def full_disk(*a):
             raise OSError(28, "No space left")
+        written = journey_report.write
         monkeypatch.setattr(journey_report, "write", full_disk)
         r = await d.run_tool("a", "journey", {"stop": True, "reached": False})
         assert r["text"].startswith('Journey "g2"') and "Note: couldn't write the report to" in r["text"]
         assert d._journeys == {}
-        monkeypatch.undo()
+        # (only the writer is put back: undo() put the real ~/.tapwright back too, and g3's report landed there)
+        monkeypatch.setattr(journey_report, "write", written)
         await d.run_tool("a", "journey", {"start": True, "goal": "g3"})
 
         def odd(*a, **k):
