@@ -66,8 +66,9 @@ class Chain:
         """Text was typed into a search field at the place the chain is at: the way breaks here as for any typing, but a
         tap on a result that was in this place's list before the typing may still be kept (`after_search`)."""
         at = len(self.places) - 1
-        if at >= 0 and self.broken_at is None:
-            self.search = (at, frozenset(self.ids_at.get(at, ())))
+        if at >= 0 and self.broken_at is None and self.ids_at.get(at):
+            # (review Opus 3 M4) only with a read of the place from before the typing: none, no route from the search
+            self.search = (at, frozenset(self.ids_at[at]))
         self.taint()
 
     def after_search(self, dst: str, ident: object) -> list[dict] | None:

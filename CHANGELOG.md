@@ -48,27 +48,33 @@ Round 2 (from the 21-run benchmark of 1.9.0, AGENT-TOOLS §30.1a, §30.4a):
 - The core tools load with the session: `open_app`, `open_url`, `look`, `tap`, `type_text`, `run`, `scroll`, `back`,
   `toggle`, `wait_for` and `drive` carry `_meta {"anthropic/alwaysLoad": true}`, so Claude Code lists them without a
   ToolSearch turn first; the others stay deferred. The listed schemas lose pydantic's `title` keys. `tapwright mcp
-  --lazy-tools` (or `TAPWRIGHT_LAZY_TOOLS=1`, or `--no-hints`) lists everything deferred as before.
-- The keyboard is told, not fought: `Keyboard: shown (covers trip-save; a tap on it closes the keyboard first)`; a
-  keyboard that stays up over a tap it doesn't cover is said plainly, and a tap on plain text that changed nothing is no
-  longer called a finding.
+  --lazy-tools` (or `TAPWRIGHT_LAZY_TOOLS=1`, or `--no-hints`) lists 1.8.5's tools byte for byte, all deferred.
+- The keyboard is told, not fought: `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`
+  (`presses the keyboard's Done first` when its accessory bar has one); a keyboard that stays up over a touch it doesn't
+  cover is said plainly in its own note (`the keyboard stayed up ...; it doesn't cover this target, so the tap went
+  ahead.`), beside the usual "report it as a finding" note when the touch changed nothing.
 - Route memory that gets used: the way begins at the session's first screen (an `open_url`, a first `look` or action),
-  not only after `open_app`; a search's result is kept as "scroll to it, tap it" by its id when it was in the list before
-  the typing (never the typed text; such a route is dropped after one failed replay); routes are kept per target, not
+  not only after `open_app`; a search's result is kept as "scroll to it, tap it" by its id when a read of the screen
+  from before the typing held it, and the tap on it comes right after the search (never the typed text; such a route is
+  dropped after one failed replay; a search typed as the session's first call, or followed by any other call, keeps
+  nothing; "search" is a word of the field's id, label or placeholder, not a part of "research"); routes are kept per target, not
   per place (a way via Lisbon no longer replaces one via Kyoto); each `Known:` name shows its way in ids,
   `dest_card_lisbon (scroll to dest-card-lisbon, tap)`; and `map`'s listing ends with the `Known:` line too.
 - In `run`: `expect {"id": X, "text": T}` (that element shows that text) and `optional: true` on a `wait_for` (skipped
-  when nothing comes) are taken instead of refused; an `open_url` step with an `expect` waits out an app reloading from
-  Metro and opens the link once more.
+  when nothing comes) are taken instead of refused; an `open_url` step's `expect` says when it waited out the app's
+  loading screen (within its own timeout, ending the moment it holds; the tool never opens a link again).
 - `look {"ocr": true}` without OCR installed answers the look with a note on how to install it; `bug_report`'s answer
   carries the report's "What happened" line and its steps' count and says nothing more needs reading.
 - The form hint fires on 1 or more inputs and a submit-worded button (Save, Submit, Continue...), besides 2 or more
   inputs and a button. This is Tapwright's own reading of AGENT-TOOLS 1.17 §30.3's "2 or more inputs" (which never
-  fired on Wayfare's trip form, one field and steppers), made while Tapline is paused.
+  fired on Wayfare's trip form, one field and steppers), made while Tapline is paused. A screen with a search field
+  gets no form hint.
 - The instructions under the shared token rules lose Tapwright's 1.7.5-era lines (options that no longer restrict
   anything), say a doubled line once, and add "Start with open_app (or a look at the app in front)"; the shared block is
-  unchanged. `logs` shows the app's own lines and counts a system framework's (`all: true` shows every line).
-- `--no-hints` keeps giving 1.8.5's behaviour for all of these.
+  unchanged. `logs` shows the app's own lines and counts a system framework's, saying how many are errors (`all: true`
+  shows every line).
+- `--no-hints` keeps giving 1.8.5's behaviour for all of these, with two exceptions that make nothing harder:
+  `expect {"id", "text"}` and `optional` on a `wait_for` are taken there too (1.8.5 refused them `bad_params`).
 
 ## 1.8.5 (2026-11-19), "the Bug Report"
 

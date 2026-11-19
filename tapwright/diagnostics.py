@@ -176,7 +176,8 @@ def no_entries(since: int | None, level: str, grep: str | None) -> str:
     return " ".join([NO_ENTRIES, *asked]) + "."
 
 
-SYSTEM_LEFT_OUT = "+{n} system line{s} (a framework in the app's process, not its own code): `all: true` shows them."
+SYSTEM_LEFT_OUT = ("+{n} system line{s}{errors} (a framework in the app's process, not its own code): `all: true` shows "
+                   "them.")
 
 
 def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str | None, limit: int,
@@ -190,9 +191,13 @@ def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str |
     tail = []
     if own and ring is not None:
         every = max(1, len(ring.entries))
-        left = len(ring.select(since, level, grep, every)) - len(ring.select(since, level, grep, every, own=True))
-        if left > 0:
-            tail.append(SYSTEM_LEFT_OUT.format(n=left, s="" if left == 1 else "s"))
+        hidden = [e for e in ring.select(since, level, grep, every) if not e.own]
+        if hidden:
+            # (review Opus 3 L5) whether errors are among them: a network or layout failure is often the cause
+            errors = sum(1 for e in hidden if e.level == "error")
+            said = f", {errors} of them {'an error' if errors == 1 else 'errors'}" if errors and len(hidden) > 1 else (
+                ", an error" if errors else "")
+            tail.append(SYSTEM_LEFT_OUT.format(n=len(hidden), s="" if len(hidden) == 1 else "s", errors=said))
     return "\n".join([*lines, *tail, LATEST.format(ms=latest)]), len(entries)
 
 

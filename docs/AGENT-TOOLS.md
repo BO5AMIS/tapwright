@@ -1435,12 +1435,13 @@ deferred with its schema as in 1.8.5; `--no-hints` implies it.
   screen with an input (Save, Submit, Continue, Confirm, Sign in...), or any tap that leaves a form (2 or more inputs and
   a button). After a `drive`, only a route the tool saved itself carries the way on (its taps were judged navigation as
   they were made); a person's route never does.
-- A search (round 2): typing into a search field (iOS's search field, or an input whose id, label or placeholder says
-  search) breaks the way as any typing does, but a tap right after it on a result whose id was in that screen's tree
-  (on or off screen) before the typing is kept as `scroll {"to": "target", "target": {"id": X}}` then `tap {"id": X}`:
+- A search (round 2): typing into a search field (iOS's search field, or an input whose id, label or placeholder has
+  `search` as a word or a word's part: `explore-search`, `searchField`, "Search destinations"; not `research-notes`)
+  breaks the way as any typing does, but a tap right after it (no other call between them, a scroll aside) on a result
+  whose id was in a read of that screen's tree (on or off screen) from before the typing is kept as `scroll {"to": "target", "target": {"id": X}}` then `tap {"id": X}`:
   the unfiltered list already offers it. The typed text is never saved. Such a route is marked `"derived": true` and
   is dropped on its first failed replay. A result that wasn't in the list before (a server-side search) leaves the way
-  broken.
+  broken, and so does a search with no read from before it (the session's first call typed it).
 - A route is kept per place and target (round 2): its last step's target (`dest-card-lisbon`) tells two routes to the
   same place apart (every destination's detail screen is one place), so a way via Lisbon doesn't replace one via
   Kyoto. For each place and target, whatever start it was reached from: a shorter way replaces it, and so does
@@ -1486,7 +1487,8 @@ logs > known way > form > screenshot > long task. The sentences are the shared o
 - a form opened (a new screen, the full list, with 1 or more inputs and a button worded as a save or submit: Save,
   Submit, Continue, Sign in, Log in, Sign up, Register, Create, Confirm, Apply, Update; or 2 or more inputs and any
   button): "fill the fields and save in one `run`, with an `expect` on the save step." (Round 2: Tapwright's own reading
-  of §30.3's "2 or more inputs", which never fired on a trip form of one field and steppers; Tapline is paused.)
+  of §30.3's "2 or more inputs", which never fired on a trip form of one field and steppers; Tapline is paused.) A
+  screen with a search field gets no form hint.
 - a screenshot asked on an action whose text had the changes: "the text answer had the changes; ask for a screenshot
   only to judge how something looks.";
 - a long task, from the session's 20th call: "on a long task, the main session can hand the driving to one small, fast
@@ -1529,35 +1531,40 @@ Otherwise the answer says `Note: closed the keyboard first.`; if nothing closed 
 as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
 ### 30.4a Round 2: answers that save a call
-- **The keyboard told, not fought.** With hints, `Keyboard: shown` names what the keyboard covers and that a tap there
-  closes it first: `Keyboard: shown (covers trip-save; a tap on it closes the keyboard first)` (each by its id, else its
-  ref; 3 at most, then `+N more`). When the keyboard stays up over a tap it doesn't cover (a multiline field ignores a
-  touch outside), the note is `the keyboard stays up (this form ignores a touch outside its field); it doesn't block
-  this tap, and a tap on a button it covers closes it first.` instead of `couldn't close the keyboard first`. A tap on
-  plain text (a text or header with no action) that changed nothing gets "It is plain text with no action: nothing is
-  expected to change." instead of "report it as a finding".
+- **The keyboard told, not fought.** With hints, `Keyboard: shown` names what the keyboard covers and what a tap there
+  does: `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`, or `... presses the
+  keyboard's Done first` when the keyboard's accessory bar has a Done (each by its id, else its ref; 3 at most, then
+  `+N more`). A tap there that can't clear the keyboard is still refused `covered` (§30.4). When the keyboard stays up
+  over a touch it doesn't cover, the note is `the keyboard stayed up (a touch outside the field didn't close it); it
+  doesn't cover this target, so the tap went ahead.` (`long press`, `toggle`, `typing` for those) instead of `couldn't
+  close the keyboard first`. It is a note of its own: a touch that then changed nothing still gets 1.8.5's "report it
+  as a finding" note beside it.
 - **`run` takes what agents wrote.** `expect {"id": X, "text": T}`: the element with id X shows T (its label, text or
   value: whole first, then a part), waited for up to the timeout (`id "X" didn't show the text "T" within N s.`).
   `optional: true` on a `wait_for` step: when what it waits for doesn't come (or go), the step is skipped
   (`optional: "ok" didn't appear within 2 s`), not failed.
-- **An `open_url` step with an `expect` waits out a reloading app.** When the app is on its own loading screen after
-  the link (React Native's "Loading from Metro", a blank start), the step waits until it can be used (30 s at most) and,
-  when what the step expects isn't there, opens the link once more (a link that came during the reload was lost). The
-  expect's own timeout starts after that. Its `Note:` lines say both.
+- **An `open_url` step's `expect` says when it waited out a loading screen.** The expect (one text, id or label,
+  present or `gone`) is waited for within its own timeout, as any expect is, and ends the moment it holds. When the app
+  showed its own loading screen meanwhile (React Native's "Loading from Metro", a loading indicator), a `Note:` says the
+  expect waited it out, or, when the timeout ran out, that the app was loading for part of it. The tool never opens a
+  link the agent didn't ask for: a link the app lost during a reload is the agent's to open again.
 - **`look {"ocr": true}` without OCR installed** answers the look with `Note: no OCR reading, so this look is the
   elements alone. OCR isn't installed: ...` instead of refusing it `unsupported`.
 - **`bug_report`'s answer** ends with the report's "What happened" line (300 characters at most), `Steps to reproduce:
   N in report.md.` and "The report is written in the folder (report.md, report.html, repro.json): give the user the
   folder; there is nothing more to read or write.", so an agent doesn't read the file.
 - **`logs` shows the app's own lines.** Lines a system framework logged in the app's process (UIKit and the like) are
-  left out and counted (`+N system lines (a framework in the app's process, not its own code): ... shows them.`).
-  `logs {"all": true}` shows every line, as 1.8.5 did.
+  left out and counted, with how many of them are errors (`+N system lines, K of them errors (a framework in the app's
+  process, not its own code): ... shows them.`). `logs {"all": true}` shows every line, as 1.8.5 did.
 
 ### 30.5 `--no-hints`
 `--no-hints` restores 1.8.5's behaviour entirely: no `Known:` and no `Hint:` line, no route saved by itself and none of
 them shown (`map`, `drive` and its lists don't see them), no Done press, and 1.8.5's refusal hint; and (round 2)
-every tool deferred with 1.8.5's schemas, 1.8.5's keyboard and plain-text notes, `look {"ocr": true}` refused without
-OCR, `bug_report`'s 1.8.5 answer, `logs` with every line, and no search-made route. It reaches every
+1.8.5's tool listing byte for byte (every tool deferred, 1.8.5's descriptions and schemas: Target's, look's and logs'
+words, no `all` on logs; `--lazy-tools` lists the same; a test diffs it against v1.8.5's), 1.8.5's keyboard notes,
+`look {"ocr": true}` refused without OCR, `bug_report`'s 1.8.5 answer, `logs` with every line, and no search-made
+route. Two round-2 inputs are taken under `--no-hints` too, since they make nothing harder: `expect {"id", "text"}`
+and `optional` on a `wait_for` step (1.8.5 refused both `bad_params`). It reaches every
 path: `tapwright mcp --no-hints` (which also gives 1.8.5's instructions), `tapwright serve --no-hints` (every call to
 that daemon), `tapwright call --no-hints`, and `TAPWRIGHT_NO_HINTS=1` for the MCP server, the thin call and
 `tapwright replay`/`explore`. The instructions are the MCP process's: with only `serve --no-hints`, start the MCP server

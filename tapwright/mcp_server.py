@@ -112,14 +112,26 @@ class TapwrightServer(MCPServer):
         them without a ToolSearch turn; other hosts ignore the key). `--lazy-tools` (and `--no-hints`) leave every tool
         deferred, with their schemas as they were, as 1.8.5 did."""
         listed = await super().list_tools()
-        if LAZY_TOOLS:
-            return listed
         for tool in listed:
-            tool.input_schema = copy.deepcopy(tool.input_schema)  # (the tool's own stays whole, for --lazy-tools)
+            tool.input_schema = copy.deepcopy(tool.input_schema)  # (the tool's own stays whole)
+            if LAZY_TOOLS:
+                # (review Opus 3 M3) --lazy-tools and --no-hints list 1.8.5's tools byte for byte: its words for look
+                # and logs, and no `all` on logs (the daemon still takes it from a caller that sends it)
+                tool.description = describe(tool.name, hints=False)
+                for new in ROUND2_ARGS.get(tool.name, ()):
+                    tool.input_schema.get("properties", {}).pop(new, None)
+                continue
             _drop_titles(tool.input_schema)
+            target = tool.input_schema.get("$defs", {}).get("Target")
+            if isinstance(target, dict):
+                target["description"] = TARGET_SHORT
             if tool.name in CORE_TOOLS:
                 tool.meta = {**(tool.meta or {}), ALWAYS_LOAD: True}
         return listed
+
+
+TARGET_SHORT = "Exactly one of ref, id, label, text, or x with y; index picks among matches."  # (1.9.0 round 2, eager only)
+ROUND2_ARGS = {"logs": ("all",)}  # (1.9.0 round 2) arguments 1.8.5's listing didn't have
 
 
 # (1.9.0) the tools nearly every session calls: loaded with the session, not found with a ToolSearch turn first
@@ -163,8 +175,8 @@ def _unset_means_absent(schema: dict) -> None:
 
 
 class Target(BaseModel):
-    """Exactly one of ref, id, label, text, or x with y; index picks among matches."""
-    # (the daemon checks the rule and answers `bad_params` with an example when it isn't met)
+    """What to act on: exactly one of ref, id, label, text, or x with y. The daemon checks the rule and
+    answers `bad_params` with an example when it isn't met."""
     model_config = ConfigDict(extra="forbid", json_schema_extra=_unset_means_absent)
     ref: str | None = None
     id: str | None = None

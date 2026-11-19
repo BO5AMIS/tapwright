@@ -386,9 +386,26 @@ EXTRA = {
 }
 
 
-def describe(name: str) -> str:
+# (1.9.0 round 2) 1.8.5's own lines for the tools round 2 changed: `--lazy-tools` and `--no-hints` list these
+EXTRA_185 = {
+    'look': (
+        'reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture '
+        'that no element carries, as `o1`, `o2`… (a target ref).'
+    ),
+    'logs': (
+        "reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a "
+        "release build), from the app's process only, never another's, keeping the last 2000 from when the app is "
+        'opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a '
+        'plain line that says warn, error, exception, fatal or failed.'
+    ),
+}
+
+
+def describe(name: str, hints: bool = True) -> str:
     """A tool's description: the shared paragraph, then on the next line Tapwright's own line, labelled as in
-    the shared text. A tool only Tapwright has is just its paragraph; one with no Tapwright line, the shared one."""
+    the shared text. A tool only Tapwright has is just its paragraph; one with no Tapwright line, the shared one.
+    `hints=False`: 1.8.5's words (`--lazy-tools`, `--no-hints`)."""
+    extra = EXTRA_185 if not hints and name in EXTRA_185 else EXTRA
     if name not in SHARED:
-        return EXTRA[name]
-    return SHARED[name] + ("\n" + "Tapwright: " + EXTRA[name] if name in EXTRA else "")
+        return extra[name]
+    return SHARED[name] + ("\n" + "Tapwright: " + extra[name] if name in extra else "")

@@ -442,8 +442,9 @@ REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't t
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 # (1.9.0 round 2, hints on) the same, for a target the keyboard doesn't cover: nothing is wrong, nothing to fight
-NOTE_KEYBOARD_STAYS = ("the keyboard stays up (this form ignores a touch outside its field); it doesn't block this tap, and a "
-                       "tap on a button it covers closes it first.")
+NOTE_KEYBOARD_STAYS = ("the keyboard stayed up (a touch outside the field didn't close it); it doesn't cover this target, "
+                       "so the {what} went ahead.")  # (review Opus 3 L1: no promise about what closes it later)
+KEYBOARD_WHAT = {"long_press": "long press", "type_text": "typing"}
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 DONE_SETTLE = 0.5  # (Opus 2 M2) seconds a multiline Done is given to show what it did before the tap goes on
 DONE_CHANGED = ("the keyboard's Done key was pressed to close the keyboard, and the screen changed after it: Done may have "
@@ -470,8 +471,6 @@ HEALTH_TICK = 0.5  # seconds between the reads that see whether the Health sheet
 NOTE_DELIVERED = "the {touch} was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
 HINT_FIELD = "It is a text field: type_text types into it."
 HINT_BARE_POINT = "No element is at that point."
-# (1.9.0 round 2, hints on) a tap on plain text that did nothing is no finding: a label that does nothing is a label
-HINT_PLAIN_TEXT = "It is plain text with no action: nothing is expected to change."
 HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
                 "report it as a finding.")
 DELIVERED_TOOLS = ("tap", "long_press")
@@ -3457,11 +3456,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
-                    if step["tool"] == "open_url" and "expect" in step and self._hints_wanted():
-                        # (1.9.0 round 2) a link opened while the app reloads (Metro) is waited out, and sent once more
-                        await self._link_through_loading(client_id, view, scope, step, seen_notes)
-                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
-                              if "expect" in step else None)
+                    if (step["tool"] == "open_url" and "expect" in step and self._hints_wanted()
+                            and self._link_expect(step["expect"])):
+                        # (1.9.0 round 2) a link's expect says when it waited out the app's loading screen
+                        missed = await self._expect_after_link(view, scope, step["expect"], seen_notes)
+                    else:
+                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
+                                  if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
                 if step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
@@ -3603,37 +3604,44 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return []
         return diagnostics.failure_logs(self._rings.get(bundle), step, mark + 1)
 
-    LOADING_WAIT = 30.0  # (1.9.0 round 2) the most a link's expect waits for the app to finish loading before its own wait
+    @staticmethod
+    def _link_expect(expect: dict) -> bool:
+        """An expect that _expect_after_link checks: one text, id or label, present or gone; nothing else in it."""
+        kinds = [k for k in batch.EXPECT_KINDS if expect.get(k) is not None]
+        return (len(kinds) == 1 and "value" not in expect and expect.get("matches") is None
+                and not batch.shows_text(expect))
 
-    async def _link_through_loading(self, client_id: str, view, scope: "Scope | None", step: dict, notes: list[str]) -> None:
-        """(1.9.0 round 2) After an `open_url` step with an `expect`: when the app is on its own loading screen (React
-        Native's "Loading from Metro", a blank start: reflex.starting), wait until it can be used (at most LOADING_WAIT),
-        then, when what the step expects isn't there, open the link once more: a link that came while the app reloaded
-        was lost. The expect's own timeout starts after this, so a reload doesn't eat it. Nothing when the app wasn't
-        loading."""
-        expect = step["expect"]
-        kind = next((k for k in batch.EXPECT_KINDS if expect.get(k) is not None), None)
+    async def _expect_after_link(self, view, scope: "Scope | None", expect: dict, notes: list[str]) -> str | None:
+        """(1.9.0 round 2; review Opus 3 H1, M1) An `open_url` step's expect: waited for within its own timeout, as any
+        expect is, ending the moment it holds. While waiting, an app on its own loading screen (React Native's "Loading
+        from Metro", a loading indicator: reflex.starting's `loading`) is noted, and the answer says it was waited out.
+        Nothing more is done: the tool never opens a link the agent didn't ask for. None when it held, else why not."""
+        kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
+        target, gone = ui.parse_target({kind: expect[kind]}), bool(expect.get("gone"))
         began = self.control.clock()
-        waited = False
+        deadline = began + float(expect.get("timeout", batch.EXPECT_DEFAULT))
+        given = await self._given(scope) if scope is not None else None
+        loading = 0.0
         while True:
+            at = self.control.clock()
             await self._read(lambda: self._silent_read(view))
-            bundle = self._bundle()
-            tree = getattr(self.session, "last_tree", None)
-            if tree is None or bundle is None or reflex.starting(tree, bundle) not in ("loading", "empty"):
-                break
-            waited = True
-            if self.control.clock() - began >= self.LOADING_WAIT:
-                return
+            if given is not None and self._bundle() not in given:
+                app = getattr(self.session, "app", None)
+                raise Refused("not_allowed", _outside(self._bundle(), app[0] if app else None, ", ".join(given.values())))
+            there = [*view.items, *self._off_screen_now()]
+            if self._missing(there, target) == gone:
+                if loading > 0:
+                    notes.append(f"the app showed its loading screen after the link; the expect waited it out "
+                                 f"({self.control.clock() - began:.1f} s).")
+                return None
+            bundle, tree = self._bundle(), getattr(self.session, "last_tree", None)
+            if tree is not None and bundle is not None and reflex.starting(tree, bundle) == "loading":
+                loading += max(0.25, self.control.clock() - at)
+            if self.control.clock() >= deadline:
+                if loading > 0:
+                    notes.append("the app was on its loading screen after the link for part of the expect's timeout.")
+                return batch.expect_failed(expect)
             await self.control.sleep(0.25)
-        if not waited:
-            return
-        notes.append(f"the app was loading for {self.control.clock() - began:.1f} s after the link; waited for it.")
-        if kind is None or expect.get("gone") or "value" in expect or batch.shows_text(expect):
-            return
-        there = [*view.items, *self._off_screen_now()]
-        if self._missing(there, ui.parse_target({kind: expect[kind]})):
-            await self.run_tool(client_id, "open_url", {"url": step["url"], "look": False}, scope)
-            notes.append("the link was opened once more: the app had been loading when it came.")
 
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
                       notes: list[str] | None = None, fold: bool = False) -> str | None:
@@ -4833,7 +4841,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             if chain.here is None:
                 chain.begin(here)
-                chain.saw(self._tree_ids(view))
+                if name != "type_text":  # (review Opus 3 M4) a read after typing is no "before the typing"
+                    chain.saw(self._tree_ids(view))
                 return
             if name == "run":
                 # (review 1.9.0 H1) a run's own steps never reach the chain one by one: any step that isn't navigation (typing
@@ -4901,8 +4910,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
         if getattr(element, "type", None) == "SearchField":
             return True
-        words = " ".join(str(v) for v in (element.identifier, element.label, getattr(element, "placeholder", None)) if v)
-        return "search" in words.lower()
+        return Daemon._says_search(element.identifier, element.label, getattr(element, "placeholder", None))
+
+    @staticmethod
+    def _says_search(*texts) -> bool:
+        """(review Opus 3 L3) "search" as a word or a word's part of an id (`search`, `explore-search`, `searchField`),
+        never inside another word (`research-notes`, "Research topic")."""
+        for text in texts:
+            if isinstance(text, str) and text:
+                words = explorefloor.id_words(text).lower().split()
+                if "search" in words:
+                    return True
+        return False
 
     def _typed_search(self, view) -> bool:
         """The input this session last typed into (view.typed_field) is a search field, as _is_search judges it."""
@@ -4914,7 +4933,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                       and (e.identifier, e.label) == (ident, label)), None)
         if shown is not None:
             return self._is_search((None, shown, []))
-        return "search" in " ".join(str(v) for v in (ident, label) if v).lower()
+        return self._says_search(ident, label)
 
     def _auto_stayed(self, view, name: str) -> None:
         """(review 1.9.0 L1) An action answered "No visible change" never reaches _learn: a selection the picture barely
@@ -5180,6 +5199,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         chain.taint()  # (more typing in the same search keeps the ids read before the first)
                 if name == "run" and code is not None:
                     view.auto = None
+            chain = view.auto
+            if (isinstance(chain, autoroute.Chain) and chain.search is not None and name not in autoroute.NEUTRAL
+                    and name != "scroll" and not (name == "type_text" and self._typed_search(view))):
+                # (review Opus 3 L2) any other call after the search (a filter tap that stays, a toggle, typing elsewhere)
+                # ends what the read before the typing can vouch for: no result is kept from it
+                chain.search = None
             bundle = (view.app or (None, None))[1]
             if name == "logs" and bundle is not None:
                 view.logs_mark[bundle] = self._log_mark(bundle)  # read: only an error after this asks for logs again
@@ -5219,7 +5244,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     def _with_keyboard(self, view, text: str) -> str:
         """(1.9.0 round 2) `Keyboard: shown` says what the keyboard covers and that a tap there closes it first, so an
         agent neither fights a keyboard that stays up (a multi-line field ignores a touch outside) nor taps around it:
-        `Keyboard: shown (covers trip-save; a tap on it closes the keyboard first)`. Each by its id when it has one a
+        `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`. Each by its id when it has one a
         developer wrote, else by its ref. Nothing covered: the line stays as it was."""
         if "Keyboard: shown" not in text:
             return text
@@ -5229,7 +5254,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         more = len(names) - self.KEYBOARD_NAMES
         listed = ", ".join(names[:self.KEYBOARD_NAMES]) + (f", +{more} more" if more > 0 else "")
         one = "it" if len(names) == 1 else "one"
-        line = f"Keyboard: shown (covers {listed}; a tap on {one} closes the keyboard first)"
+        # (review Opus 3 L1) what a tap there does, as it is: a Done in the keyboard's accessory bar is pressed; else the
+        # tool tries to close the keyboard, and a tap it can't clear is refused `covered`
+        how = ("presses the keyboard's Done first" if self._done_on_keyboard(view) is not None
+               else "tries to close the keyboard first")
+        line = f"Keyboard: shown (covers {listed}; a tap on {one} {how})"
         return "\n".join(line if row == "Keyboard: shown" else row for row in text.split("\n"))
 
     @staticmethod
@@ -5365,6 +5394,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         H1 rule (`_is_form`, a tap that leaves a form is no navigation) keeps its own definition."""
         if not any(getattr(e, "role", None) == "input" for e in items):
             return False
+        if any(getattr(e, "role", None) == "input" and cls._is_search((None, e, [])) for e in items):
+            return False  # (review Opus 3 L4) a screen with a search field is a list to search, not a form to fill
         if cls._is_form(items):
             return True  # (§30.3's own reading still holds: 2 or more inputs and a button)
         return any(getattr(e, "role", None) == "button" and getattr(e, "enabled", True) is not False
@@ -7061,7 +7092,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         aimed = self._keyboard_covers(view, target)
         said = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
         if said == NOTE_KEYBOARD_STAYED and aimed is None and self._hints_wanted():
-            return NOTE_KEYBOARD_STAYS  # (1.9.0 round 2) the target is clear of it: the tap goes on, nothing failed
+            # (1.9.0 round 2) the target is clear of it: the touch goes on, nothing failed
+            return NOTE_KEYBOARD_STAYS.format(what=KEYBOARD_WHAT.get(name, name))
         return said
 
     def _keyboard_covers(self, view, target: ui.Target) -> "ui.Element | None":
@@ -8116,8 +8148,6 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return HINT_BARE_POINT
         if found.role == "input":
             return HINT_FIELD
-        if found.role in ("text", "header") and not found.actions and self._hints_wanted():
-            return HINT_PLAIN_TEXT  # (1.9.0 round 2) not "report it as a finding": --no-hints keeps 1.8.5's words
         return HINT_LOADING
 
     async def _tap(self, view, a: dict) -> str:
