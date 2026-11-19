@@ -170,15 +170,25 @@ def _new_tunnel(userspace_tunnel, serial, make):
     return userspace_tunnel.UserspaceRsdTunnel(serial=serial, provider_factory=factory)
 
 
-_swap_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+_swap_locks: "dict[int, tuple[weakref.ref, asyncio.Lock]]" = {}
 
 
 def _swap_lock() -> asyncio.Lock:
-    """One lock per event loop (as pymobiledevice3's own lifecycle lock), made inside the loop that uses it."""
+    """One lock per event loop, made inside the loop that uses it. Keyed by the loop's id with only a weak reference
+    to the loop: a lock that once had to wait holds its loop, so a loop-keyed weak dictionary would never let either
+    go (review 1.9.1, Opus 2 L1). Such a lock still holds its loop itself, so the reference stays alive: entries of
+    closed loops are dropped here too, which leaves at most the last closed loop's until the next open. A dead
+    reference, or another loop, under an id means the id was reused."""
     loop = asyncio.get_running_loop()
-    lock = _swap_locks.get(loop)
-    if lock is None:
-        lock = _swap_locks[loop] = asyncio.Lock()
+    entry = _swap_locks.get(id(loop))
+    if entry is not None and entry[0]() is loop:
+        return entry[1]
+    for key, (ref, _) in list(_swap_locks.items()):
+        held = ref()
+        if held is None or held.is_closed():
+            del _swap_locks[key]
+    lock = asyncio.Lock()
+    _swap_locks[id(loop)] = (weakref.ref(loop), lock)
     return lock
 
 
@@ -244,7 +254,8 @@ class Device:
         from pymobiledevice3.remote import userspace_tunnel
         on_usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"
                   and (self.udid is None or d.serial == self.udid)]
-        unclaimed: list = []  # a service found here that no tunnel has taken yet
+        unclaimed: list = []  # services found here that no tunnel has taken and nobody has closed yet
+        extras: list = []
         if self.host:
             if not self.port:
                 raise DeviceError("no pairing port known for a direct address: run `tapwright probe` once on the "
@@ -267,10 +278,8 @@ class Device:
             if not services:
                 raise PhoneNotFound("no phone on USB, and none paired on this network (same Wi-Fi, unlocked, "
                                     "Developer Mode on, `tapwright setup` done over USB once)")
-            for extra in services[1:]:
-                await extra.close()
-            found = services[0]
-            unclaimed.append(found)
+            found, extras = services[0], services[1:]
+            unclaimed.extend(services)  # every one is ours to close until the tunnel takes `found`
 
             async def make():
                 unclaimed.clear()  # the tunnel owns it from here, and closes it with itself
@@ -278,6 +287,14 @@ class Device:
             self.via = "local network"
         self.tunnel = _new_tunnel(userspace_tunnel, self.udid, make)
         try:
+            # other paired phones that answered: closed one by one, so a failing close leaves none of the rest open
+            # (review 1.9.1, Opus 2 L3)
+            for extra in extras:
+                unclaimed.remove(extra)
+                try:
+                    await extra.close()
+                except Exception as closing:
+                    self.log(f"closing another phone's network service: {closing}")
             self.rsd = await _open_tunnel(userspace_tunnel, self.tunnel, make)
         except BaseException as e:
             # an open that failed before taking the found service (a tunnel still active, say) leaves it to us

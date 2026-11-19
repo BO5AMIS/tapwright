@@ -293,11 +293,80 @@ def test_a_cancellation_while_closing_the_found_service_goes_up(world, monkeypat
             return [Slow()]
         monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", mdns)
         task = asyncio.ensure_future(Device(log=lambda *a: None).connect())
-        await closing.wait()
+        reached = asyncio.ensure_future(closing.wait())
+        # bounded: a connect() that never closes the service ends (or hangs) without setting `closing`
+        await asyncio.wait({task, reached}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        reached.cancel()
+        assert closing.is_set(), "connect() never closed the service it found"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     asyncio.run(scenario())
+
+
+def _closing_services(names, closed, failing=None, failure=None):
+    class Found:
+        def __init__(self, name):
+            self.name = name
+
+        async def close(self):
+            closed.append(self.name)
+            if self.name == failing:
+                raise failure
+    return [Found(n) for n in names]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("TLS alert"), asyncio.CancelledError()], ids=["error", "cancel"])
+def test_a_failing_close_of_another_phones_service_leaves_none_open(world, monkeypatch, failure):
+    """(review 1.9.1, Opus 2 L3) Several paired phones answer; closing one of the others fails (a TLS error, or a
+    cancel in wait_closed). The phone's own service and the rest were left open."""
+    mod = _new_contract()
+    world.use(mod)
+    closed = []
+
+    async def mdns(udid=None, **kw):
+        return _closing_services(["mine", "other1", "other2"], closed, failing="other1", failure=failure)
+    monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", mdns)
+
+    async def busy(self):
+        raise RuntimeError("A userspace tunnel is already active in this process")
+    mod.UserspaceRsdTunnel.aopen = busy
+    expected = DeviceError if isinstance(failure, Exception) else asyncio.CancelledError
+    with pytest.raises(expected):
+        _connect()
+    assert sorted(closed) == ["mine", "other1", "other2"]
+
+
+def test_a_contended_swap_lock_doesnt_keep_its_loops(world, monkeypatch):
+    """(review 1.9.1, Opus 2 L1) A lock that once had to wait holds its event loop: kept per loop, every such loop
+    stayed alive for good. At most the last closed loop's lock is kept now."""
+    import gc
+    import weakref
+    monkeypatch.setattr(device_module, "_swap_locks", type(device_module._swap_locks)())
+    mod = _old_contract()
+    world.use(mod)
+    loops, gates = [], {}
+
+    async def direct(identifier, host, port):
+        await gates["now"].wait()
+        return f"direct {host}"
+    monkeypatch.setattr(tunnel_service, "create_core_device_tunnel_service_using_remotepairing", direct)
+
+    async def scenario():
+        loops.append(weakref.ref(asyncio.get_running_loop()))
+        gates["now"] = asyncio.Event()
+        a = asyncio.ensure_future(Device(log=lambda *x: None, host="a.host", port=1).connect())
+        b = asyncio.ensure_future(Device(log=lambda *x: None, host="b.host", port=1).connect())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        gates["now"].set()
+        await asyncio.gather(a, b)
+        gates.clear()  # the test's own event mustn't keep the loop either
+    for _ in range(4):
+        asyncio.run(scenario())
+    gc.collect()
+    assert sum(ref() is not None for ref in loops) <= 1
+    assert len(device_module._swap_locks) <= 1
 
 
 def _usb_open_queued_behind_a_teardown(world, monkeypatch, mod, lifecycle_lock):
