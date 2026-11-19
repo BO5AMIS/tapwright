@@ -440,6 +440,9 @@ NOTE_KEYBOARD = "closed the keyboard first."
 REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't tell another screen from this one
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
+# (1.9.0 round 2, hints on) the same, for a target the keyboard doesn't cover: nothing is wrong, nothing to fight
+NOTE_KEYBOARD_STAYS = ("the keyboard stays up (this form ignores a touch outside its field); it doesn't block this tap, and a "
+                       "tap on a button it covers closes it first.")
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 DONE_SETTLE = 0.5  # (Opus 2 M2) seconds a multiline Done is given to show what it did before the tap goes on
 DONE_CHANGED = ("the keyboard's Done key was pressed to close the keyboard, and the screen changed after it: Done may have "
@@ -466,6 +469,8 @@ HEALTH_TICK = 0.5  # seconds between the reads that see whether the Health sheet
 NOTE_DELIVERED = "the {touch} was delivered, and nothing on screen changed within {seconds:.1f} s. {hint}"
 HINT_FIELD = "It is a text field: type_text types into it."
 HINT_BARE_POINT = "No element is at that point."
+# (1.9.0 round 2, hints on) a tap on plain text that did nothing is no finding: a label that does nothing is a label
+HINT_PLAIN_TEXT = "It is plain text with no action: nothing is expected to change."
 HINT_LOADING = ("If the screen is still loading, wait_for what you expect, then try once more; if it stays the same, "
                 "report it as a finding.")
 DELIVERED_TOOLS = ("tap", "long_press")
@@ -5040,7 +5045,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 view.logs_mark[bundle] = self._log_mark(bundle)  # read: only an error after this asks for logs again
             if not self._hints_on(client_id):
                 return text
-            return self._with_hints(view, name, args, self._with_known(view, text), code)
+            return self._with_hints(view, name, args, self._with_known(view, self._with_keyboard(view, text)), code)
         except Exception as e:  # noqa: BLE001
             self.log(f"hints left out: {type(e).__name__}")
             return text
@@ -5066,6 +5071,41 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         chain.places.append(view.place[1])
         chain.steps.append(list(saved["steps"]))
         view.auto = chain
+
+    KEYBOARD_NAMES = 3  # (1.9.0 round 2) at most this many covered elements named on the Keyboard: line
+
+    def _with_keyboard(self, view, text: str) -> str:
+        """(1.9.0 round 2) `Keyboard: shown` says what the keyboard covers and that a tap there closes it first, so an
+        agent neither fights a keyboard that stays up (a multi-line field ignores a touch outside) nor taps around it:
+        `Keyboard: shown (covers trip-save; a tap on it closes the keyboard first)`. Each by its id when it has one a
+        developer wrote, else by its ref. Nothing covered: the line stays as it was."""
+        if "Keyboard: shown" not in text:
+            return text
+        names = self._keyboard_covered(view.items)
+        if not names:
+            return text
+        more = len(names) - self.KEYBOARD_NAMES
+        listed = ", ".join(names[:self.KEYBOARD_NAMES]) + (f", +{more} more" if more > 0 else "")
+        one = "it" if len(names) == 1 else "one"
+        line = f"Keyboard: shown (covers {listed}; a tap on {one} closes the keyboard first)"
+        return "\n".join(line if row == "Keyboard: shown" else row for row in text.split("\n"))
+
+    @staticmethod
+    def _keyboard_covered(items: list) -> list[str]:
+        """The listed controls whose centre the keyboard lies over (never its own keys or accessory bar, nor an alert's)."""
+        out = []
+        for e in items:
+            if (getattr(e, "role", None) not in ("button", "link", "cell", "tab", "switch", "input")
+                    or getattr(e, "by_keyboard", False) or getattr(e, "in_alert", False)):
+                continue
+            cx, cy = e.center
+            if not any(b.kind == "Keyboard" and b.rect[0] <= cx < b.rect[0] + b.rect[2]
+                       and b.rect[1] <= cy < b.rect[1] + b.rect[3] for b in e.covered_by):
+                continue
+            ident = e.identifier
+            named = isinstance(ident, str) and ui.structural_id(ident) and not ui.private(ident)
+            out.append(ident if named else e.ref)
+        return out
 
     def _with_known(self, view, text: str) -> str:
         """§30.2: the first answer of the session that shows the app's screen gets `Known:` after the screen's header."""
@@ -6834,7 +6874,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
         aimed = self._keyboard_covers(view, target)
-        return await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
+        said = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
+        if said == NOTE_KEYBOARD_STAYED and aimed is None and self._hints_wanted():
+            return NOTE_KEYBOARD_STAYS  # (1.9.0 round 2) the target is clear of it: the tap goes on, nothing failed
+        return said
 
     def _keyboard_covers(self, view, target: ui.Target) -> "ui.Element | None":
         """The target's element when the keyboard lies over its centre (1.9.0); only then may a Done close it first."""
@@ -7886,7 +7929,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             found = self._element_at(found)
             if found is None:
                 return HINT_BARE_POINT
-        return HINT_FIELD if found.role == "input" else HINT_LOADING
+        if found.role == "input":
+            return HINT_FIELD
+        if found.role in ("text", "header") and not found.actions and self._hints_wanted():
+            return HINT_PLAIN_TEXT  # (1.9.0 round 2) not "report it as a finding": --no-hints keeps 1.8.5's words
+        return HINT_LOADING
 
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)

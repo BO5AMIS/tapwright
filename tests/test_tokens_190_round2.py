@@ -84,3 +84,50 @@ def test_the_command_line_takes_lazy_tools(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["tapwright", "mcp"])
     cli.main()
     assert seen["lazy_tools"] is False
+
+
+# ---- item 2: the keyboard told, not fought ----
+
+from test_daemon import finish, keyboard_up, run  # noqa: E402
+
+from tapwright import daemon as daemon_module  # noqa: E402
+
+
+def test_the_keyboard_line_names_what_it_covers_and_that_a_tap_there_closes_it_first():
+    async def go():
+        d, stop, task = await keyboard_up()
+        shown = "Screen 400x800 pt · 6 elements\nKeyboard: shown\ne1 text \"Title\""
+        d.session.SCREEN_TEXT = shown
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert "Keyboard: shown (covers low; a tap on it closes the keyboard first)" in r["text"].splitlines()
+        plain = await d.run_tool("a", "look", {"screenshot": False}, hints=False)  # --no-hints: 1.8.5's line
+        assert "Keyboard: shown" in plain["text"].splitlines() and "covers" not in plain["text"]
+        view = d.control.client("a")
+        many = d._with_keyboard(view, "Keyboard: shown")
+        assert many == "Keyboard: shown (covers low; a tap on it closes the keyboard first)"
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_keyboard_that_stays_up_over_a_tap_it_doesnt_cover_is_said_plainly_and_plain_text_is_no_finding():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Title"}})
+        text = r["text"]
+        assert "Note: " + daemon_module.NOTE_KEYBOARD_STAYS in text
+        assert daemon_module.NOTE_KEYBOARD_STAYED not in text
+        assert "report it as a finding" not in text
+        assert daemon_module.HINT_PLAIN_TEXT in text
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_hints_keeps_1_8_5s_keyboard_and_finding_notes():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Title"}}, hints=False)
+        text = r["text"]
+        assert "Note: " + daemon_module.NOTE_KEYBOARD_STAYED in text
+        assert daemon_module.NOTE_KEYBOARD_STAYS not in text and "report it as a finding" in text
+        await finish(stop, task)
+    run(go)
