@@ -8,6 +8,7 @@ may be watching or driving in its live view at the same time.
 import asyncio
 import base64
 import contextvars
+import copy
 import functools
 import io
 import logging
@@ -105,6 +106,49 @@ class TapwrightServer(MCPServer):
         finally:
             _CONTEXT.reset(token)
 
+    async def list_tools(self):
+        """(1.9.0) The tools as the host lists them: schemas without pydantic's `title` keys (a fifth of their characters,
+        never read), and the core tools marked to load up front (`_meta` `anthropic/alwaysLoad`: Claude Code then lists
+        them without a ToolSearch turn; other hosts ignore the key). `--lazy-tools` (and `--no-hints`) leave every tool
+        deferred, with their schemas as they were, as 1.8.5 did."""
+        listed = await super().list_tools()
+        if LAZY_TOOLS:
+            return listed
+        for tool in listed:
+            tool.input_schema = copy.deepcopy(tool.input_schema)  # (the tool's own stays whole, for --lazy-tools)
+            _drop_titles(tool.input_schema)
+            if tool.name in CORE_TOOLS:
+                tool.meta = {**(tool.meta or {}), ALWAYS_LOAD: True}
+        return listed
+
+
+# (1.9.0) the tools nearly every session calls: loaded with the session, not found with a ToolSearch turn first
+CORE_TOOLS = ("open_app", "open_url", "look", "tap", "type_text", "run", "scroll", "back", "toggle", "wait_for", "drive")
+ALWAYS_LOAD = "anthropic/alwaysLoad"  # the key Claude Code reads per tool (`_meta["anthropic/alwaysLoad"] === true`)
+LAZY_TOOLS = False  # `tapwright mcp --lazy-tools` (or TAPWRIGHT_LAZY_TOOLS=1, or --no-hints): every tool deferred, as 1.8.5
+
+
+def lazy_tools_env() -> bool:
+    return os.environ.get("TAPWRIGHT_LAZY_TOOLS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _drop_titles(schema: object) -> None:
+    """Remove pydantic's `title` keys from a JSON schema, in place. A property that is itself named `title` stays."""
+    if isinstance(schema, list):
+        for part in schema:
+            _drop_titles(part)
+        return
+    if not isinstance(schema, dict):
+        return
+    if isinstance(schema.get("title"), str):
+        del schema["title"]
+    for key, value in schema.items():
+        if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            for sub in value.values():  # (the names here are fields, not keywords)
+                _drop_titles(sub)
+        else:
+            _drop_titles(value)
+
 
 def _unset_means_absent(schema: dict) -> None:
     """Drop the null branch from every field, so a client must leave an unset key out. Otherwise a `null`
@@ -119,8 +163,8 @@ def _unset_means_absent(schema: dict) -> None:
 
 
 class Target(BaseModel):
-    """What to act on: exactly one of ref, id, label, text, or x with y. The daemon checks the rule and
-    answers `bad_params` with an example when it isn't met."""
+    """Exactly one of ref, id, label, text, or x with y; index picks among matches."""
+    # (the daemon checks the rule and answers `bad_params` with an example when it isn't met)
     model_config = ConfigDict(extra="forbid", json_schema_extra=_unset_means_absent)
     ref: str | None = None
     id: str | None = None
@@ -547,6 +591,20 @@ def set_hints(hints: bool) -> None:
     hints = hints and not client.no_hints_env()  # (TAPWRIGHT_NO_HINTS=1 as --no-hints)
     server._lowlevel_server.instructions = instructions(hints)
     client.set_hints(hints)
+    global LAZY_TOOLS, _HINTS_ON
+    _HINTS_ON = hints
+    LAZY_TOOLS = _LAZY_ASKED or not hints  # (1.9.0) --no-hints is 1.8.5's: every tool deferred
+
+
+_LAZY_ASKED = False
+_HINTS_ON = True
+
+
+def set_lazy_tools(lazy: bool) -> None:
+    """`tapwright mcp --lazy-tools` (or TAPWRIGHT_LAZY_TOOLS=1): no tool is marked to load up front."""
+    global LAZY_TOOLS, _LAZY_ASKED
+    _LAZY_ASKED = lazy or lazy_tools_env()
+    LAZY_TOOLS = _LAZY_ASKED or not _HINTS_ON
 
 
 HEARTBEAT = 5.0  # s between the signs this process gives the daemon that it lives (a network condition is kept meanwhile)
@@ -567,9 +625,10 @@ def _heartbeat(stop: threading.Event) -> None:
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
         rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None, brief: bool = False,
         maps: str | None = None, dialog: bool = True, accounts: str | None = None, phone: bool = False,
-        hints: bool = True) -> None:
+        hints: bool = True, lazy_tools: bool = False) -> None:
     global BRIEF_DEFAULT
     BRIEF_DEFAULT = brief
+    set_lazy_tools(lazy_tools)
     set_hints(hints)
     DIALOGS.enabled = dialog
     if apps or dedicated or rules is not None:
