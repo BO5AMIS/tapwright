@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.9.0, "the Token Update"
+## 1.9.0 (2026-11-19), "the Token Update"
 
 Fewer calls per task (AGENT-TOOLS 1.17 §30). Nothing is taken away: every 1.8.5 call, argument and answer still
 works, and `--no-hints` gives 1.8.5's behaviour back.
