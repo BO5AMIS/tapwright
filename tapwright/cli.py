@@ -14,7 +14,11 @@
   tapwright serve [--apps ID[,ID] | --dedicated | --phone] [--address IP] [--port N] [--keep-alive] [--new-token] [--stop]
                      the background process that owns the phone: the live view in your
                      browser, the agent tools and an HTTP API. Agent tools start it by
-                     themselves; it stops after 30 minutes unused (--keep-alive: never)
+                     themselves; it stops after 30 minutes unused with no phone connected
+                     (--keep-alive: never)
+  tapwright service install [serve's flags] | uninstall | status
+                     Tapwright always on: a logon task starts `serve --keep-alive` (Windows; launchd or
+                     systemd entry elsewhere), so the phone's test runner and iOS's consent are kept
   tapwright view     open the live view in your browser (starts the daemon if needed)
   tapwright record-video --out FILE.mp4 [--seconds N] [--fps N]
                      record the live view as an H.264 MP4 in real time, with FILE.frames.json (each frame's
@@ -31,7 +35,8 @@
                      no agent (Windows: a time schedule is a Task Scheduler task that wakes the PC)
   tapwright unlock-reset
                      after the phone refused the vault's passcode, the passcode unlock types nothing until you check
-                     phone.passcode and run this (at most 2 attempts an hour and 3 a day in any case)
+                     phone.passcode and run this (at most 2 failed attempts an hour and 3 a day in any case;
+                     one that unlocks the phone isn't limited)
   tapwright bug <report folder> <finding id> [--with-picture] [--verify N] [--accounts FILE]; bug list [--app ID];
                      bug verify <bug id> [--verify N]; bug export <bug id> --to zip|issue [--repo O/N] [--yes]
                      a one-page bug report of an explore finding under ~/.tapwright/bugs (the phone only to verify)
@@ -1350,7 +1355,7 @@ def main() -> int:
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, help="default 8417; a free port if that one is taken")
     p.add_argument("--address", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
-    p.add_argument("--keep-alive", action="store_true", help="don't stop after 30 minutes without use")
+    p.add_argument("--keep-alive", action="store_true", help="never stop by itself (without it: after 30 minutes without use and with no phone connected)")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
     p.add_argument("--no-log", action="store_true",
@@ -1384,6 +1389,24 @@ def main() -> int:
     p.add_argument("--video", action="store_true",
                    help="show the live view as video: start the phone's Screen Mirroring to this computer (same "
                         "Wi-Fi; needs UxPlay and `pip install tapwright[video]`)")
+    p = sub.add_parser("service", help="Tapwright always on: start the daemon at logon and keep it running (install, "
+                                       "uninstall, status)")
+    sv = p.add_subparsers(dest="service_cmd", required=True)
+    q = sv.add_parser("install", help="a logon task (Windows) that runs `tapwright serve --keep-alive` with these flags; "
+                                      "elsewhere, the launchd or systemd entry to add")
+    q.add_argument("--apps", metavar="APP[,APP]")
+    q.add_argument("--dedicated", action="store_true")
+    q.add_argument("--phone", action="store_true")
+    q.add_argument("--accounts", metavar="FILE", help="serve's vault file (the passcode unlock reads it; never copied)")
+    q.add_argument("--maps", metavar="DIR")
+    q.add_argument("--policy", metavar="FILE")
+    q.add_argument("--port", type=int)
+    q.add_argument("--address")
+    q.add_argument("--no-log", action="store_true")
+    q.add_argument("--brief", action="store_true")
+    q.add_argument("--no-hints", action="store_true")
+    sv.add_parser("uninstall", help="remove the logon task (a running daemon keeps running until serve --stop)")
+    sv.add_parser("status", help="whether the logon task is there and the daemon runs")
     sub.add_parser("view")
     sub.add_parser("call", add_help=False,
                    help="run one tool in the running daemon and print its answer (standard library only: "
@@ -1565,6 +1588,20 @@ def main() -> int:
             text, code = "Error: give the schedule's name, or --phone for the phone lock", 1
         else:
             text, code = schedules.unlock(a.name)
+        print(text)
+        return code
+    if a.cmd == "service":
+        from . import service as servicelib
+        svc = servicelib.Service()
+        if a.service_cmd == "install":
+            if a.phone and (a.apps or a.dedicated):
+                print("Error: --phone can't be used with --apps or --dedicated")
+                return 2
+            text, code = svc.install(servicelib.serve_args(vars(a)))
+        elif a.service_cmd == "uninstall":
+            text, code = svc.uninstall()
+        else:
+            text, code = svc.status()
         print(text)
         return code
     if a.cmd == "run-schedule":

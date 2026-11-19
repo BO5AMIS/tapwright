@@ -220,9 +220,26 @@ opens the phone's screen in your browser, live, in a drawn iPhone, and lets you 
 step is captioned under the phone; the bar has Pause agent, Steps and More (Home, volume, the
 picture quality, Details). It starts
 `tapwright serve` (the background process that owns the phone) if it isn't running; agent
-tools start it too. It stops by itself after 30 minutes without viewers or requests
-(`tapwright serve --keep-alive` keeps it running), or with `tapwright serve --stop`. Its log
-is `~/.tapwright/serve.log`.
+tools start it too. With no phone connected it stops by itself after 30 minutes without viewers
+or requests; while a phone is connected it keeps running (`tapwright serve --keep-alive` keeps it
+running in any case), until `tapwright serve --stop`. Its log is `~/.tapwright/serve.log`.
+
+### Plug and forget: always on
+
+iOS asks for the passcode ("Enter iPhone Passcode for XCTest") when Tapwright starts its test
+runner on the phone and the last time you entered it is about 8 hours ago or more. A runner that
+keeps running is never asked. So keep the phone plugged in and let Tapwright start once:
+
+```sh
+tapwright service install --accounts ~/tapwright-vault.json
+```
+
+creates a Windows logon task (hidden) that runs `tapwright serve --keep-alive` with the flags
+you give (`--apps`, `--accounts`, `--maps`, ...); `tapwright service status` and
+`tapwright service uninstall` check and remove it. On macOS and Linux the command prints the
+launchd agent or systemd user unit to add. After the phone restarts, unlock it once with its
+passcode and enter the passcode once more when it asks to allow UI automation; until the next
+restart it needs no one.
 
 ### The live view as video
 

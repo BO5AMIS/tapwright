@@ -684,11 +684,25 @@ def _bind(port: int) -> socket.socket | None:
     return sock
 
 
+PHONE_GONE = ("no-device",)  # the daemon's states with no phone to keep (all others: one is plugged in or reachable)
+
+
+def phone_present(daemon) -> bool:
+    """(1.9.1, plug and forget) Is a phone connected, or being connected to? Then the daemon doesn't stop for idleness:
+    stopping ends the test runner, and iOS asks for the passcode at a new runner's start once its consent is about 8 h
+    old (serve.log 11-13 to 11-19), while a runner kept running is never asked. A phone waiting at that prompt counts
+    too: its start goes on once the passcode is in."""
+    state = getattr(daemon, "state", None)
+    return isinstance(state, str) and state not in PHONE_GONE
+
+
 async def _idle_watch(daemon, stop: asyncio.Event, limit: float, every: float = 30.0) -> None:
     while not stop.is_set():
         await asyncio.sleep(every)
         if daemon.pump.viewers == 0 and daemon.ws_clients == 0 and time.monotonic() - daemon.last_request > limit:
-            daemon.log(f"no viewers or requests for {limit / 60:.0f} min: stopping")
+            if phone_present(daemon):
+                continue  # the runner is kept (see phone_present); the first check after the phone is gone stops
+            daemon.log(f"no viewers or requests for {limit / 60:.0f} min and no phone: stopping")
             stop.set()
 
 
