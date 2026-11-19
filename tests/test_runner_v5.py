@@ -337,9 +337,9 @@ def test_no_answer_force_or_a_point_tap_as_before():
 
 def test_the_runner_pinned_is_tw_16_15_3_7():
     repo, tag, sha, folder = store.WDA_SOURCES["fork"]
-    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.7", "fork-tw-16.15.3.7")
-    assert sha == "50558af70c0a84adcdb70b5216ac36e4f806d08f9bc0aa976f326e9bfe9d23ac"
-    assert store.WDA_VERSION == "fork-tw-16.15.3.7"
+    assert (repo, tag, folder) == ("bo5amis/WebDriverAgent", "tw-16.15.3.8", "fork-tw-16.15.3.8")
+    assert sha == "0d0bc023c966fee132e5d213eb1f839b970947b28812f7db0561bce052ca7014"
+    assert store.WDA_VERSION == "fork-tw-16.15.3.8"
 
 
 # ---- a cover the tree only guesses: the runner's hit test decides ----

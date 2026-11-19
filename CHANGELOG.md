@@ -78,6 +78,10 @@
   are the app's own lines (no XCTest or system framework lines), the same link opened twice in a row is one step, and a
   bug no check was asked for says `Reproduced: not checked.`. The count of a bug is of sightings (two explore runs: count
   2), with how often they saw it in all kept as `seen.occurrences`.
+- The phone's lock is seen again: the runner (`tw-16.15.3.8`, version 8; `tapwright setup --force` installs it) reads the
+  lock state from iOS on every check. It kept a flag only iOS's change notices set, so a locked phone could read as not
+  locked (the owner's lock went unseen and `unlock` answered "The phone isn't locked."), and an unlocked one with
+  Notification Center open as locked.
 
 ## 1.8.0 (2026-11-19), "the Explorer"
 
