@@ -83,6 +83,12 @@
   lock state from iOS on every check. It kept a flag only iOS's change notices set, so a locked phone could read as not
   locked (the owner's lock went unseen and `unlock` answered "The phone isn't locked."), and an unlocked one with
   Notification Center open as locked.
+- `unlock` finds iOS 26's passcode keypad (seen on a Face ID iPhone with iOS 26.5, where it answered that the
+  passcode entry couldn't be found): the keypad is on the screen but under a view whose frame lies outside it, so
+  the tree listed every key as off the screen. Such a keypad (each digit's key once, none above or left of the
+  screen, every other check as before) is used only after the runner's hit test confirms that touches at four keys
+  (always 1, 3, 5 and 0, whatever the passcode is) land on those keys in SpringBoard; iOS 26 answers each key's round
+  face, unnamed, inside the key. Keys of type Key count as buttons.
 
 - A bug made `from: "failure"` names the place the run's answer named (a thin run's own read; it said "an unnamed
   screen"), and its Logs are the app's own lines, as `from: "now"` keeps them, not the run's log block with iOS's lines.

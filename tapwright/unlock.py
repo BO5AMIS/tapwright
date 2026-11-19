@@ -53,7 +53,7 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -72,6 +72,10 @@ KEY_GAP = 0.08  # seconds between two keypad touches
 WAKE_LIMIT = 3  # wakes that typed nothing ...
 WAKE_WINDOW = 600.0  # ... per this many seconds, in the record (last Opus review of 1.7.8, L3; on disk since 1.7.9)
 DIGITS = "0123456789"
+# (1.8.5) keys whose place the runner's hit test confirms before a keypad that the tree lists as off the screen is used
+# (iOS 26 puts the lock screen's passcode view under a container whose frame lies outside it): the corners and the
+# middle of the keypad, the same keys every time, whatever the passcode is
+PROBE_KEYS = "1350"
 STATE_FILE: Path | None = None  # the record of attempts; None: ~/.tapwright/unlock-state.json (the tests set their own)
 RESET = "tapwright unlock-reset"
 
@@ -120,6 +124,10 @@ class Entry:
     """The lock screen's passcode entry, as found in SpringBoard's tree."""
     keys: dict[str, tuple[float, float]]  # digit -> where its key's centre is (all ten, or none)
     field: ui.Element | None  # the secure passcode field, when there is one
+    # False (1.8.5): the keys came from the tree's off-screen list, so where they are must be confirmed by the hit test
+    # (PROBE_KEYS) before a key goes out
+    on_screen: bool = True
+    frames: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)  # digit -> its key's frame
 
 
 @dataclass(frozen=True)
@@ -391,19 +399,27 @@ class LockScreen(Protocol):
     async def xctest_prompt(self) -> bool | None: ...  # is iOS's XCTest passcode prompt up (None: can't say)
     async def press_keys(self, points: list[tuple[float, float]]) -> None: ...
     async def type_secret(self, text: str) -> None: ...
+    # the key (of `frames`, digit -> frame) a touch at (x, y) lands on, as the runner's hit test says; None: no key, or
+    # it can't say
+    async def key_at(self, x: float, y: float, frames: dict[str, tuple[float, float, float, float]]) -> str | None: ...
 
 
-def _key_of(e: ui.Element) -> str | None:
-    """The digit a keypad key types: a button named or labelled with the digit (iOS labels them "2" or "2, ABC")."""
-    if e.role != "button" and e.type != "Button":
-        return None
-    for said in (e.identifier, e.name, e.label):
-        text = (said or "").strip()
+def _digit_of(*said: str | None) -> str | None:
+    """The digit a key's name or label says: "2" or "2, ABC" (iOS's words for a keypad key)."""
+    for words in said:
+        text = (words or "").strip()
         if len(text) == 1 and text in DIGITS:
             return text
         if len(text) > 1 and text[0] in DIGITS and text[1] in ", " and not any(c in DIGITS for c in text[1:]):
             return text[0]
     return None
+
+
+def _key_of(e: ui.Element) -> str | None:
+    """The digit a keypad key types: a button (iOS 26: XCTest's Key) named or labelled with the digit."""
+    if e.role != "button" and e.type not in ("Button", "Key"):
+        return None
+    return _digit_of(e.identifier, e.name, e.label)
 
 
 def _mentions_xctest(e: ui.Element) -> bool:
@@ -415,9 +431,49 @@ def _passcode_field(e: ui.Element) -> bool:
     return secure and any("passcode" in (s or "").casefold() for s in (e.label, e.identifier, e.name, e.placeholder))
 
 
+def _keypad(elements: list[ui.Element]) -> dict[str, ui.Element]:
+    """The ten keys when each digit's key is among `elements` exactly once; else {}."""
+    found: dict[str, list[ui.Element]] = collections.defaultdict(list)
+    for e in elements:
+        digit = _key_of(e)
+        if digit is not None and e.enabled and not e.in_alert:
+            found[digit].append(e)
+    if not all(len(found.get(d, [])) == 1 for d in DIGITS):
+        return {}
+    return {d: found[d][0] for d in DIGITS}
+
+
+def _inside(x: float, y: float, rect: tuple[float, float, float, float]) -> bool:
+    rx, ry, rw, rh = rect
+    return rw > 0 and rh > 0 and rx <= x < rx + rw and ry <= y < ry + rh
+
+
+def hit_key(name: str, label: str, rect: tuple[float, float, float, float], x: float, y: float,
+            frames: dict[str, tuple[float, float, float, float]]) -> str | None:
+    """The key a touch at (x, y) lands on, from what the hit test says it lands on (its name, label and frame): an
+    element at that point that names a digit, inside that digit's key; or (iOS 26: the key's round face, which has no
+    name) an unnamed element at that point lying wholly inside one key's frame and no other's. Anything else: None."""
+    if not _inside(x, y, rect):
+        return None
+    said = _digit_of(name, label)
+    if said is not None:
+        return said if said in frames and _inside(x, y, frames[said]) else None
+    if (name or "").strip() or (label or "").strip():
+        return None
+    hx, hy, hw, hh = rect
+    holders = [d for d, (fx, fy, fw, fh) in frames.items()
+               if fx - 0.5 <= hx and fy - 0.5 <= hy and hx + hw <= fx + fw + 0.5 and hy + hh <= fy + fh + 0.5]
+    return holders[0] if len(holders) == 1 else None
+
+
 def find_entry(tree: ui.Tree, front: str | None) -> Entry | None:
     """The passcode entry iOS's lock screen shows, or None when this screen isn't proven to be it: SpringBoard in front,
-    no alert, nothing about XCTest, and the keypad's ten keys (each once) or a secure passcode field."""
+    no alert, nothing about XCTest, and the keypad's ten keys (each once) or a secure passcode field.
+
+    iOS 26 (seen on the phone 2026-11-19, iPhone15,3 iOS 26.5) shows the keypad on the screen but under a container
+    whose frame lies outside it, so the tree lists every key as off the screen. Then the keys are taken from the whole
+    tree, on screen and off, each digit once, no key's centre above or left of the screen, and the Entry says so
+    (`on_screen` False): the Unlocker types on them only after the hit test confirmed where they are."""
     if front != SPRINGBOARD:
         return None
     if tree.alert is not None:
@@ -425,18 +481,17 @@ def find_entry(tree: ui.Tree, front: str | None) -> Entry | None:
     items = [*tree.items, *tree.offscreen]
     if any(_mentions_xctest(e) for e in items):
         return None
-    found: dict[str, list[ui.Element]] = collections.defaultdict(list)
-    for e in tree.items:
-        digit = _key_of(e)
-        if digit is not None and e.enabled and not e.in_alert:
-            found[digit].append(e)
-    keypad = all(len(found.get(d, [])) == 1 for d in DIGITS)
-    keys = {d: found[d][0].center for d in DIGITS} if keypad else {}
+    keypad, on_screen = _keypad(tree.items), True
+    if not keypad:
+        keypad, on_screen = _keypad(items), False
+        if any(e.center[0] < 0 or e.center[1] < 0 for e in keypad.values()):
+            keypad = {}
     fields = [e for e in tree.items if _passcode_field(e) and not e.in_alert]
-    field = fields[0] if len(fields) == 1 else None
-    if not keys and field is None:
+    secure = fields[0] if len(fields) == 1 else None
+    if not keypad and secure is None:
         return None
-    return Entry(keys, field)
+    return Entry({d: e.center for d, e in keypad.items()}, secure, on_screen or not keypad,
+                 {d: e.rect for d, e in keypad.items()})
 
 
 class Unlocker:
@@ -496,6 +551,8 @@ class Unlocker:
             return Result(False, "not_proven", NOT_PROVEN)
         if not digits and entry.field is None:
             return Result(False, "not_proven", LETTERS_ON_KEYPAD)
+        if digits and entry.keys and not entry.on_screen and not await self._placed(phone, entry):
+            return Result(False, "not_proven", NOT_PROVEN)
         # the last checks, right before the keys: still locked, and still no XCTest prompt
         if not await phone.locked():
             return Result(True, "not_locked")
@@ -524,6 +581,18 @@ class Unlocker:
             return Result(True, "unlocked")
         self._audit(audit, "typed on the lock screen; refused")
         return Result(False, "refused", REFUSED)
+
+    @staticmethod
+    async def _placed(phone: LockScreen, entry: Entry) -> bool:
+        """Does a touch at each of PROBE_KEYS' centres land on that key (the runner's hit test)? Anything else, an
+        error or an answer that can't say included: no."""
+        for digit in PROBE_KEYS:
+            try:
+                if await phone.key_at(*entry.keys[digit], entry.frames) != digit:
+                    return False
+            except Exception:
+                return False
+        return True
 
     async def _end(self, attempt: str, unlocked: bool) -> None:
         """The ledger's end, which never raises: after a key went out, an error here must not read as "nothing was
@@ -607,6 +676,14 @@ class PhoneLockScreen:
 
     async def type_secret(self, text: str) -> None:
         await self.session._call("POST", "/session/{sid}/wda/keys", {"value": list(text) + ["\n"]}, timeout=15)
+
+    async def key_at(self, x: float, y: float, frames: dict[str, tuple[float, float, float, float]]) -> str | None:
+        """The SpringBoard key (hit_key) a touch at (x, y) lands on, as the runner's hit test says; None when it lands
+        elsewhere, in another app, or the test can't answer (an older runner, the check off)."""
+        hit = await self.session.hit_at(x, y)
+        if hit is None or hit.bundle not in ("", SPRINGBOARD):
+            return None
+        return hit_key(hit.name, hit.label, hit.rect, x, y, frames)
 
 
 def schedule_hook(schedule: object) -> bool:
