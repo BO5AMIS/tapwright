@@ -77,6 +77,22 @@ def test_a_scan_that_ended_stays_ended_through_a_merge_with_the_disk_copy_from_d
     assert explored.MORE in explored.merge_record(cut, merged)["frontier"]
 
 
+def test_a_scan_that_begins_in_the_second_another_ended_keeps_its_marker():
+    """CodeRabbit, PR #20 cycle 2 follow-up: times have one-second precision; a scan that ended and a new one that began in
+    the same second must stay apart, or the merge drops the new scan's `…` and the place reads explored mid-scan."""
+    t = "2026-11-19T10:00:05Z"
+    done = {"places": {"home": {"key": {}}}}
+    explored.mark_seen(done, "home", ["id:a"], "2026-11-19T10:00:00Z")
+    explored.scan_open(done, "home", t)
+    explored.mark_tried(done, "home", "id:a", "same", "1", t)
+    assert explored.scan_done(done, "home", [])
+    fresh = {"places": {"home": {"key": {}}}}
+    explored.mark_seen(fresh, "home", ["id:b"], "2026-11-19T10:00:04Z")
+    assert explored.scan_open(fresh, "home", t)  # the next scan, in that same second
+    merged = explored.merge_record(done["places"]["home"]["explored"], fresh["places"]["home"]["explored"])
+    assert explored.MORE in merged["frontier"], merged
+
+
 # ---- explorereport.py: retention counts finished reports only ----
 
 def _finished(folder):

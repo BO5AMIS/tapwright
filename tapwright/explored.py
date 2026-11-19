@@ -10,6 +10,7 @@ Nothing here allows anything (§28.3): a record is never read as a permission, a
 every touch by the caller.
 """
 import copy
+import itertools
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -213,6 +214,15 @@ def mark_seen(data: dict, place: str, sigs: list[str], now: str) -> bool:
     return True
 
 
+_SCAN_SEQ = itertools.count(1)
+
+
+def _scan_mark(now: str) -> str:
+    """When a scan began, as `now` plus a sequence: compared as text it sorts after `now` itself (a `last` or a scan that
+    ended in that second) and after this process's earlier marks."""
+    return f"{now}#{next(_SCAN_SEQ):09d}"
+
+
 def scan_open(data: dict, place: str, now: str) -> bool:
     """The place's screen is being enumerated past what showed first (a scroll is about to be made): its frontier ends in `…`
     until `scan_done`, so a run that stops before the scan ends leaves the place a frontier place, never `explored` with what
@@ -221,7 +231,10 @@ def scan_open(data: dict, place: str, now: str) -> bool:
     if rec is None or MORE in rec["frontier"]:
         return False
     rec["frontier"] = [*rec["frontier"], MORE]
-    rec[SCANNING] = now  # (this `…` is a scan's: a merge drops it once the other side's scan ended after it, `merge_record`)
+    # (this `…` is a scan's: a merge drops it once the other side's scan ended after it, `merge_record`). `now` has one-second
+    # precision, so each scan's mark carries a sequence that sorts after the bare second and after any earlier scan of this
+    # process: a scan that ended and one that began in the same second stay apart (CodeRabbit, PR #20 cycle 2).
+    rec[SCANNING] = _scan_mark(now)
     return True
 
 
