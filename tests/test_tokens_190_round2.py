@@ -1,0 +1,706 @@
+"""1.9.0, round 2 (OPTIMIZE-1.9-ROUND2): the core tools loaded with the session and trimmed schemas, the keyboard told
+rather than fought, route memory that gets used, the failed-call fixes, the form hint that fires, and the trimmed
+instructions with an app-only `logs`."""
+import asyncio
+import json
+
+import pytest
+from mcp.types import ListToolsResult
+
+from tapwright import mcp_server
+
+
+def wire_tools() -> dict:
+    """tools/list as a host receives it (by alias: `_meta`, `inputSchema`)."""
+    listed = asyncio.run(mcp_server.server.list_tools())
+    wire = ListToolsResult(tools=listed).model_dump(by_alias=True, exclude_none=True, mode="json")
+    return {t["name"]: t for t in wire["tools"]}
+
+
+@pytest.fixture
+def eager():
+    mcp_server.set_lazy_tools(False)
+    mcp_server.set_hints(True)
+    yield
+    mcp_server.set_lazy_tools(False)
+    mcp_server.set_hints(True)
+
+
+# ---- item 1: the core tools load with the session; schemas without titles ----
+
+def test_the_core_tools_carry_always_load_and_the_rest_stay_deferred(eager):
+    tools = wire_tools()
+    marked = {name for name, t in tools.items() if (t.get("_meta") or {}).get("anthropic/alwaysLoad") is True}
+    assert marked == {"open_app", "open_url", "look", "tap", "type_text", "run", "scroll", "back", "toggle", "wait_for",
+                      "drive"}
+    assert set(mcp_server.CORE_TOOLS) == marked
+
+
+def test_the_listed_schemas_have_no_title_keys_but_keep_everything_else(eager):
+    tools = wire_tools()
+    text = json.dumps({n: t["inputSchema"] for n, t in tools.items()})
+    assert '"title"' not in text
+    tap = tools["tap"]["inputSchema"]
+    assert tap["required"] == ["target"] and tap["properties"]["force"] == {"default": False, "type": "boolean"}
+    target = tap["$defs"]["Target"]
+    assert set(target["properties"]) == {"ref", "id", "label", "text", "x", "y", "index"}
+    assert len(target["description"]) < 90
+    # the server's own copy is untouched (so --lazy-tools lists 1.8.5's schemas)
+    assert "title" in mcp_server.server._tool_manager.get_tool("tap").parameters["properties"]["force"]
+
+
+def test_a_property_named_title_is_kept():
+    schema = {"title": "X", "properties": {"title": {"title": "Title", "type": "string"}, "a": {"title": "A"}}}
+    mcp_server._drop_titles(schema)
+    assert schema == {"properties": {"title": {"type": "string"}, "a": {}}}
+
+
+@pytest.mark.parametrize("how", ["flag", "env", "no_hints"])
+def test_lazy_tools_or_no_hints_list_every_tool_deferred_as_before(eager, monkeypatch, how):
+    if how == "flag":
+        mcp_server.set_lazy_tools(True)
+    elif how == "env":
+        monkeypatch.setenv("TAPWRIGHT_LAZY_TOOLS", "1")
+        mcp_server.set_lazy_tools(False)
+    else:
+        mcp_server.set_hints(False)
+    tools = wire_tools()
+    assert not any("_meta" in t for t in tools.values())
+    assert '"title"' in json.dumps(tools["tap"]["inputSchema"])
+    monkeypatch.delenv("TAPWRIGHT_LAZY_TOOLS", raising=False)
+    mcp_server.set_lazy_tools(False)
+    mcp_server.set_hints(True)
+    assert "_meta" in wire_tools()["tap"]
+
+
+def test_the_command_line_takes_lazy_tools(monkeypatch):
+    import sys
+    from tapwright import cli
+    seen = {}
+    monkeypatch.setattr(mcp_server, "run", lambda **kw: seen.update(kw))
+    monkeypatch.setattr(sys, "argv", ["tapwright", "mcp", "--lazy-tools"])
+    cli.main()
+    assert seen["lazy_tools"] is True
+    monkeypatch.setattr(sys, "argv", ["tapwright", "mcp"])
+    cli.main()
+    assert seen["lazy_tools"] is False
+
+
+# ---- item 2: the keyboard told, not fought ----
+
+from fakes import button  # noqa: E402
+from test_daemon import finish, keyboard_up, run  # noqa: E402
+
+from tapwright import daemon as daemon_module  # noqa: E402
+
+
+def test_the_keyboard_line_names_what_it_covers_and_what_a_tap_there_does():
+    async def go():
+        d, stop, task = await keyboard_up()
+        shown = "Screen 400x800 pt · 6 elements\nKeyboard: shown\ne1 text \"Title\""
+        d.session.SCREEN_TEXT = shown
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert "Keyboard: shown (covers low; a tap on it tries to close the keyboard first)" in r["text"].splitlines()
+        plain = await d.run_tool("a", "look", {"screenshot": False}, hints=False)  # --no-hints: 1.8.5's line
+        assert "Keyboard: shown" in plain["text"].splitlines() and "covers" not in plain["text"]
+        view = d.control.client("a")
+        done = button("e9", "Done", "", rect=(330, 460, 60, 40))  # the keyboard's accessory bar, on its top edge
+        done.by_keyboard = True
+        view.items = [*view.items, done]
+        # (review Opus 3 L1) said as it is: with an accessory Done, that Done is pressed
+        assert d._with_keyboard(view, "Keyboard: shown") == ("Keyboard: shown (covers low; a tap on it presses the "
+                                                             "keyboard's Done first)")
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_keyboard_that_stays_up_over_a_tap_it_doesnt_cover_is_said_plainly_beside_the_finding_note():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Title"}})
+        text = r["text"]
+        stays = ("Note: the keyboard stayed up (a touch outside the field didn't close it); it doesn't cover this target, "
+                 "so the tap went ahead.")
+        assert stays in text and daemon_module.NOTE_KEYBOARD_STAYED not in text
+        # (review Opus 3 M2) text that changed nothing may be a broken control: the finding note stays, as its own note
+        assert "report it as a finding" in text and "nothing is expected" not in text
+        assert text.index(stays) < text.index("report it as a finding")
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_hints_keeps_1_8_5s_keyboard_and_finding_notes():
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False)
+        r = await d.run_tool("a", "tap", {"target": {"text": "Title"}}, hints=False)
+        text = r["text"]
+        assert "Note: " + daemon_module.NOTE_KEYBOARD_STAYED in text
+        assert "the keyboard stayed up" not in text and "report it as a finding" in text
+        await finish(stop, task)
+    run(go)
+
+
+# ---- item 3: route memory that gets used ----
+
+from mapfakes import APP, screen  # noqa: E402
+from test_daemon import started  # noqa: E402
+from test_tokens_190 import mapped, saved, walk_to_form  # noqa: E402
+
+from tapwright import autoroute, tokentext  # noqa: E402
+from tapwright.control import Refused  # noqa: E402
+
+BUNDLE = APP[1]
+
+
+def with_search(d, extra_ids=()):
+    """The list screen gets a search field (as Wayfare's Explore)."""
+    d.session.screens["list"] = screen("Explore", ids=(*extra_ids, "dest-card-kyoto", "dest-card-lisbon", "to-home", "l1"),
+                                       tab="home", inputs=("explore-search",))
+    d.session.goes[("list", "dest-card-lisbon")] = "detail"
+
+
+def test_the_way_begins_at_a_first_look_of_an_app_already_in_front(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})  # no open_app: the app is already in front
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
+        assert {"open_list", "dest_card_kyoto"} <= set(saved(tmp_path))
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_way_begins_at_the_first_screen_an_open_url_shows(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.goes[("home", "example://explore")] = "list"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_url", {"url": "example://explore"})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
+        await d.run_tool("a", "tap", {"target": {"id": "plan-trip"}})
+        kept = saved(tmp_path)
+        assert "plan_trip" in kept
+        assert [s["target"]["id"] for s in kept["plan_trip"]["steps"]] == ["dest-card-kyoto", "plan-trip"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_result_tapped_after_a_search_is_kept_as_scroll_to_it_and_tap_never_the_typed_text(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        with_search(d)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "type_text", {"text": "Lisbon secret", "target": {"id": "explore-search"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-lisbon"}})
+        await d.run_tool("a", "tap", {"target": {"id": "plan-trip"}})
+        kept = saved(tmp_path)
+        route = kept["dest_card_lisbon"]
+        assert route["steps"] == [{"tool": "tap", "target": {"id": "open-list"}},
+                                  {"tool": "scroll", "to": "target", "target": {"id": "dest-card-lisbon"}},
+                                  {"tool": "tap", "target": {"id": "dest-card-lisbon"}}]
+        assert route["derived"] is True and route["auto"] is True
+        assert kept["plan_trip"]["derived"] is True  # the way on from it was made from the search too
+        assert "secret" not in json.dumps(kept) and "Lisbon" not in json.dumps(kept)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_result_that_wasnt_in_the_list_before_the_search_breaks_the_way(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        with_search(d)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "type_text", {"text": "Paris", "target": {"id": "explore-search"}})
+        with_search(d, extra_ids=("dest-card-paris",))  # a server-side search brought a card the list didn't hold
+        d.session.goes[("list", "dest-card-paris")] = "detail"
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-paris"}})
+        assert set(saved(tmp_path)) == {"open_list"}
+        await finish(stop, task)
+    run(go)
+
+
+def test_typing_into_a_field_that_isnt_a_search_still_breaks_the_way(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-kyoto", "to-home", "l1"), tab="home",
+                                           inputs=("name",))
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "type_text", {"text": "Kyoto", "target": {"id": "name"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
+        assert set(saved(tmp_path)) == {"open_list"}
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_route_made_from_a_search_is_dropped_after_one_failed_replay(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        with_search(d)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "type_text", {"text": "Lis", "target": {"id": "explore-search"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-lisbon"}})
+        assert "dest_card_lisbon" in saved(tmp_path)
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-kyoto", "to-home", "l1"), tab="home",
+                                           inputs=("explore-search",))  # Lisbon is gone from the list
+        d.session.at = "home"
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "drive", {"route": "dest_card_lisbon"})
+        assert "dropped (its replay failed; it was made from a search)" in str(e.value)
+        assert "dest_card_lisbon" not in saved(tmp_path)
+        await finish(stop, task)
+    run(go)
+
+
+def test_routes_are_kept_per_target_not_per_place(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        with_search(d)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
+        await d.run_tool("a", "tap", {"target": {"id": "to-list"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-lisbon"}})
+        kept = saved(tmp_path)
+        assert {"dest_card_kyoto", "dest_card_lisbon"} <= set(kept)  # both reach the detail place, by different cards
+        assert kept["dest_card_kyoto"]["end"] == kept["dest_card_lisbon"]["end"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_known_shows_each_routes_way_in_ids_and_map_lists_it_too(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "scroll", {"to": "target", "target": {"id": "dest-card-kyoto"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
+        d.session.at = "home"
+        r = await d.run_tool("b", "open_app", {"app": BUNDLE})
+        known = next(line for line in r["text"].splitlines() if line.startswith("Known: "))
+        assert "dest_card_kyoto (tap open-list, scroll to dest-card-kyoto, tap)" in known
+        assert "open_list (tap open-list)" in known and "; " in known
+        assert known.endswith('(one call each: drive {"route": "<name>"})')
+        m = await d.run_tool("c", "map", {})
+        assert any(line.startswith("Known: ") and "dest_card_kyoto (" in line for line in m["text"].splitlines())
+        plain = await d.run_tool("e", "map", {}, hints=False)
+        assert "Known:" not in plain["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_the_way_text_is_ids_only_and_short():
+    assert autoroute.way_text([{"tool": "scroll", "to": "target", "target": {"id": "dest-card-lisbon"}},
+                               {"tool": "tap", "target": {"id": "dest-card-lisbon"}}]) == "scroll to dest-card-lisbon, tap"
+    assert autoroute.way_text([{"tool": "tap", "target": {"label": "Chat with Sara"}}, {"tool": "back"},
+                               {"tool": "scroll", "to": "end"}, {"tool": "open_url", "url": "app://x"}]) == \
+        "tap, back, scroll to end, open link"
+    long = [{"tool": "tap", "target": {"id": f"s{n}"}} for n in range(9)]
+    assert autoroute.way_text(long) == "tap s0, tap s1, +4 more, tap s6, tap s7, tap s8"
+    assert autoroute.way_text([]) is None
+    assert tokentext.known_line([("a", "tap x"), ("b", None)]) == 'Known: a (tap x); b (one call each: drive {"route": "<name>"})'
+
+
+def test_the_target_key_tells_cards_apart():
+    assert autoroute.target_key([{"tool": "tap", "target": {"id": "a"}}]) == "id:a"
+    assert autoroute.target_key([{"tool": "back"}]) == '{"tool": "back"}'
+    kyoto = autoroute.Held("dest_card_kyoto", "home", "detail", 2, True, 0, False, "id:dest-card-kyoto")
+    assert autoroute.decide([kyoto], "home", "detail", [{"tool": "tap", "target": {"id": "dest-card-lisbon"}}],
+                            "dest_card_lisbon", {"dest_card_kyoto"}) == "dest_card_lisbon"
+    assert autoroute.decide([kyoto], "home", "detail", [{"tool": "tap", "target": {"id": "dest-card-kyoto"}}] * 2,
+                            "dest_card_kyoto", {"dest_card_kyoto"}) is None  # the same card: one route, not shorter
+
+
+def test_a_search_that_filters_the_list_still_keeps_the_result_by_its_id(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        with_search(d)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        # the typing filters the list: only Lisbon's card is left
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-lisbon", "to-home"), tab="home",
+                                           inputs=("explore-search",))
+        await d.run_tool("a", "type_text", {"text": "Lis", "target": {"id": "explore-search"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-lisbon"}})
+        kept = saved(tmp_path)
+        assert kept["dest_card_lisbon"]["steps"][-2:] == [
+            {"tool": "scroll", "to": "target", "target": {"id": "dest-card-lisbon"}},
+            {"tool": "tap", "target": {"id": "dest-card-lisbon"}}]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- item 4: the failed calls an agent made, accepted or answered ----
+
+from tapwright import batch, bugmake, ocr as ocrlib  # noqa: E402
+
+
+def test_expect_with_an_id_and_a_text_checks_that_element_shows_that_text(tmp_path):
+    batch.check_expect({"id": "status", "text": "Saved"}, 1)  # no longer bad_params
+    with pytest.raises(Refused):
+        batch.check_expect({"id": "status", "text": "Saved", "gone": True}, 1)
+    with pytest.raises(Refused):
+        batch.check_expect({"text": "a", "label": "b"}, 1)
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "open-list"},
+                                                     "expect": {"id": "to-home", "text": "Label of to-home"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps")
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "l1"},
+                                                     "expect": {"id": "to-home", "text": "Saved", "timeout": 0.5}}]})
+        assert e.value.code == "expect_failed"
+        assert 'id "to-home" didn\'t show the text "Saved" within 0.5 s.' in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_optional_wait_for_in_a_run_is_skipped_when_nothing_comes(tmp_path):
+    batch.check_conditions({"tool": "wait_for", "text": "ok", "timeout": 2, "optional": True}, 1)  # no longer bad_params
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        r = await d.run_tool("a", "run", {"steps": [
+            {"tool": "wait_for", "text": "Never here", "timeout": 0.5, "optional": True},
+            {"tool": "tap", "target": {"id": "open-list"}}]})
+        assert r["text"].startswith("Ran 2 of 2 steps")
+        assert 'optional: "Never here" didn\'t appear within 0.5 s' in r["text"]
+        with pytest.raises(Refused) as e:  # not optional: it stops the run as before
+            await d.run_tool("a", "run", {"steps": [{"tool": "wait_for", "text": "Never here", "timeout": 0.5}]})
+        assert e.value.code == "timeout"
+        await finish(stop, task)
+    run(go)
+
+
+def test_look_with_ocr_but_no_ocr_installed_answers_the_look_with_a_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(ocrlib, "available", lambda: False)
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"screenshot": False, "ocr": True})
+        assert r["text"].startswith("Screen ") and "Note: " + daemon_module.NOTE_NO_OCR in r["text"]
+        assert 'pip install "tapwright[ocr]"' in r["text"]
+        with pytest.raises(Refused) as e:  # --no-hints: 1.8.5's refusal
+            await d.run_tool("a", "look", {"screenshot": False, "ocr": True}, hints=False)
+        assert e.value.code == "unsupported"
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_bug_reports_answer_carries_its_summary_so_the_file_isnt_read(tmp_path):
+    from test_daemon_bug import bugged
+
+    async def go():
+        d = bugged(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        with pytest.raises(Refused):
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "go-settings"},
+                                                     "expect": {"text": "Never on this screen", "timeout": 0.5}}]})
+        r = await d.run_tool("a", "bug_report", {"from": "failure"})
+        lines = r["text"].splitlines()
+        assert lines[0].startswith("New bug: Check failed on ") and lines[1].startswith("Reproduced: ")
+        assert any(line.startswith("Folder: ") for line in lines)
+        assert any(line.startswith("What happened: Expected: step 1 holds its check") for line in lines)
+        assert "Steps to reproduce: 1 in report.md." in lines and lines[-1] == bugmake.REPORT_WRITTEN
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_hints_keeps_1_8_5s_bug_answer(tmp_path):
+    from test_daemon_bug import bugged
+
+    async def go():
+        d = bugged(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {})
+        with pytest.raises(Refused):
+            await d.run_tool("a", "run", {"steps": [{"tool": "tap", "target": {"id": "go-settings"},
+                                                     "expect": {"text": "Never on this screen", "timeout": 0.5}}]},
+                             hints=False)
+        r = await d.run_tool("a", "bug_report", {"from": "failure"}, hints=False)
+        assert r["text"].splitlines()[-1].startswith("Folder: ") and "What happened" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_an_expect_after_a_link_waits_out_a_loading_screen_within_its_timeout_and_never_opens_the_link_again(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["loading"] = screen("Loading", texts=("Loading from Metro",))
+        d.session.goes[("home", "example://explore")] = "loading"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        opens, reads = {"n": 0}, {"n": 0}
+        sent, refresh = d.session.open_url, d.session.refresh
+
+        async def counting(url):
+            opens["n"] += 1
+            return await sent(url)
+
+        async def reloading(timeout=None):
+            reads["n"] += 1
+            if d.session.at == "loading" and reads["n"] > 3:
+                d.session.at = "list"  # the app finished loading and showed the link's screen
+            return await refresh(timeout)
+        d.session.open_url, d.session.refresh = counting, reloading
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "open_url", "url": "example://explore",
+                                                     "expect": {"id": "dest-card-kyoto"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps") and opens["n"] == 1  # (review Opus 3 H1) one open, the agent's
+        assert "the app showed its loading screen after the link; the expect waited it out" in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_link_whose_loading_eats_the_link_fails_its_expect_in_its_timeout_and_opens_nothing(tmp_path):
+    """The reviewer's cold-start and Metro repros: the link is never sent twice, and the wait is the expect's own."""
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["loading"] = screen("Loading", texts=("Loading from Metro",))
+        d.session.goes[("home", "example://explore")] = "loading"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        opens, reads = {"n": 0}, {"n": 0}
+        sent, refresh = d.session.open_url, d.session.refresh
+
+        async def counting(url):
+            opens["n"] += 1
+            return await sent(url)
+
+        async def reloading(timeout=None):
+            reads["n"] += 1
+            if d.session.at == "loading" and reads["n"] > 3:
+                d.session.at = "home"  # the reload is over, and the link was lost
+            return await refresh(timeout)
+        d.session.open_url, d.session.refresh = counting, reloading
+        began = d.control.clock()
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": [{"tool": "open_url", "url": "example://explore",
+                                                     "expect": {"id": "dest-card-kyoto", "timeout": 1}}]})
+        assert e.value.code == "expect_failed" and opens["n"] == 1
+        assert "opened once more" not in str(e.value)
+        assert d.control.clock() - began < 5
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_link_to_a_screen_with_no_controls_ends_the_moment_its_expect_holds(tmp_path):
+    """The reviewer's M1 repro: a verified page with text only used to stall 30 s."""
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["thanks"] = screen("Verified", texts=("Your email is verified",))
+        d.session.goes[("home", "example://verify")] = "thanks"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        began = d.control.clock()
+        r = await d.run_tool("a", "run", {"steps": [{"tool": "open_url", "url": "example://verify",
+                                                     "expect": {"text": "Your email is verified"}}]})
+        assert r["text"].startswith("Ran 1 of 1 steps") and d.control.clock() - began < 2
+        assert "loading screen" not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_recording_holds_the_link_once(tmp_path):
+    """The reviewer's record repro: a link opened while the app reloads (and lost) is recorded once, never twice."""
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["loading"] = screen("Loading", texts=("Loading from Metro",))
+        d.session.goes[("home", "example://explore")] = "loading"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        reads = {"n": 0}
+        refresh = d.session.refresh
+
+        async def reloading(timeout=None):
+            reads["n"] += 1
+            if d.session.at == "loading" and reads["n"] > 3:
+                d.session.at = "home"
+                d.session.goes[("home", "example://explore")] = "list"
+            return await refresh(timeout)
+        d.session.refresh = reloading
+        await d.run_tool("a", "record", {"start": True, "name": "r1", "path": str(tmp_path / "r1.json")})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "run", {"steps": [{"tool": "open_url", "url": "example://explore",
+                                                     "expect": {"id": "dest-card-kyoto"}}]})
+        assert e.value.code == "expect_failed"
+        links = [st for st in d._recording["a"]["steps"] if st.get("tool") == "open_url"]
+        assert len(links) <= 1
+        await finish(stop, task)
+    run(go)
+
+
+# ---- item 5: the form hint fires on one field and a Save ----
+
+def test_one_input_and_a_save_button_is_a_form_for_its_hint(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["form"] = screen("Plan a trip", ids=("trip-save", "to-detail", "f1"), inputs=("trip-notes",))
+        stop, task = await started(d)
+        answers = await walk_to_form(d)
+        assert answers[-1]["text"].splitlines()[-1] == tokentext.HINTS["form"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_one_input_without_a_submit_button_is_no_form():
+    from fakes import button, el
+    D = daemon_module.Daemon
+    search = [el("e1", "input", "Search destinations", "explore-search"), button("e2", "Kyoto", "dest-card-kyoto")]
+    assert not D._is_form_hint(search)
+    # (review Opus 3 L4) a screen with a search field is no form, whatever its buttons say
+    assert not D._is_form_hint([*search, button("e3", "Create trip", "create-trip")])
+    assert not D._is_form_hint([*search, button("e3", "Share", "share")])  # a share is no form's save
+    notes = [el("e1", "input", "Notes", "trip-notes"), button("e2", "Kyoto", "dest-card-kyoto")]
+    assert D._is_form_hint([*notes, button("e3", "Save trip", "trip-save")])
+    two = [el("e1", "input", "A", "a"), el("e2", "input", "B", "b"), button("e3", "Next", "next")]
+    assert D._is_form_hint(two)  # §30.3's own reading still holds
+
+
+# ---- item 7: Tapwright's own instruction lines trimmed; logs shows the app's own lines ----
+
+from tapwright import descriptions  # noqa: E402
+
+CODES = ["not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", "locked", "in_background", "reconnecting",
+         "not_connected", "timeout", "bad_params", "unsupported", "not_allowed", "internal", "expect_failed", "off_route",
+         "not_answering"]
+REASONS = ["disabled", "off_screen", "covered", "under_tab_bar", "behind_alert", "no_action"]
+
+
+def test_the_instructions_lose_the_1_7_5_lines_and_keep_every_code_and_the_shared_block():
+    text = descriptions.instructions(True)
+    assert text.startswith(tokentext.RULES + "\n")  # §30.1's block, word for word, on top
+    for gone in ("1.7.5", "Legacy --apps", "No app list or label-based approval", "no longer an app-list",
+                 "retains its geometry override"):
+        assert gone not in text, gone
+    assert not [c for c in CODES if f"`{c}`" not in text]
+    assert not [r for r in REASONS if r not in text]
+    assert "Start with open_app (or a look at the app in front): its answer shows the screen and `Known:`" in text
+    assert text.count("dry_run: true") == 1 and len(text) < len(tokentext.RULES) + len(descriptions.INSTRUCTIONS)
+    assert descriptions.instructions(False) == descriptions.INSTRUCTIONS  # --no-hints: 1.8.5's, word for word
+
+
+def test_logs_shows_the_apps_own_lines_and_counts_the_systems(tmp_path):
+    from tapwright import diagnostics
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        ring = d._rings.setdefault(BUNDLE, diagnostics.LogRing())
+        ring.add(diagnostics.LogEntry(1_800_000_000_000, "info", "app says hello"))
+        for n in range(3):
+            ring.add(diagnostics.LogEntry(1_800_000_000_001 + n, "info", f"UIKit chatter {n}", own=False))
+        r = await d.run_tool("a", "logs", {})
+        assert "app says hello" in r["text"] and "UIKit chatter" not in r["text"]
+        assert "+3 system lines (a framework in the app's process, not its own code): `all: true` shows them." in r["text"]
+        every = await d.run_tool("a", "logs", {"all": True})
+        assert "UIKit chatter 2" in every["text"] and "system lines" not in every["text"]
+        plain = await d.run_tool("a", "logs", {}, hints=False)  # --no-hints: 1.8.5's logs, every line
+        assert "UIKit chatter 0" in plain["text"]
+        with pytest.raises(Refused):
+            await d.run_tool("a", "logs", {"all": "yes"})
+        await finish(stop, task)
+    run(go)
+
+
+# ---- the final review of round 2 (REVIEW-1.9.0-OPUS3) ----
+
+from pathlib import Path  # noqa: E402
+
+TOOLS_185 = Path(__file__).resolve().parent / "data" / "tools_185.json"  # tools/list of v1.8.5 (dump as the reviewer's)
+
+
+@pytest.mark.parametrize("mode", ["lazy", "nohints"])
+def test_m3_lazy_tools_and_no_hints_list_1_8_5s_tools_byte_for_byte(eager, mode):
+    want = json.loads(TOOLS_185.read_text("utf-8"))
+    if mode == "lazy":
+        mcp_server.set_lazy_tools(True)
+    else:
+        mcp_server.set_hints(False)
+    listed = asyncio.run(mcp_server.server.list_tools())
+    got = ListToolsResult(tools=listed).model_dump(by_alias=True, exclude_none=True, mode="json")["tools"]
+    assert json.dumps(got, sort_keys=True) == json.dumps(want["tools"], sort_keys=True)
+    if mode == "nohints":
+        assert mcp_server.server._lowlevel_server.instructions == want["instructions"]
+
+
+def test_m3_the_eager_listing_keeps_the_round_2_words(eager):
+    tools = wire_tools()
+    assert "without OCR installed" in tools["look"]["description"] and "all" in tools["logs"]["inputSchema"]["properties"]
+    assert tools["tap"]["inputSchema"]["$defs"]["Target"]["description"] == mcp_server.TARGET_SHORT
+
+
+def test_m4_a_search_that_is_the_sessions_first_call_derives_nothing(tmp_path):
+    """The reviewer's repro: the app is on Explore, the first call types, and the typing brings a card the list never
+    held."""
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-kyoto", "to-home", "l1"), tab="home",
+                                           inputs=("explore-search",))
+        d.session.at = "list"
+        stop, task = await started(d)
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-paris", "dest-card-kyoto", "to-home", "l1"),
+                                           tab="home", inputs=("explore-search",))
+        d.session.goes[("list", "dest-card-paris")] = "detail"
+        await d.run_tool("a", "type_text", {"text": "Paris", "target": {"id": "explore-search"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-paris"}})
+        assert saved(tmp_path) == {}
+        await finish(stop, task)
+    run(go)
+
+
+def test_l2_any_other_call_between_the_search_and_the_tap_keeps_nothing(tmp_path):
+    """The reviewer's repro: a filter tap that stays on the screen, then the result."""
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["list"] = screen("Explore", ids=("dest-card-kyoto", "dest-card-lisbon", "only-favs", "to-home"),
+                                           tab="home", inputs=("explore-search",))
+        d.session.goes[("list", "dest-card-lisbon")] = "detail"
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
+        await d.run_tool("a", "type_text", {"text": "Lis", "target": {"id": "explore-search"}})
+        await d.run_tool("a", "tap", {"target": {"id": "only-favs"}})
+        await d.run_tool("a", "tap", {"target": {"id": "dest-card-lisbon"}})
+        assert sorted(saved(tmp_path)) == ["open_list"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_l3_search_is_a_word_not_a_part_of_one():
+    from fakes import el
+    D = daemon_module.Daemon
+    for ident, label, want in (("explore-search", "", True), ("searchField", "", True), ("search", "", True),
+                               ("q", "Search destinations", True), ("research-notes", "", False),
+                               ("topic", "Research topic", False)):
+        assert D._is_search((None, el("e1", "input", label, ident), [])) is want, ident
+
+
+def test_l5_hidden_system_lines_say_how_many_are_errors(tmp_path):
+    from tapwright import diagnostics
+    ring = diagnostics.LogRing()
+    ring.add(diagnostics.LogEntry(1_800_000_000_000, "info", "app line"))
+    ring.add(diagnostics.LogEntry(1_800_000_000_001, "error", "CFNetwork: the request failed", own=False))
+    ring.add(diagnostics.LogEntry(1_800_000_000_002, "info", "UIKit chatter", own=False))
+    text, _ = diagnostics.logs_answer(ring, None, "info", None, 100, own=True)
+    assert "+2 system lines, 1 of them an error (a framework" in text

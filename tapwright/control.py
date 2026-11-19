@@ -88,6 +88,7 @@ class ClientView:
     # `Known:` line was given, the hints given, the top-level calls made, single taps in a row along known roads, whether
     # `logs` was read, and whether the last move went along a road the map had
     auto: object | None = None
+    auto_begun: set = field(default_factory=set)  # (1.9.0 round 2) the apps whose way this session already began
     known_told: set = field(default_factory=set)
     hints_given: set = field(default_factory=set)
     calls: int = 0

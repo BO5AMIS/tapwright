@@ -138,12 +138,13 @@ class LogRing:
         return entries[-1].at if entries else None
 
     def select(self, since: int | None = None, level: str = "info", grep: str | None = None,
-               limit: int = LOG_DEFAULT_LIMIT) -> list[LogEntry]:
-        """The newest `limit` entries newer than `since`, at `level` or above, containing `grep`; oldest first."""
+               limit: int = LOG_DEFAULT_LIMIT, own: bool = False) -> list[LogEntry]:
+        """The newest `limit` entries newer than `since`, at `level` or above, containing `grep`; oldest first. `own`
+        (1.9.0 round 2): only what the app's own code logged, not a system framework in its process."""
         floor = LOG_LEVELS.index(level)
         needle = grep.casefold() if grep else None
         found = [e for e in self.shown() if (since is None or e.at > since) and LOG_LEVELS.index(e.level) >= floor
-                 and (needle is None or needle in e.text.casefold())]
+                 and (needle is None or needle in e.text.casefold()) and (not own or e.own)]
         return found[-limit:]
 
 
@@ -175,12 +176,29 @@ def no_entries(since: int | None, level: str, grep: str | None) -> str:
     return " ".join([NO_ENTRIES, *asked]) + "."
 
 
-def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str | None, limit: int) -> tuple[str, int]:
-    """(the answer's text, the number of entry lines) for a `logs` call."""
-    entries = ring.select(since, level, grep, limit) if ring is not None else []
+SYSTEM_LEFT_OUT = ("+{n} system line{s}{errors} (a framework in the app's process, not its own code): `all: true` shows "
+                   "them.")
+
+
+def logs_answer(ring: LogRing | None, since: int | None, level: str, grep: str | None, limit: int,
+                own: bool = False) -> tuple[str, int]:
+    """(the answer's text, the number of entry lines) for a `logs` call. `own` (1.9.0 round 2, the default with hints): the
+    app's own lines only, and how many system lines were left out (a sonnet K5 `logs` was 13k characters, most of them
+    UIKit's)."""
+    entries = ring.select(since, level, grep, limit, own=own) if ring is not None else []
     latest = (ring.latest(shown=True) if ring is not None else None) or since or 0
     lines = [line_of(e) for e in entries] or [no_entries(since, level, grep)]
-    return "\n".join([*lines, LATEST.format(ms=latest)]), len(entries)
+    tail = []
+    if own and ring is not None:
+        every = max(1, len(ring.entries))
+        hidden = [e for e in ring.select(since, level, grep, every) if not e.own]
+        if hidden:
+            # (review Opus 3 L5) whether errors are among them: a network or layout failure is often the cause
+            errors = sum(1 for e in hidden if e.level == "error")
+            said = f", {errors} of them {'an error' if errors == 1 else 'errors'}" if errors and len(hidden) > 1 else (
+                ", an error" if errors else "")
+            tail.append(SYSTEM_LEFT_OUT.format(n=len(hidden), s="" if len(hidden) == 1 else "s", errors=said))
+    return "\n".join([*lines, *tail, LATEST.format(ms=latest)]), len(entries)
 
 
 def failure_logs(ring: LogRing | None, step: int, since: int) -> list[str]:

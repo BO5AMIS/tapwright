@@ -86,6 +86,7 @@ UNLOCK_BUSY = ("the phone is being unlocked: no picture of the screen is taken u
 UNLOCK_NOT_YET = ("the phone is locked, and the connection to it isn't up yet, so the passcode can't be typed now; try "
                   "unlock again in a few seconds, or ask the user to unlock it")
 FEW_ELEMENTS = 3  # a look with fewer elements than this says that ocr: true can read the picture
+NOTE_NO_OCR = "no OCR reading, so this look is the elements alone. " + ocr.INSTALL  # (1.9.0 round 2)
 NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); look with ocr: true reads the text "
             "in its picture.")
 OCR_REF = re.compile(r"o[1-9][0-9]*")
@@ -442,6 +443,10 @@ NOTE_KEYBOARD = "closed the keyboard first."
 REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't tell another screen from this one
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
+# (1.9.0 round 2, hints on) the same, for a target the keyboard doesn't cover: nothing is wrong, nothing to fight
+NOTE_KEYBOARD_STAYS = ("the keyboard stayed up (a touch outside the field didn't close it); it doesn't cover this target, "
+                       "so the {what} went ahead.")  # (review Opus 3 L1: no promise about what closes it later)
+KEYBOARD_WHAT = {"long_press": "long press", "type_text": "typing"}
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
 DONE_SETTLE = 0.5  # (Opus 2 M2) seconds a multiline Done is given to show what it did before the tap goes on
 DONE_CHANGED = ("the keyboard's Done key was pressed to close the keyboard, and the screen changed after it: Done may have "
@@ -779,6 +784,10 @@ def _checked_diag(name: str, args: dict) -> dict:
         if grep is not None and not isinstance(grep, str):
             raise Refused("bad_params", f"grep must be a text, not {grep!r}")
         out["grep"] = grep or None
+        every = given.get("all", False)
+        if not isinstance(every, bool):
+            raise Refused("bad_params", f"all must be true or false, not {every!r}")
+        out["all"] = every
         limit = given.get("limit", diagnostics.LOG_DEFAULT_LIMIT)
         if (isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit)
                 or limit != int(limit)
@@ -2692,8 +2701,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             ring = self._rings.get(bundle)
             if bundle in self._log_dead and not (ring and ring.entries):
                 raise Refused("unsupported", f"{diagnostics.LOGS_NO_SOURCE} ({self._log_dead[bundle]})")
+            # (1.9.0 round 2) the app's own lines by default; `all: true`, or --no-hints (1.8.5), shows every line
+            own = not args.get("all") and self._hints_wanted()
             text, self._diag_count = diagnostics.logs_answer(self._rings.get(bundle), args.get("since"),
-                                                             args["level"], args["grep"], args["limit"])
+                                                             args["level"], args["grep"], args["limit"], own=own)
             return {"text": text, "image": None, "image_size": None}
         return await self._crash(bundle, shown, args)
 
@@ -3477,10 +3488,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     over = performance.failures(self._performed[client_id], under)
                     missed = f"{'; '.join(over)}." if over else None
                 else:
-                    missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
-                              if "expect" in step else None)
+                    if (step["tool"] == "open_url" and "expect" in step and self._hints_wanted()
+                            and self._link_expect(step["expect"])):
+                        # (1.9.0 round 2) a link's expect says when it waited out the app's loading screen
+                        missed = await self._expect_after_link(view, scope, step["expect"], seen_notes)
+                    else:
+                        missed = (await self._expect(client_id, view, scope, step["expect"], seen_notes, fold=recorded)
+                                  if "expect" in step else None)
                 step_notes += [f"Note (step {i}): {note}" for note in seen_notes]
             except Refused as e:
+                if step["tool"] == "wait_for" and step.get("optional") is True and e.code == "timeout":
+                    traced.append(batch.skipped(i, batch.optional_wait_skipped(step)))  # (1.9.0 round 2)
+                    done += 1
+                    continue
                 message, crash = _without_crash_note(str(e))  # the note goes with the others, at the end
                 step_notes += crash
                 failed = (e.code, f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): {message}")
@@ -3616,6 +3636,45 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return []
         return diagnostics.failure_logs(self._rings.get(bundle), step, mark + 1)
 
+    @staticmethod
+    def _link_expect(expect: dict) -> bool:
+        """An expect that _expect_after_link checks: one text, id or label, present or gone; nothing else in it."""
+        kinds = [k for k in batch.EXPECT_KINDS if expect.get(k) is not None]
+        return (len(kinds) == 1 and "value" not in expect and expect.get("matches") is None
+                and not batch.shows_text(expect))
+
+    async def _expect_after_link(self, view, scope: "Scope | None", expect: dict, notes: list[str]) -> str | None:
+        """(1.9.0 round 2; review Opus 3 H1, M1) An `open_url` step's expect: waited for within its own timeout, as any
+        expect is, ending the moment it holds. While waiting, an app on its own loading screen (React Native's "Loading
+        from Metro", a loading indicator: reflex.starting's `loading`) is noted, and the answer says it was waited out.
+        Nothing more is done: the tool never opens a link the agent didn't ask for. None when it held, else why not."""
+        kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
+        target, gone = ui.parse_target({kind: expect[kind]}), bool(expect.get("gone"))
+        began = self.control.clock()
+        deadline = began + float(expect.get("timeout", batch.EXPECT_DEFAULT))
+        given = await self._given(scope) if scope is not None else None
+        loading = 0.0
+        while True:
+            at = self.control.clock()
+            await self._read(lambda: self._silent_read(view))
+            if given is not None and self._bundle() not in given:
+                app = getattr(self.session, "app", None)
+                raise Refused("not_allowed", _outside(self._bundle(), app[0] if app else None, ", ".join(given.values())))
+            there = [*view.items, *self._off_screen_now()]
+            if self._missing(there, target) == gone:
+                if loading > 0:
+                    notes.append(f"the app showed its loading screen after the link; the expect waited it out "
+                                 f"({self.control.clock() - began:.1f} s).")
+                return None
+            bundle, tree = self._bundle(), getattr(self.session, "last_tree", None)
+            if tree is not None and bundle is not None and reflex.starting(tree, bundle) == "loading":
+                loading += max(0.25, self.control.clock() - at)
+            if self.control.clock() >= deadline:
+                if loading > 0:
+                    notes.append("the app was on its loading screen after the link for part of the expect's timeout.")
+                return batch.expect_failed(expect)
+            await self.control.sleep(0.25)
+
     async def _expect(self, client_id: str, view, scope: "Scope | None", expect: dict,
                       notes: list[str] | None = None, fold: bool = False) -> str | None:
         """Does the step's expectation hold (§9.2)? None when it did, else why not. A text, id or label is waited
@@ -3646,7 +3705,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """Wait up to the expectation's timeout for its text, id or label to hold. None when it did, else why not."""
         kind = next(k for k in batch.EXPECT_KINDS if expect.get(k) is not None)
         timeout = float(expect.get("timeout", batch.EXPECT_DEFAULT))
-        if "value" not in expect:
+        if batch.shows_text(expect):
+            kind = "id"  # (1.9.0 round 2) the element with that id shows that text: polled as a value is
+        if "value" not in expect and not batch.shows_text(expect):
             try:
                 await self.run_tool(client_id, "wait_for", {kind: expect[kind], "gone": bool(expect.get("gone")),
                                                             "timeout": timeout, "look": False}, scope)
@@ -3667,7 +3728,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 found = ui.resolve(view.items, target)
             except Refused:
                 found = None
-            if isinstance(found, ui.Element) and batch.has_value(found, expect["value"]):
+            if isinstance(found, ui.Element) and (batch.has_text(found, expect["text"]) if batch.shows_text(expect)
+                                                  else batch.has_value(found, expect["value"])):
                 return None
             if self.control.clock() >= deadline:
                 return batch.expect_failed(expect)
@@ -4004,17 +4066,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
-            if args.get("ocr") and not ocr.available():
-                raise Refused("unsupported", ocr.INSTALL)
+            no_ocr = bool(args.get("ocr")) and not ocr.available()
+            if no_ocr and not self._hints_wanted():
+                raise Refused("unsupported", ocr.INSTALL)  # (--no-hints: 1.8.5's refusal)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            if no_ocr:
+                # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
+                answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
             # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
             # another app that comes forward after the look (last Opus review, L)
             view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
             if given is None or (self.session.app or (None, None))[1] in given:
                 uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
-            if args.get("ocr"):
+            if args.get("ocr") and not no_ocr:  # (without the extra: the look and its note, never a read)
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_FEW}
@@ -4797,11 +4863,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not self._hints_wanted():
             view.auto = None
             return
+        if chain is None and bundle not in view.auto_begun and name not in autoroute.NEUTRAL:
+            # (1.9.0 round 2) the way begins at the session's first screen of the app, whatever showed it (an open_url, a
+            # first action), not only after open_app
+            chain = view.auto = autoroute.Chain(bundle)
         if not isinstance(chain, autoroute.Chain) or chain.app != bundle or name in autoroute.NEUTRAL:
             return
+        view.auto_begun.add(bundle)
         try:
             if chain.here is None:
                 chain.begin(here)
+                if name != "type_text":  # (review Opus 3 M4) a read after typing is no "before the typing"
+                    chain.saw(self._tree_ids(view))
                 return
             if name == "run":
                 # (review 1.9.0 H1) a run's own steps never reach the chain one by one: any step that isn't navigation (typing
@@ -4817,29 +4890,90 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if name == "scroll":
                 if here == previous:
                     chain.scrolled(autoroute.scroll_step(args))
+                    chain.saw(self._tree_ids(view))
                 else:
                     chain.taint()
                     chain.moved(here, None)
                 return
+            if name == "type_text" and here == previous:
+                return  # (1.9.0 round 2) typing that stayed is judged at the call's end (_tokens_after): a search or not
+            if (name == "tap" and here != previous and not _GRANTED.get() and chain.search is not None
+                    and chain.search[0] == len(chain.places) - 1 and not self._submits(aim, bundle)):
+                element = aim[1] if aim else None
+                way = chain.after_search(here, getattr(element, "identifier", None) if self._kept_id(element) else None)
+                if way:
+                    chain.saw(self._tree_ids(view))
+                    await self._auto_save(root, bundle, chain.start or previous, here, way, derived=True)
+                    return
             nav = name in autoroute.NAV_TOOLS and not typed_here and not _GRANTED.get()
             if nav and name == "tap" and here != previous and self._submits(aim, bundle):
                 nav = False  # (review 1.9.0 H1) a Save, Submit or confirm tap that leaves a form is never navigation
             if not nav:
                 chain.taint()
             way = chain.moved(here, autoroute.step_of(move) if nav else None)
+            chain.saw(self._tree_ids(view))
             if way:
-                await self._auto_save(root, bundle, chain.start or previous, here, way)
+                await self._auto_save(root, bundle, chain.start or previous, here, way, derived=chain.derived)
         except Exception as e:  # noqa: BLE001 - a route not saved is a route not known, never a failed call
             self.log(f"auto route not kept: {type(e).__name__}: {self._redact(str(e))}")
             view.auto = None
+
+    @staticmethod
+    def _tree_ids(view) -> set:
+        """(1.9.0 round 2) The ids a developer wrote in the screen's tree as last read, on and off screen."""
+        tree = view.tree
+        if tree is None:
+            return set()
+        return {e.identifier for e in [*tree.items, *getattr(tree, "offscreen", [])]
+                if isinstance(e.identifier, str) and e.identifier and ui.structural_id(e.identifier)
+                and not ui.private(e.identifier)}
+
+    @staticmethod
+    def _kept_id(element) -> bool:
+        ident = getattr(element, "identifier", None)
+        return isinstance(ident, str) and bool(ident) and ui.structural_id(ident) and not ui.private(ident)
+
+    @staticmethod
+    def _is_search(aim: tuple | None) -> bool:
+        """(1.9.0 round 2) Was the text typed into a search field: iOS's search field, or an input whose id, label or
+        placeholder says search?"""
+        element = aim[1] if aim else None
+        if element is None or getattr(element, "role", None) != "input":
+            return False
+        if getattr(element, "type", None) == "SearchField":
+            return True
+        return Daemon._says_search(element.identifier, element.label, getattr(element, "placeholder", None))
+
+    @staticmethod
+    def _says_search(*texts) -> bool:
+        """(review Opus 3 L3) "search" as a word or a word's part of an id (`search`, `explore-search`, `searchField`),
+        never inside another word (`research-notes`, "Research topic")."""
+        for text in texts:
+            if isinstance(text, str) and text:
+                words = explorefloor.id_words(text).lower().split()
+                if "search" in words:
+                    return True
+        return False
+
+    def _typed_search(self, view) -> bool:
+        """The input this session last typed into (view.typed_field) is a search field, as _is_search judges it."""
+        typed = view.typed_field
+        if not typed:
+            return False
+        ident, label = typed[0], typed[1]
+        shown = next((e for e in view.items if getattr(e, "role", None) == "input"
+                      and (e.identifier, e.label) == (ident, label)), None)
+        if shown is not None:
+            return self._is_search((None, shown, []))
+        return self._says_search(ident, label)
 
     def _auto_stayed(self, view, name: str) -> None:
         """(review 1.9.0 L1) An action answered "No visible change" never reaches _learn: a selection the picture barely
         shows (a radio dot) still breaks the way, as any action that stays on its screen does."""
         chain = view.auto
         if (isinstance(chain, autoroute.Chain) and not _NESTED.get() and SCRIPT.get() is None and name != "scroll"
-                and name not in autoroute.NEUTRAL and chain.here is not None):
-            chain.taint()
+                and name not in autoroute.NEUTRAL and chain.here is not None and name != "type_text"):
+            chain.taint()  # (typing is judged at the call's end, _tokens_after: a search may be kept by its result)
 
     def _submits(self, aim: tuple | None, bundle: str) -> bool:
         """Does a tap leave a form by a control that may submit it (review 1.9.0 H1)? The floor's own words (Delete, Send,
@@ -4879,7 +5013,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         locks = self.__dict__.setdefault("_auto_locks", {})
         return locks.setdefault(self.maps._key(root, bundle), asyncio.Lock())
 
-    async def _auto_save(self, root: str | None, bundle: str, start: str, end: str, way: list[dict]) -> str | None:
+    async def _auto_save(self, root: str | None, bundle: str, start: str, end: str, way: list[dict],
+                         derived: bool = False) -> str | None:
         """Save `way` as the route to `end` when it is the one to keep (autoroute.decide); its name, or None. The files are
         read and written on a worker thread, never on the phone's event loop (CodeRabbit, PR #22): the map's lock can be
         held by another writer for seconds. The map in memory takes the result afterwards."""
@@ -4889,7 +5024,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async with self._auto_lock(root, bundle):
             snapshot = copy.deepcopy(self.maps.data(root, bundle))
             try:
-                name, dropped = await asyncio.to_thread(self._auto_save_io, file, snapshot, bundle, start, end, way)
+                name, dropped = await asyncio.to_thread(self._auto_save_io, file, snapshot, bundle, start, end, way, derived)
             except Exception as e:  # noqa: BLE001 - an optional save that failed never fails the action
                 self.log(f"auto route not kept: {type(e).__name__}: {self._redact(str(e))}")
                 return None
@@ -4903,7 +5038,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return name
 
     def _auto_save_io(self, file, data: dict, bundle: str, start: str, end: str,
-                      way: list[dict]) -> tuple[str | None, list[str]]:
+                      way: list[dict], derived: bool = False) -> tuple[str | None, list[str]]:
         """The worker's part of _auto_save: (the name saved, the routes evicted to keep the cap)."""
         found, taken = self._held_routes_of(file, data)
 
@@ -4911,7 +5046,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return v if isinstance(v, int) and not isinstance(v, bool) else 0
         held = [autoroute.Held(r["name"], r.get("start"), r.get("end"),
                                len(r["steps"]) if isinstance(r.get("steps"), list) else 0, r.get("auto") is True,
-                               count(r.get("failed")), bool(r.get("variables"))) for r in found]
+                               count(r.get("failed")), bool(r.get("variables")),
+                               autoroute.target_key(r["steps"]) if isinstance(r.get("steps"), list) else None)
+                for r in found]
         name = autoroute.decide(held, start, end, way, autoroute.base_name(data, end, way[-1]), taken)
         if name is None or not routes.NAME.match(name) or self._route_held(name) is not None:
             return None, []
@@ -4927,7 +5064,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if evict is None:
                 return None, []
         route = {**routes.route(name, bundle, start, end, [], [routes.escaped(step) for step in way]),
-                 "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0, "reached": mapfile.now()}
+                 "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0, "reached": mapfile.now(),
+                 **({"derived": True} if derived else {})}
         route = batch.saved_script(route, self._redact, f"route {name}")
         routes.check(route)
         if not file.write_auto_route(name, route, replaces):  # (checked again and written under the map's lock)
@@ -4970,7 +5108,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async with self._auto_lock(root, bundle):
             snapshot = copy.deepcopy(self.maps.data(root, bundle))
             try:
-                dropped = await asyncio.to_thread(self._auto_counted_io, file, snapshot, name, worked, stamp, end)
+                dropped, derived = await asyncio.to_thread(self._auto_counted_io, file, snapshot, name, worked, stamp, end)
             except Exception as e:  # noqa: BLE001
                 self.log(f"auto route not counted: {type(e).__name__}")
                 return None
@@ -4978,12 +5116,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return None
             self.maps.forget_route(root, bundle, name)  # (Opus 2 M1) a tombstone, so no save under way brings it back
         called = f"route {name}" if self._plain_name(name) else "the route"  # (review 1.9.0 M1)
+        if derived:  # (1.9.0 round 2) a route made from a search goes on its first failure
+            return f"{called} dropped (its replay failed; it was made from a search); the next way the app is driven there " \
+                   "is kept instead."
         return f"{called} dropped (its replay failed twice); the next way the app is driven there is kept instead."
 
     def _auto_counted_io(self, file, data: dict, name: str, worked: bool, stamp: int | None,
-                         end: str | None = None) -> bool:
-        """The worker's part of _auto_counted: whether the route was dropped (all under the map's lock: Opus 2 L1)."""
-        return file.auto_result(name, stamp, worked, autoroute.FAILS, mapfile.now(), end)
+                         end: str | None = None) -> tuple[bool, bool]:
+        """The worker's part of _auto_counted: whether the route was dropped (all under the map's lock: Opus 2 L1), and
+        whether it was one made from a search (1.9.0 round 2: dropped on its first failure)."""
+        before = file.read_route(data, name)
+        derived = isinstance(before, dict) and before.get("derived") is True
+        return file.auto_result(name, stamp, worked, autoroute.FAILS, mapfile.now(), end), derived
 
     def _hints_wanted(self) -> bool:
         """--no-hints is off for this call (the call's and serve's)."""
@@ -5029,6 +5173,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # (review 1.9.0 M1) a name the redaction would change is left out, never shown redacted
         return [n for n in autoroute.known(held, here, reachable, held_word) if self._plain_name(n)]
 
+    def _known_entries(self, bundle: str, here: str | None) -> list[tuple[str, str | None]]:
+        """(1.9.0 round 2) The Known names, each with its way in ids (autoroute.way_text): an agent sees what one call does
+        (`dest_card_lisbon (scroll to dest-card-lisbon, tap)`). A way the redaction would change is left out (the name
+        stays)."""
+        names = self._known_names(bundle, here)
+        if not names:
+            return []
+        held, _ = self._held_routes(self._maps_root(), bundle)
+        steps = {r["name"]: r.get("steps") for r in held}
+        out = []
+        for name in names:
+            way = autoroute.way_text(steps.get(name))
+            out.append((name, way if way is not None and self._plain_name(way) else None))
+        return out
+
     @staticmethod
     def _held_word(bundle: str):
         """A test of one target's words against the default skip floor (Delete, Send, Buy...): Known never offers a route
@@ -5055,7 +5214,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 view.auto = None
             elif name == "drive":
                 self._chain_after_drive(view, args)
-            elif (name not in autoroute.NEUTRAL and name not in (*autoroute.NAV_TOOLS, "scroll", "run", "open_app")
+            elif (name not in autoroute.NEUTRAL and name not in (*autoroute.NAV_TOOLS, "scroll", "run", "open_app", "type_text")
                   and name in ACTIONS and isinstance(view.auto, autoroute.Chain)):
                 # (CodeRabbit, PR #22 cycle 2) an action that isn't navigation breaks the way even when it skipped _learn
                 # (look: false): a switch flipped unseen still changes where the next tap leads
@@ -5063,16 +5222,29 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             elif name == "type_text" or (name == "run" and not autoroute.only_navigation(args.get("steps"))):
                 # (review 1.9.0 H1; CodeRabbit, PR #22) any typing breaks the way, wherever it was made, a run's too (with
                 # look: false or trace: true it never reached _learn); a failed run leaves it unknown
-                if isinstance(view.auto, autoroute.Chain):
-                    view.auto.taint()
+                chain = view.auto
+                if isinstance(chain, autoroute.Chain):
+                    if (name == "type_text" and code is None and chain.broken_at is None and view.place is not None
+                            and view.place[1] == chain.here and self._typed_search(view)):
+                        chain.searched()  # (1.9.0 round 2) a search: a result tapped next may still be kept, by its id
+                    else:
+                        chain.taint()  # (more typing in the same search keeps the ids read before the first)
                 if name == "run" and code is not None:
                     view.auto = None
+            chain = view.auto
+            if (isinstance(chain, autoroute.Chain) and chain.search is not None and name not in autoroute.NEUTRAL
+                    and name != "scroll" and not (name == "type_text" and self._typed_search(view))):
+                # (review Opus 3 L2) any other call after the search (a filter tap that stays, a toggle, typing elsewhere)
+                # ends what the read before the typing can vouch for: no result is kept from it
+                chain.search = None
             bundle = (view.app or (None, None))[1]
             if name == "logs" and bundle is not None:
                 view.logs_mark[bundle] = self._log_mark(bundle)  # read: only an error after this asks for logs again
             if not self._hints_on(client_id):
                 return text
-            return self._with_hints(view, name, args, self._with_known(view, text), code)
+            if name == "map" and code is None:
+                return self._with_hints(view, name, args, self._map_known(view, args, text), code)
+            return self._with_hints(view, name, args, self._with_known(view, self._with_keyboard(view, text)), code)
         except Exception as e:  # noqa: BLE001
             self.log(f"hints left out: {type(e).__name__}")
             return text
@@ -5099,6 +5271,55 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         chain.steps.append(list(saved["steps"]))
         view.auto = chain
 
+    KEYBOARD_NAMES = 3  # (1.9.0 round 2) at most this many covered elements named on the Keyboard: line
+
+    def _with_keyboard(self, view, text: str) -> str:
+        """(1.9.0 round 2) `Keyboard: shown` says what the keyboard covers and that a tap there closes it first, so an
+        agent neither fights a keyboard that stays up (a multi-line field ignores a touch outside) nor taps around it:
+        `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`. Each by its id when it has one a
+        developer wrote, else by its ref. Nothing covered: the line stays as it was."""
+        if "Keyboard: shown" not in text:
+            return text
+        names = self._keyboard_covered(view.items)
+        if not names:
+            return text
+        more = len(names) - self.KEYBOARD_NAMES
+        listed = ", ".join(names[:self.KEYBOARD_NAMES]) + (f", +{more} more" if more > 0 else "")
+        one = "it" if len(names) == 1 else "one"
+        # (review Opus 3 L1) what a tap there does, as it is: a Done in the keyboard's accessory bar is pressed; else the
+        # tool tries to close the keyboard, and a tap it can't clear is refused `covered`
+        how = ("presses the keyboard's Done first" if self._done_on_keyboard(view) is not None
+               else "tries to close the keyboard first")
+        line = f"Keyboard: shown (covers {listed}; a tap on {one} {how})"
+        return "\n".join(line if row == "Keyboard: shown" else row for row in text.split("\n"))
+
+    @staticmethod
+    def _keyboard_covered(items: list) -> list[str]:
+        """The listed controls whose centre the keyboard lies over (never its own keys or accessory bar, nor an alert's)."""
+        out = []
+        for e in items:
+            if (getattr(e, "role", None) not in ("button", "link", "cell", "tab", "switch", "input")
+                    or getattr(e, "by_keyboard", False) or getattr(e, "in_alert", False)):
+                continue
+            cx, cy = e.center
+            if not any(b.kind == "Keyboard" and b.rect[0] <= cx < b.rect[0] + b.rect[2]
+                       and b.rect[1] <= cy < b.rect[1] + b.rect[3] for b in e.covered_by):
+                continue
+            ident = e.identifier
+            named = isinstance(ident, str) and ui.structural_id(ident) and not ui.private(ident)
+            out.append(ident if named else e.ref)
+        return out
+
+    def _map_known(self, view, args: dict, text: str) -> str:
+        """(1.9.0 round 2) `map`'s listing ends with the Known: line too, where the app is now (an agent that calls map
+        first learns what one call reaches without a look). Not for `map {"to"}` or an edit."""
+        if any(args.get(k) is not None for k in ("to", "name", "link", "place", "reflex", "forget_reflex", "forget")):
+            return text
+        if view.place is None or not self._may_map(view.place[0]):
+            return text
+        line = tokentext.known_line(self._known_entries(view.place[0], view.place[1]))
+        return f"{text}\n{line}" if line else text
+
     def _with_known(self, view, text: str) -> str:
         """§30.2: the first answer of the session that shows the app's screen gets `Known:` after the screen's header."""
         bundle = (view.app or (None, None))[1]
@@ -5114,7 +5335,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # Metro…"): the line isn't spent
             return text
         view.known_told.add(bundle)
-        line = tokentext.known_line(self._known_names(bundle, here))
+        line = tokentext.known_line(self._known_entries(bundle, here))
         if line is None:
             return text
         at += 1
@@ -5137,10 +5358,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             "logs": lambda: CRASH_NOTE in text or self._app_errored(view),
             "known_way": lambda: (code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None
                                   and self._known_name(view) is not None),
-            # a new screen (the full list) holding 2 or more inputs and a button
+            # a new screen (the full list) holding an input and a submit-worded button (1.9.0 round 2: §30.3's "2 or
+            # more inputs" never fired on a trip form of one field and steppers)
             "form": lambda: (code is None and name not in ("logs", "map", "apps")
                              and any(line.startswith("Screen ") for line in text.split("\n")[:4])
-                             and self._is_form(view.items)),
+                             and self._is_form_hint(view.items)),
             "screenshot": lambda: (code is None and args.get("screenshot") is True and name in ACTIONS and name != "look"
                                    and changes.NO_CHANGE not in text),
             "long_task": lambda: view.calls >= tokentext.LONG_TASK_CALLS,
@@ -5183,8 +5405,34 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         except Exception:  # noqa: BLE001
             return None
         held_word = self._held_word(bundle)
-        return next((r["name"] for r in held if r.get("end") == place and autoroute.known_ok(r, held_word)
-                     and self._plain_name(r["name"])), None)  # (CodeRabbit, PR #22; Opus 2 L3) as Known: would list it
+        found = [r for r in held if r.get("end") == place and autoroute.known_ok(r, held_word)
+                 and self._plain_name(r["name"])]  # (CodeRabbit, PR #22; Opus 2 L3) as Known: would list it
+        if len(found) > 1:
+            # (1.9.0 round 2) routes are kept per target: the one whose last step is the move just made, else none (a
+            # route via another card would reach another destination's screen)
+            chain = view.auto
+            last = chain.steps[-1] if isinstance(chain, autoroute.Chain) and chain.steps and chain.steps[-1] else None
+            key = autoroute.target_key(last) if last else None
+            found = [r for r in found if key is not None and isinstance(r.get("steps"), list)
+                     and autoroute.target_key(r["steps"]) == key]
+        return found[0]["name"] if len(found) == 1 else None
+
+    FORM_WORDS = tuple(w for w in explorefloor.SUBMIT_WORDS if w != "Share")  # (1.9.0 round 2) a form's own save
+
+    @classmethod
+    def _is_form_hint(cls, items: list) -> bool:
+        """(1.9.0 round 2, Tapwright's reading of §30.3) A form, for its hint: 1 or more inputs and a button worded as a
+        save or submit (Save, Submit, Continue, Sign in, Create, Confirm...), or §30.3's 2 or more inputs and a button. The
+        H1 rule (`_is_form`, a tap that leaves a form is no navigation) keeps its own definition."""
+        if not any(getattr(e, "role", None) == "input" for e in items):
+            return False
+        if any(getattr(e, "role", None) == "input" and cls._is_search((None, e, [])) for e in items):
+            return False  # (review Opus 3 L4) a screen with a search field is a list to search, not a form to fill
+        if cls._is_form(items):
+            return True  # (§30.3's own reading still holds: 2 or more inputs and a button)
+        return any(getattr(e, "role", None) == "button" and getattr(e, "enabled", True) is not False
+                   and any(explorefloor._first(cls.FORM_WORDS, explorefloor._plain(n)) is not None
+                           for n in explorefloor.names_of(e)) for e in items)
 
     @staticmethod
     def _is_form(items: list) -> bool:
@@ -5243,8 +5491,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if view.typed_at is not None and view.typed_at != view.place:
             view.typed_at = None
         chain = view.auto
+        if (seen is not None and chain is None and bundle not in view.auto_begun and self._hints_wanted()
+                and not _NESTED.get()):
+            # (1.9.0 round 2) the session's first look at an app already in front begins its way, as open_app does
+            chain = view.auto = autoroute.Chain(bundle)
         if seen is not None and isinstance(chain, autoroute.Chain) and chain.app == bundle and chain.here is None:
             chain.begin(seen.name)  # (1.9.0, §30) the first screen after open_app is where its way starts
+            view.auto_begun.add(bundle)
+        if seen is not None and isinstance(chain, autoroute.Chain) and chain.app == bundle and chain.here == seen.name:
+            chain.saw(self._tree_ids(view))  # (1.9.0 round 2) what the place holds, for a search's result
         notes = [problem] if (problem := self.maps.problem_once(root, bundle)) is not None else []
         if seen is None or not seen.had_map:
             return text, notes
@@ -5347,6 +5602,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._opened = bundle_id
         view.opened = True
         view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
+        view.auto_begun.add(bundle_id)
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
         # target goes only to it, and no field of the app before is typed into again
         view.aimed_app, view.typed_field = (shown, bundle_id), None
@@ -6868,7 +7124,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
         aimed = self._keyboard_covers(view, target)
-        return await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
+        said = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed, tool=name)
+        if said == NOTE_KEYBOARD_STAYED and aimed is None and self._hints_wanted():
+            # (1.9.0 round 2) the target is clear of it: the touch goes on, nothing failed
+            return NOTE_KEYBOARD_STAYS.format(what=KEYBOARD_WHAT.get(name, name))
+        return said
 
     def _keyboard_covers(self, view, target: ui.Target) -> "ui.Element | None":
         """The target's element when the keyboard lies over its centre (1.9.0); only then may a Done close it first."""
@@ -7920,7 +8180,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             found = self._element_at(found)
             if found is None:
                 return HINT_BARE_POINT
-        return HINT_FIELD if found.role == "input" else HINT_LOADING
+        if found.role == "input":
+            return HINT_FIELD
+        return HINT_LOADING
 
     async def _tap(self, view, a: dict) -> str:
         return await self._touch(view, a, TAP_MS)

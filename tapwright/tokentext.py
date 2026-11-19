@@ -23,13 +23,22 @@ RULES = (
 KNOWN_MAX = 8  # §30.2: at most 8 names, then `+N more`
 
 
-def known_line(names: list[str]) -> str | None:
-    """§30.2: `Known: <name>, <name>, ... (one call each: <replay>)`; None when nothing is known."""
+def known_line(names: list) -> str | None:
+    """§30.2: `Known: <name>, <name>, ... (one call each: <replay>)`; None when nothing is known. (1.9.0 round 2,
+    Tapwright's own) a name given as `(name, way)` is shown with its way in ids, `dest_card_lisbon (scroll to
+    dest-card-lisbon, tap)`, and the names are then parted by `; ` (a way has commas of its own)."""
     if not names:
         return None
-    shown = names[:KNOWN_MAX]
-    more = f", +{len(names) - KNOWN_MAX} more" if len(names) > KNOWN_MAX else ""
-    return f"Known: {', '.join(shown)}{more} (one call each: {REPLAY})"
+
+    def one(entry) -> str:
+        if isinstance(entry, tuple):
+            name, way = entry
+            return f"{name} ({way})" if way else name
+        return entry
+    shown = [one(n) for n in names[:KNOWN_MAX]]
+    sep = "; " if any(isinstance(n, tuple) and n[1] for n in names[:KNOWN_MAX]) else ", "
+    more = f"{sep}+{len(names) - KNOWN_MAX} more" if len(names) > KNOWN_MAX else ""
+    return f"Known: {sep.join(shown)}{more} (one call each: {REPLAY})"
 
 
 # §30.3: the sentences word for word (Tapwright fills its own call). Keys are what "at most once per session" counts.

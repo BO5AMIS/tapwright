@@ -34,7 +34,7 @@ Do not claim that software can bypass a genuine XCTest passcode, trust, signing 
 ### look
 
 Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.
-Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref).
+Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note.
 
 Arguments: `screenshot`, `width`, `labels`, `ocr`.
 
@@ -150,9 +150,9 @@ Arguments: `add`, `remove`, `confirm`.
 ### logs
 
 The app's recent log: one line per entry with its time and level (`error`, `warning`, `info`). `level` keeps that level and above, `grep` keeps lines containing a text, `limit` caps the count (default 100, newest), and `since` (epoch ms) returns only newer lines; each result ends with `Latest:`, a timestamp to reuse. Read it when something fails: the cause is often there.
-Tapwright: reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a release build), from the app's process only, never another's, keeping the last 2000 from when the app is opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a plain line that says warn, error, exception, fatal or failed.
+Tapwright: reads the app's own entries in the phone's unified log (os_log, NSLog; React Native's console in a release build), from the app's process only, never another's, keeping the last 2000 from when the app is opened or `logs` is first used. iOS has no warning level: `error` is an error or fault, `warning` a plain line that says warn, error, exception, fatal or failed. Lines a system framework logged in the app's process are left out and counted; `all: true` shows them.
 
-Arguments: `since`, `level`, `grep`, `limit`.
+Arguments: `since`, `level`, `grep`, `limit`, `all`.
 
 ### crash
 
@@ -1407,8 +1407,24 @@ read each answer; known steps in one `run` with an `expect`; target by id; a scr
 (`screenshot: false` on a `look` that only reads); use `Known:`; on a long or unknown task hand the driving to one
 small, fast agent; a bug report is `bug_report`.
 
+Under it come Tapwright's own lines (round 2, `descriptions.INSTRUCTIONS_190`): 1.8.5's, without the 1.7.5-era lines
+about options that no longer restrict anything (`Legacy --apps ...`, "No app list or label-based approval is required",
+"`not_allowed` ... is no longer an app-list ... refusal"), with a line said twice said once, and one line added: "Start
+with open_app (or a look at the app in front): its answer shows the screen and `Known:`; `map` isn't needed first."
+Every error code and reason is still named. `--no-hints` gives 1.8.5's instructions word for word.
+
+### 30.1a Tools loaded with the session
+`tools/list` marks the core tools `_meta: {"anthropic/alwaysLoad": true}`: `open_app`, `open_url`, `look`, `tap`,
+`type_text`, `run`, `scroll`, `back`, `toggle`, `wait_for`, `drive`. Claude Code (2.1.x reads the key per tool) then
+lists them with the session instead of deferring them behind a ToolSearch turn; the rest stay deferred, and a host that
+doesn't know the key ignores it. The listed schemas carry no pydantic `title` keys (a fifth of their characters, never
+read); nothing else in them changes. `tapwright mcp --lazy-tools` (or `TAPWRIGHT_LAZY_TOOLS=1`) lists every tool
+deferred with its schema as in 1.8.5; `--no-hints` implies it.
+
 ### 30.2 Routes that save themselves, and `Known:`
-- A session's way from the app's start (the screen after `open_app`) to a place is saved as that place's route
+- A session's way from the app's start to a place is saved as a route. The way begins at the session's first screen of
+  the app (round 2): the screen after `open_app`, else the first one an `open_url`, a first `look` at an app already in
+  front, or a first action shows. It is saved
   (`routes/<name>.json` in the app's map folder, `"auto": true`), with no `record` call. Navigation only: `tap`, `back`,
   `open_url`, and the scrolls made at a place before leaving it. Its steps are the targets the map keeps for roads (an
   id, else a label or text; never a title, a row's words or an id that carries content).
@@ -1419,7 +1435,16 @@ small, fast agent; a bug report is `bug_report`.
   screen with an input (Save, Submit, Continue, Confirm, Sign in...), or any tap that leaves a form (2 or more inputs and
   a button). After a `drive`, only a route the tool saved itself carries the way on (its taps were judged navigation as
   they were made); a person's route never does.
-- A place keeps one route of the tool's own, whatever start it was reached from: a shorter way replaces it, and so does
+- A search (round 2): typing into a search field (iOS's search field, or an input whose id, label or placeholder has
+  `search` as a word or a word's part: `explore-search`, `searchField`, "Search destinations"; not `research-notes`)
+  breaks the way as any typing does, but a tap right after it (no other call between them, a scroll aside) on a result
+  whose id was in a read of that screen's tree (on or off screen) from before the typing is kept as `scroll {"to": "target", "target": {"id": X}}` then `tap {"id": X}`:
+  the unfiltered list already offers it. The typed text is never saved. Such a route is marked `"derived": true` and
+  is dropped on its first failed replay. A result that wasn't in the list before (a server-side search) leaves the way
+  broken, and so does a search with no read from before it (the session's first call typed it).
+- A route is kept per place and target (round 2): its last step's target (`dest-card-lisbon`) tells two routes to the
+  same place apart (every destination's detail screen is one place), so a way via Lisbon doesn't replace one via
+  Kyoto. For each place and target, whatever start it was reached from: a shorter way replaces it, and so does
   a working way when it has failed since. A replay (`drive {"route": ...}`) whose own steps fail twice in a row drops it
   (`Note: route <name> dropped ...`); not reaching the route's start never counts. Its end is given 2 s to come in; a
   route whose end was read as the screen came in (the screen it left still drawn beside it) is judged arrived when the
@@ -1434,14 +1459,20 @@ small, fast agent; a bug report is `bug_report`.
   `drive {"route": ...}` takes (the leads' reading of the frozen §30.2).
 - The first answer of a session that shows the app, once where the app is is known and it isn't still starting (a
   "Loading from Metro…" screen doesn't spend it), has after its header
-  `Known: <name>, ... (one call each: drive {"route": "<name>"})`: the saved routes whose steps are strictly navigation
+  `Known: <name> (<way>); ... (one call each: drive {"route": "<name>"})`: the saved routes whose steps are strictly navigation
   (taps, back, links and scrolls; no nested `drive`, no typing, no vault, account or one-time value, no toggle, not
   draftsOnly, no target with a word the skip floor holds such as Delete or Send) and replay with nothing the agent
   hasn't given (no variable, no account, no link value: a map link's `[id]` or a `${...}`), whose start can be reached
   from where the app is the same way, the most used first, else the most recently reached, at most 8 and then
   `+N more`. A person's route that does more stays drivable by name; it just isn't offered. A name the redaction would
   change is left out. Nothing known: no line. None in a user's-eyes journey. The known-way hint names a route only on
-  the same terms.
+  the same terms (with several routes to the place, only the one whose last step is the move just made).
+- Each name comes with its way in ids (round 2, Tapwright's own reading of §30.2): `dest_card_lisbon (tap explore-tab,
+  scroll to dest-card-lisbon, tap)`, so an agent sees what the one call does. A tap by a label or a text is shown as
+  `tap` alone, a link as `open link`; a way of more than 6 parts keeps its first 2 and last 3 (`+N more`). A way the
+  redaction would change is left out (the name stays). With ways, the names are parted by `; `.
+- `map`'s listing ends with the same `Known:` line, where the app is now (round 2), so an agent that calls `map` first
+  learns what one call reaches.
 
 ### 30.3 Hints
 After the `Note:` lines, at most one `Hint:` per answer, each kind once per session. None on a safety refusal
@@ -1453,8 +1484,11 @@ logs > known way > form > screenshot > long task. The sentences are the shared o
   "the app logged an error: `logs` shows it.";
 - 3 single taps in a row along known roads to a place a saved route reaches: "this way is known:
   `drive {"route": "<name>"}` reaches <name> in one call.";
-- a form opened (a new screen, the full list, with 2 or more inputs and a button): "fill the fields and save in one
-  `run`, with an `expect` on the save step.";
+- a form opened (a new screen, the full list, with 1 or more inputs and a button worded as a save or submit: Save,
+  Submit, Continue, Sign in, Log in, Sign up, Register, Create, Confirm, Apply, Update; or 2 or more inputs and any
+  button): "fill the fields and save in one `run`, with an `expect` on the save step." (Round 2: Tapwright's own reading
+  of §30.3's "2 or more inputs", which never fired on a trip form of one field and steppers; Tapline is paused.) A
+  screen with a search field gets no form hint.
 - a screenshot asked on an action whose text had the changes: "the text answer had the changes; ask for a screenshot
   only to judge how something looks.";
 - a long task, from the session's 20th call: "on a long task, the main session can hand the driving to one small, fast
@@ -1496,9 +1530,41 @@ may have submitted the form, so the call is refused `stale`, saying Done was pre
 Otherwise the answer says `Note: closed the keyboard first.`; if nothing closed the keyboard the tap is refused `covered`
 as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
+### 30.4a Round 2: answers that save a call
+- **The keyboard told, not fought.** With hints, `Keyboard: shown` names what the keyboard covers and what a tap there
+  does: `Keyboard: shown (covers trip-save; a tap on it tries to close the keyboard first)`, or `... presses the
+  keyboard's Done first` when the keyboard's accessory bar has a Done (each by its id, else its ref; 3 at most, then
+  `+N more`). A tap there that can't clear the keyboard is still refused `covered` (§30.4). When the keyboard stays up
+  over a touch it doesn't cover, the note is `the keyboard stayed up (a touch outside the field didn't close it); it
+  doesn't cover this target, so the tap went ahead.` (`long press`, `toggle`, `typing` for those) instead of `couldn't
+  close the keyboard first`. It is a note of its own: a touch that then changed nothing still gets 1.8.5's "report it
+  as a finding" note beside it.
+- **`run` takes what agents wrote.** `expect {"id": X, "text": T}`: the element with id X shows T (its label, text or
+  value: whole first, then a part), waited for up to the timeout (`id "X" didn't show the text "T" within N s.`).
+  `optional: true` on a `wait_for` step: when what it waits for doesn't come (or go), the step is skipped
+  (`optional: "ok" didn't appear within 2 s`), not failed.
+- **An `open_url` step's `expect` says when it waited out a loading screen.** The expect (one text, id or label,
+  present or `gone`) is waited for within its own timeout, as any expect is, and ends the moment it holds. When the app
+  showed its own loading screen meanwhile (React Native's "Loading from Metro", a loading indicator), a `Note:` says the
+  expect waited it out, or, when the timeout ran out, that the app was loading for part of it. The tool never opens a
+  link the agent didn't ask for: a link the app lost during a reload is the agent's to open again.
+- **`look {"ocr": true}` without OCR installed** answers the look with `Note: no OCR reading, so this look is the
+  elements alone. OCR isn't installed: ...` instead of refusing it `unsupported`.
+- **`bug_report`'s answer** ends with the report's "What happened" line (300 characters at most), `Steps to reproduce:
+  N in report.md.` and "The report is written in the folder (report.md, report.html, repro.json): give the user the
+  folder; there is nothing more to read or write.", so an agent doesn't read the file.
+- **`logs` shows the app's own lines.** Lines a system framework logged in the app's process (UIKit and the like) are
+  left out and counted, with how many of them are errors (`+N system lines, K of them errors (a framework in the app's
+  process, not its own code): ... shows them.`). `logs {"all": true}` shows every line, as 1.8.5 did.
+
 ### 30.5 `--no-hints`
 `--no-hints` restores 1.8.5's behaviour entirely: no `Known:` and no `Hint:` line, no route saved by itself and none of
-them shown (`map`, `drive` and its lists don't see them), no Done press, and 1.8.5's refusal hint. It reaches every
+them shown (`map`, `drive` and its lists don't see them), no Done press, and 1.8.5's refusal hint; and (round 2)
+1.8.5's tool listing byte for byte (every tool deferred, 1.8.5's descriptions and schemas: Target's, look's and logs'
+words, no `all` on logs; `--lazy-tools` lists the same; a test diffs it against v1.8.5's), 1.8.5's keyboard notes,
+`look {"ocr": true}` refused without OCR, `bug_report`'s 1.8.5 answer, `logs` with every line, and no search-made
+route. Two round-2 inputs are taken under `--no-hints` too, since they make nothing harder: `expect {"id", "text"}`
+and `optional` on a `wait_for` step (1.8.5 refused both `bad_params`). It reaches every
 path: `tapwright mcp --no-hints` (which also gives 1.8.5's instructions), `tapwright serve --no-hints` (every call to
 that daemon), `tapwright call --no-hints`, and `TAPWRIGHT_NO_HINTS=1` for the MCP server, the thin call and
 `tapwright replay`/`explore`. The instructions are the MCP process's: with only `serve --no-hints`, start the MCP server

@@ -21,6 +21,7 @@ EXPECT_KINDS = ("text", "id", "label")
 STEP_KEYS = ("tool", "expect", "route", "secure", "look", "screenshot", "brief", "if", "optional", "place", "seen",
              "repaired")  # besides its tool's own arguments (a step's look, screenshot and brief are ignored, §9.1; `if` and `optional` are the batch's own; `place` (§26.6), `seen` (§9.4) and `repaired` (§26.6) are a script's notes, never passed to a call)
 IF_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "if": {"text": "Not now"}}'
+ID_TEXT_EXAMPLE = '{"expect": {"id": "trip-status", "text": "Saved"}}'
 OPTIONAL_EXAMPLE = '{"tool": "tap", "target": {"text": "Not now"}, "optional": true}'
 FORMAT, VERSION = "agent-tools-script", 1  # a route (AGENT-TOOLS §18.5) is version 2: routes.py
 VERSIONS = (1, 2)
@@ -79,6 +80,8 @@ def check_conditions(step: dict, n: int) -> None:
         raise Refused("bad_params", f"step {n}: optional must be true or false, like {OPTIONAL_EXAMPLE}")
     if not step["optional"]:
         return
+    if step["tool"] == "wait_for":
+        return  # (1.9.0 round 2) an optional wait: when what it waits for doesn't come, the step is skipped, not failed
     if "target" not in params.ALLOWED[step["tool"]] or not isinstance(step.get("target"), dict):
         raise Refused("bad_params", f"step {n}: optional goes with a step that has a target (tap, long_press, "
                                     f"type_text, scroll, toggle), like {OPTIONAL_EXAMPLE}")
@@ -137,6 +140,14 @@ def check_expect(expect: object, n: int, script: bool = False, tool: str = "") -
         return
     given = [k for k in EXPECT_KINDS if expect.get(k) is not None]
     matches = expect.get("matches") is not None
+    if set(given) == {"id", "text"}:
+        # (1.9.0 round 2) the element with this id shows this text: one check an agent reaches for, no longer refused
+        if not all(isinstance(expect[k], str) and expect[k] for k in given):
+            raise Refused("bad_params", f"step {n}: expect's id and text are non-empty strings, like {ID_TEXT_EXAMPLE}")
+        if any(k in expect for k in ("value", "gone", "label")):
+            raise Refused("bad_params", f"step {n}: expect with both id and text (that element shows that text) takes "
+                                        f"no value, gone or label, like {ID_TEXT_EXAMPLE}")
+        given = ["id"]
     if len(given) > 1 or (not given and not matches):
         raise Refused("bad_params", f"step {n}: expect needs exactly one of text, id or label, as a non-empty string "
                                     '(or "matches", the name of a reference picture, alone or beside one of them)')
@@ -210,12 +221,36 @@ def summary(step: dict) -> str:
 
 def expect_failed(expect: dict) -> str:
     """The reason a text, id or label expectation failed, as the answer says it."""
+    seconds = f"{float(expect.get('timeout', EXPECT_DEFAULT)):g}"
+    if shows_text(expect):
+        return (f"id {json.dumps(expect['id'], ensure_ascii=False)} didn't show the text "
+                f"{json.dumps(expect['text'], ensure_ascii=False)} within {seconds} s.")
     kind = next(k for k in EXPECT_KINDS if expect.get(k) is not None)
     what = f"{kind} {json.dumps(expect[kind], ensure_ascii=False)}"
     seconds = f"{float(expect.get('timeout', EXPECT_DEFAULT)):g}"
     if "value" in expect:
         return f"{what} didn't have the value {json.dumps(expect['value'], ensure_ascii=False)} within {seconds} s."
     return f"{what} didn't {'disappear' if expect.get('gone') else 'appear'} within {seconds} s."
+
+
+def shows_text(expect: dict) -> bool:
+    """(1.9.0 round 2) `expect {id, text}`: the element with that id shows that text."""
+    return isinstance(expect.get("id"), str) and isinstance(expect.get("text"), str)
+
+
+def has_text(element: ui.Element, want: str) -> bool:
+    """Does the element show the text, as wait_for matches it: the whole of its label, text or value, else a part."""
+    shown = [t for t in (element.label, element.text, element.value) if isinstance(t, str) and t]
+    return any(t == want or ui.shown(t) == want for t in shown) or any(want in t for t in shown)
+
+
+def optional_wait_skipped(step: dict) -> str:
+    """(1.9.0 round 2) The skip line of an optional wait_for whose element didn't come (or go)."""
+    kind = next((k for k in EXPECT_KINDS if step.get(k) is not None), None)
+    aim = aim_name(kind, step[kind]) if kind else "it"
+    timeout = step.get("timeout", 10.0)
+    seconds = f"{float(timeout):g}" if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else "10"
+    return f"optional: {aim} didn't {'disappear' if step.get('gone') else 'appear'} within {seconds} s"
 
 
 def value_of(element: ui.Element) -> str:

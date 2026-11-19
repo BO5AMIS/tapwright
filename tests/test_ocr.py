@@ -61,9 +61,11 @@ def test_without_the_extra_ocr_says_how_to_install_it(monkeypatch):
         monkeypatch.setattr(ocr, "available", lambda: False)
         d = make()
         stop, task = await started(d)
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "look", {"ocr": True})
+        with pytest.raises(Refused) as e:  # (1.9.0 round 2: refused only with --no-hints, 1.8.5's way)
+            await d.run_tool("a", "look", {"ocr": True}, hints=False)
         assert e.value.code == "unsupported" and 'pip install "tapwright[ocr]"' in str(e.value)
+        r = await d.run_tool("a", "look", {"ocr": True})  # with hints: the look, and the note says how to install it
+        assert 'pip install "tapwright[ocr]"' in r["text"]
         await finish(stop, task)
     run(go)
 
@@ -82,5 +84,33 @@ def test_the_status_bar_and_what_elements_say_already_are_left_out(monkeypatch):
         r = await d.run_tool("a", "look", {"screenshot": False, "ocr": True})
         ocr_lines = [line for line in r["text"].splitlines() if line.startswith("o")]
         assert ocr_lines == ['o1 "Kyoto, Japan" @49,406 105x20']
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_half_installed_extra_counts_as_not_installed(monkeypatch):
+    """CI, 2026-11-19: rapidocr and onnxruntime were found but numpy wasn't, so `look ocr` crashed instead of answering
+    with the install note."""
+    import importlib.util as iu
+    from tapwright import ocr
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name in ("rapidocr", "onnxruntime", "PIL")
+                        else (None if name == "numpy" else real(name, *a)))
+    assert ocr.installed() is False
+
+
+def test_without_the_extra_the_look_never_reads_the_picture(monkeypatch):
+    """CI, 2026-11-19: with no OCR the look added its note and then still called ocr.read (numpy missing: a crash)."""
+    def boom(*a):
+        raise AssertionError("ocr.read was called without the extra")
+
+    async def go():
+        monkeypatch.setattr(ocr, "reader", None)
+        monkeypatch.setattr(ocr, "available", lambda: False)
+        monkeypatch.setattr(ocr, "read", boom)
+        d = make()
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"ocr": True})
+        assert 'pip install "tapwright[ocr]"' in r["text"]
         await finish(stop, task)
     run(go)

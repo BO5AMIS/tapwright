@@ -265,7 +265,7 @@ def test_a_step_cant_update_and_its_parameters_are_checked_up_front(tmp_path):
                          ([{"tool": "tap", "expect": {"matches": "x", "threshold": 120}}], "0 to 100"),
                          ([{"tool": "tap", "expect": {"text": "a", "threshold": 1}}], "go with matches"),
                          ([{"tool": "tap", "expect": {"value": "on", "matches": "x"}}], "value goes with"),
-                         ([{"tool": "tap", "expect": {"text": "a", "id": "b", "matches": "x"}}], "exactly one of text")):
+                         ([{"tool": "tap", "expect": {"text": "a", "label": "b", "matches": "x"}}], "exactly one of text")):
         with pytest.raises(Refused) as e:
             batch.check_steps(steps)
         assert e.value.code == "bad_params" and words in str(e.value), (steps, str(e.value))

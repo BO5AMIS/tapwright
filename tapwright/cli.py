@@ -1528,6 +1528,9 @@ def main() -> int:
                    help="answer every action in brief unless the call says brief: false (the change block cut to 12 lines)")
     p.add_argument("--no-hints", action="store_true",
                    help="answers without the Known: and Hint: lines and instructions without the token rules: as in 1.8.5")
+    p.add_argument("--lazy-tools", action="store_true",
+                   help="list every tool as deferred (found with the host's tool search), as in 1.8.5, instead of loading "
+                        "the core tools with the session (also TAPWRIGHT_LAZY_TOOLS=1; --no-hints implies it)")
     p.add_argument("--maps", metavar="DIR",
                    help="where the per-app maps (<DIR>/<bundle id>/map.json and routes/) are kept, instead of "
                         "~/.tapwright/maps: keep them with a project so a team, CI and Tapline share one folder")
@@ -1556,7 +1559,7 @@ def main() -> int:
                              f"tapwright mcp: {e}") from e
         mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
                        brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts, phone=a.phone,
-                       hints=not a.no_hints)
+                       hints=not a.no_hints, lazy_tools=a.lazy_tools)
         return 0
     if a.cmd == "view":
         return view()
