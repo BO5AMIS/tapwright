@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tapwright"
-version = "1.9.0"
+version = "1.9.1"
 description = "Let AI agents operate real iPhones for QA, research and mobile workflows from Windows, Linux or macOS."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "pymobiledevice3>=11.50,<12",  # Apple's device protocols; device.py relies on its user-space tunnel
+    "pymobiledevice3>=11.50,<12",  # Apple's device protocols; device.py relies on its user-space tunnel (both provider contracts: before and from 11.57)
     "mcp>=2.3",
     "anyio>=4.5",  # runs everything on the event loop pymobiledevice3 needs (device.run)
     "starlette>=1.0",  # the daemon's HTTP and WebSocket app

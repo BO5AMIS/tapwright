@@ -144,6 +144,48 @@ def _failure_listener(on_failure):
     return Listener()
 
 
+def _takes_factory(userspace_tunnel) -> bool:
+    """pymobiledevice3 11.57 and later: UserspaceRsdTunnel takes a `provider_factory` returning a TunnelProvider
+    (`.service`, `.lockdown`). Before 11.57 it always calls the module's `_create_no_root_tunnel_provider`,
+    which returns a `(service, lockdown)` tuple."""
+    import inspect
+    if not hasattr(userspace_tunnel, "TunnelProvider"):
+        return False
+    try:
+        return "provider_factory" in inspect.signature(userspace_tunnel.UserspaceRsdTunnel).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _new_tunnel(userspace_tunnel, serial, make):
+    """The tunnel to the phone. `make` (async, no arguments) gives the tunnel service of a phone reached over a
+    network; None leaves the choice to the library (USB). On 11.57+ `make` goes in as the provider factory, so
+    nothing outside this tunnel changes."""
+    if make is None or not _takes_factory(userspace_tunnel):
+        return userspace_tunnel.UserspaceRsdTunnel(serial=serial)
+
+    async def factory():
+        return userspace_tunnel.TunnelProvider(await make(), None)
+    return userspace_tunnel.UserspaceRsdTunnel(serial=serial, provider_factory=factory)
+
+
+async def _open_tunnel(userspace_tunnel, tunnel, make):
+    """Open `tunnel`. Before 11.57 a network service can only be handed in by replacing the module's provider:
+    that is done for this one open and undone after it, so a later open over USB gets the library's own provider
+    again (1.9.0 left it replaced: every USB reconnect after a network one failed)."""
+    if make is None or _takes_factory(userspace_tunnel):
+        return await tunnel.aopen()
+
+    async def provider(serial, autopair, remotepairing_fallback=True):
+        return await make(), None
+    original = userspace_tunnel._create_no_root_tunnel_provider
+    userspace_tunnel._create_no_root_tunnel_provider = provider
+    try:
+        return await tunnel.aopen()
+    finally:
+        userspace_tunnel._create_no_root_tunnel_provider = original
+
+
 class Device:
     def __init__(self, udid: str | None = None, host: str | None = None, port: int | None = None, log=print):
         state = store.load_state()
@@ -187,14 +229,14 @@ class Device:
             identifier = self._pairing_identifier()
             host, port = self.host, self.port
 
-            async def provider(serial, autopair, remotepairing_fallback=True):
+            async def make():
                 from pymobiledevice3.remote.tunnel_service import create_core_device_tunnel_service_using_remotepairing
-                return await create_core_device_tunnel_service_using_remotepairing(identifier, host, port), None
-            # pymobiledevice3 picks USB or mDNS; to dial a given address, swap in this provider.
-            userspace_tunnel._create_no_root_tunnel_provider = provider
+                return await create_core_device_tunnel_service_using_remotepairing(identifier, host, port)
+            # pymobiledevice3 picks USB or mDNS; to dial a given address, it is handed this service instead.
             self.via = f"network {host}:{port}"
         elif on_usb:
             self.udid = self.udid or on_usb[0].serial
+            make = None  # the library's own choice: USB first
             self.via = "USB"
         else:
             from pymobiledevice3.remote.tunnel_service import get_remote_pairing_tunnel_services
@@ -206,13 +248,12 @@ class Device:
                 await extra.close()
             found = services[0]
 
-            async def provider(serial, autopair, remotepairing_fallback=True):
-                return found, None
-            userspace_tunnel._create_no_root_tunnel_provider = provider
+            async def make():
+                return found
             self.via = "local network"
-        self.tunnel = userspace_tunnel.UserspaceRsdTunnel(serial=self.udid)
+        self.tunnel = _new_tunnel(userspace_tunnel, self.udid, make)
         try:
-            self.rsd = await self.tunnel.aopen()
+            self.rsd = await _open_tunnel(userspace_tunnel, self.tunnel, make)
         except Exception as e:
             raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
         self.udid = self.rsd.udid
