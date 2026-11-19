@@ -5603,10 +5603,13 @@ def test_a_tab_under_a_keyboard_that_stays_up_says_how_to_close_it():
         stop, task = await started(d)
         d.session.screen = (430.0, 932.0)
         await looked(d, [el("e1", "button", "Settings", "tab-settings", rect=(286, 849, 144, 50), covered_by=(KEYBOARD,))])
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        with pytest.raises(Refused) as e:  # (1.8.5's words, which --no-hints keeps)
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}}, hints=False)
         assert str(e.value).endswith("is under the keyboard, and this app doesn't close it on a touch outside the field; "
                                      "type_text into the field with submit: true closes it (it presses return).")
+        with pytest.raises(Refused) as e:  # (1.9.0: Return can submit, send or add a line)
+            await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert str(e.value).endswith(daemon_module.KEYBOARD_HINT_190)
         await finish(stop, task)
     run(go)
 

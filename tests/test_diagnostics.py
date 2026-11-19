@@ -7,6 +7,7 @@ import re
 from xml.etree import ElementTree as ET
 
 import pytest
+from tapwright import tokentext
 from fakes import FakeFrame, FakeReport
 from test_daemon import finish, make, run, started
 
@@ -271,6 +272,12 @@ def test_crash_without_a_known_executable_is_unsupported():
 NOTE = "Note: the app crashed: EXC_BAD_ACCESS (SIGSEGV) in Example -[HomeController crash] +40. logs and crash show more."
 
 
+def noted(text: str) -> list[str]:
+    """The answer's lines without the 1.9.0 `Hint:` line after its notes (a crash asks for `logs`: AGENT-TOOLS §30.3)."""
+    lines = text.splitlines()
+    return lines[:-1] if lines and lines[-1] == tokentext.HINTS["logs"] else lines
+
+
 def test_an_app_that_dies_during_a_call_adds_the_note():
     async def go():
         d = tuned(make())
@@ -279,7 +286,7 @@ def test_an_app_that_dies_during_a_call_adds_the_note():
         await d.run_tool("a", "look", {"screenshot": False})
         die(d, FakeReport())
         r = await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert r["text"].splitlines()[-1] == NOTE
+        assert noted(r["text"])[-1] == NOTE
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert NOTE not in r["text"]  # told once
         await finish(stop, task)
@@ -297,7 +304,7 @@ def test_the_note_is_on_an_error_answer_too():
         d.session.fail["tap"] = ConnectionLost("the connection dropped")
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
-        assert e.value.code == "reconnecting" and str(e.value).splitlines()[-1] == NOTE
+        assert e.value.code == "reconnecting" and noted(str(e.value))[-1] == NOTE
         await finish(stop, task)
     run(go)
 
@@ -333,7 +340,7 @@ def test_a_crash_that_reaches_the_phone_later_is_told_once_with_its_time():
         when = datetime.datetime.now().replace(microsecond=0)
         d.session.device.crashes["Example"] = [FakeReport(when=when)]
         r = await d.run_tool("a", "look", {"screenshot": False})
-        assert r["text"].splitlines()[-1] == (f"Note: the app crashed at {when:%H:%M:%S}: EXC_BAD_ACCESS (SIGSEGV) in "
+        assert noted(r["text"])[-1] == (f"Note: the app crashed at {when:%H:%M:%S}: EXC_BAD_ACCESS (SIGSEGV) in "
                                               "Example -[HomeController crash] +40. logs and crash show more.")
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert "crashed" not in r["text"] and not d._crash_pending
@@ -414,7 +421,7 @@ def test_a_failure_without_warnings_adds_no_logs_and_a_crash_adds_its_note():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "run", {"steps": steps})
         text = str(e.value)
-        assert text.splitlines()[-1] == NOTE and text.count("the app crashed") == 1
+        assert noted(text)[-1] == NOTE and text.count("the app crashed") == 1
         assert "stopped at step 2" in text and "Logs (since step 2):" in text and "lost the database" in text
         await finish(stop, task)
     run(go)
@@ -579,7 +586,7 @@ def test_a_crash_found_by_the_tap_inside_performance_is_in_its_answer():
         d.session.device.measurement = Measurement(memory_mb=[100.0])
         die(d, FakeReport())
         r = await d.run_tool("a", "performance", {"seconds": 1, "tap": {"ref": "e1"}})
-        assert r["text"].splitlines()[-1] == NOTE and r["text"].count("the app crashed") == 1
+        assert noted(r["text"])[-1] == NOTE and r["text"].count("the app crashed") == 1
         await finish(stop, task)
     run(go)
 

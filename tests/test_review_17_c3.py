@@ -137,6 +137,7 @@ TOUCHES = {
     ("daemon", "Daemon._dismiss_keyboard_now", "tap"): "a blank spot no element holds, to close the keyboard",
     ("daemon", "Daemon._dismiss_keyboard_now", "swipe"): "a drag on the content, to close the keyboard",
     ("daemon", "Daemon._press_done", "key"): "a backspace taking back the new line a Done key typed into a multiline field",
+    ("daemon", "Daemon._press_done", "tap"): "an input accessory's or toolbar's Done button just above the keyboard",
     ("daemon", "Daemon._back", "tap"): "the navigation bar's back button, or outside a popover: leaving",
     ("daemon", "Daemon._back", "swipe"): "the edge swipe back: leaving",
     ("daemon", "Daemon._close_sheet", "tap"): "beside a sheet, to close it: leaving",
