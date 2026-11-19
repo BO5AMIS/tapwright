@@ -60,9 +60,9 @@
   minutes (run, replay and drive 200 s), as the MCP server does: before, the thin call gave up after 120 s while the run
   went on.
 - `tapwright serve --policy` and `tapwright mcp --policy` read and check the file at start (its words reach explore's and
-  a repair's skip floor). From 1.7.5 to 1.7.9 the flag was ignored, so a host config written by `tapwright connect --policy
+  a repair's skip floor). From 1.7.5 to 1.7.9 the flag was ignored, so a host config written by `tapwright install --policy
   FILE` whose file has since been moved or broken now stops the server from starting, with a message that says how to fix
-  it (restore the file, or run `tapwright connect` again).
+  it (restore the file, or run `tapwright install` again).
 
 ## 1.7.9 (2026-11-19)
 

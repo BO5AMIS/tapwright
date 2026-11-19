@@ -1022,7 +1022,7 @@ def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
 
 
 _POLICY_HINT = (". Since 1.8.0 the --policy file is read at start (its words reach explore's skip floor): fix or restore it, "
-                "or run `tapwright connect` again without --policy (or with another file) to rewrite the host's config")
+                "or run `tapwright install` again without --policy (or with another file) to rewrite the host's config")
 
 
 def main() -> int:
@@ -1060,11 +1060,11 @@ def main() -> int:
                    help="repair what it can with the phone on USB: mount the developer disk image, install or "
                         "re-sign WebDriverAgent with the stored profile, refresh the network pairing")
     p.add_argument("--policy", metavar="FILE",
-                   help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+                   help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     p = sub.add_parser("grants", help="the grants of a policy file, their counts and last uses; --revoke-all; unlock")
     p.add_argument("action", nargs="?", choices=["unlock"],
                    help="unlock: remove a stuck policy edit lock (refused while its holder is alive)")
-    p.add_argument("--policy", metavar="FILE", help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+    p.add_argument("--policy", metavar="FILE", help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     p.add_argument("--revoke-all", action="store_true",
                    help="revoke every grant in the file (it stays there, marked revoked) and stop any running route "
                         "between moves")
@@ -1080,7 +1080,7 @@ def main() -> int:
     q.add_argument("--with", dest="with_", action="append", metavar="NAME=VALUE|NAME=@FILE",
                    help="a value for one of the route's variables; @FILE is the text of that file, read at each run")
     q.add_argument("--name", help="the schedule's name (default: the route's)")
-    q.add_argument("--policy", metavar="FILE", help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+    q.add_argument("--policy", metavar="FILE", help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     q.add_argument("--accounts", metavar="FILE", help="the vault the run uses")
     q.add_argument("--maps", metavar="DIR", help="where the route's map is kept (default: ~/.tapwright/maps)")
     ss.add_parser("list", help="the schedules and their tasks")
@@ -1130,7 +1130,7 @@ def main() -> int:
     p.add_argument("--phone", nargs="?", const=PHONE_MODE, default=None, metavar="",
                        help='Enable configured automatic unlock at call start; whole-phone access already works without this flag.')
     p.add_argument("--policy", metavar="FILE",
-                   help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+                   help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     p.add_argument("--no-dialog", action="store_true",
                    help="no person's OK in the host's dialog (for 1.6; kept as the daemon's setting)")
     p.add_argument("--accounts", metavar="FILE",
@@ -1226,7 +1226,7 @@ def main() -> int:
                    help="for this project only: its .mcp.json (Claude Code) or .cursor/mcp.json (Cursor), and its skill folders")
     rules = p.add_mutually_exclusive_group()
     rules.add_argument("--policy", metavar="FILE",
-                       help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+                       help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     rules.add_argument("--no-policy", action="store_true", help='Deprecated compatibility flag; actions no longer use label-based policies.')
     p.add_argument("--ux-rules", metavar="FILE",
                    help="the house rules file to register with the server (see tapwright mcp --ux-rules); a rerun "
@@ -1246,7 +1246,7 @@ def main() -> int:
                        help='Enable configured automatic unlock at call start; whole-phone access already works without this flag.')
     rules = p.add_mutually_exclusive_group()
     rules.add_argument("--policy", metavar="FILE",
-                       help='Deprecated compatibility option; policies and grants no longer restrict actions.')
+                       help='a policy file: its words only add to what explore and a repair skip (an agent'"'"'s own actions are never restricted by it)')
     rules.add_argument("--no-policy", action="store_true",
                        help='Deprecated compatibility flag; actions no longer use label-based policies.')
     p.add_argument("--ux-rules", metavar="FILE",
@@ -1277,7 +1277,7 @@ def main() -> int:
             ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
             # (review R180b L6: from 1.8.0 the file is read at start, as explore's skip floor uses it; a host config written by
-            # `tapwright connect --policy FILE` before then may name a file since moved or broken)
+            # `tapwright install --policy FILE` before then may name a file since moved or broken)
             raise SystemExit(f"tapwright mcp: {e}" + _POLICY_HINT if a.policy and str(a.policy) in str(e) else
                              f"tapwright mcp: {e}") from e
         mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
@@ -1384,7 +1384,7 @@ def main() -> int:
             chosen = policies.load(a.policy) if a.policy else None
         except ValueError as e:
             # (review R180b L6: from 1.8.0 the file is read at start, as explore's skip floor uses it; a host config written by
-            # `tapwright connect --policy FILE` before then may name a file since moved or broken)
+            # `tapwright install --policy FILE` before then may name a file since moved or broken)
             raise SystemExit(f"tapwright serve: {e}" + _POLICY_HINT if a.policy and str(a.policy) in str(e) else
                              f"tapwright serve: {e}") from e
         whole, address = serve_phone(a.phone, a.address)
