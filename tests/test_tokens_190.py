@@ -287,7 +287,7 @@ def test_three_taps_along_known_roads_get_the_known_way_hint(tmp_path):
         d.control.clients.clear()
         answers = await walk_to_form(d)
         hints = [line for a in answers for line in a["text"].splitlines() if line.startswith("Hint:")]
-        assert 'Hint: this way is known: `drive {"route": "plan_trip"}` reaches it in one call.' in hints
+        assert 'Hint: this way is known: `drive {"route": "plan_trip"}` reaches plan_trip in one call.' in hints
         assert len([h for h in hints if "this way is known" in h]) == 1
         await finish(stop, task)
     run(go)
@@ -306,7 +306,7 @@ def test_a_screenshot_on_an_action_that_had_its_changes_gets_the_hint(tmp_path):
 
 def test_the_long_task_hint_comes_at_the_20th_call_once_and_is_harmless_to_a_helper(tmp_path):
     assert tokentext.LONG_TASK_CALLS == 20
-    assert tokentext.HINTS["long_task"] == ("Hint: On a long task, the main session can hand the driving to one small, fast "
+    assert tokentext.HINTS["long_task"] == ("Hint: on a long task, the main session can hand the driving to one small, fast "
                                             "agent; if you are that agent, carry on.")
 
     async def go():
@@ -352,7 +352,7 @@ def test_an_error_the_app_logged_asks_for_logs_until_they_are_read(tmp_path):
         app_logs(d, "error")
         r = await d.run_tool("a", "look", {"screenshot": False})
         assert r["text"].splitlines()[-1] == tokentext.HINTS["logs"]
-        assert tokentext.HINTS["logs"] == "Hint: the app logged an error or crashed: `logs` shows its own log."
+        assert tokentext.HINTS["logs"] == "Hint: the app logged an error: `logs` shows it."
         await finish(stop, task)
     run(go)
 
@@ -528,5 +528,73 @@ def test_no_backspace_when_the_value_changed_otherwise():
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "tap", {"target": {"id": "low"}})
         assert "key:backspace" not in s.calls and "taken back" not in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+# ---- round 3: §30.3 as both leads agreed it ----
+
+def test_the_five_hint_sentences_are_the_drafts_word_for_word():
+    assert tokentext.HINTS["form"] == "Hint: fill the fields and save in one `run`, with an `expect` on the save step."
+    assert tokentext.hint("known_way", name="plan_trip") == (
+        'Hint: this way is known: `drive {"route": "plan_trip"}` reaches plan_trip in one call.')
+    assert tokentext.HINTS["screenshot"] == ("Hint: the text answer had the changes; ask for a screenshot only to judge how "
+                                             "something looks.")
+    assert tokentext.HINTS["long_task"] == ("Hint: on a long task, the main session can hand the driving to one small, fast "
+                                            "agent; if you are that agent, carry on.")
+    assert tokentext.HINTS["logs"] == "Hint: the app logged an error: `logs` shows it."
+    assert tokentext.ORDER == ("logs", "known_way", "form", "screenshot", "long_task")
+
+
+def test_a_form_is_two_inputs_and_a_button():
+    from tapwright.daemon import Daemon
+    from fakes import el
+    two = [el("e1", "input", "A", "a"), el("e2", "input", "B", "b")]
+    assert not Daemon._is_form(two)  # no button: nothing to save with
+    assert Daemon._is_form([*two, button("e3", "Save", "save")])
+    assert not Daemon._is_form([el("e1", "input", "A", "a"), el("e2", "switch", "S", "s"), button("e3", "Save", "save")])
+
+
+def test_a_screen_of_two_fields_and_no_button_gets_no_form_hint(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["form"] = screen("Plan a trip", inputs=("trip-notes", "trip-name"))
+        stop, task = await started(d)
+        answers = await walk_to_form(d)
+        assert tokentext.HINTS["form"] not in answers[-1]["text"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_when_several_apply_logs_comes_first_then_the_rest_in_order(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "open_app", {"app": BUNDLE})
+        for target in ("open-list", "dest-card-kyoto"):
+            await d.run_tool("a", "tap", {"target": {"id": target}})
+        app_logs(d, "error")
+        r = await d.run_tool("a", "tap", {"target": {"id": "plan-trip"}, "screenshot": True})  # a form, a screenshot, an error
+        assert r["text"].splitlines()[-1] == tokentext.HINTS["logs"]
+        assert sum(line.startswith("Hint:") for line in r["text"].splitlines()) == 1
+        await d.run_tool("a", "tap", {"target": {"id": "to-detail"}})
+        r = await d.run_tool("a", "tap", {"target": {"id": "plan-trip"}, "screenshot": True})  # the form, then: form first
+        assert r["text"].splitlines()[-1] == tokentext.HINTS["form"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_no_hint_on_a_safety_refusal(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        view = d.control.client("a")
+        app_logs(d, "error")
+        held = "needs_confirmation: Delete is on the skip floor; explore and repair touch nothing it holds, and ask nobody."
+        assert d._with_hints(view, "tap", {}, held, "not_allowed") == held
+        assert "logs" not in view.hints_given  # not spent: the next answer may still carry it
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert r["text"].splitlines()[-1] == tokentext.HINTS["logs"]
         await finish(stop, task)
     run(go)

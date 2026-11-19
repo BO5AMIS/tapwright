@@ -16,7 +16,9 @@ works, and `--no-hints` gives 1.8.5's answers and instructions word for word.
 - The MCP instructions begin with the shared token rules: known steps in one `run` with an `expect`, target by id, a
   screenshot only to judge looks (`screenshot: false` on a `look` that only reads), use `Known:`, hand a long task's driving to one small agent, a bug report is
   `bug_report`.
-- `Hint:` lines, at most one per answer and each once per session: a form opened, three taps along a known way, a
+- `Hint:` lines in the shared words, at most one per answer and each once per session, none on a safety refusal, in
+  the order logs > known way > form > screenshot > long task: a form opened (2 or more inputs and a button), three
+  taps along a known way, a
   screenshot the text already covered, a long task (from the 20th call, worded so a helper agent carries on), the app's
   own logged error or a crash since `logs` was last read (never a tool error).
 - A tap whose target the keyboard covers presses a Done when a touch outside, a drag and the dismiss key don't close

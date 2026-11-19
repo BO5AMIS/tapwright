@@ -4937,28 +4937,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif name not in ("look", "wait", "wait_for", "logs"):
             view.tap_streak = 0
         view.road_known = None
-        chosen: str | None = None
-
-        def wants(kind: str) -> bool:
-            return chosen is None and kind not in view.hints_given
-        # the app's own error or a crash since logs were last read; never a tool error (not_found and the like)
-        if wants("logs") and (CRASH_NOTE in text or self._app_errored(view)):
-            chosen = "logs"
-        if wants("known_way") and code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None:
-            chosen = "known_way"
-        if (wants("form") and code is None and name not in ("logs", "map", "apps")
-                and any(line.startswith("Screen ") for line in text.split("\n")[:4]) and self._is_form(view.items)):
-            chosen = "form"
-        if (wants("screenshot") and code is None and args.get("screenshot") is True and name in ACTIONS and name != "look"
-                and changes.NO_CHANGE not in text):
-            chosen = "screenshot"
-        if wants("long_task") and view.calls >= tokentext.LONG_TASK_CALLS:
-            chosen = "long_task"
+        if code in tokentext.SAFETY_CODES:
+            return text  # no hint on a safety refusal (needs_confirmation, not_allowed, a floor hold)
+        applies = {
+            # the app's own error or a crash since logs were last read; never a tool error (not_found and the like)
+            "logs": lambda: CRASH_NOTE in text or self._app_errored(view),
+            "known_way": lambda: (code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None
+                                  and self._known_name(view) is not None),
+            # a new screen (the full list) holding 2 or more inputs and a button
+            "form": lambda: (code is None and name not in ("logs", "map", "apps")
+                             and any(line.startswith("Screen ") for line in text.split("\n")[:4])
+                             and self._is_form(view.items)),
+            "screenshot": lambda: (code is None and args.get("screenshot") is True and name in ACTIONS and name != "look"
+                                   and changes.NO_CHANGE not in text),
+            "long_task": lambda: view.calls >= tokentext.LONG_TASK_CALLS,
+        }
+        chosen = next((kind for kind in tokentext.ORDER if kind not in view.hints_given and applies[kind]()), None)
         if chosen is None:
             return text
         view.hints_given.add(chosen)
         if chosen == "known_way":
-            return f"{text}\n{tokentext.hint(chosen, call=self._known_call(view))}"
+            return f"{text}\n{tokentext.hint(chosen, name=self._known_name(view))}"
         return f"{text}\n{tokentext.hint(chosen)}"
 
     def _log_mark(self, bundle: str) -> int:
@@ -4984,22 +4983,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         recent = shown[max(0, len(shown) - new):]
         return any(e.level == "error" and e.own for e in recent)
 
-    def _known_call(self, view) -> str:
-        """The one call that reaches the place the app is at: its saved route, else drive to the place."""
+    def _known_name(self, view) -> str | None:
+        """The saved route that reaches the place the app is at (its replay is the known way's one call)."""
         bundle, place = view.place
         try:
             held, _ = self._held_routes(self._maps_root(), bundle)
-            mine = next((r["name"] for r in held if r.get("end") == place and not r.get("variables")), None)
         except Exception:  # noqa: BLE001
-            mine = None
-        return f'`drive {{"route": "{mine}"}}`' if mine else f'`drive {{"to": "{place}"}}`'
+            return None
+        return next((r["name"] for r in held if r.get("end") == place and not r.get("variables")), None)
 
     @staticmethod
     def _is_form(items: list) -> bool:
-        """A form: at least two fields, or one field with a switch beside it."""
+        """A form (§30.3): 2 or more inputs and a button."""
         fields = sum(1 for e in items if getattr(e, "role", None) == "input")
-        switches = sum(1 for e in items if getattr(e, "role", None) == "switch")
-        return fields >= 2 or (fields >= 1 and switches >= 1)
+        return fields >= 2 and any(getattr(e, "role", None) == "button" for e in items)
 
     def _held_titles(self, box: dict, root: str | None, bundle: str, previous: str | None) -> frozenset[str]:
         """The places whose title (as the map held it before this read, or as the screen showed it before the touch) is

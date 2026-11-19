@@ -32,16 +32,20 @@ def known_line(names: list[str]) -> str | None:
     return f"Known: {', '.join(shown)}{more} (one call each: {REPLAY})"
 
 
-# §30.3: one sentence each, naming one call. Keys are what "at most once per session" counts.
+# §30.3: the sentences word for word (Tapwright fills its own call). Keys are what "at most once per session" counts.
 HINTS = {
-    "form": "Hint: this screen is a form: fill it and save it in one `run`, with an `expect` on the save step.",
-    "known_way": "Hint: this way is known: {call} reaches it in one call.",
-    "screenshot": "Hint: the text answer already listed what changed; ask for a screenshot only to judge how something looks.",
-    # (§30.3: harmless to a helper too: a subagent's calls come over the same server)
-    "long_task": "Hint: On a long task, the main session can hand the driving to one small, fast agent; if you are that "
+    "form": "Hint: fill the fields and save in one `run`, with an `expect` on the save step.",
+    "known_way": "Hint: this way is known: `" + REPLAY.replace("{", "{{").replace("}", "}}").replace("<name>", "{name}")
+                 + "` reaches {name} in one call.",
+    "screenshot": "Hint: the text answer had the changes; ask for a screenshot only to judge how something looks.",
+    # (harmless to a helper too: a subagent's calls come over the same server)
+    "long_task": "Hint: on a long task, the main session can hand the driving to one small, fast agent; if you are that "
                  "agent, carry on.",
-    "logs": "Hint: the app logged an error or crashed: `logs` shows its own log.",
+    "logs": "Hint: the app logged an error: `logs` shows it.",
 }
+# §30.3: when several apply, the first of these; none on a safety refusal
+ORDER = ("logs", "known_way", "form", "screenshot", "long_task")
+SAFETY_CODES = ("not_allowed",)  # needs_confirmation, a floor hold and every other refusal of the safety layer
 
 LONG_TASK_CALLS = 20  # §30.3: from the session's 20th call, once
 KNOWN_WAY_TAPS = 3  # single taps in a row along known roads before the known-way hint

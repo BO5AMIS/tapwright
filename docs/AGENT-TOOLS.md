@@ -1424,9 +1424,12 @@ on a long or unknown task hand the driving to one small, fast agent; a bug repor
   used first, else the most recently reached, at most 8 and then `+N more`. Nothing known: no line.
 
 ### 30.3 Hints
-After the `Note:` lines, at most one `Hint:` per answer, each kind once per session: a form opened (fill and save in
-one `run`); 3 single taps in a row along known roads (the one call that gets there); a screenshot asked on an action
-whose text had the changes; a long task (from the session's 20th call: "On a long task, the main session can hand
+After the `Note:` lines, at most one `Hint:` per answer, each kind once per session, never on a safety refusal
+(`not_allowed`: needs_confirmation, a floor hold); when several apply, logs > known way > form > screenshot > long task.
+The sentences are the shared ones, word for word (tapwright/tokentext.py). A form opened (a new screen, the full list,
+with 2 or more inputs and a button: "fill the fields and save in one `run`, with an `expect` on the save step."); 3
+single taps in a row along known roads to a place a saved route reaches ("this way is known: `drive {"route":
+"<name>"}` reaches <name> in one call."); a screenshot asked on an action whose text had the changes; a long task (from the session's 20th call: "On a long task, the main session can hand
 the driving to one small, fast agent; if you are that agent, carry on.", harmless to a helper, whose calls come over
 the same server); the app logged an error of its own or crashed and `logs` wasn't read since (never a tool error such
 as `not_found`).
