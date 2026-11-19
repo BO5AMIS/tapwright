@@ -41,8 +41,8 @@ from . import session as session_module
 from . import shot as shotlib
 from .control import STILL_WANTED, TAP_MS, Controller, Refused, classify
 from .errors import PHONE_LOCKED
-from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
-                     Unanswered, PhoneNotFound, PASSCODE_WORDS)
+from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, LockedBeforeStart, NotSetUp,
+                     NotUnlockedSinceRestart, PasscodeNeeded, PhoneLocked, Proc, Unanswered, PhoneNotFound, PASSCODE_WORDS)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -69,6 +69,8 @@ LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back"
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
+# (W185) a connect that launched no runner because of the phone's lock state: a person is needed, and `unlock` can't help
+HELD_BEFORE_START = (NotUnlockedSinceRestart, LockedBeforeStart)
 UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
 # `unlock` (1.7.8): the agent's own call; its refusals in fixed words (never a value)
 UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, replay, a route, drive or a journey (a lock "
@@ -1659,6 +1661,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(self.stuck, PasscodeNeeded):
             return Refused("locked", "the phone is asking for its passcode to allow UI automation; ask the user "
                                      "to enter it on the phone")
+        if isinstance(self.stuck, HELD_BEFORE_START):  # no runner was launched: `unlock` has nothing to type through
+            return Refused("locked", f"{self.stuck}; ask the user")
         if isinstance(self.stuck, PhoneLocked):
             return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
@@ -5510,6 +5514,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if PASSCODE_WORDS in (self.detail or "") or isinstance(self.stuck, PasscodeNeeded):
             raise Refused("locked", unlocklib.XCTEST)  # a person enters it there, never the tool
         if self.state not in ("live", "locked"):
+            if isinstance(self.stuck, HELD_BEFORE_START):  # (W185) a person unlocks it; then the runner starts
+                raise Refused("locked", f"{self.stuck}; ask the user")
             if isinstance(self.stuck, PhoneLocked):  # the connect found it locked: no session to type through yet
                 raise Refused("locked", UNLOCK_NOT_YET)
             await self.wait_connected()

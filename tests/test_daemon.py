@@ -5086,6 +5086,36 @@ def test_a_phone_asking_for_its_passcode_answers_locked_and_says_which_screen():
     run(go)
 
 
+@pytest.mark.parametrize("held", ["restart", "gate"])
+def test_a_start_held_by_the_lock_state_says_why_and_never_offers_unlock(held):
+    """(W185) No runner was launched (a phone not unlocked since its restart, or the lock gate): a person unlocks it,
+    the `unlock` tool can't type without a runner, and the next connect after the unlock goes on by itself."""
+    from tapwright.device import LockedBeforeStart, NotUnlockedSinceRestart
+
+    async def go():
+        s = FakeSession()
+        s.stuck = NotUnlockedSinceRestart() if held == "restart" else LockedBeforeStart()
+        d = make(s)
+        stop, task = await started(d, until=())
+        await until_stuck(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "look", {"screenshot": False})
+        assert e.value.code == "locked" and "ask the user" in str(e.value)
+        assert ("restarted" if held == "restart" else "starting UI automation") in str(e.value)
+        assert "call unlock" not in str(e.value)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "unlock", {})
+        assert e.value.code == "locked" and "call unlock" not in str(e.value) and "ask the user" in str(e.value)
+        s.stuck = None  # the person unlocked it: the next connect launches the runner
+        for _ in range(300):
+            if d.state == "live":
+                break
+            await asyncio.sleep(0.01)
+        assert d.stuck is None and d.state == "live"
+        await finish(stop, task)
+    run(go)
+
+
 def test_a_call_after_the_passcode_was_typed_gets_the_phone_not_the_last_starts_answer():
     """Seen on the phone 2026-11-10: the passcode was in, nothing had been started since (the starts thin
     out), and a tap answered `locked` 20 s before the phone was back. The call's own start is what counts."""
