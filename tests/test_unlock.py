@@ -26,6 +26,9 @@ def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.El
     return [*items, *extra]
 
 
+SCREEN = (430.0, 932.0)  # the phone's screen in points (iPhone15,3)
+
+
 class Screen:
     """A fake lock screen. Keys pressed are mapped back to digits; the right passcode unlocks it."""
 
@@ -53,6 +56,9 @@ class Screen:
 
     async def xctest_prompt(self):
         return self.xctest
+
+    def screen_size(self):
+        return SCREEN
 
     async def press_keys(self, points):
         centres = {e.center: (e.label or "")[0] for e in self.items}
@@ -302,10 +308,10 @@ class Ios26(Screen):
 
 
 def test_ios26_keypad_listed_off_screen_is_found_but_marked_for_the_hit_test():
-    entry = unlock.find_entry(ios26_tree(), SB)
+    entry = unlock.find_entry(ios26_tree(), SB, SCREEN)
     assert entry is not None and not entry.on_screen and sorted(entry.keys) == sorted(unlock.DIGITS)
     assert entry.keys["1"] == (103.0, 371.0) and entry.frames["0"] == (159.0, 641.0, 112.0, 108.0)
-    assert unlock.find_entry(ios26_tree(), "com.example.app") is None
+    assert unlock.find_entry(ios26_tree(), "com.example.app", SCREEN) is None
     on = unlock.find_entry(ui.Tree(keypad()), SB)
     assert on is not None and on.on_screen  # a keypad the tree lists on the screen needs no hit test
 
@@ -359,7 +365,7 @@ def test_ios26_off_screen_keypad_still_needs_every_proof(change):
     elif change == "xctest-words":
         off.append(("text", "StaticText", "", "Enter iPhone Passcode for \"XCTest\"", (20, 100, 390, 30)))
     tree = ios26_tree(off)
-    entry = unlock.find_entry(tree, SB)
+    entry = unlock.find_entry(tree, SB, SCREEN)
     assert entry is None or not entry.keys  # at most the secure field, which a digit passcode never goes into
     u, _ = unlocker()
     screen = Ios26()
@@ -376,3 +382,32 @@ def test_hit_key_reads_a_named_key_or_one_unnamed_face():
     assert unlock.hit_key("", "", (59.0, 327.0, 88.0, 88.0), 300, 371, frames) is None  # the point isn't on the hit
     assert unlock.hit_key("", "", (40.0, 317.0, 240.0, 108.0), 103, 371, frames) is None  # spans two keys
     assert unlock.hit_key("Cancel", "Cancel", (59.0, 327.0, 88.0, 88.0), 103, 371, frames) is None
+
+
+# ---- review R185b L1: an off-screen keypad's keys must lie on the glass, every edge ----
+
+@pytest.mark.parametrize("change", ["past-right", "past-bottom", "no-size"])
+def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothing_typed(change):
+    off = list(IOS26_OFF)
+    if change == "past-right":
+        off = [(r[0], r[1], r[2], r[3], (r[4][0] + 1000, r[4][1], r[4][2], r[4][3])) if r[1] == "Key" else r for r in off]
+    elif change == "past-bottom":
+        off = [(r[0], r[1], r[2], r[3], (r[4][0], r[4][1] + 2000, r[4][2], r[4][3])) if r[1] == "Key" else r for r in off]
+    tree = ios26_tree(off)
+    size = None if change == "no-size" else SCREEN
+    entry = unlock.find_entry(tree, SB, size)
+    assert entry is None or not entry.keys
+
+    class Off(Ios26):
+        async def key_at(self, x, y, frames):  # a runner whose hit test answers the off-screen key itself
+            self.probed.append((x, y))
+            key = self._keys().get((x, y))
+            return key.label if key is not None else None
+
+        def screen_size(self):
+            return size
+    u, _ = unlocker()
+    screen = Off()
+    screen.tree = tree
+    r = run(u.unlock(screen, PASSCODE))
+    assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2

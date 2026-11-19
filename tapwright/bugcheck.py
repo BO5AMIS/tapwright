@@ -28,6 +28,9 @@ from . import bug, explore, findings
 RUNS_DEFAULT = 3
 RUNS_MAX = 10
 RUN_SECONDS = 60.0
+# (review R185b M1) a run's reset and its way to the start each wait for the app's screen, up to exploretool.LAUNCH_WAIT
+# (30 s) each (not imported: exploretool is heavy; tests/test_bug_r185b.py checks they agree)
+LAUNCH_WAITS = 2 * 30.0
 RESET_OWN = "relaunch only, data kept"
 UNREACHABLE = "an unreachable place has no steps"
 NO_START = "the screen it started on isn't known"
@@ -105,13 +108,13 @@ def runs_of(verify: object, default: int) -> int:
 
 
 def timeout_for(args: dict) -> float:
-    """How long a client waits for `bug_report`'s answer: each run's 60 s with its reset and the way to its start, and the
-    export's push when there is one."""
+    """How long a client waits for `bug_report`'s answer: each run's 60 s with its reset and the way to its start (60 s),
+    the two launch waits of each run (its reset's and its way's, review R185b M1), and the export's push when there is one."""
     verify = args.get("verify")
     runs = RUNS_DEFAULT if verify is True else verify if isinstance(verify, int) and not isinstance(verify, bool) else 0
     if verify is None and (args.get("finding") is not None or args.get("from") == "failure"):
         runs = RUNS_DEFAULT
-    return 120.0 + runs * (RUN_SECONDS + 60.0) + (600.0 if args.get("export") is not None else 0.0)
+    return 120.0 + runs * (RUN_SECONDS + 60.0 + LAUNCH_WAITS) + (600.0 if args.get("export") is not None else 0.0)
 
 
 def not_checked(why: str) -> dict:

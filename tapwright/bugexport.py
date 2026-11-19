@@ -158,8 +158,11 @@ def inert(page: str) -> str:
     return "\n".join(out)
 
 
-def _gated(gate: Gate, texts: dict[str, str], audit: Audit, target: str, bug_id: str) -> None:
-    bad = gate(texts)
+def _gated(gate: Gate, texts: dict[str, str], audit: Audit, target: str, bug_id: str,
+           extra: dict[str, str] | None = None) -> None:
+    """The gate over what is sent (review R185b H1): the bug's app text when its files are as the tool built them, else
+    every text whole, with `extra`."""
+    bad = bugstore.gate_sent(texts, gate, extra)
     if bad is not None:
         raise _refuse(audit, target, bug_id, "redaction check", f"export refused: a vault value was found in {bad}. "
                                                                 "Nothing was sent.")
@@ -261,8 +264,7 @@ def to_issue(held: bugstore.Kept, spec: dict, gate: Gate, audit: Audit, checked:
     title = bug.one_line(texts["report.md"].split("\n", 1)[0].removeprefix("# "))[:200]
     body = issue_body(held, texts["report.md"], repo, picture is not None)
     # (the page as it is too: the issue's body has its `@` and `#` escaped, which a value may hold)
-    _gated(gate, {"title": title, "report.md": texts["report.md"], "issue body": body, "repro.json": texts["repro.json"]},
-           audit, target, held.id)
+    _gated(gate, texts, audit, target, held.id, {"title": title, "issue body": body})
     public = _public(repo)
     if public and not spec["public"]:
         raise _refuse(audit, target, held.id, "public repository",

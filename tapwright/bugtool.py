@@ -315,12 +315,19 @@ class BugTools:
     def _bugs(self) -> bugstore.BugStore:
         bugs = bugstore.BugStore(self.bug_home if self.bug_home is not None else store.HOME / "bugs")
         if not self._bug_pruned:  # (§29.2: retention at start too; the daemon's first use of the bugs is its start for them)
-            self._bug_pruned = True
+            # (review R185b L3) this runs on the daemon's event loop: each app's lock is tried once, never waited for (the
+            # command line may hold it for a while, writing a zip); an app whose bugs are busy is left for the next call,
+            # and every bug made or updated prunes its app anyway
+            done = True
             try:
                 for app in bugs.apps():
-                    bugs.prune(app)
+                    try:
+                        bugs.prune(app, wait=0.0)
+                    except bugstore.BugFolderError:
+                        done = False
             except OSError:
                 pass
+            self._bug_pruned = done
         return bugs
 
     def _bug_explore_home(self) -> Path:
@@ -387,8 +394,8 @@ class BugTools:
                 said = await self._bug_export(held, parsed["export"])
             except Refused as e:
                 # (the bug is made and kept: the refusal says so, and nothing was sent)
-                raise Refused(e.code, ctx.safe()(f"{e}\n{text}")) from None
-            notes.append(ctx.safe()(said))
+                raise Refused(e.code, f"{ctx.safe()(str(e))}\n{text}") from None
+            notes.append(said)  # (the tool's own words, the zip's path or the issue's link: review R185b H1)
         return {"text": "\n".join([text, *notes]), "image": None, "image_size": None}
 
     async def _bug_checked(self, ctx: bugmake.Context, client_id: str, scope, made: bugstore.Made, runs: int, parsed: dict,

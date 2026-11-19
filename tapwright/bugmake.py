@@ -45,9 +45,19 @@ class Context:
     gate: Callable[[dict[str, str]], str | None]
     map_data: Callable[[str], dict | None]
     rules: policylib.Policy = policylib.NONE
+    # (review R185b H1) what the tool's own labels (versions, build, device) are checked with: the vault's values and codes,
+    # not the typed values. None: the vault redactor of the store `scrub` belongs to (`Store.bug_scrub`), else `scrub`
+    labels: Callable[[str], str] | None = None
 
     def safe(self) -> Callable[[str], str]:
         return findings.safe_scrub(self.scrub)
+
+    def label_check(self) -> Callable[[str], str]:
+        if self.labels is not None:
+            return findings.safe_scrub(self.labels)
+        owner = getattr(self.scrub, "__self__", None)
+        vault = getattr(owner, "scrub", None) if getattr(self.scrub, "__name__", "") == "bug_scrub" else None
+        return findings.safe_scrub(vault if callable(vault) else self.scrub)
 
 
 # ---- the finding, made safe ----
@@ -55,7 +65,7 @@ class Context:
 _PRIVATE_ONLY = re.compile(r"^(?:\S+\s+){0,3}<private>\s*$")  # "04:49:22.373 info <private>": a line iOS hid whole
 
 
-def clean(raw: dict, scrub: Callable[[str], str], named: bool = True) -> dict:
+def clean(raw: dict, scrub: Callable[[str], str], named: bool = True, labels: Callable[[str], str] | None = None) -> dict:
     """A finding (§27 JSON, or `observed`) checked and redacted whole, then its paths cut to file names (its `got`,
     `expected`, logs and crash: review R185 M2), then cut; a `system` that isn't one of §29.8's kinds is `other`.
     `FindingError` for what isn't a finding.
@@ -64,7 +74,7 @@ def clean(raw: dict, scrub: Callable[[str], str], named: bool = True) -> dict:
     screen text and no log lines beyond its own normalized `got`: no logs, no component names, `got` and `expected`
     normalized (§29.5), a step only when it is aimed by an id (one aimed by words cuts the path after it), and its picture
     is private."""
-    made = findings.parse(raw, scrub, bug.BUG_KINDS)
+    made = findings.parse(raw, scrub, bug.BUG_KINDS, labels)
     out = findings.to_dict(made)
     out["got"] = "\n".join(bug.strip_paths(line) for line in out["got"].split("\n"))
     out["expected"] = bug.strip_paths(out["expected"])
@@ -202,7 +212,7 @@ def script_for(finding: dict, script: dict | None, scrub: Callable[[str], str]) 
     for step in script.get("steps") or []:
         if isinstance(step, dict) and step.get("tool") == "type_text":
             step["text"] = findings.TYPED
-    return findings.redact(script, scrub)  # type: ignore[return-value]
+    return bugstore.redact_kept({}, {}, script, scrub)[2] or {}  # (its app text: review R185b H1)
 
 
 def _escaped(step: dict) -> dict:
@@ -310,7 +320,7 @@ def read_run(explore_home: Path, run_dir: Path, finding_id: str) -> RunFinding:
 
 
 def from_run(ctx: Context, got: RunFinding, *, with_picture: bool, reproduced: dict, named: bool = False) -> bugstore.Made:
-    finding = clean(got.raw, ctx.safe(), named)
+    finding = clean(got.raw, ctx.safe(), named, ctx.label_check())
     key = place_key_of(ctx, finding["app"], finding.get("place"), got.place_keys)
     return _make(ctx, finding, place_key=key, how="explore", key=f"{got.run}/{finding['id']}", run=got.run,
                  script=got.script, picture=got.picture, with_picture=with_picture, reproduced=reproduced,
@@ -436,7 +446,7 @@ def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identit
                  "logs": logs[-findings.MAX_LOGS:], "count": 1}
     if system is not None:
         raw["system"] = system
-    finding = clean(raw, ctx.safe(), named)
+    finding = clean(raw, ctx.safe(), named, ctx.label_check())
     return _make(ctx, finding, place_key=place_key, how="now", key=f"now/{when}", run=None, script=None, picture=picture,
                  with_picture=with_picture, reproduced=reproduced or {"checked": False, "why": bug.NOT_ASKED},
                  extras={"steps_cut": observed.cut, "links_cut": list(observed.links_cut)}, named=named)
@@ -507,7 +517,7 @@ def failure_record(*, app: str, identity: dict, when: str, steps: list[dict], fa
 def from_failure(ctx: Context, failure: dict, *, with_picture: bool, reproduced: dict, named: bool = False) -> bugstore.Made:
     """The `expect_failed` finding of the session's last failed `run` or `replay` (`failure` as the daemon kept it). Its
     script is its path: the steps as they were replayed (review R185 M4)."""
-    finding = clean(failure["finding"], ctx.safe(), named)
+    finding = clean(failure["finding"], ctx.safe(), named, ctx.label_check())
     key = place_key_of(ctx, finding["app"], finding.get("place"))
     return _make(ctx, finding, place_key=key, how="failure", key=f"failure/{finding['when']}", run=None,
                  script=None, picture=failure.get("picture"), with_picture=with_picture, reproduced=reproduced,
@@ -518,20 +528,24 @@ def from_failure(ctx: Context, failure: dict, *, with_picture: bool, reproduced:
 # ---- the answer (§29.3) ----
 
 def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bool = True, home: Path | None = None) -> str:
+    """The tool's answer. Only the app's text in it (the title's `got`, a check's reason) is read through the redactor
+    (review R185b H1): the id, the dates, the builds and the folder are the tool's own and shown as they are."""
+    safe = findings.safe_scrub(scrub)
     seen = made.meta["seen"]
     times = f"{seen['count']} {'time' if seen['count'] == 1 else 'times'}"
     builds = seen["builds"]
     shown_builds = f"build {builds[0]}" if len(builds) == 1 else f"builds {', '.join(builds)}"
-    head = f"New bug: {made.title}" if made.new else f"Known bug (seen {times}): {made.title}"
+    title = bug.title(made.finding["kind"], made.finding.get("place"), safe(made.finding["got"]))
+    head = f"New bug: {title}" if made.new else f"Known bug (seen {times}): {title}"
     r = made.meta["reproduced"]
     if r.get("checked") is False:
         shown = reason_shown and r.get("why") != bug.NOT_ASKED  # (no check asked for: no reason to give, §29.3; W177)
-        line = f"Reproduced: not checked ({r['why']})." if shown else "Reproduced: not checked."
+        line = f"Reproduced: not checked ({safe(str(r['why']))})." if shown else "Reproduced: not checked."
     else:
         n, of = r["n"], r["of"]
         line = f"Reproduced: {n} of {of} runs" + (": not reproduced." if n == 0 else " (flaky)." if n < of else ".")
     lines = [head, line, f"Seen: {times}, {str(seen['last'])[:10]}, {shown_builds}.", f"Folder: {shown_path(made.folder, home)}"]
-    return findings.safe_scrub(scrub)("\n".join(lines))
+    return "\n".join(lines)
 
 
 def shown_path(path: Path, home: Path | None = None) -> str:

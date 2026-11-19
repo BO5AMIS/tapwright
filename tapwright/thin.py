@@ -34,7 +34,8 @@ APPLY_CALL_TIMEOUT = 480.0  # replay with repair "apply": the run, then the repa
 EXPLORE_MINUTES = 10.0  # explore's default budget (explore.MINUTES)
 EXPLORE_MARGIN = 60 + 5 * 60  # a minute for the report and a person's waits (exploretool.timeout_for)
 FLOOR_TOOLS = ("explore", "replay", "bug_report")  # the calls whose own moves pass the skip floor, as server.FLOOR_TOOLS (replay with repair)
-BUG_BASE, BUG_RUN, BUG_RUNS, BUG_EXPORT = 120.0, 60.0 + 60.0, 3, 600.0  # bug_report: bugcheck.timeout_for (3 runs by default)
+BUG_BASE, BUG_RUN, BUG_RUNS, BUG_EXPORT = 120.0, 60.0 + 60.0 + 2 * 30.0, 3, 600.0  # bug_report: bugcheck.timeout_for (3 runs
+# by default; each run with its two launch waits, review R185b M1)
 NO_DAEMON = "tapwright serve isn't running (or its address file is unreadable): start it with `tapwright serve`."
 
 

@@ -85,6 +85,154 @@ def build_of(finding: dict) -> str:
     return f"{finding['app_version']} ({finding['build']})"
 
 
+# ---- what the redactor and the gate read (review R185b H1) ----
+# Only text that came from the app or the session (`got`, `expected`, the note, logs, frames, the component stack, the steps'
+# words, road names, a check's reason) is read through the redactor and gated. What the tool writes itself (its ids, times,
+# place names, versions and build numbers, counts, hashes, the page's own words) is never: a typed `2026` or `place` must not
+# turn a date into `<typed value>-11-14` or refuse every bug. Unknown keys are read as app text (fail closed).
+TOOL_FINDING = frozenset({"id", "kind", "app", "app_version", "build", "tool", "tool_version", "when", "device", "place",
+                          "path_from", "picture", "repro", "count", "system"})
+TOOL_META = frozenset({"id", "generation", "signature", "source", "seen", "picture_included", "picture_file",
+                       "picture_source", "test_app", "needs_person", "steps_cut", "links_cut", "others"})
+TOOL_REPRODUCED = frozenset({"checked", "n", "of", "build", "when", "reset"})  # (`why` is read: it may quote the screen)
+TOOL_SCRIPT = frozenset({"format", "version", "name", "app", "start", "end", "variables"})
+TOOL_STEP = frozenset({"tool", "direction", "to"})  # (a tool's name and a scroll's direction are never content: §20.3)
+
+
+def _steps_split(steps: object) -> tuple[object, object]:
+    """(the steps' app text, the steps' tool-made parts): each step dict split by `TOOL_STEP`."""
+    if not isinstance(steps, list):
+        return steps, None
+    text, tool = [], []
+    for step in steps:
+        if isinstance(step, dict):
+            text.append({k: v for k, v in step.items() if k not in TOOL_STEP})
+            tool.append({k: v for k, v in step.items() if k in TOOL_STEP})
+        else:
+            text.append(step)
+            tool.append({})
+    return text, tool
+
+
+def _steps_join(text: object, tool: object) -> object:
+    if not isinstance(text, list) or not isinstance(tool, list):
+        return text
+    return [{**t, **s} if isinstance(s, dict) and isinstance(t, dict) else s for s, t in zip(text, tool)]
+
+
+def _parts(value: dict, tool_keys: frozenset[str], steps_key: str | None) -> tuple[dict, dict]:
+    """(app text, tool-made) of one dict, in its own key order when joined again."""
+    app = {k: v for k, v in value.items() if k not in tool_keys}
+    tool = {k: v for k, v in value.items() if k in tool_keys}
+    if steps_key is not None and steps_key in app:
+        app[steps_key], tool[f"\0{steps_key}"] = _steps_split(app[steps_key])
+    return app, tool
+
+
+def _join(order: dict, app: dict, tool: dict, steps_key: str | None) -> dict:
+    if steps_key is not None and steps_key in app:
+        app = {**app, steps_key: _steps_join(app[steps_key], tool.get(f"\0{steps_key}"))}
+    return {k: (app[k] if k in app else tool[k]) for k in order}
+
+
+def _meta_parts(meta: dict) -> tuple[dict, dict]:
+    app, tool = _parts(meta, TOOL_META, None)
+    for key, exempt in (("reproduced", TOOL_REPRODUCED), ("place_key", frozenset({"signature"}))):
+        if isinstance(app.get(key), dict):
+            app[key], tool[f"\0{key}"] = _parts(app[key], exempt, None)
+    return app, tool
+
+
+def _meta_join(meta: dict, app: dict, tool: dict) -> dict:
+    app = dict(app)
+    for key in ("reproduced", "place_key"):
+        if isinstance(app.get(key), dict) and isinstance(meta.get(key), dict):
+            app[key] = _join(meta[key], app[key], tool.get(f"\0{key}") or {}, None)
+    return _join(meta, app, tool, None)
+
+
+def redact_kept(finding: dict, meta: dict, script: dict | None, scrub: Callable[[str], str]) -> tuple[dict, dict, dict | None]:
+    """The finding, meta and script with their app text read through the redactor, and what the tool wrote as it was."""
+    f_app, f_tool = _parts(finding, TOOL_FINDING, "path")
+    m_app, m_tool = _meta_parts(meta)
+    out_f = _join(finding, findings.redact(f_app, scrub), f_tool, "path")  # type: ignore[arg-type]
+    out_m = _meta_join(meta, findings.redact(m_app, scrub), m_tool)  # type: ignore[arg-type]
+    out_s = None
+    if script is not None:
+        s_app, s_tool = _parts(script, TOOL_SCRIPT, "steps")
+        out_s = _join(script, findings.redact(s_app, scrub), s_tool, "steps")  # type: ignore[arg-type]
+    return out_f, out_m, out_s
+
+
+def _leaves(value: object, out: list[str]) -> list[str]:
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _leaves(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _leaves(v, out)
+    return out
+
+
+def gated(finding: dict, meta: dict, script: dict | None) -> dict[str, str]:
+    """What the grep gate reads of a bug (review R185b H1): the app text of its finding and meta (all its page shows of the
+    app: the page is built from them) and of its script, each text on its own line. The page's own words and what the tool
+    wrote are left out."""
+    f_app, _ = _parts(finding, TOOL_FINDING, "path")
+    m_app, _ = _meta_parts(meta)
+    # the app text as the page shows it too (its lines joined, paths cut, a frame's number and offsets dropped): a cut that
+    # brings two parts of a text together is gated as well
+    shown: list[str] = []
+    for key in ("got", "expected"):
+        if isinstance(f_app.get(key), str):
+            shown.append(bug.one_line("; ".join(f_app[key].split("\n"))))
+    shown.extend(bug.one_line(bug.strip_paths(x)) for x in f_app.get("logs") or [] if isinstance(x, str))
+    crash = f_app.get("crash")
+    if isinstance(crash, dict):
+        if isinstance(crash.get("reason"), str):
+            shown.append(bug.one_line(bug.strip_paths(crash["reason"])))
+        shown.extend(bug.frame_shown(x) for x in crash.get("frames") or [] if isinstance(x, str))
+    files = {"report.md": "\n".join(shown), "finding.json": "\n".join(_leaves([f_app, m_app], []))}
+    if script is not None:
+        files["repro.json"] = "\n".join(_leaves(_parts(script, TOOL_SCRIPT, "steps")[0], []))
+    return files
+
+
+def composed(texts: dict[str, str]) -> tuple[dict, dict, dict] | None:
+    """(finding, meta, script) when a bug's text files are exactly what they would be built from its `finding.json` and
+    `repro.json` (so gating those fields gates every file); None when any file differs (a page edited by hand, a file
+    missing): then every text is gated whole."""
+    try:
+        data = json.loads(texts["finding.json"])
+        script = json.loads(texts["repro.json"])
+    except (KeyError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("bug"), dict) or not isinstance(script, dict):
+        return None
+    meta = data["bug"]
+    finding = {k: v for k, v in data.items() if k != "bug"}
+    try:
+        page = bug.markdown(finding, meta, "picture.jpg" if meta.get("picture_included") else None)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return None
+    if texts.get("report.md") != page or texts.get("report.html") != bug.page_html(page) \
+            or texts["finding.json"] != _dumps(data) or texts["repro.json"] != _dumps(script):
+        return None
+    return finding, meta, script
+
+
+def gate_sent(texts: dict[str, str], gate: Callable[[dict[str, str]], str | None],
+              extra: dict[str, str] | None = None) -> str | None:
+    """The export's gate (§29.6, review R185b H1): a bug whose files are as the tool built them is gated on its app text, as
+    when it was made; any other is gated whole, with `extra` (an issue's title and body)."""
+    parts = composed(texts)
+    if parts is not None:
+        return gate(gated(*parts))
+    return gate({**texts, **(extra or {})})
+
+
 def _write(path: Path, data: str | bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -169,17 +317,18 @@ class BugStore:
     # ---- the lock (review R185 M5) ----
 
     @contextlib.contextmanager
-    def locked(self, app: str) -> Iterator[None]:
-        """One change of this app's bugs at a time, in this process and in any other (a lock file beside them)."""
+    def locked(self, app: str, wait: float = LOCK_WAIT) -> Iterator[None]:
+        """One change of this app's bugs at a time, in this process and in any other (a lock file beside them). `wait`:
+        how long a taken lock is waited for (0: tried once, review R185b L3), then `BugFolderError`."""
         folder = self.app_dir(app)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / LOCK_FILE
-        deadline = time.monotonic() + LOCK_WAIT
+        deadline = time.monotonic() + wait
         # (PR #21: a lock is never taken over for its age; a holder suspended for minutes still holds it, and only a lock
         # whose holder's process is gone is taken over. Only its holder releases it.)
         while (token := pidlock.take(path)) is None:
             if time.monotonic() > deadline:
-                raise BugFolderError(f"the bugs of {app} stayed locked for {LOCK_WAIT:g} s; try again.")
+                raise BugFolderError(f"the bugs of {app} stayed locked for {wait:g} s; try again.")
             time.sleep(LOCK_POLL)
         try:
             # (PR #21) a swap a dead writer left half done is mended first, before any bug is looked up or made: a report of
@@ -268,7 +417,7 @@ class BugStore:
             meta["picture_file"] = {"private": private, "consent": bool(with_picture and private),
                                     "sha256": hashlib.sha256(picture).hexdigest()}
         files = self._files(finding, meta, script, "picture.jpg" if include else None)
-        if (bad := gate(files)) is not None:
+        if (bad := gate(gated(finding, meta, script or {}))) is not None:  # (the app text only: review R185b H1)
             raise BugGateError(bad)
         folder = self.app_dir(app) / bug_id
         self._write_new(folder, files, picture if include else None)
@@ -376,10 +525,11 @@ class BugStore:
         one (a value added to the vault since is hidden: review R185 L2), and its page built anew from them."""
         finding = held.finding
         script_text = None
+        script: dict | None = None
         if scrub is not None:
             safe = findings.safe_scrub(scrub)
-            finding = findings.redact(finding, safe)  # type: ignore[assignment]
-            meta = findings.redact(meta, safe)  # type: ignore[assignment]
+            # (review R185b H1) only the app's and the session's text: the ids, times and builds stay as the tool wrote them
+            finding, meta, _ = redact_kept(finding, meta, None, safe)
             try:
                 script = json.loads((held.folder / "repro.json").read_text("utf-8"))
                 if not isinstance(script, dict):
@@ -389,12 +539,13 @@ class BugStore:
                 # that says it was updated beside a script no gate has seen
                 raise BugFolderError(f"the repro.json of {held.id} can't be read, so the bug was kept as it was. Move its "
                                      "folder away or remove it, then report the bug again.") from None
-            script_text = _dumps(findings.redact(script, safe))
+            script = redact_kept({}, {}, script, safe)[2]
+            script_text = _dumps(script)
         page = bug.markdown(finding, meta, "picture.jpg" if meta.get("picture_included") else None)
         files = {"report.md": page, "report.html": bug.page_html(page), "finding.json": _dumps({**finding, "bug": meta})}
         if script_text is not None:
             files["repro.json"] = script_text
-        if (bad := gate(files)) is not None:
+        if (bad := gate(gated(finding, meta, script))) is not None:
             raise BugGateError(bad, update=True)
         self._publish(held.folder, files, picture)
         self._prune(held.app, keep=held.id)
@@ -434,18 +585,21 @@ class BugStore:
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
             raise
-        shutil.rmtree(old, ignore_errors=True)
+        _discard(old)
 
     def _tidy(self, app: str) -> None:
         """Under the lock: what a process that died during a write left beside the bugs. A previous version whose folder is
-        gone goes back (it was whole); any other staged folder is removed (no writer is at work now)."""
+        gone goes back only when it is whole (`_whole`: every text file, its picture when it has one, and its `finding.json`
+        naming its own id; review R185b L2); any
+        other staged folder (a part-removed backup, a `.dead.` one) is removed (no writer is at work now)."""
         try:
             left = [p for p in self.app_dir(app).iterdir() if p.name.startswith(".bug_") and p.is_dir() and not p.is_symlink()]
         except OSError:
             return
         for path in sorted(left, key=lambda p: ".old." not in p.name):
             name = path.name[1:].split(".", 1)[0]
-            if ".old." in path.name and bug.BUG_ID.match(name) and not (path.parent / name).exists():
+            if ".old." in path.name and bug.BUG_ID.match(name) and not (path.parent / name).exists() \
+                    and _whole(path, name):
                 try:
                     os.replace(path, path.parent / name)
                 except OSError:
@@ -469,10 +623,10 @@ class BugStore:
 
     # ---- retention (§29.2) ----
 
-    def prune(self, app: str, keep: str | None = None) -> None:
+    def prune(self, app: str, keep: str | None = None, wait: float = LOCK_WAIT) -> None:
         """The newest `kept` bugs of the app stay; the others are removed with their `.zip`. `keep`, and a bug a check
-        holds, is never removed."""
-        with self.locked(app):
+        holds, is never removed. `wait`: as `locked`'s."""
+        with self.locked(app, wait):
             self._prune(app, keep)
 
     def _prune(self, app: str, keep: str | None = None) -> None:
@@ -503,6 +657,31 @@ class BugStore:
                 lines.append(f"  {k.id}  {k.title}   seen {k.meta['seen']['count']}, last {str(k.meta['seen']['last'])[:10]}, "
                              f"{checked}")
         return lines
+
+
+def _whole(folder: Path, bug_id: str) -> bool:
+    """Is a backup a whole bug (review R185b L2)? Its `finding.json` reads and names this id, and its page is there. A
+    backup a failed removal left part-deleted is never made the bug."""
+    try:
+        data = json.loads((folder / "finding.json").read_text("utf-8"))
+        files = all((folder / name).is_file() for name in TEXT_FILES)
+        meta = data.get("bug") if isinstance(data, dict) else None
+        if isinstance(meta, dict) and meta.get("picture_included"):
+            files = files and (folder / "picture.jpg").is_file()
+    except (OSError, ValueError, RecursionError):
+        return False
+    return files and isinstance(meta, dict) and meta.get("id") == bug_id
+
+
+def _discard(old: Path) -> None:
+    """A replaced version removed: first renamed `.dead.` (review R185b L2), so a removal a reader's open file stops part
+    way (Windows) leaves nothing `_tidy` would put back; the next lock's `_tidy` removes what is left."""
+    dead = old.with_name(old.name.replace(".old.", ".dead.", 1))
+    try:
+        os.replace(old, dead)
+    except OSError:
+        return  # (a reader holds it: left whole, for the next lock's `_tidy`, which checks it with `_whole` first)
+    shutil.rmtree(dead, ignore_errors=True)
 
 
 def _source_id(key: str) -> str:

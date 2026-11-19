@@ -85,10 +85,11 @@
   Notification Center open as locked.
 - `unlock` finds iOS 26's passcode keypad (seen on a Face ID iPhone with iOS 26.5, where it answered that the
   passcode entry couldn't be found): the keypad is on the screen but under a view whose frame lies outside it, so
-  the tree listed every key as off the screen. Such a keypad (each digit's key once, none above or left of the
-  screen, every other check as before) is used only after the runner's hit test confirms that touches at four keys
-  (always 1, 3, 5 and 0, whatever the passcode is) land on those keys in SpringBoard; iOS 26 answers each key's round
-  face, unnamed, inside the key. Keys of type Key count as buttons.
+  the tree listed every key as off the screen. Such a keypad (each digit's key once, every key's centre on the screen,
+  every other check as before) is used only after the runner's hit test confirms that touches at four keys (always 1,
+  3, 5 and 0, whatever the passcode is) land on those keys in SpringBoard; iOS 26 answers each key's round face,
+  unnamed, inside the key. Without the hit test (an older runner, the check off, landscape) or the screen's size, the
+  answer is `not_proven`.
 
 - A bug made `from: "failure"` names the place the run's answer named (a thin run's own read; it said "an unnamed
   screen"), and its Logs are the app's own lines, as `from: "now"` keeps them, not the run's log block with iOS's lines.
@@ -121,6 +122,20 @@
   check that couldn't run keeps a check another one finished meanwhile (decided under the lock). A picture added to a bug
   made again meanwhile is refused. Explore's and `from: "now"`'s picture is private when a system sheet was in front as
   it was taken (a share sheet that came up after the last read).
+- Review round 3 (PR #21): a value typed in the session that is also in what the tool writes itself (a year such as
+  `2026`, the word `place`, the build number, a run of a bug id's hex) no longer refuses every bug and every export until
+  a restart, and a check or sighting no longer turns a kept bug's dates or id into `<typed value>` (which made it sort
+  first for retention, or unreadable). The redactor and the grep gate read only the text that came from the app or the
+  session (got, expected, the note, logs, frames, the component stack, the steps' words, road names, a check's reason);
+  the tool's ids, times, place names, versions, builds and the page's own words are written as they are. A typed value in
+  the app's text is hidden as before, and a version or build that holds a vault value is still refused. An export gates a
+  bug's app text when its files are as the tool built them, and every text whole when they aren't (a page edited by hand).
+- `bug_report`'s wait in `tapwright call` and the MCP server covers each run's two launch waits (up to 30 s each), so a
+  check of a development build that loads slowly no longer times out while the daemon is still checking.
+- A backup of a bug that couldn't be removed whole (Windows, a file held open) is never put back as the bug: a replaced
+  version is renamed before it is removed, and only a whole backup is restored. The daemon's first bug call no longer
+  waits up to 15 s on its event loop while the command line holds an app's bugs: retention then skips that app until the
+  next call.
 
 ## 1.8.0 (2026-11-19), "the Explorer"
 

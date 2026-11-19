@@ -398,6 +398,7 @@ class LockScreen(Protocol):
     async def lock_tree(self) -> tuple[ui.Tree, str | None]: ...  # SpringBoard's tree now, and the app in front
     async def xctest_prompt(self) -> bool | None: ...  # is iOS's XCTest passcode prompt up (None: can't say)
     async def press_keys(self, points: list[tuple[float, float]]) -> None: ...
+    def screen_size(self) -> tuple[float, float] | None: ...  # the screen's size in points (None: not known)
     async def type_secret(self, text: str) -> None: ...
     # the key (of `frames`, digit -> frame) a touch at (x, y) lands on, as the runner's hit test says; None: no key, or
     # it can't say
@@ -466,14 +467,26 @@ def hit_key(name: str, label: str, rect: tuple[float, float, float, float], x: f
     return holders[0] if len(holders) == 1 else None
 
 
-def find_entry(tree: ui.Tree, front: str | None) -> Entry | None:
+def _on_glass(keys, screen: tuple[float, float] | None) -> bool:
+    """Is every key's centre on the screen (left, top, right and bottom edges; review R185b L1)? An unknown size: no."""
+    if screen is None:
+        return False
+    try:
+        w, h = float(screen[0]), float(screen[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return w > 0 and h > 0 and all(0 <= e.center[0] < w and 0 <= e.center[1] < h for e in keys)
+
+
+def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | None = None) -> Entry | None:
     """The passcode entry iOS's lock screen shows, or None when this screen isn't proven to be it: SpringBoard in front,
     no alert, nothing about XCTest, and the keypad's ten keys (each once) or a secure passcode field.
 
     iOS 26 (seen on the phone 2026-11-19, iPhone15,3 iOS 26.5) shows the keypad on the screen but under a container
     whose frame lies outside it, so the tree lists every key as off the screen. Then the keys are taken from the whole
-    tree, on screen and off, each digit once, no key's centre above or left of the screen, and the Entry says so
-    (`on_screen` False): the Unlocker types on them only after the hit test confirmed where they are."""
+    tree, on screen and off, each digit once, every key's centre on the screen (`screen`, its size in points: review
+    R185b L1; unknown, no such keypad), and the Entry says so (`on_screen` False): the Unlocker types on them only after
+    the hit test confirmed where they are."""
     if front != SPRINGBOARD:
         return None
     if tree.alert is not None:
@@ -484,7 +497,7 @@ def find_entry(tree: ui.Tree, front: str | None) -> Entry | None:
     keypad, on_screen = _keypad(tree.items), True
     if not keypad:
         keypad, on_screen = _keypad(items), False
-        if any(e.center[0] < 0 or e.center[1] < 0 for e in keypad.values()):
+        if not _on_glass(keypad.values(), screen):
             keypad = {}
     fields = [e for e in tree.items if _passcode_field(e) and not e.in_alert]
     secure = fields[0] if len(fields) == 1 else None
@@ -607,7 +620,11 @@ class Unlocker:
             tree, front = await phone.lock_tree()
         except Exception:
             return None
-        return find_entry(tree, front)
+        try:
+            screen = phone.screen_size()
+        except Exception:
+            screen = None
+        return find_entry(tree, front, screen)
 
     async def _unlocked(self, phone: LockScreen) -> bool:
         deadline = self.clock() + self.confirm_wait
@@ -640,6 +657,10 @@ class PhoneLockScreen:
 
     async def locked(self) -> bool:
         return bool(await self.session.locked())
+
+    def screen_size(self) -> tuple[float, float] | None:
+        screen = getattr(self.session, "screen", None)
+        return (float(screen[0]), float(screen[1])) if isinstance(screen, tuple) and len(screen) == 2 else None
 
     async def wake(self) -> None:
         # WebDriverAgent's unlock: wakes the screen and presses home (the passcode keypad on a Touch ID phone); on a

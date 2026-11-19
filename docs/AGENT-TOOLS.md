@@ -241,7 +241,7 @@ Arguments: `name`, `look`, `screenshot`, `brief`.
 
 Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, `phone.passcode`). You never see or send the passcode: the tool types it on iOS's own lock screen, never on the XCTest prompt, at most twice an hour and 3 times a day, and never again after the phone refused it. Answers with the screen once unlocked, or `The phone isn't locked.`; `locked` when no passcode is saved (ask the user to unlock it) or the unlock couldn't be done (its reason). A call of its own: not a step of `run`, `replay`, `drive` or a journey. The owner stops you by pausing in the live view.
 
-Works in every mode (personal, `--dedicated`, `--phone`); `serve --phone` still also unlocks by itself at the start of a new call. While it runs, `filmstrip`, `compare_screen` and screenshots answer `busy` ("the phone is being unlocked"), and recordings leave those frames out. It wakes the lock screen at most 3 times in 10 minutes without typing. Every rule of the passcode unlock holds (only iOS's lock screen with its keypad proven, never the XCTest prompt, the limits, the stop after a refusal, an audit line with the name `phone.passcode` only). Paused: `paused`; a person at the phone: `busy`. Every `locked` answer for a locked phone now says: "the phone is locked; call unlock (it types the passcode saved for this phone), or ask the user to unlock it".
+Works in every mode (personal, `--dedicated`, `--phone`); `serve --phone` still also unlocks by itself at the start of a new call. While it runs, `filmstrip`, `compare_screen` and screenshots answer `busy` ("the phone is being unlocked"), and recordings leave those frames out. It wakes the lock screen at most 3 times in 10 minutes without typing. Every rule of the passcode unlock holds (only iOS's lock screen with its keypad proven (iOS 26 lists its keypad as off the screen: such a keypad is used only when every key's centre lies on the screen and the runner's hit test confirms keys 1, 3, 5 and 0 land on those keys; without the hit test, on an older runner, with the check off or in landscape, the answer is `not_proven`), never the XCTest prompt, the limits, the stop after a refusal, an audit line with the name `phone.passcode` only). Paused: `paused`; a person at the phone: `busy`. Every `locked` answer for a locked phone now says: "the phone is locked; call unlock (it types the passcode saved for this phone), or ask the user to unlock it".
 
 Arguments: none.
 
@@ -942,7 +942,12 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   `confirm: true`. Its page says why in Environment.
 - **Typed values.** Every value typed in this session (the agent's, a script's) is kept out of every bug report, registered
   before it is typed; the explorer's public fake values are not. Only the bug report hides them: an ordinary answer still
-  shows what the screen shows.
+  shows what the screen shows. The redactor and the gate read only the text that came from the app or the session (`got`,
+  `expected`, the note, logs, frames, the component stack, the steps' words, road names, a check's reason), never what the
+  tool writes itself (ids, times, place names, versions and builds, counts, the page's own words), so a typed `2026` or
+  `place` never blocks a bug or turns its dates into `<typed value>`. A version, build or device that holds a vault value
+  is refused. An export gates a bug's app text when its files are as the tool built them, and every text whole when they
+  aren't (a page edited by hand).
 - **System sheets** (§29.8): `share sheet` (in the app's tree, as the explorer's floor sees it) and `permission prompt` are
   named; an app's own alert is no system sheet. An explore finding records the one in front when it was made (`system` in
   `report.json`), and a picture taken with one in front is private for any app.

@@ -145,8 +145,10 @@ def _text(value: object, what: str) -> str:
     return value
 
 
-def _label(value: object, what: str, pattern: re.Pattern[str]) -> str:
+def _label(value: object, what: str, pattern: re.Pattern[str], held: Callable[[str], str] | None = None) -> str:
     text = _text(value, what)
+    if held is not None and held(text) != text:  # (a label that holds a vault value is no label: refused, never shown)
+        raise FindingError(f"{what} holds a private value, so it isn't kept")
     if not pattern.match(text):
         raise FindingError(f"{what} isn't one: {text!r}")
     return text
@@ -206,10 +208,16 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
          path_from: str | None = None, path: list[dict] | tuple[dict, ...] = (), picture_file: str | None = None,
          test_app: bool = False, logs: list[str] | tuple[str, ...] = (), crash_reason: str | None = None,
          crash_frames: list[str] | tuple[str, ...] = (), component_stack: list[str] | tuple[str, ...] = (),
-         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS, system: str | None = None) -> Finding:
+         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS, system: str | None = None,
+         labels: Callable[[str], str] | None = None) -> Finding:
     """A finding as §27.1 has it, made safe: all text redacted whole, then cut (a log line at 300 characters, at most 20
     lines, the top 8 frames, at most 10 issues). `picture_file` is where the picture was saved (`findings/f3.jpg`), None for
-    none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding."""
+    none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding.
+
+    `labels` (review R185b H1): the redactor the tool's own labels (the versions, the build, the device, the files) are
+    checked with, never changed by: one that holds a value is refused. A bug report passes the vault's values and codes
+    only, so a value typed in the session (`220`, `2026`) is no reason to refuse a build; `scrub` by default."""
+    held = scrub if labels is None else labels
     if kind not in kinds:  # (`kinds`: a bug report also takes `observed`, its own kind, §29.3)
         raise FindingError(f"kind is one of {', '.join(kinds)}, not {kind!r}")
     if (crash_reason is not None or crash_frames) and kind != "crash":
@@ -228,20 +236,22 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
     crash = Crash(safe(crash_reason), tuple(safe(f) for f in crash_frames[:MAX_FRAMES])) if crash_reason is not None else None
     return Finding(
         id=_label(finding_id, "id", _ID), kind=kind, app=_text(app, "app"),
-        app_version=_label(safe(app_version), "app_version", _ID_TEXT), build=_label(safe(build), "build", _ID_TEXT),
-        tool=_label(tool, "tool", _TOOL), tool_version=_label(safe(tool_version), "tool_version", _ID_TEXT),
+        # (review R185b H1) a version, a build, a model and an OS are the tool's own labels, nothing free (`_ID_TEXT`): never
+        # read through the redactor, so a typed `220` can't make a build `<typed value>` and refuse the finding
+        app_version=_label(app_version, "app_version", _ID_TEXT, held), build=_label(build, "build", _ID_TEXT, held),
+        tool=_label(tool, "tool", _TOOL), tool_version=_label(tool_version, "tool_version", _ID_TEXT, held),
         when=_label(when or now_ms(), "when", _WHEN),
-        device=Device(_label(safe(device.model), "device model", _ID_TEXT), _label(safe(device.os), "device os", _ID_TEXT)),
+        device=Device(_label(device.model, "device model", _ID_TEXT, held), _label(device.os, "device os", _ID_TEXT, held)),
         expected=_one_line(hide_values(safe(_text(expected, "expected")))),
         got=_got(kind, hide_values(safe(_text(got, "got")))),
         place=None if place is None else _label(place, "place", _PLACE),
         path_from=None if path_from is None else _label(path_from, "path_from", _PLACE),
         path=tuple(_step(s, scrub) for s in path),
-        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/", scrub),
+        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/", held),
                                                           not test_app or system is not None),
         logs=tuple(safe(line)[:LOG_CUT] for line in logs[:MAX_LOGS]), crash=crash,
         component_stack=tuple(safe(c) for c in component_stack),
-        repro=None if repro is None else _file(repro, "repro", "repro/", scrub), count=count, system=system)
+        repro=None if repro is None else _file(repro, "repro", "repro/", held), count=count, system=system)
 
 
 def visible_picture(finding: Finding, asked: bool = False) -> str | None:
@@ -305,7 +315,8 @@ def dumps(finding: Finding) -> str:
     return json.dumps(to_dict(finding), indent=2, ensure_ascii=False) + "\n"
 
 
-def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KINDS) -> Finding:
+def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KINDS,
+          labels: Callable[[str], str] | None = None) -> Finding:
     """A finding read from JSON text or a dict (either tool's), checked and redacted as `make` does; a key it doesn't know is
     ignored. A picture with no `private`, or any value but `false`, is private. `FindingError` for what isn't one."""
     if isinstance(raw, (str, bytes)):
@@ -349,4 +360,5 @@ def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KIN
                 picture_file=None if picture is None else text("file", picture),
                 test_app=picture is not None and picture.get("private") is False,
                 logs=lists["logs"], crash_reason=None if crash is None else text("reason", crash), crash_frames=frames,
-                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds, system=system)
+                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds, system=system,
+                labels=labels)
