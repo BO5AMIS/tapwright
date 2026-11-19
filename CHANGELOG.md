@@ -46,7 +46,8 @@
   true`. A private picture goes only with the export's own `with_picture: true`. Every text sent is grepped again with the
   live values and the export is refused if any is found (`export refused: a vault value was found in report.md.`, never
   the value), nothing sent. A new audit kind `export`: one line per export, a refused one too, its detail the target and
-  the bug id, never content; with no audit line nothing is sent. `tapwright bug export <bug id> --to zip|issue [--repo
+  the bug id, never content; with no audit line nothing is sent. An export that fails after its line was written (a
+  zip that can't be written, an issue `gh` refuses) adds a second line with that outcome. `tapwright bug export <bug id> --to zip|issue [--repo
   owner/name] [--public] [--with-picture] [--yes] [--app ID]` asks `Send to GitHub? [y/N]` (`--yes` without a terminal).
 - Privacy (review R185): a link is kept only as the pattern of a place's link it matched, never its query, fragment or a
   token in it (one that matches none starts the path after it); a row of a list with no id is `the 1st row of the list`,
@@ -109,6 +110,11 @@
   is no loading screen. This computer's home folder with a space in its name is cut whole (`/Users/Jane Doe`). A `from:
   "now"` page names a start only when the first step's place is known, keeps two opens of a link that lost its query, and
   a source seen again after it left the last 50 is not counted again.
+- Review round 2 (PR #21): a swap a writer left half done is mended under the lock before any bug is looked up (a report
+  of the same finding no longer makes a new bug over it), and a backup that can't be put back is kept, never removed. A
+  check that couldn't run keeps a check another one finished meanwhile (decided under the lock). A picture added to a bug
+  made again meanwhile is refused. Explore's and `from: "now"`'s picture is private when a system sheet was in front as
+  it was taken (a share sheet that came up after the last read).
 
 ## 1.8.0 (2026-11-19), "the Explorer"
 

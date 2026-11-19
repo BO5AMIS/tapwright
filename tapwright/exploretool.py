@@ -137,6 +137,7 @@ class DaemonPhone:
         self._began = daemon._wall()  # a crash report of the app counts from the run's start
         self.crashes: list = []  # the reports the daemon's own crash checks found while the search ran (daemon._CRASHES)
         self.still_loading = False  # the last launch wait ended at its deadline with the app still loading (W177)
+        self.picture_system: str | None = None  # the system sheet in front when the last picture was taken (PR #21)
 
     # ---- reading ----
     async def read(self) -> ui.Tree:
@@ -331,19 +332,27 @@ class DaemonPhone:
 
     async def picture(self) -> bytes | None:
         """A picture of the screen, only while the explored app is in front, taken in one turn between two reads of that (§27.2:
-        no picture of an app not given)."""
+        no picture of an app not given). `picture_system` is then the system sheet or prompt in front as it was taken (PR #21:
+        read in the same turn, so a share sheet that came up after the last read makes the picture private); a screen that
+        can't be read then gives no picture."""
         session, d = self.d.session, self.d
+        self.picture_system = None
         if d.unlocking():  # (1.7.8, M1) no picture while the phone is being unlocked
             return None
         asked = d.hub.mono()
 
-        async def capture() -> tuple[str | None, bytes, str | None]:
+        async def capture() -> tuple[str | None, bytes, object, str | None]:
             first = await session.foreground_bundle_id() or None
             shot = await session.screenshot_png()
-            return first, shot, await session.foreground_bundle_id() or None
-        before, png, after = await self.d._read(capture)
-        if before != self.bundle or after != before:
+            try:
+                tree = (await session.snapshot()).tree
+            except Exception:  # noqa: BLE001 - what was in front can't be told: no picture
+                tree = None
+            return first, shot, tree, await session.foreground_bundle_id() or None
+        before, png, tree, after = await self.d._read(capture)
+        if before != self.bundle or after != before or tree is None:
             return None
+        self.picture_system = explorefloor.system_of(tree)
         if d.unlocked_since(asked) or d.center_since(asked):  # an unlock, or Notification Center, may be in it
             return None
         return await asyncio.to_thread(jpeg_of, png)

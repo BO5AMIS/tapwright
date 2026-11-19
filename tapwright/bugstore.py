@@ -182,6 +182,9 @@ class BugStore:
                 raise BugFolderError(f"the bugs of {app} stayed locked for {LOCK_WAIT:g} s; try again.")
             time.sleep(LOCK_POLL)
         try:
+            # (PR #21) a swap a dead writer left half done is mended first, before any bug is looked up or made: a report of
+            # the same finding never makes a new bug over the previous version waiting to be put back
+            self._tidy(app)
             yield
         finally:
             pidlock.release(path, token)
@@ -342,6 +345,11 @@ class BugStore:
             now = self.read(held.app, held.id)
             if now is None or now.meta.get("generation") != held.meta.get("generation"):
                 return None
+            current = now.meta.get("reproduced") or {}
+            if reproduced.get("checked") is False and current.get("checked") is not False:
+                # (PR #21) a check that couldn't run never replaces a check that did, decided here under the lock (another
+                # check may have finished meanwhile): the bug as it is comes back, and nothing is written
+                return Made(now.meta, now.folder, new, now.title, now.finding)
             meta = json.loads(json.dumps(now.meta))
             meta["reproduced"] = reproduced
             return self._rewrite(now, meta, gate, new=new, scrub=scrub)
@@ -353,6 +361,8 @@ class BugStore:
             now = self.read(held.app, held.id)
             if now is None:
                 raise BugFolderError(f"{held.id} was removed meanwhile; nothing was written.")
+            if now.meta.get("generation") != held.meta.get("generation"):  # (PR #21: the picture is the earlier report's)
+                raise BugFolderError(f"{held.id} was made again meanwhile; nothing was written.")
             meta = json.loads(json.dumps(now.meta))
             pic = now.finding.get("picture")
             private = not (isinstance(pic, dict) and pic.get("private") is False) or meta.get("test_app") is not True
@@ -438,9 +448,9 @@ class BugStore:
             if ".old." in path.name and bug.BUG_ID.match(name) and not (path.parent / name).exists():
                 try:
                     os.replace(path, path.parent / name)
-                    continue
                 except OSError:
-                    pass
+                    pass  # (PR #21) the only copy of the bug stays where it is, for the next lock to put back
+                continue
             shutil.rmtree(path, ignore_errors=True)
 
     def _write_new(self, folder: Path, files: dict[str, str], picture: bytes | None) -> None:

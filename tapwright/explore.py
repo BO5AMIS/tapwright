@@ -973,7 +973,11 @@ class Explorer:
             if shot:  # (the phone gives one only while the given app is in front, §27.2; private unless a test app)
                 file = f"findings/{made.id}.jpg"
                 self.pictures[made.id] = shot
-                # (a picture with a system sheet in front is private for any app: it shows the owner's own things, §29.8)
+                # (a picture with a system sheet in front is private for any app: it shows the owner's own things, §29.8;
+                # PR #21: what was in front as the picture was taken counts, not only the earlier read)
+                taken = getattr(self.phone, "picture_system", None)
+                if made.system is None and taken is not None:
+                    made = dataclasses.replace(made, system=taken)
                 made = dataclasses.replace(made, picture=findings.Picture(file, not self.who.test_app or made.system is not None))
         self.found = findings.add(self.found, made)
 

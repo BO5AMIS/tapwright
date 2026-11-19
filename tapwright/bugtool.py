@@ -406,12 +406,13 @@ class BugTools:
         with ctx.store.hold(held.app, held.id):
             result = await self._bug_check(held, runs, parsed["reset"], parsed["account"], client_id=client_id,
                                            scope=scope)
-            before = held.meta.get("reproduced") or {}
-            if result.get("checked") is False and before.get("checked") is not False and not made.new:
-                notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
-                return made
+            # (PR #21) whether a check that couldn't run keeps the last check is decided in the store, under its lock
             checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new,
                                               scrub=ctx.safe())
+        if checked is not None and result.get("checked") is False and \
+                (checked.meta.get("reproduced") or {}).get("checked") is not False:
+            notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
+            return checked
         if checked is None:
             notes.append(f"Note: {held.id} was removed (or made again from another report) while it was checked; the "
                          "check wasn't written.")
@@ -493,9 +494,12 @@ class BugTools:
         identity = {"app_version": who.app_version, "build": explore._build_number(who.build), "tool_version": who.tool_version,
                     "device": {"model": who.device.model, "os": who.device.os}}
         picture = None
+        taken = None  # (PR #21) the system sheet in front as the picture was taken
         try:
             from .exploretool import DaemonPhone
-            picture = await DaemonPhone(self, client_id, scope, bundle).picture()
+            phone = DaemonPhone(self, client_id, scope, bundle)
+            picture = await phone.picture()
+            taken = phone.picture_system
         except Refused:
             raise
         except Exception:  # noqa: BLE001 - a picture that can't be had is a gap in the page, not a reason to lose the bug
@@ -504,7 +508,7 @@ class BugTools:
         return await asyncio.to_thread(
             bugmake.from_now, ctx, app=bundle, note=note, expected=expected, identity=identity, when=when,
             observed=observed, place=place, place_key=key, logs=await self._bug_logs(bundle) if named else [],
-            picture=picture, system=system_of(snap.tree), with_picture=with_picture, reproduced=reproduced, named=named)
+            picture=picture, system=system_of(snap.tree) or taken, with_picture=with_picture, reproduced=reproduced, named=named)
 
     async def _bug_logs(self, bundle: str) -> list[str]:
         """The app's last 20 log lines of any level (§29.3), each `HH:MM:SS.mmm level text`; redacted when the bug is made.
