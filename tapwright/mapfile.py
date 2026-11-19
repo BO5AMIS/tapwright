@@ -476,7 +476,7 @@ class MapFile:
                 route.update(used=used + 1, failed=0, reached=now)
                 if end is not None:
                     route["end"] = end  # (1.9.0) where it really arrives, as the drive judged it
-            elif failed + 1 >= fails:
+            elif failed + 1 >= (1 if route.get("derived") is True else fails):  # (1.9.0 round 2) a search's: one failure
                 try:
                     path.unlink()
                 except FileNotFoundError:

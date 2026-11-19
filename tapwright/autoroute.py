@@ -44,6 +44,48 @@ class Chain:
     steps: list[list[dict]] = field(default_factory=list)
     pending: list[dict] = field(default_factory=list)
     broken_at: int | None = None
+    # (1.9.0 round 2) the ids each place's tree held (on and off screen) while the way there was clean and nothing had
+    # been typed there; a search typed at a place: (its index, the ids it held before the typing); the index of the
+    # first step made from a search (`derived`: a route through it is dropped on its first failed replay)
+    ids_at: dict = field(default_factory=dict)
+    search: tuple | None = None
+    derived_at: int | None = None
+
+    @property
+    def derived(self) -> bool:
+        return self.derived_at is not None
+
+    def saw(self, ids: set) -> None:
+        """What the place the chain is at holds now, read before any typing there."""
+        at = len(self.places) - 1
+        if at < 0 or self.broken_at is not None or (self.search is not None and self.search[0] == at):
+            return
+        self.ids_at.setdefault(at, set()).update(ids)
+
+    def searched(self) -> None:
+        """Text was typed into a search field at the place the chain is at: the way breaks here as for any typing, but a
+        tap on a result that was in this place's list before the typing may still be kept (`after_search`)."""
+        at = len(self.places) - 1
+        if at >= 0 and self.broken_at is None:
+            self.search = (at, frozenset(self.ids_at.get(at, ())))
+        self.taint()
+
+    def after_search(self, dst: str, ident: object) -> list[dict] | None:
+        """A tap on `ident` right after a search at the place the chain is at, which arrived at `dst`: kept as "scroll to
+        the result, tap it" when the result was in the place's list before the typing (ids only: never the typed text),
+        else None (a server-side search: the way stays broken). Returns the whole way to save, as `moved` does."""
+        at = len(self.places) - 1
+        if (self.search is None or self.search[0] != at or self.broken_at != at or dst == self.here or dst in self.places
+                or not isinstance(ident, str) or ident not in self.search[1]):
+            return None
+        self.broken_at, self.pending, self.search = None, [], None
+        self.steps.append([{"tool": "scroll", "to": "target", "target": {"id": ident}},
+                           {"tool": "tap", "target": {"id": ident}}])
+        self.places.append(dst)
+        if self.derived_at is None:
+            self.derived_at = len(self.steps) - 1
+        way = [s for part in self.steps for s in part]
+        return way if 0 < len(way) <= MAX_STEPS else None
 
     @property
     def start(self) -> str | None:
@@ -87,6 +129,11 @@ class Chain:
             self.places, self.steps, self.pending = self.places[:k + 1], self.steps[:k], []
             if self.broken_at is not None and self.broken_at > k:
                 self.broken_at = None
+            if self.derived_at is not None and self.derived_at >= k:
+                self.derived_at = None  # (the step made from a search is cut off with the loop)
+            if self.search is not None and self.search[0] > k:
+                self.search = None
+            self.ids_at = {i: v for i, v in self.ids_at.items() if i <= k}
             return None
         self.steps.append([*self.pending, step] if step is not None else [])
         self.places.append(dst)
@@ -263,6 +310,19 @@ class Held:
     auto: bool
     failed: int
     variables: bool
+    key: str | None = None  # (1.9.0 round 2) target_key of its last step; None: any (a route read without its steps)
+
+
+def target_key(way: list) -> str:
+    """(1.9.0 round 2) What a route's last step aims at: the tool's own routes are kept one per target, not one per place
+    (every destination's detail screen is one place, and a route via Lisbon is not one via Kyoto)."""
+    last = way[-1] if way else None
+    if not isinstance(last, dict):
+        return ""
+    target = last.get("target")
+    if last.get("tool") == "tap" and isinstance(target, dict) and isinstance(target.get("id"), str):
+        return "id:" + target["id"] + (f"#{target['index']}" if target.get("index") is not None else "")
+    return json_text(last)
 
 
 def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
@@ -270,10 +330,11 @@ def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
     """The name to save `way` under, or None when it isn't saved: a person's route already reaches `end` from `start`,
     or this place's own route is no longer and still works. `wanted`: the name it would take; `taken`: every route name
     the folder has (a twin in another case counts)."""
-    if any(not h.auto and h.start == start and h.end == end and not h.variables for h in held):
+    key = target_key(way)
+    if any(not h.auto and h.start == start and h.end == end and not h.variables and h.key in (None, key) for h in held):
         return None
-    # (review 1.9.0 L3) one route of the tool's own per place, whatever start it was reached from
-    mine = next((h for h in held if h.auto and h.end == end), None)
+    # (review 1.9.0 L3) one route of the tool's own per place and target (1.9.0 round 2), whatever start it was reached from
+    mine = next((h for h in held if h.auto and h.end == end and h.key in (None, key)), None)
     if mine is not None:
         return mine.name if (len(way) < mine.steps or mine.failed > 0) else None
     low = {t.lower() for t in taken}
@@ -301,6 +362,48 @@ def known(held: list[dict], here: str | None, reachable, held_word=None) -> list
         out.append((-(used if isinstance(used, int) and not isinstance(used, bool) else 0),
                     "\U0010ffff" if not isinstance(reached, str) else _negated(reached), route["name"]))
     return [name for *_, name in sorted(out)]
+
+
+WAY_PARTS = 6  # (1.9.0 round 2) the most parts of a way the Known: line shows; a longer one keeps its first and last
+
+
+def way_text(steps: object) -> str | None:
+    """(1.9.0 round 2) A route's way in ids only, for the Known: line: `scroll to dest-card-lisbon, tap`, `tap open-list,
+    back`. A target that isn't an id a developer wrote is shown as its tool alone (a label or a text is the screen's
+    words); a link as `open link`. None when there are no steps."""
+    if not isinstance(steps, list) or not steps:
+        return None
+
+    def ident(step: dict) -> str | None:
+        target = step.get("target")
+        value = target.get("id") if isinstance(target, dict) else None
+        return value if isinstance(value, str) and ui.structural_id(value) and not ui.private(value) else None
+    parts: list[str] = []
+    for n, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        if tool == "tap":
+            before = steps[n - 1] if n > 0 and isinstance(steps[n - 1], dict) else {}
+            if (ident(step) is not None and before.get("tool") == "scroll" and before.get("to") == "target"
+                    and ident(before) == ident(step) and parts):
+                parts[-1] += ", tap"  # (scroll to X, then tap X: said once)
+                continue
+            parts.append(f"tap {ident(step)}" if ident(step) else "tap")
+        elif tool == "scroll":
+            if step.get("to") == "target":
+                parts.append(f"scroll to {ident(step)}" if ident(step) else "scroll")
+            elif step.get("to") in ("start", "end"):
+                parts.append(f"scroll to {step['to']}")
+            else:
+                parts.append(f"scroll {step.get('direction') or 'down'}")
+        elif tool == "open_url":
+            parts.append("open link")
+        elif isinstance(tool, str):
+            parts.append(tool)
+    if len(parts) > WAY_PARTS:
+        parts = [*parts[:2], f"+{len(parts) - WAY_PARTS + 1} more", *parts[-(WAY_PARTS - 3):]]
+    return ", ".join(parts) if parts else None
 
 
 def _negated(stamp: str) -> str:

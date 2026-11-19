@@ -181,8 +181,8 @@ def test_typed_text_and_what_comes_after_it_is_never_saved(tmp_path):
         await d.run_tool("a", "open_app", {"app": BUNDLE})
         await d.run_tool("a", "tap", {"target": {"id": "open-list"}})
         d.session.screens["list"] = screen("Explore", ids=("dest-card-kyoto", "to-home", "l1"), tab="home",
-                                           inputs=("search",))
-        await d.run_tool("a", "type_text", {"text": "secret words", "target": {"id": "search"}})
+                                           inputs=("trip-name",))  # (round 2: not a search, whose result may be kept by its id)
+        await d.run_tool("a", "type_text", {"text": "secret words", "target": {"id": "trip-name"}})
         await d.run_tool("a", "tap", {"target": {"id": "dest-card-kyoto"}})
         assert set(saved(tmp_path)) == {"open_list"}
         assert "secret words" not in json.dumps(saved(tmp_path))
