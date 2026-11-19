@@ -526,9 +526,11 @@ def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bo
 
 
 def shown_path(path: Path, home: Path | None = None) -> str:
-    """A path as a person reads it: `~/.tapwright/...` under the home folder, so no user name is shown."""
+    """A path as a person reads it: `~/.tapwright/...` under the home folder, so no user name is shown. A folder
+    outside home (a `--bugs` or temporary folder the user chose) is shown whole: the caller has to be able to open it,
+    and these answers and audit lines stay on this computer (never in a page, a zip or an issue)."""
     base = str(home if home is not None else Path.home())
     text = str(path)
     if text.startswith(base):
         return ("~" + text[len(base):]).replace("\\", "/")
-    return bug.strip_paths(text) if os.path.isabs(text) else text
+    return text
