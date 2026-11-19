@@ -17,6 +17,7 @@ import posixpath
 import re
 import sys
 import time
+import weakref
 from pathlib import Path
 
 from . import aio, store, trace
@@ -235,6 +236,79 @@ def _failure_listener(on_failure):
     return Listener()
 
 
+def _takes_factory(userspace_tunnel) -> bool:
+    """pymobiledevice3 11.57 and later: UserspaceRsdTunnel takes a `provider_factory` returning a TunnelProvider
+    (`.service`, `.lockdown`). Before 11.57 it always calls the module's `_create_no_root_tunnel_provider`,
+    which returns a `(service, lockdown)` tuple."""
+    import inspect
+    if not hasattr(userspace_tunnel, "TunnelProvider"):
+        return False
+    try:
+        return "provider_factory" in inspect.signature(userspace_tunnel.UserspaceRsdTunnel).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _new_tunnel(userspace_tunnel, serial, make):
+    """The tunnel to the phone. `make` (async, no arguments) gives the tunnel service of a phone reached over a
+    network; None leaves the choice to the library (USB). On 11.57+ `make` goes in as the provider factory, so
+    nothing outside this tunnel changes."""
+    if make is None or not _takes_factory(userspace_tunnel):
+        return userspace_tunnel.UserspaceRsdTunnel(serial=serial)
+
+    async def factory():
+        return userspace_tunnel.TunnelProvider(await make(), None)
+    return userspace_tunnel.UserspaceRsdTunnel(serial=serial, provider_factory=factory)
+
+
+_swap_locks: "dict[int, tuple[weakref.ref, asyncio.Lock]]" = {}
+
+
+def _swap_lock() -> asyncio.Lock:
+    """One lock per event loop, made inside the loop that uses it. Keyed by the loop's id with only a weak reference
+    to the loop: a lock that once had to wait holds its loop, so a loop-keyed weak dictionary would never let either
+    go (review 1.9.1, Opus 2 L1). Such a lock still holds its loop itself, so the reference stays alive: entries of
+    closed loops are dropped here too, which leaves at most the last closed loop's until the next open. A dead
+    reference, or another loop, under an id means the id was reused."""
+    loop = asyncio.get_running_loop()
+    entry = _swap_locks.get(id(loop))
+    if entry is not None and entry[0]() is loop:
+        return entry[1]
+    for key, (ref, _) in list(_swap_locks.items()):
+        held = ref()
+        if held is None or held.is_closed():
+            del _swap_locks[key]
+    lock = asyncio.Lock()
+    _swap_locks[id(loop)] = (weakref.ref(loop), lock)
+    return lock
+
+
+async def _open_tunnel(userspace_tunnel, tunnel, make):
+    """Open `tunnel`. Before 11.57 the tunnel always calls the module's provider, so a network service can only be
+    handed in by replacing it: for this one open, undone after it, so a later open over USB gets the library's own
+    provider again (1.9.0 left it replaced). The swap, the open and the undo are one step under a lock: a second
+    open meanwhile would take this open's provider for its original, or have its own undone before it runs. A USB
+    open takes the lock too: the tunnel reads the module's provider only once it holds its own lifecycle lock, so a
+    USB open queued there (behind a closing tunnel) would otherwise read a network open's swapped-in provider
+    (CodeRabbit, PR #24)."""
+    if _takes_factory(userspace_tunnel):
+        return await tunnel.aopen()
+    if make is None:
+        async with _swap_lock():
+            return await tunnel.aopen()
+
+    async def provider(serial, autopair, remotepairing_fallback=True):
+        return await make(), None
+    async with _swap_lock():
+        original = userspace_tunnel._create_no_root_tunnel_provider
+        userspace_tunnel._create_no_root_tunnel_provider = provider
+        try:
+            return await tunnel.aopen()
+        finally:
+            if userspace_tunnel._create_no_root_tunnel_provider is provider:  # never undo someone else's
+                userspace_tunnel._create_no_root_tunnel_provider = original
+
+
 class Device:
     def __init__(self, udid: str | None = None, host: str | None = None, port: int | None = None, log=print):
         state = store.load_state()
@@ -271,6 +345,8 @@ class Device:
         from pymobiledevice3.remote import userspace_tunnel
         on_usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"
                   and (self.udid is None or d.serial == self.udid)]
+        unclaimed: list = []  # services found here that no tunnel has taken and nobody has closed yet
+        extras: list = []
         if self.host:
             if not self.port:
                 raise DeviceError("no pairing port known for a direct address: run `tapwright probe` once on the "
@@ -278,14 +354,14 @@ class Device:
             identifier = self._pairing_identifier()
             host, port = self.host, self.port
 
-            async def provider(serial, autopair, remotepairing_fallback=True):
+            async def make():
                 from pymobiledevice3.remote.tunnel_service import create_core_device_tunnel_service_using_remotepairing
-                return await create_core_device_tunnel_service_using_remotepairing(identifier, host, port), None
-            # pymobiledevice3 picks USB or mDNS; to dial a given address, swap in this provider.
-            userspace_tunnel._create_no_root_tunnel_provider = provider
+                return await create_core_device_tunnel_service_using_remotepairing(identifier, host, port)
+            # pymobiledevice3 picks USB or mDNS; to dial a given address, it is handed this service instead.
             self.via = f"network {host}:{port}"
         elif on_usb:
             self.udid = self.udid or on_usb[0].serial
+            make = None  # the library's own choice: USB first
             self.via = "USB"
         else:
             from pymobiledevice3.remote.tunnel_service import get_remote_pairing_tunnel_services
@@ -293,19 +369,35 @@ class Device:
             if not services:
                 raise PhoneNotFound("no phone on USB, and none paired on this network (same Wi-Fi, unlocked, "
                                     "Developer Mode on, `tapwright setup` done over USB once)")
-            for extra in services[1:]:
-                await extra.close()
-            found = services[0]
+            found, extras = services[0], services[1:]
+            unclaimed.extend(services)  # every one is ours to close until the tunnel takes `found`
 
-            async def provider(serial, autopair, remotepairing_fallback=True):
-                return found, None
-            userspace_tunnel._create_no_root_tunnel_provider = provider
+            async def make():
+                unclaimed.clear()  # the tunnel owns it from here, and closes it with itself
+                return found
             self.via = "local network"
-        self.tunnel = userspace_tunnel.UserspaceRsdTunnel(serial=self.udid)
+        self.tunnel = _new_tunnel(userspace_tunnel, self.udid, make)
         try:
-            self.rsd = await self.tunnel.aopen()
-        except Exception as e:
-            raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
+            # other paired phones that answered: closed one by one, so a failing close leaves none of the rest open
+            # (review 1.9.1, Opus 2 L3)
+            for extra in extras:
+                unclaimed.remove(extra)
+                try:
+                    await extra.close()
+                except Exception as closing:
+                    self.log(f"closing another phone's network service: {closing}")
+            self.rsd = await _open_tunnel(userspace_tunnel, self.tunnel, make)
+        except BaseException as e:
+            # an open that failed before taking the found service (a tunnel still active, say) leaves it to us
+            for service in unclaimed:
+                try:
+                    await service.close()
+                except Exception as closing:  # the open's own failure is the one to report
+                    self.log(f"closing the unused network service: {closing}")
+                # a cancellation while closing (CodeRabbit, PR #24) is not caught: it goes up in place of the failure
+            if isinstance(e, Exception):
+                raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
+            raise
         self.udid = self.rsd.udid
         store.save_state(udid=self.udid)
         self.log(f"connected over {self.via}: {self.rsd.product_type} iOS {self.rsd.product_version}")
