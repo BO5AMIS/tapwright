@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.9.0, "the Token Update"
+
+Fewer calls per task (AGENT-TOOLS 1.17 §30). Nothing is taken away: every 1.8.5 call, argument and answer still
+works, and `--no-hints` gives 1.8.5's answers and instructions word for word.
+
+- Routes save themselves: the way a session went from the app's start to a screen (taps, back, open_url and the scrolls
+  before them) is kept as that screen's route in the app's map folder (`"auto": true`), with no `record` call, and
+  `drive {"route": "<name>"}` replays it in one call. Navigation only: typed text, form values, toggles, a touch the
+  policy held and anything after them are never saved. The shortest working way is kept, a shorter one replaces it, and
+  a route whose replay fails twice is dropped. A person's route is never replaced.
+- The first answer of a session that shows an app says what it can reach in one call: `Known: plan_trip, kyoto (one
+  call each: drive {"route": "<name>"})`.
+- The MCP instructions begin with the shared token rules: known steps in one `run` with an `expect`, target by id, a
+  screenshot only to judge looks, use `Known:`, hand a long task's driving to one small agent, a bug report is
+  `bug_report`.
+- `Hint:` lines, at most one per answer and each once per session: a form opened, three taps along a known way, a
+  screenshot the text already covered, a long session, a failed check before `logs` was read.
+- A tap whose target the keyboard covers closes the keyboard with its own Done key when a touch outside, a drag and the
+  dismiss key don't (Wayfare's trip form, whose last field is multiline): `Note: closed the keyboard first.` A new line
+  the Done key adds to a multiline field is taken back; nothing is typed or submitted.
+- `tapwright mcp --no-hints` and `tapwright serve --no-hints`: no `Known:` or `Hint:` lines, and 1.8.5's instructions.
+- Tests keep the tool's home in a folder of their own: a daemon test no longer writes maps or reports to
+  `~/.tapwright`.
+
 ## 1.8.5 (2026-11-19), "the Bug Report"
 
 - New tool `bug_report` (and `tapwright bug`): one page for whoever fixes a bug, readable in a minute and holding nothing

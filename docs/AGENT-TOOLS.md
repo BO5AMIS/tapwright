@@ -1395,6 +1395,48 @@ In each tool, on Wayfare, on the real phone. The bugs are planted and listed in 
   written with the network off; each export, refused ones too, has one `export` line whose `detail` holds no content; and
   with the audit log unwritable nothing is sent.
 
+## 30. The Token Update (1.9.0; AGENT-TOOLS 1.17)
+
+The cost of a task is decided by its number of calls: each re-reads the whole context. 1.9.0 adds lines and defaults
+that save calls; nothing is taken away, and `--no-hints` gives 1.8.5's answers and instructions word for word.
+
+### 30.1 The token rules
+The MCP `instructions` begin with the shared block (word for word in Tapline), `<replay>` being `drive {"route": "<name>"}`:
+read each answer; known steps in one `run` with an `expect`; target by id; a screenshot only to judge looks; use `Known:`;
+on a long or unknown task hand the driving to one small, fast agent; a bug report is `bug_report`.
+
+### 30.2 Routes that save themselves, and `Known:`
+- A session's way from the app's start (the screen after `open_app`) to a place is saved as that place's route
+  (`routes/<name>.json` in the app's map folder, `"auto": true`), with no `record` call. Navigation only: `tap`, `back`,
+  `open_url`, and the scrolls made at a place before leaving it. Typed text, a toggle, any other action, a touch the
+  policy held, a tap that stays on its screen, a list row with no id or a point break the way from there: no place
+  reached through it is saved. Its steps are the targets the map keeps for roads (an id, else a label or text; never a
+  title, a row's words or an id that carries content).
+- A place keeps one route: a shorter way replaces it, and so does a working way when it has failed since. A replay
+  (`drive {"route": ...}`) that fails twice in a row drops it (`Note: route <name> dropped ...`). A person's route is
+  never replaced, and a place a person's route already reaches gets none of its own.
+- The name: the place's own name when a person named it, else the id (or label, or text) of what the last step touched
+  (`plan-trip` gives `plan_trip`), else the place's name. Never a title (the map keeps titles only as hashes).
+- The first answer of a session that shows the app has, after its header, `Known: <name>, ... (one call each: drive
+  {"route": "<name>"})`: the saved routes with no variables whose start can be reached from where the app is, the most
+  used first, at most 8 and then `+N more`. Nothing known: no line.
+
+### 30.3 Hints
+After the `Note:` lines, at most one `Hint:` per answer, each kind once per session: a form opened (fill and save in
+one `run`); 3 single taps in a row along known roads (the one call that gets there); a screenshot asked on an action
+whose text had the changes; a long session (15 calls: hand the driving to a small agent); an `expect_failed` before
+`logs` was read.
+
+### 30.4 The keyboard over a target
+A tap whose target the keyboard covers closes it first, as before (a touch on passive space, a short drag, the dismiss
+key); when the app ignores those (Wayfare's trip form: its last field is a multiline Notes), the keyboard's own Done key
+is pressed, only when it has one. A field whose Done key only added a line gets it taken back; nothing is typed or
+submitted. The answer says `Note: closed the keyboard first.`
+
+### 30.5 `--no-hints`
+`tapwright mcp --no-hints` (sent to the daemon with each call) and `tapwright serve --no-hints`: no `Known:` and no
+`Hint:` line, and the instructions without the token rules. Routes still save themselves; that adds nothing to an answer.
+
 ## Historical design
 
 [AGENT-TOOLS 1.16.2](history/AGENT-TOOLS-pre-1.7.5.md) is still the shared contract with Tapline for the tools both have; this guide is Tapwright's own on top of it, and its app-scope, policy, grant and confirmation rules don't bind Tapwright's whole-phone control.
