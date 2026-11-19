@@ -20,6 +20,11 @@ runner that keeps running is never asked (serve.log, 11-13 to 11-19). So Tapwrig
   WebDriverAgent): calls answer `locked`, "unlock it once with its passcode". With `TAPWRIGHT_LOCK_GATE=1`, no runner is
   started either on a locked phone whose consent is older than 7.5 h, so the prompt comes up when a person unlocks it.
   A start that went on after the prompt records when (`~/.tapwright/automation.json`).
+- The passcode unlock types only on the lock screen's own passcode view: the cover sheet's window must be in the
+  tree, and a keypad in SpringBoard's transient overlay window, or a screen that mentions an update or "Remind Me
+  Later", is refused (`locked`: answer it with "Remind Me Later", or ask the user). iOS's "Enter Passcode to Update
+  Tonight" is such a keypad, and the passcode typed there schedules an iOS update. The screen is read again right
+  before the first key.
 
 ## 1.9.0 (2026-11-19), "the Token Update"
 

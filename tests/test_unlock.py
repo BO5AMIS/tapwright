@@ -11,8 +11,14 @@ PASSCODE = "482913"  # synthetic
 SB = unlock.SPRINGBOARD
 
 
-def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.Element]:
-    """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels."""
+def window(name: str = "SBCoverSheetWindow") -> ui.Element:
+    """A window of SpringBoard's tree, as the runner lists it (the lock screen's is the cover sheet)."""
+    return ui.Element(f"w-{name}", "window", "", name, rect=(0.0, 0.0, 430.0, 932.0), type="Window", name=name)
+
+
+def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True) -> list[ui.Element]:
+    """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels, in the cover sheet's
+    window (1.9.1: find_entry requires it; cover=False leaves it out)."""
     letters = {"2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"}
     items = []
     for i, d in enumerate("1234567890"):
@@ -23,7 +29,7 @@ def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.El
         items.append(ui.Element(f"e{i + 1}", "button", label, rect=rect, actions=("tap",), type="Button"))
         if d in twice:
             items.append(ui.Element(f"x{i + 1}", "button", label, rect=(5, 5, 20, 20), actions=("tap",), type="Button"))
-    return [*items, *extra]
+    return [*([window()] if cover else []), *items, *extra]
 
 
 SCREEN = (430.0, 932.0)  # the phone's screen in points (iPhone15,3)
@@ -61,7 +67,7 @@ class Screen:
         return SCREEN
 
     async def press_keys(self, points):
-        centres = {e.center: (e.label or "")[0] for e in self.items}
+        centres = {e.center: e.label[0] for e in self.items if e.label}
         typed = "".join(centres[p] for p in points)
         self.pressed.append(typed)
         if typed == self.right:
@@ -243,7 +249,7 @@ def test_a_typing_error_counts_as_a_refusal_and_never_echoes_what_was_sent():
 def test_a_passcode_with_letters_goes_only_into_the_secure_passcode_field():
     field = ui.Element("p1", "input", "Passcode field", rect=(20, 200, 300, 40), secure=True, type="SecureTextField")
     u, _ = unlocker()
-    screen = Screen(items=[field], right="abc-123x")
+    screen = Screen(items=[window(), field], right="abc-123x")
     r = run(u.unlock(screen, "abc-123x"))
     assert r.code == "unlocked" and screen.secrets == ["abc-123x"] and screen.pressed == []
     u2, _ = unlocker()
@@ -448,3 +454,76 @@ def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothi
     screen.tree = tree
     r = run(u.unlock(screen, PASSCODE))
     assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2
+
+
+# ---- 1.9.1: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
+# After Software Update > Later, iOS showed "Enter Passcode to Update Tonight": window SBTransientOverlayWindow, a
+# "Passcode field", all ten digit keys and "Remind Me Later". Typing the passcode there schedules an iOS update. The tree
+# below is that screen's, ids and labels only (frames are placeholders in the keypad's usual places).
+def update_tonight_tree(cover: bool = False) -> ui.Tree:
+    field = ui.Element("f", "input", "Passcode field", rect=(0.0, 220.0, 430.0, 13.0), secure=True,
+                       type="SecureTextField", name="Passcode field")
+    title = ui.Element("t", "text", "Enter Passcode to Update Tonight", rect=(40.0, 150.0, 350.0, 27.0),
+                       type="StaticText", name="Enter Passcode to Update Tonight")
+    later = ui.Element("l", "button", "Remind Me Later", rect=(120.0, 820.0, 190.0, 44.0), actions=("tap",),
+                       type="Button", name="Remind Me Later")
+    items = [*([window()] if cover else []), window("SBTransientOverlayWindow"), title, field,
+             *keypad(cover=False), later]
+    return ui.Tree(items, app=(SB, SB))
+
+
+def test_the_update_tonight_keypad_is_never_the_lock_screen():
+    assert unlock.find_entry(update_tonight_tree(), SB, SCREEN) is None
+    assert unlock.find_entry(update_tonight_tree(cover=True), SB, SCREEN) is None  # even over the cover sheet
+    assert unlock.foreign_keypad(update_tonight_tree())
+
+
+@pytest.mark.parametrize("what", ["overlay-window", "update-words", "remind-me-later"])
+def test_each_sign_of_another_keypad_alone_refuses(what):
+    extra = {"overlay-window": [window("SBTransientOverlayWindow")],
+             "update-words": [ui.Element("t", "text", "Enter Passcode to Update Tonight", type="StaticText")],
+             "remind-me-later": [ui.Element("b", "button", "Remind Me Later", type="Button")]}[what]
+    assert unlock.find_entry(ui.Tree(keypad(extra=extra)), SB) is None
+
+
+def test_a_keypad_without_the_lock_screen_window_is_not_the_lock_screen():
+    assert unlock.find_entry(ui.Tree(keypad(cover=False)), SB) is None
+    assert unlock.find_entry(ui.Tree(keypad()), SB) is not None
+
+
+class UpdateTonight(Screen):
+    def __init__(self, cover=False, **kw):
+        super().__init__(**kw)
+        self.tree = update_tonight_tree(cover)
+
+    async def lock_tree(self):
+        self.calls.append("tree")
+        return self.tree, self.front
+
+
+@pytest.mark.parametrize("cover", [False, True])
+def test_unlock_never_types_on_the_update_tonight_screen(cover):
+    u, _ = unlocker()
+    screen, audited = UpdateTonight(cover=cover), []
+    r = run(u.unlock(screen, PASSCODE, audited.append))
+    assert (r.ok, r.code) == (False, "update_prompt") and "Remind Me Later" in r.message
+    assert screen.pressed == [] and screen.secrets == [] and audited == [] and u.tries_left() == 2
+    assert PASSCODE not in r.message
+
+
+def test_an_update_keypad_that_comes_up_before_the_keys_stops_the_unlock():
+    """The last check before the first key reads the screen again: the lock screen was proven, then the update keypad
+    came up over it."""
+    class Switching(Screen):
+        reads = 0
+
+        async def lock_tree(self):
+            self.calls.append("tree")
+            self.reads += 1
+            if self.reads == 1:
+                return ui.Tree(list(self.items)), self.front
+            return update_tonight_tree(cover=True), self.front
+    u, _ = unlocker()
+    screen = Switching()
+    r = run(u.unlock(screen, PASSCODE))
+    assert r.code == "update_prompt" and screen.pressed == [] and u.tries_left() == 2

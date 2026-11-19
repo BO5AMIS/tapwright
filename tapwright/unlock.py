@@ -16,7 +16,10 @@ with its passcode entry showing, types the passcode there, and checks that the p
     file that a request or a call names.
   - **Only on the lock screen.** Before a key goes out, all of these hold: WebDriverAgent says the phone is locked; the
     app in front is SpringBoard; its tree shows the passcode entry (all ten digit keys of the keypad, each found once,
-    or a secure passcode field); nothing on it mentions XCTest; and iOS's XCTest prompt (LocalAuthenticationUIService,
+    or a secure passcode field); nothing on it mentions XCTest; (1.9.1) the tree holds the lock screen's own window (the
+    cover sheet) and no other SpringBoard keypad's (no transient overlay window, nothing about an update or "Remind Me
+    Later": iOS's "Enter Passcode to Update Tonight" schedules an update with the passcode), checked again right before
+    the first key; and iOS's XCTest prompt (LocalAuthenticationUIService,
     "Enter iPhone Passcode for XCTest") is not up. Anything else: nothing is typed.
   - **Never the XCTest prompt.** That prompt is iOS's consent to UI automation, not the lock screen. §18.6 says the
     passcode is typed "only on the lock screen's keypad", and §11.5 lists the XCTest prompt as a moment for a person, so
@@ -104,6 +107,9 @@ NOT_RUN = ("the unlock couldn't run (the connection to the phone changed); nothi
            "seconds, or ask the user to unlock the phone")
 LETTERS_ON_KEYPAD = ("the phone is locked, and its lock screen shows a number keypad, but the passcode in the file has "
                      "other characters; nothing was typed. Ask the user to unlock it")
+UPDATE_PROMPT = ("the phone shows a passcode screen that isn't the lock screen (iOS's \"Enter Passcode to Update Tonight\" "
+                 "or another SpringBoard keypad): the tool never types the passcode there, as it would schedule an iOS "
+                 "update. Answer it with \"Remind Me Later\" or \"Later\", or ask the user")
 WOKEN_TOO_OFTEN = ("the phone is locked, and the unlock already tried to wake the lock screen 3 times in 10 minutes; "
                    "ask the user to unlock it")
 AUDIT_NAME = "phone.passcode"
@@ -113,7 +119,7 @@ AUDIT_NAME = "phone.passcode"
 class Result:
     ok: bool  # the phone is unlocked now (or wasn't locked)
     code: str  # unlocked, not_locked, no_passcode, refused, limit, not_proven, xctest_prompt, failed, busy, no_record,
-    # paused, wake_limit
+    # paused, wake_limit, update_prompt
     message: str = ""  # fixed words for an answer: never a value
 
     @property
@@ -486,9 +492,42 @@ def _on_glass(keys, screen: tuple[float, float] | None) -> bool:
     return w > 0 and h > 0 and all(0 <= e.center[0] < w and 0 <= e.center[1] < h for e in keys)
 
 
+# (1.9.1) SpringBoard draws other passcode keypads than the lock screen's. Seen on the phone 2026-11-19 ~19:45: after
+# Software Update > Later, "Enter Passcode to Update Tonight" (window SBTransientOverlayWindow, a "Passcode field", all
+# ten digit keys, "Remind Me Later"); typing the passcode there schedules an iOS update. The lock screen's passcode view
+# lives in the cover sheet (window SBCoverSheetWindow in every lock-screen tree read on the phone).
+LOCK_WINDOWS = ("coversheet", "dashboard", "lockscreen")  # a window whose id holds one of these (lowercase): the lock screen's
+FOREIGN_WINDOWS = ("transientoverlay",)  # a window whose id holds one: another keypad over or instead of the lock screen
+FOREIGN_WORDS = ("update", "remind me later")  # words on the screen that mean it isn't (only) the lock screen
+
+
+def _window_ids(items: list[ui.Element]) -> list[str]:
+    return [(e.identifier or e.name or "").casefold() for e in items if e.type == "Window" or e.role == "window"]
+
+
+def _words(e: ui.Element) -> str:
+    return " ".join(s for s in (e.label, e.identifier, e.name, e.value) if s).casefold()
+
+
+def foreign_keypad(tree: ui.Tree) -> bool:
+    """Is a SpringBoard keypad that isn't the lock screen's on the screen (or might be)? A transient overlay window (the
+    "Enter Passcode to Update Tonight" screen), or the screen mentioning an update or "Remind Me Later"."""
+    items = [*tree.items, *tree.offscreen]
+    if any(f in w for w in _window_ids(items) for f in FOREIGN_WINDOWS):
+        return True
+    return any(word in _words(e) for e in tree.items for word in FOREIGN_WORDS)
+
+
+def lock_window(tree: ui.Tree) -> bool:
+    """Does the tree hold the lock screen's own window (the cover sheet)?"""
+    return any(f in w for w in _window_ids([*tree.items, *tree.offscreen]) for f in LOCK_WINDOWS)
+
+
 def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | None = None) -> Entry | None:
     """The passcode entry iOS's lock screen shows, or None when this screen isn't proven to be it: SpringBoard in front,
-    no alert, nothing about XCTest, and the keypad's ten keys (each once) or a secure passcode field.
+    no alert, nothing about XCTest, the lock screen's own window (the cover sheet) and no other keypad's (no transient
+    overlay, nothing about an update or "Remind Me Later": 1.9.1), and the keypad's ten keys (each once) or a secure
+    passcode field.
 
     iOS 26 (seen on the phone 2026-11-19, iPhone15,3 iOS 26.5) shows the keypad on the screen but under a container
     whose frame lies outside it, so the tree lists every key as off the screen. Then the keys are taken from the whole
@@ -501,6 +540,8 @@ def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | N
         return None
     items = [*tree.items, *tree.offscreen]
     if any(_mentions_xctest(e) for e in items):
+        return None
+    if foreign_keypad(tree) or not lock_window(tree):
         return None
     keypad, on_screen = _keypad(tree.items), True
     if not keypad:
@@ -526,6 +567,7 @@ class Unlocker:
         self.confirm_wait, self.poll, self.sleep, self.key_gap = confirm_wait, poll, sleep, key_gap
         self.ledger = ledger if ledger is not None else Ledger()
         self._lock = asyncio.Lock()
+        self._foreign = False  # the last tree read showed a keypad that isn't the lock screen's (see foreign_keypad)
 
     def tries_left(self) -> int:
         return self.ledger.left()
@@ -566,7 +608,7 @@ class Unlocker:
                 return Result(False, "not_proven", NOT_PROVEN)
             entry = await self._entry(phone)
         if entry is None:
-            return Result(False, "not_proven", NOT_PROVEN)
+            return self._not_lock_screen()
         digits = passcode.isascii() and passcode.isdigit()
         if not entry.keys and digits and entry.field is None:
             return Result(False, "not_proven", NOT_PROVEN)
@@ -574,12 +616,15 @@ class Unlocker:
             return Result(False, "not_proven", LETTERS_ON_KEYPAD)
         if digits and entry.keys and not entry.on_screen and not await self._placed(phone, entry):
             return Result(False, "not_proven", NOT_PROVEN)
-        # the last checks, right before the keys: still locked, and still no XCTest prompt
+        # the last checks, right before the keys: still locked, still no XCTest prompt, and (1.9.1) still the lock
+        # screen's own passcode view, with no other keypad come up over it since
         if not await phone.locked():
             return Result(True, "not_locked")
         prompt = await phone.xctest_prompt()
         if prompt is not False:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
+        if await self._entry(phone) is None:
+            return self._not_lock_screen()
         if may_type is not None and (stop := may_type()) is not None:
             return stop  # (paused, or a person: never between keys, where a partial passcode counts as a wrong one)
         attempt = await self.ledger.begin(source, woke)  # counted, and latched, before the first key
@@ -623,11 +668,16 @@ class Unlocker:
         except Exception:
             pass
 
+    def _not_lock_screen(self) -> Result:
+        return Result(False, "update_prompt", UPDATE_PROMPT) if self._foreign else Result(False, "not_proven", NOT_PROVEN)
+
     async def _entry(self, phone: LockScreen) -> Entry | None:
+        self._foreign = False
         try:
             tree, front = await phone.lock_tree()
         except Exception:
             return None
+        self._foreign = front == SPRINGBOARD and foreign_keypad(tree)
         try:
             screen = phone.screen_size()
         except Exception:

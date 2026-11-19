@@ -351,8 +351,7 @@ EXTRA = {
     'unlock': (
         'Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, '
         '`phone.passcode`). You never see or send the passcode: the tool types it on iOS\'s own lock screen, never on '
-        'the XCTest prompt; an unlock that works isn\'t limited, one that doesn\'t at most twice an hour and 3 times a '
-        'day, and never again after the phone refused it. '
+        'the XCTest prompt, at most twice an hour and 3 times a day, and never again after the phone refused it. '
         'Answers with the screen once unlocked, or `The phone isn\'t locked.`; `locked` when no passcode is saved '
         '(ask the user to unlock it) or the unlock couldn\'t be done (its reason). A call of its own: not a step of '
         '`run`, `replay`, `drive` or a journey. The owner stops you by pausing in the live view.'
