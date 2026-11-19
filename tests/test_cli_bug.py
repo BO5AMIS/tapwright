@@ -97,7 +97,7 @@ def test_bug_export_writes_a_zip_and_asks_before_github(home, monkeypatch, tmp_p
     said: list[str] = []
     assert cli.bug_cmd(args(str(folder), "f3"), out=said.append, alive=lambda: False) == 0
     assert said[-1].splitlines()[-1] == f"Checked for: {cli.BUG_VALUES_NONE}."
-    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).rsplit("/", 1)[-1]
+    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).replace("\\", "/").rsplit("/", 1)[-1]
     gh = FakeGh({})
     monkeypatch.setattr(journey_export, "run_gh", gh)
     # (made with no daemon: no app is one of its test apps, so a zip needs a yes too: review R185 H2)
@@ -133,7 +133,7 @@ def test_with_a_daemon_running_the_make_and_the_export_go_through_it(home):
     assert not (home / "bugs").exists()  # (nothing made here: the daemon makes it)
     made = cli.bug_cmd(args(str(folder), "f3"), out=said.append, alive=lambda: False)
     assert made == 0
-    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).rsplit("/", 1)[-1]
+    bug_id = next(ln for ln in said[-1].splitlines() if ln.startswith("Folder: ")).replace("\\", "/").rsplit("/", 1)[-1]
     assert cli.bug_cmd(args("export", bug_id, to="issue", repo="o/r", yes=True), out=said.append, call=call,
                        alive=lambda: True) == 0
     assert call.calls[-1][1] == {"bug": bug_id, "export": {"to": "issue", "repo": "o/r", "public": False, "confirm": True}}

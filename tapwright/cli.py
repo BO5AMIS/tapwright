@@ -1031,7 +1031,7 @@ def bug_cmd(a, out=print, ask=None, call=None, alive=None) -> int:
         if len(words) != 2:
             out("usage: tapwright bug verify <bug id> [--verify N]")
             return 2
-        return _bug_call({"bug": words[1], "verify": verify or 3}, out, call)
+        return _bug_call({"bug": words[1], "verify": verify or 3}, out, call, app=getattr(a, "app", None))
     loaded = accountlib.load(a.accounts) if a.accounts else accountlib.NONE
     if loaded.problem is not None:
         out(f"tapwright bug: {loaded.problem}")
@@ -1039,6 +1039,11 @@ def bug_cmd(a, out=print, ask=None, call=None, alive=None) -> int:
     keep = accountlib.Store()
     keep.remember(loaded)
     running = (alive or _daemon_alive)()
+    if running and a.accounts:
+        # (PR #21) the daemon makes and exports with its own vault; a file given here would be read by nobody, and its
+        # values would go unchecked: refused, never ignored
+        out(BUG_ACCOUNTS_WITH_DAEMON)
+        return 2
     if words[:1] == ["export"]:
         return _bug_export_cmd(a, words, bugs, keep, out, ask, call, running)
     if len(words) != 2:
@@ -1069,40 +1074,58 @@ def bug_cmd(a, out=print, ask=None, call=None, alive=None) -> int:
     except (ValueError, OSError) as e:
         out(f"Error bad_params: {ctx.safe()(str(e))}")
         return 2
-    if verify:  # the bug is made; the phone checks it (the daemon finds it by its id, preferring the app in front)
-        return _bug_call({"bug": made.meta["id"], "verify": verify}, out, call)
+    if verify:  # the bug is made; the phone checks it (the daemon finds it by its id and its app)
+        return _bug_call({"bug": made.meta["id"], "verify": verify}, out, call, app=made.finding["app"])
     out(bugmake.answer(made, ctx.scrub, home=Path.home()) + f"\nChecked for: {BUG_VALUES_VAULT if a.accounts else BUG_VALUES_NONE}.")
     return 0
 
 
 BUG_NOT_ASKED = "not asked: tapwright bug verify <bug id> checks it on the phone"
+BUG_ACCOUNTS_WITH_DAEMON = ("Error bad_params: --accounts is for when no daemon is running. tapwright serve is running, and "
+                            "it makes and exports bugs with its own vault (the one it was started with: tapwright serve "
+                            "--accounts FILE). Leave --accounts out, or start the daemon with that file; nothing was made "
+                            "or sent.")
 
 
-def _bug_call(args: dict, out, call=None) -> int:
-    """A `bug_report` call to the daemon (the phone's side: the reproduction check), with the exit code of §29.3."""
+def _bug_call(args: dict, out, call=None, app: str | None = None) -> int:
+    """A `bug_report` call to the daemon (the phone's side: the reproduction check), with the exit code of §29.3. `app`: the
+    app whose bug `args["bug"]` is, sent as the call's app (PR #21: the daemon then takes that app's bug when two apps hold
+    the id, never the one in front)."""
     from . import bugcheck, client
     call = call or client.call
+    before = client.SCOPE.get("X-Tapwright-Apps")
+    if app:
+        client.SCOPE["X-Tapwright-Apps"] = app
     try:
         answer = call("bug_report", args, "cli-bug", timeout=bugcheck.timeout_for(args))
     except client.DaemonError as e:
         out(f"Error {e.code}: {e}")
         return 2
+    finally:
+        if app:
+            if before is None:
+                client.SCOPE.pop("X-Tapwright-Apps", None)
+            else:
+                client.SCOPE["X-Tapwright-Apps"] = before
     text = answer.get("text", "")
     out(text)
+    if args.get("export") is not None and not args.get("verify"):
+        return 0  # (PR #21) an export that answered was written: the saved check's result is no exit of it
     return bug_exit(text)
 
 
 def bug_exit(text: str) -> int:
     """The exit code of an answer (§29.3): 1 when it didn't reproduce (`0 of N`), 2 when a person, a pause or a refusal
-    stopped the check, else 0."""
+    stopped the check, else 0. A stop of this check comes before the page's saved result (PR #21: a check that paused
+    keeps the last check's `0 of 3` on its page, and is still a stop)."""
     lines = text.splitlines()
     line = lines[1] if len(lines) > 1 else ""
+    stopped = ("stopped (", "needs a person")
+    if any(ln.startswith("Note: not checked this time (") and any(w in ln for w in stopped) for ln in lines):
+        return 2
     if line.startswith("Reproduced: 0 of "):
         return 1
-    stopped = ("stopped (", "needs a person")
     if line.startswith("Reproduced: not checked (") and any(w in line for w in stopped):
-        return 2
-    if any(ln.startswith("Note: not checked this time (") and any(w in ln for w in stopped) for ln in lines):
         return 2
     return 0
 
@@ -1159,7 +1182,7 @@ def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None, call=None, d
         except Refused as e:
             out(f"Error {e.code}: {e}")
             return 2
-        return _bug_call({"bug": bug_id, "export": raw}, out, call)
+        return _bug_call({"bug": bug_id, "export": raw}, out, call, app=held.app)
     log = auditlog.AuditLog(scrub=keep.scrub)
     if a.to == "issue" and not a.accounts:  # (every export, a refused one too, has its audit line: §29.7)
         log.write("export", name="bug_report", app=held.app,

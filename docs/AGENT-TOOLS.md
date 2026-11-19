@@ -935,8 +935,8 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   doesn't reproduce it`). A link that matches no pattern can't be written down: the path starts after it. A pattern with a
   value in it (`wayfare://trips/[id]`) can't be run, so such a bug is `not checked` with why. The same holds for a failed
   run's steps.
-- **A bug of an app that isn't one of the daemon's test apps.** `serve --apps` names the test apps (`--dedicated` and
-  `--phone` name every app; with none named, no app is one). Tapwright controls the whole phone, so `bug_report` works for
+- **A bug of an app that isn't one of the daemon's test apps.** `serve --apps` names the test apps (`--dedicated` names
+  every app; `--phone` names none by itself; with none named, no app is one). Tapwright controls the whole phone, so `bug_report` works for
   any app, but a bug of any other app keeps no screen text and no log lines beyond its own `got`, normalized (§29.5): no
   logs, a step only when it is aimed by an id, its picture always private, and ANY export of it (a zip too) needs
   `confirm: true`. Its page says why in Environment.
@@ -1142,7 +1142,7 @@ A picture exists and is private. To include it: bug_report {"bug": "bug_7bc2e91c
 | Argument | Meaning |
 |---|---|
 | `finding` | a finding's id in the report of `run` (`f3`) |
-| `run` | an explore report folder (§25.10) or `"last"`; default `"last"`: the newest explore report of this app. A journey's report folder (§17.5) is also valid, when it holds its findings as `findings.json` in §27's shape; otherwise `bad_params` |
+| `run` | an explore report folder (§25.10) or `"last"`; default `"last"`: the newest explore report of this app. A journey's report folder (§17.5) is also valid, when it holds its findings as `findings.json` in §27's shape; otherwise `bad_params`. (Tapwright: its journey reports hold no `findings.json`, so it takes only an explore report folder under `~/.tapwright/explore/`; any other folder, a journey's included, is `bad_params`.) |
 | `from` | `"now"` or `"failure"`, below |
 | `note`, `expected` | with `from: "now"`; one line each, at most 300 characters (`bad_params` above that). `note` is required |
 | `verify` | how many reproduction runs (§29.4): 1 to 10, or `true` for 3, or `false` or 0 for none. Default 3 with `finding` and `from: "failure"`; none with `from: "now"` |

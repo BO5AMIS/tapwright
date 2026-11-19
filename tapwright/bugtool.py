@@ -281,13 +281,14 @@ class BugTools:
             return None
 
     async def _bug_named(self, app: str) -> bool:
-        """Is the app one of the daemon's test apps (review R185 H2)? `serve --apps` names them; `--dedicated` and `--phone`
-        name every app (a phone kept for testing); with none named, no app is one. A name in the list is looked up among the
-        installed apps."""
+        """Is the app one of the daemon's test apps (review R185 H2)? `serve --apps` names them; `--dedicated` names every app
+        (a phone kept for testing); with none named, no app is one. `--phone` names none by itself (PR #21): it is the phone
+        mode (unlock, whole-phone control), not a list of test apps, so with it only the apps of `--apps` are. A name in
+        the list is looked up among the installed apps."""
         ceiling = getattr(self, "ceiling", None)
         if ceiling is None:
             return False
-        if getattr(ceiling, "dedicated", False) or getattr(ceiling, "phone", False):
+        if getattr(ceiling, "dedicated", False):
             return True
         named = tuple(getattr(ceiling, "apps", ()) or ())
         if app in named:
@@ -400,17 +401,20 @@ class BugTools:
             raise Refused("not_found", f"{made.meta['id']} can't be read back from its folder to check it.")
         if parsed["account"] is not None:
             notes.append(ACCOUNT_NOTE)
-        with ctx.store.hold(held.app, held.id):  # (retention never removes a bug a check holds: review R185 M5)
+        # (retention never removes a bug a check holds, review R185 M5; each check's hold is its own and lasts until its
+        # result is written, PR #21)
+        with ctx.store.hold(held.app, held.id):
             result = await self._bug_check(held, runs, parsed["reset"], parsed["account"], client_id=client_id,
                                            scope=scope)
-        before = held.meta.get("reproduced") or {}
-        if result.get("checked") is False and before.get("checked") is not False and not made.new:
-            notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
-            return made
-        checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new,
-                                          scrub=ctx.safe())
+            before = held.meta.get("reproduced") or {}
+            if result.get("checked") is False and before.get("checked") is not False and not made.new:
+                notes.append(f"Note: not checked this time ({result['why']}); the page keeps the last check.")
+                return made
+            checked = await asyncio.to_thread(ctx.store.checked, held, result, ctx.gate, new=made.new,
+                                              scrub=ctx.safe())
         if checked is None:
-            notes.append(f"Note: {held.id} was removed while it was checked; the check wasn't written.")
+            notes.append(f"Note: {held.id} was removed (or made again from another report) while it was checked; the "
+                         "check wasn't written.")
             return made
         return checked
 
@@ -434,13 +438,17 @@ class BugTools:
 
     async def _bug_again(self, ctx: bugmake.Context, bug_id: str, with_picture: bool) -> bugstore.Made:
         """A kept bug (§29.3 `bug`): its answer again, and with `with_picture` its own private picture added while its source
-        file still exists. An id two apps hold is `ambiguous` unless the app in front holds it (§29.7, 1.16.2)."""
+        file still exists. An id two apps hold is the bug of the call's app when that is one of them (the app the command
+        line named: PR #21), else of the app in front when that is one, else `ambiguous` (§29.7, 1.16.2)."""
         bugs = ctx.store
         holders = await asyncio.to_thread(bugs.holders, bug_id)
         if not holders:
             raise Refused("not_found", f'no bug "{bug_id}" is kept; tapwright bug list names them.')
         app = holders[0]
-        if len(holders) > 1:
+        hint = _d()._APP_HINT.get()
+        if len(holders) > 1 and hint in holders:
+            app = hint  # (PR #21) the call's own app (the command line's --app, an agent's one app) names which one
+        elif len(holders) > 1:
             front = self._bug_app_hint()
             if front not in holders:
                 raise Refused("ambiguous", f"{bug_id} is a bug of {', '.join(holders)}: open the one meant with open_app first.")

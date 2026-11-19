@@ -5,7 +5,6 @@ import asyncio
 import datetime
 import json
 import socket
-from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -363,7 +362,7 @@ def test_from_now_through_thin_calls_starts_on_the_place_the_last_read_left(tmp_
             assert (await call(capsys, "tap", '{"target": {"id": "go-form"}}', "--client", "5102"))[0] == 0
             code, out, err = await call(capsys, "bug_report", '{"from": "now", "note": "looks wrong"}', "--client", "5103")
             assert code == 0, err
-            page = (Path(out.splitlines()[3].removeprefix("Folder: ").replace("~", str(Path.home()), 1)) / "report.md")
+            page = folder_of({"text": out}, d.bug_home) / "report.md"
             text = page.read_text("utf-8")
             assert "\nStart on place_" in text and "isn't known" not in text, text
         finally:

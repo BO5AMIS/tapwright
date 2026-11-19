@@ -44,7 +44,7 @@ def test_from_now_writes_the_last_touches_and_never_the_typed_value(tmp_path):
         lines = r["text"].splitlines()
         assert lines[0].startswith("New bug: Observed on place_") and TYPED not in r["text"]
         assert lines[1] == "Reproduced: not checked." and lines[2].startswith("Seen: 1 time, ")
-        folder = Path(lines[3].removeprefix("Folder: ").replace("~", str(Path.home()), 1))
+        folder = folder_of(r, d.bug_home)
         assert folder.parent.parent == tmp_path / "bugs" and folder.parent.name == BUNDLE
         page = (folder / "report.md").read_text("utf-8")
         assert "1. Tap id go-form" in page and "2. Type something in id name-test-safe" in page
@@ -103,7 +103,7 @@ def test_from_a_finding_of_the_newest_explore_report_and_the_kept_bug_again(tmp_
         assert lines[0].startswith("New bug: Crash on place_4: the app crashed: EXC_BAD_ACCESS")
         # (the default check runs: the report's app isn't on this phone, so no reset reaches a known place of it)
         assert lines[1] == "Reproduced: not checked (no reset reached a known place)."
-        bug_id = lines[3].rsplit("/", 1)[-1]
+        bug_id = lines[3].replace("\\", "/").rsplit("/", 1)[-1]
         again = await d.run_tool("a", "bug_report", {"bug": bug_id})
         assert again["text"].startswith("Known bug (seen 1 time): Crash on place_4")
         added = await d.run_tool("a", "bug_report", {"bug": bug_id, "with_picture": True})
@@ -130,7 +130,7 @@ def test_from_the_last_failed_check_and_a_later_run_clears_it(tmp_path):
         assert e.value.code == "expect_failed"
         r = await d.run_tool("a", "bug_report", {"from": "failure"})
         assert r["text"].startswith("New bug: Check failed on ")
-        folder = Path(r["text"].splitlines()[3].removeprefix("Folder: ").replace("~", str(Path.home()), 1))
+        folder = folder_of(r, d.bug_home)
         page = (folder / "report.md").read_text("utf-8")
         assert "1. Tap id go-settings" in page and "step 1 holds its check (text 'Never on this screen')" in page
         assert json.loads((folder / "repro.json").read_text("utf-8"))["steps"][0]["expect"]["text"] == "Never on this screen"
@@ -162,9 +162,13 @@ def test_a_typed_value_is_registered_before_it_is_sent_but_not_the_explorers_fak
     run(go)
 
 
-def folder_of(answer: dict) -> Path:
+def folder_of(answer: dict, home: Path) -> Path:
+    """The bug's folder under the daemon's bugs folder `home`, by the app folder and the id the answer names (CodeRabbit,
+    PR #21: never the shown path made back into one, which depends on where the temporary folder lies)."""
     line = next(ln for ln in answer["text"].splitlines() if ln.startswith("Folder: "))
-    return Path(line.removeprefix("Folder: ").replace("~", str(Path.home()), 1))
+    app, bug_id = line.removeprefix("Folder: ").replace("\\", "/").rstrip("/").rsplit("/", 2)[-2:]
+    assert (home / app / bug_id).is_dir(), f"no folder {app}/{bug_id} under {home}: {line}"
+    return home / app / bug_id
 
 
 def gated(d) -> list:
@@ -200,11 +204,11 @@ def test_the_check_replays_the_failed_check_under_the_one_dispatch_gate(tmp_path
         assert [k for _, k in d.session.tapped[before:]] == ["go-settings", "go-settings"]
         taps = [floor for tool, floor in seen if tool == "tap"]
         assert taps and all(floor is not None for floor in taps)  # every touch under the floor
-        page = (folder_of(r) / "report.md").read_text("utf-8")
+        page = (folder_of(r, d.bug_home) / "report.md").read_text("utf-8")
         assert "2 of 2 runs. Script: repro.json" in page and "- Reset before each run: relaunch only, data kept" in page
-        meta = json.loads((folder_of(r) / "finding.json").read_text("utf-8"))["bug"]["reproduced"]
+        meta = json.loads((folder_of(r, d.bug_home) / "finding.json").read_text("utf-8"))["bug"]["reproduced"]
         assert (meta["n"], meta["of"], meta["reset"]) == (2, 2, "relaunch only, data kept")
-        again = await d.run_tool("a", "bug_report", {"bug": folder_of(r).name, "verify": 1})
+        again = await d.run_tool("a", "bug_report", {"bug": folder_of(r, d.bug_home).name, "verify": 1})
         assert again["text"].splitlines()[1] == "Reproduced: 1 of 1 runs."
         await finish(stop, task)
     run(go)
@@ -241,8 +245,8 @@ def test_a_check_with_no_phone_or_an_app_reset_still_makes_the_bug(tmp_path):
         await failed_check(d)
         r = await d.run_tool("a", "bug_report", {"from": "failure", "reset": "app", "account": "tester"})
         assert "app_command reset" in r["text"].splitlines()[1] and "Note: account isn't used" in r["text"]
-        assert (folder_of(r) / "report.md").exists()
-        held = d._bugs().read(BUNDLE, folder_of(r).name)
+        assert (folder_of(r, d.bug_home) / "report.md").exists()
+        held = d._bugs().read(BUNDLE, folder_of(r, d.bug_home).name)
         await finish(stop, task)
         d.state = "no-device"  # (the supervisor has stopped: nothing sets it back to live)
         assert await d._bug_check(held, 2, "own", None, client_id="a") == {"checked": False, "why": "no phone connected"}
@@ -256,7 +260,7 @@ def test_export_to_a_zip_with_its_audit_line_and_none_without_an_audit_log(tmp_p
         stop, task = await started(d)
         await failed_check(d)
         r = await d.run_tool("a", "bug_report", {"from": "failure", "verify": False, "export": {"to": "zip"}})
-        folder = folder_of(r)
+        folder = folder_of(r, d.bug_home)
         assert r["text"].splitlines()[-1].startswith("Exported: ") and (folder.parent / f"{folder.name}.zip").exists()
         lines = [json.loads(x) for x in auditlog.read_lines(tmp_path / "audit")]
         assert [(x["kind"], x["name"], x["app"]) for x in lines] == [("export", "bug_report", BUNDLE)]

@@ -21,12 +21,13 @@ def store_with(*values: str) -> accountlib.Store:
 
 def write_run(home: Path, run: str = "20261114T091500Z", *, place: str = "place_4", got: str = "the app crashed: EXC_BAD_ACCESS",
               build: str = "220", kind: str = "crash", logs=("09:21:07.440 error boom",), frames=(" 3 * Wayfare renderDays +148",),
-              picture: bool = True, private: bool = True, place_keys=None, finding_id: str = "f3", path=None) -> Path:
+              picture: bool = True, private: bool = True, place_keys=None, finding_id: str = "f3", path=None,
+              when: str = "2026-11-14T09:21:07.512Z") -> Path:
     folder = home / APP / run
     (folder / "findings").mkdir(parents=True, exist_ok=True)
     (folder / "repro").mkdir(parents=True, exist_ok=True)
     finding = {"id": finding_id, "kind": kind, "app": APP, "app_version": "1.5.0", "build": build, "tool": "tapwright",
-               "tool_version": "1.8.0", "when": "2026-11-14T09:21:07.512Z", "device": {"model": "iPhone16,1", "os": "iOS 19.1"},
+               "tool_version": "1.8.0", "when": when, "device": {"model": "iPhone16,1", "os": "iOS 19.1"},
                "place": place, "path_from": "home",
                "path": path if path is not None else [{"tool": "tap", "target": {"id": "trips-tab"}},
                                                       {"tool": "tap", "target": {"id": "trip-row-1"}}],
@@ -139,12 +140,18 @@ def test_the_place_key_falls_back_to_the_map(tmp_path):
 def test_retention_keeps_the_newest_and_never_the_one_just_made(tmp_path):
     home = tmp_path / "explore"
     ctx = ctx_for(tmp_path, kept=3)
-    ids = []
-    for n in range(5):
-        write_run(home, f"2026111{n}T091500Z", got=f"error kind {'abcde'[n]}", kind="js_error", picture=False)
-        ids.append(make(ctx, home, f"2026111{n}T091500Z").meta["id"])
+    ids = {}
+    days = (3, 1, 5, 2, 4)  # (made out of order: the newest by its time stay, not the last made)
+    for n, day in enumerate(days):
+        write_run(home, f"2026111{n}T091500Z", got=f"error kind {'abcde'[n]}", kind="js_error", picture=False,
+                  when=f"2026-11-1{day}T09:21:07.512Z")
+        ids[day] = make(ctx, home, f"2026111{n}T091500Z").meta["id"]
     left = sorted(p.name for p in (tmp_path / "bugs" / APP).iterdir())
-    assert len(left) == 3 and ids[-1] in left
+    assert left == sorted(ids[d] for d in (3, 4, 5))
+    # a bug made just now stays, even when it is older than the ones kept: then the newest two others stay with it
+    write_run(home, "20261119T091500Z", got="error kind f", kind="js_error", picture=False, when="2026-11-10T09:21:07.512Z")
+    oldest = make(ctx, home, "20261119T091500Z").meta["id"]
+    assert sorted(p.name for p in (tmp_path / "bugs" / APP).iterdir()) == sorted([oldest, ids[4], ids[5]])
 
 
 def test_a_private_picture_goes_in_only_when_asked_and_a_public_one_always(tmp_path):
@@ -180,7 +187,7 @@ def test_a_vault_value_and_a_typed_value_reach_no_file_and_no_answer(tmp_path):
     keep.remember_typed(TYPED)
     ctx = ctx_for(tmp_path, keep)
     made = make(ctx, home, "20261114T091500Z")
-    text = every_text(made.folder) + bugmake.answer(made, ctx.scrub)
+    text = every_text(made.folder) + bugmake.answer(made, ctx.scrub, home=tmp_path)
     for value in (SECRET, TYPED):
         assert value not in text
         assert not any(value[i:i + 12] in text for i in range(len(value) - 11))
@@ -197,7 +204,8 @@ def test_the_gate_refuses_and_nothing_is_written(tmp_path):
     write_run(home, got=f"the app crashed: {SECRET}")
     with pytest.raises(bugstore.BugGateError) as e:
         make(ctx, home, "20261114T091500Z")
-    assert SECRET not in str(e.value) and "report.md" in str(e.value) or "finding.json" in str(e.value)
+    assert SECRET not in str(e.value)
+    assert "report.md" in str(e.value) or "finding.json" in str(e.value)
     assert not (tmp_path / "bugs" / APP).exists() or not any((tmp_path / "bugs" / APP).iterdir())
 
 

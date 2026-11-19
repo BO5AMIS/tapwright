@@ -86,6 +86,30 @@
 - A bug made `from: "failure"` names the place the run's answer named (a thin run's own read; it said "an unnamed
   screen"), and its Logs are the app's own lines, as `from: "now"` keeps them, not the run's log block with iOS's lines.
 
+- Review (PR #21, CodeRabbit): the bugs folder's lock is a pid lock: a holder that is slow for minutes keeps it (it was
+  taken over after 60 s), and only its holder releases it. A rewrite of a bug (a check's result, a sighting, a picture) is
+  staged whole and swapped in, so its files are always of one version, and a failed write leaves the old one whole; an
+  export reads the bug once, under the lock, so the picture and whether it may go come from that one version. A check's
+  result is never written into a bug removed and made again meanwhile, each check holds the bug on its own (a second check
+  that stops at once no longer ends the first one's hold), and an update whose `repro.json` can't be read again writes
+  nothing. A bug is read only inside the bugs folder (an app folder that is a link is never followed).
+- `serve --phone` no longer makes every app a test app for bug reports: only `--apps` (or `--dedicated`) names them, so
+  another app's bug stays private and its export needs `confirm`.
+- A check's run starts from a fresh process (a refused `close_app` makes no run), counts nothing that shows after its 60 s,
+  reads a dead end's place and its back button from one screen read, and refuses a script with a step that isn't one
+  rather than running a shorter path. A bug check reads the caller's `--policy` words, as explore does.
+- Export: each zip has its own staging file (two exports of one bug no longer move each other's bytes into place); a file
+  that can't be read or a zip that can't be written is a plain refusal; an issue that failed after its files were committed
+  says so, names the branch and folder, and the export again makes the issue without uploading the same files again.
+- `tapwright bug`: `--accounts` while the daemon runs is refused (the daemon uses its own vault; the file was ignored);
+  `--app` reaches the daemon, so a bug id two apps hold exports that app's bug; an export's exit is 0 when it was written
+  (a saved `0 of 3` made it 1); a check that paused exits 2 even when the page keeps an earlier `0 of 3`.
+- A field with no label: its value (shown as its quoted text) is hidden in explore's and the check's accessibility and
+  usability findings, as a labeled field's `value=` was. Explore's JS errors are the app's own lines only. A slider's `50%`
+  is no loading screen. This computer's home folder with a space in its name is cut whole (`/Users/Jane Doe`). A `from:
+  "now"` page names a start only when the first step's place is known, keeps two opens of a link that lost its query, and
+  a source seen again after it left the last 50 is not counted again.
+
 ## 1.8.0 (2026-11-19), "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A

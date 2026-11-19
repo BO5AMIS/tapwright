@@ -1633,6 +1633,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
+        self._thin_place = None  # (PR #21) the place a thin call's read left is from before the drop too
         # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
         # mends without a new tunnel, and the condition lives on the instruments connection, not on WebDriverAgent.
         # The hold reports its own death (Device._hold_died), and a new tunnel ends it (Device.connect).
@@ -2255,7 +2256,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             trail_from, trail_aim = self._bug_aim(client_id, name, args)
             self._bug_typed(name, args)
             at_turn: list = []  # (the place as the touch got its turn: another agent may have moved the app meanwhile, PR #20)
-            turn_token = _PLACE_AT_TURN.set(at_turn) if ran_on is not None else None
+            recorded_turn = ran_on is not None
+            # (PR #21) filled for every touch: the bug trail takes the place at turn as well, recording or not
+            turn_token = _PLACE_AT_TURN.set(at_turn)
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2279,10 +2282,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
-                if turn_token is not None:
-                    _PLACE_AT_TURN.reset(turn_token)
-            if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
+                _PLACE_AT_TURN.reset(turn_token)
+            if at_turn and recorded_turn:  # what the touch saw as it went out wins over what was read before its turn
                 ran_on = at_turn[0]
+            if at_turn and at_turn[0] != trail_from:
+                # (PR #21) the bug trail too: the touch ran where it got its turn; a target aimed on the place before isn't
+                # kept (the step is then a point, which a path starts after)
+                trail_aim = trail_aim if trail_from is None else None
+                trail_from = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
             self._bug_touch(name, args, trail_aim, trail_from, after=self._place_before(self.control.client(client_id)))
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,

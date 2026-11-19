@@ -11,6 +11,7 @@ import hashlib
 import html
 import json
 import re
+from pathlib import Path
 
 from . import findings
 
@@ -156,12 +157,28 @@ _USER_HOME = re.compile(r"(?<![\w:/.\\-])(?:[A-Za-z]:[\\/](?:Users|Documents and
 # (the last part: `C:\Users\Jane Doe\proj\…` is a path under a folder with a space in its name, cut whole below)
 
 
+def _own_home(text: str) -> str:
+    """This computer's home folder, spelled with either slash, as `~` (PR #21): its name may hold spaces (`/Users/Jane
+    Doe`), which the general rule can't tell from the words after a path; this one is known whole."""
+    try:
+        home = str(Path.home()).rstrip("\\/")
+    except (RuntimeError, OSError, KeyError):
+        return text
+    if len(home) < 4 or not re.search(r"[\\/]", home):
+        return text
+    forms = sorted({home, home.replace("\\", "/"), home.replace("/", "\\")}, key=len, reverse=True)
+    pattern = "|".join(re.escape(f) for f in forms)
+    # (the folder itself; a path under it is cut to its file name by the rules below, which take spaces in folder names)
+    return re.sub(rf"(?i)(?<![\w:/.\\-])(?:{pattern})[\\/]?(?=$|[\s\"'():,;<>|])", "~", text)
+
+
 def strip_paths(text: str) -> str:
     """A path in a frame or a log line cut to its file name: no user folder, no machine name (§29.6). A path under a user
     folder may hold spaces (`C:\\Users\\Jane Doe\\...`): it is cut whole, so what follows (`:48 renderDays`) stays. A
     `file://` URL and a UNC path are cut the same way; a path that ends at a user folder itself becomes `~`."""
     text = _FILE_URL.sub(lambda m: m.group(1).rsplit("/", 1)[-1], text)
     text = _UNC.sub(lambda m: m.group(0).rsplit("\\", 1)[-1], text)
+    text = _own_home(text)
     text = _USER_HOME.sub("~", text)
     text = _QUOTED_PATH.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(1)}", text)
     text = _BARE_PATH.sub(lambda m: m.group(1), text)

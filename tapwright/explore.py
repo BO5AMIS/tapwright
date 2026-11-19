@@ -612,6 +612,7 @@ class Explorer:
             self.prompts += 1
             tries += 1
             tree = await self.phone.read()
+            self._system_now = explorefloor.system_of(tree)  # (PR #21: what is in front now, not the prompt just answered)
         if tree.alert is not None:
             return Look(tree, None)
         if self._foreign(tree):

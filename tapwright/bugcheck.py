@@ -90,7 +90,7 @@ class Target:
     place_key: dict | None
     got: str
     start: str | None
-    steps: list[dict]
+    steps: list  # the script's steps as kept (dicts; anything else makes `why_not` refuse the check)
 
 
 def runs_of(verify: object, default: int) -> int:
@@ -125,13 +125,16 @@ def target_of(finding: dict, meta: dict, script: dict | None) -> Target:
         steps = list(finding.get("path") or [])
     start = script.get("start") if isinstance(script, dict) and isinstance(script.get("start"), str) else None
     return Target(finding["kind"], str(meta.get("signature") or ""), meta.get("place_key"), finding["got"],
-                  start or finding.get("path_from"), [s for s in steps if isinstance(s, dict)])
+                  start or finding.get("path_from"), list(steps))
 
 
 def why_not(target: Target, reset: str) -> str | None:
     """Why the bug can't be checked at all, before anything is touched; None when it can."""
     if target.kind == "unreachable":
         return UNREACHABLE
+    bad = next((i for i, s in enumerate(target.steps, 1) if not isinstance(s, dict)), None)
+    if bad is not None:  # (PR #21) never run as a shorter sequence: that would check another path
+        return f"its script's step {bad} isn't a step"
     if reset == "app":
         return NO_APP_RESET
     if not target.start:
@@ -174,7 +177,8 @@ def _same(target: Target, kind: str, key: dict | None, got: str, reason: str | N
     """Does what a run ended with have the bug's signature (§29.5)? A bug with no place key compares with none."""
     if kind != target.kind or not target.signature:
         return False
-    got = "\n".join(bug.strip_paths(line) for line in got.split("\n"))  # (as the bug's own `got` was: review R185 M2)
+    # (as the bug's own `got` was: its paths cut, review R185 M2, and a field's value hidden, findings.make)
+    got = "\n".join(bug.strip_paths(line) for line in findings.hide_values(got).split("\n"))
     sig = bug.signature(kind, key if target.place_key is not None else None, got, reason, frames)
     return sig == target.signature
 
@@ -183,8 +187,11 @@ async def one_run(port: Port, target: Target, steps: list[dict], scrub: Callable
     """One run after its reset: True when it showed the bug, False when it didn't, (step, why) when a step needs a person."""
     began = port.clock()
     safe = findings.safe_scrub(scrub)
+
+    def late() -> bool:  # (PR #21) what a run shows after its 60 s never counts, however the last step ran over
+        return port.clock() - began > RUN_SECONDS
     for i, step in enumerate(steps, 1):
-        if port.clock() - began > RUN_SECONDS:
+        if late():
             return False
         await port.gate()
         key = await port.place_key()
@@ -198,6 +205,8 @@ async def one_run(port: Port, target: Target, steps: list[dict], scrub: Callable
             word = _POLICY_WORD.search(done.message)  # the gate held the actual recipient: no move of this step was made
             return i, f'the policy word "{word.group(1)}"' if word else "the skip floor holds what it touches"
         seen = await port.seen(mark)
+        if late():
+            return False
         if seen.crash is not None:
             reason, frames = seen.crash
             reason = safe(reason)
@@ -217,14 +226,18 @@ async def one_run(port: Port, target: Target, steps: list[dict], scrub: Callable
         if seconds > explore.SLOW_SECONDS and _same(target, "slow", key, f"{seconds:.1f} s to settle"):
             return True
     key = await port.place_key()
+    if late():
+        return False
     if target.kind == "observed":
         return target.place_key is None or key == target.place_key
     if target.kind in ("a11y", "ux"):
         issues = await port.issues(target.kind)
-        return bool(issues) and _same(target, target.kind, key, safe("\n".join(issues[:findings.MAX_ISSUES])))
+        return bool(issues) and not late() and _same(target, target.kind, key,
+                                                     safe("\n".join(issues[:findings.MAX_ISSUES])))
     if target.kind == "dead_end" and not target.got.startswith("it left the app"):
-        # a place with no way back but a reset (§25.8): the app is on that place and it shows no back
-        return (target.place_key is None or key == target.place_key) and not await port.has_back()
+        # a place with no way back but a reset (§25.8): the app is on that place and it shows no back, both read from the
+        # one screen read that gave the key (PR #21: `has_back` answers for that read, never a later one)
+        return (target.place_key is None or key == target.place_key) and not await port.has_back() and not late()
     return False
 
 
@@ -286,7 +299,10 @@ class DaemonCheck:
             return False
 
     async def reset(self) -> bool:
-        await self._call("close_app", {"app": self.app})
+        # (PR #21) a run starts from a fresh process: a close that was refused (it succeeds for an app that isn't running)
+        # leaves the app as the last run left it, and open_app would only bring that process to the front
+        if not await self._call("close_app", {"app": self.app}):
+            return False
         if not await self._call("open_app", {"app": self.app, "look": False}):
             return False
         await self._launched()  # (W177: a development build shows "Loading from Metro…" first; a link opened then is lost)
@@ -345,13 +361,17 @@ class DaemonCheck:
         await self.d._read(lambda: self.d._silent_read(view))
         return getattr(self.d.session, "last_tree", None)
 
+    _keyed = None  # the tree `place_key` read last, which `has_back` answers for (PR #21: one read for both facts)
+
     async def place_key(self) -> dict | None:
+        self._keyed = None
         try:
             tree = await self._tree()
         except Exception:  # noqa: BLE001 - a screen that can't be read has no key
             return None
         if tree is None or self.d._bundle() != self.app:
             return None
+        self._keyed = tree
         return self._key_of(self.d._language.get(self.app), tree)
 
     def mark(self) -> int:
@@ -382,9 +402,10 @@ class DaemonCheck:
             return ()
 
     async def has_back(self) -> bool:
-        try:
-            tree = await self._tree()
-        except Exception:  # noqa: BLE001
-            return True  # (can't tell: not the same dead end)
+        """Does the screen `place_key` read last show a way back? With no such read: yes (can't tell, so not the same dead
+        end)."""
+        tree = self._keyed
+        if tree is None:
+            return True
         back = getattr(tree, "back", None)
         return back is not None and (back.point is not None or back.dismiss is not None)

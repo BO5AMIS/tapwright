@@ -22,10 +22,12 @@ id, never content. A line that can't be written means nothing is sent.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import re
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Callable
@@ -169,19 +171,50 @@ def _picture_word(sent: bool) -> str:
 
 # ---- the zip ----
 
+def _snapshot(held: bugstore.Kept, with_picture: bool, audit: Audit, target: str) -> tuple[
+        bugstore.Kept, bytes | None, bool, dict[str, str]]:
+    """The bug as one version (PR #21): read again under its app's lock, with its picture and its privacy record and its
+    text files all from that read (a rewrite swaps the folder under the same lock). (the bug, the picture's bytes when it
+    goes, whether a picture is in the folder, the texts as sent). A folder that can't be read is a refusal that names no
+    content."""
+    store = bugstore.BugStore(held.folder.parent.parent)
+    try:
+        with store.locked(held.app):
+            now = store.read(held.app, held.id)
+            if now is None:
+                raise _refuse(audit, target, held.id, "gone", f"{held.id} is no longer kept; nothing was sent.", "not_found")
+            picture, there = _picture(now, with_picture)
+            return now, picture, there, texts_of(now, picture is not None, there)
+    except bugstore.BugFolderError as e:
+        raise _refuse(audit, target, held.id, "busy", f"export refused: {e} Nothing was sent.") from None
+    except (OSError, UnicodeDecodeError) as e:
+        raise _refuse(audit, target, held.id, "unreadable", f"export refused: a file of {held.id} can't be read "
+                                                            f"({type(e).__name__}). Nothing was sent.") from None
+
+
 def to_zip(held: bugstore.Kept, spec: dict, gate: Gate, audit: Audit, home: Path | None = None, checked: str = "") -> str:
-    picture, there = _picture(held, spec["with_picture"])
     path = held.folder.parent / f"{held.id}.zip"
     target = f"zip {bugmake.shown_path(path, home)}"
+    held, picture, there, texts = _snapshot(held, spec["with_picture"], audit, target)
     _confirmed(held, spec, audit, target)
-    texts = texts_of(held, picture is not None, there)
     _gated(gate, texts, audit, target, held.id)
     data = zip_bytes(held.id, texts, picture)
     if not audit(f"{target}: {held.id}, {_picture_word(picture is not None)}{checked and f'; {checked}'}"):
         raise Refused("not_allowed", NO_AUDIT)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_bytes(data)
-    os.replace(temporary, path)
+    # (PR #21) this export's own staging file: two exports of one bug never move each other's bytes into place
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.replace(staged, path)
+    except OSError as e:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        audit(f"{target}: {held.id}, failed (the zip couldn't be written)")
+        raise Refused("unsupported", f"export failed: the zip couldn't be written ({type(e).__name__}); nothing was "
+                                     "exported.") from None
     said = "with its picture" if picture is not None else (
         "without its private picture (export with_picture: true includes it)" if there else "")
     return f"Exported: {bugmake.shown_path(path, home)}" + (f", {said}." if said else ".") + (
@@ -221,8 +254,7 @@ def to_issue(held: bugstore.Kept, spec: dict, gate: Gate, audit: Audit, checked:
     if not spec["confirm"]:
         raise _refuse(audit, target, held.id, "needs confirmation",
                       NEED_CONFIRM_APP if held.meta.get("test_app") is not True else NEED_CONFIRM)
-    picture, there = _picture(held, spec["with_picture"])
-    texts = texts_of(held, picture is not None, there)
+    held, picture, there, texts = _snapshot(held, spec["with_picture"], audit, target)
     if "report.md" not in texts or "repro.json" not in texts:
         raise _refuse(audit, target, held.id, "missing files",
                       f"{held.id}: its page or its script is missing from its folder; make the bug again.", "not_found")
@@ -241,6 +273,9 @@ def to_issue(held: bugstore.Kept, spec: dict, gate: Gate, audit: Audit, checked:
         raise Refused("not_allowed", NO_AUDIT)
     try:
         _send(held, repo, title, body, texts["repro.json"], picture)
+    except IssueFailed as e:
+        audit(f"{target}: {held.id}, files committed, issue failed ({e.code})")
+        raise Refused(e.code, str(e)) from None
     except Refused as e:
         audit(f"{target}: {held.id}, failed ({e.code})")
         raise
@@ -265,8 +300,36 @@ def _send(held: bugstore.Kept, repo: str, title: str, body: str, script: str, pi
     files = {f"{base}/repro.json": script.encode("utf-8")}
     if picture is not None:
         files[f"{base}/picture.jpg"] = picture
-    j._commit(repo, j.BRANCH, files, f"Tapwright bug report: {held.id}")
-    j.run_gh(["issue", "create", "--repo", repo, "--title", title, "--body-file", "-"], stdin=body)
+    if not all(_on_branch(repo, path, data) for path, data in files.items()):  # (an export again after a failed issue)
+        j._commit(repo, j.BRANCH, files, f"Tapwright bug report: {held.id}")
+    try:
+        j.run_gh(["issue", "create", "--repo", repo, "--title", title, "--body-file", "-"], stdin=body)
+    except Refused as e:
+        # (PR #21) the files are on the branch already: said, so the caller knows what is in the repository now
+        named = " and ".join(p.rsplit("/", 1)[-1] for p in files)
+        raise IssueFailed(e.code, f"export half done: {named} {'were' if len(files) > 1 else 'was'} committed to the "
+                                  f"{j.BRANCH} branch of {repo} under {base}/, but the issue couldn't be made ({e}). Export "
+                                  "again to make the issue; files already there with the same content aren't uploaded "
+                                  "again.") from None
+
+
+class IssueFailed(Refused):
+    """The files were committed, the issue wasn't made."""
+
+
+def _blob_sha(data: bytes) -> str:
+    """The git blob id of `data` (what GitHub's contents API gives as a file's `sha`)."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: S324 - git's own id, not a security use
+
+
+def _on_branch(repo: str, path: str, data: bytes) -> bool:
+    """Is `path` on the branch with exactly these bytes? Any answer that doesn't say so is no."""
+    j = journey_export
+    try:
+        seen = j._json(["api", f"repos/{repo}/contents/{path}?ref={j.BRANCH}"])
+    except Refused:
+        return False
+    return seen.get("type") == "file" and seen.get("sha") == _blob_sha(data)
 
 
 def export(held: bugstore.Kept, spec: dict, gate: Gate, audit: Audit, home: Path | None = None, checked: str = "") -> str:

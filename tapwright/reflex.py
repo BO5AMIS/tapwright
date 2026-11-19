@@ -107,6 +107,7 @@ STARTING_WORDS = re.compile(r"(?i)(?:\b(?:loading|downloading|bundling|please wa
                             r"|(?<![\w.])\d{1,3}(?:\.\d+)?\s?%)")
 STARTING_MAX_CONTROLS = 2  # a loading screen offers at most this many things to touch (a Dismiss, a Reload)
 CONTROL_ROLES = ("button", "link", "cell", "tab", "input", "switch", "slider")
+VALUE_ROLES = ("input", "slider", "switch")  # controls whose value is what a person set, not what the screen says
 
 
 def starting(tree: ui.Tree | None, bundle: str) -> str | None:
@@ -118,8 +119,10 @@ def starting(tree: ui.Tree | None, bundle: str) -> str | None:
     if tree.alert is not None:
         return None  # (an alert is answered by whoever reads next: it is no loading screen)
     controls = [e for e in tree.items if e.role in CONTROL_ROLES and not e.in_alert]
+    # (PR #21) a control's value (a slider's "50%", what is in a field) is a setting, never a startup word: only its label
     if len(controls) <= STARTING_MAX_CONTROLS and (loading(tree.items) or any(
-            STARTING_WORDS.search(f"{e.label} {e.value}") for e in tree.items if not e.in_alert)):
+            STARTING_WORDS.search(e.label if e.role in VALUE_ROLES else f"{e.label} {e.value}")
+            for e in tree.items if not e.in_alert)):
         return "loading"
     if not controls:
         return "empty"

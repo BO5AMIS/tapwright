@@ -27,7 +27,7 @@ from .errors import HTTP_STATUS
 from .stream import PictureGone, jpeg_of
 
 COOKIE = "tapwright_token"
-FLOOR_TOOLS = ("explore", "replay")  # the calls whose own moves pass the skip floor (explore; replay with repair)
+FLOOR_TOOLS = ("explore", "replay", "bug_report")  # the calls whose own moves pass the skip floor (replay: with repair)
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 # What a person sees when the link carries no valid key (2026-11-12: an agent opened `?token=SECRET`, and the old one
 # line, "Open the link that tapwright view prints", didn't tell the owner what to do)
@@ -234,9 +234,9 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         scope, rules = None, None
         tool = request.path_params["name"]
         if tool in FLOOR_TOOLS and (tool != "replay" or args.get("repair") is not None):
-            # (1.8) explore's and a repair's skip floor alone reads the caller's policy: its words only add to what those
-            # moves never touch (AGENT-TOOLS §25.5); it lets nothing through and restricts no other call. A bad one is refused,
-            # so a skip list the user wrote is never lost without a word.
+            # (1.8) explore's, a repair's and (PR #21) a bug check's skip floor alone reads the caller's policy: its words
+            # only add to what those moves never touch (AGENT-TOOLS §25.5); it lets nothing through and restricts no other
+            # call. A bad one is refused, so a skip list the user wrote is never lost without a word.
             sent = _hv(request, "x-tapwright-policy")
             try:
                 rules = policy.loads(sent, header=True) if sent else None
@@ -255,8 +255,10 @@ def create_app(daemon, token: str, hosts=LOCAL_HOSTS, on_stop=None, ceiling: Cei
         # `tapwright call` says each call is a process of its own, for session_report; no other value is kept
         via: dict[str, str | bool] = {"via": "call"} if _hv(request, "x-tapwright-via") == "call" else {}
         apps = [a.strip() for a in _hv(request, "x-tapwright-apps", "").split(",") if a.strip()]
-        if (client.startswith("schedule-") or tool == "explore") and len(apps) == 1:
-            via["app_hint"] = apps[0]  # route launch context, or the one app explore searches; never an allowlist
+        if (client.startswith("schedule-") or tool in ("explore", "bug_report")) and len(apps) == 1:
+            # route launch context, the one app explore searches, or the app whose bug a bug id two apps hold names (PR #21);
+            # never an allowlist
+            via["app_hint"] = apps[0]
         if _hv(request, "x-tapwright-dialog") == "1":
             via["dialog"] = True  # the caller's host can show a dialog and is polling for it (dialog.py)
         # Where the per-app maps are kept (--maps, AGENT-TOOLS §18.9): an absolute folder; a daemon's own can't be moved

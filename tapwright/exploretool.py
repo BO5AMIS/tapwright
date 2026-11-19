@@ -309,7 +309,8 @@ class DaemonPhone:
             if ring is not None and ring.added > mark:
                 shown = ring.shown()
                 new = shown[max(0, len(shown) - max(0, ring.added - mark - ring.unvouched)):]
-                errors = tuple(self.d._safe_scrub(e.text) for e in new if e.level == "error")
+                # (PR #21) only the app's own lines: a framework's error in its process is no error of the app (as _bug_logs)
+                errors = tuple(self.d._safe_scrub(e.text) for e in new if e.level == "error" and e.own)
         except Exception:  # noqa: BLE001 - no log is no finding
             errors = ()
         crash = None
@@ -348,11 +349,19 @@ class DaemonPhone:
         return await asyncio.to_thread(jpeg_of, png)
 
     async def audit(self) -> tuple[str, ...]:
-        answer = await self.d.run_tool(self.cid, "audit", {}, self.scope)
-        return issues_of(answer["text"])
+        return await self._issues("audit")
 
     async def ux(self) -> tuple[str, ...]:
-        answer = await self.d.run_tool(self.cid, "ux_check", {}, self.scope)
+        return await self._issues("ux_check")
+
+    async def _issues(self, tool: str) -> tuple[str, ...]:
+        """A screen's issues for a finding, its field lines with no value in them (PR #21: an input with no label shows its
+        value as its quoted text, which `hide_values` can't tell from a label)."""
+        token = ui.FIELD_VALUES_HIDDEN.set(True)
+        try:
+            answer = await self.d.run_tool(self.cid, tool, {}, self.scope)
+        finally:
+            ui.FIELD_VALUES_HIDDEN.reset(token)
         return issues_of(answer["text"])
 
     # ---- a person first (§25.9) ----

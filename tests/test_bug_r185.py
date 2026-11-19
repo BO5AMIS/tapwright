@@ -60,7 +60,7 @@ def test_a_link_is_kept_as_its_places_pattern_never_its_token_in_any_file_the_zi
         await d.run_tool("a", "tap", {"target": {"id": "go-settings"}})
         r = await d.run_tool("a", "bug_report", {"from": "now", "note": "the sign-in link lands on settings",
                                                  "export": {"to": "zip"}})
-        folder = folder_of(r)
+        folder = folder_of(r, d.bug_home)
         page = (folder / "report.md").read_text("utf-8")
         assert "Earlier steps couldn't be written down." in page
         assert "1. Open the link example://login (its query and fragment aren't kept" in page and "2. Tap id go-settings" in page
@@ -114,7 +114,7 @@ def test_a_bug_of_an_app_that_isnt_a_test_app_keeps_no_screen_text_or_logs_and_a
         await d.run_tool("a", "tap", {"target": {"id": "b-more"}})
         r = await d.run_tool("a", "bug_report", {"from": "now", "note": "order 42 of 'Jane Doe' is lost at 10:21",
                                                  "with_picture": True})
-        folder = folder_of(r)
+        folder = folder_of(r, d.bug_home)
         page = (folder / "report.md").read_text("utf-8")
         assert asked == []  # (its log isn't even read)
         assert "No log lines." in page and "jane@example.com" not in files_text(folder)
@@ -139,7 +139,7 @@ def test_a_bug_of_an_app_that_isnt_a_test_app_keeps_no_screen_text_or_logs_and_a
         await d.run_tool("a", "look", {})
         await d.run_tool("a", "tap", {"target": {"label": "Profile form"}})
         r = await d.run_tool("a", "bug_report", {"from": "now", "note": "order 42 is lost"})
-        page = (folder_of(r) / "report.md").read_text("utf-8")
+        page = (folder_of(r, d.bug_home) / "report.md").read_text("utf-8")
         assert asked == [BUNDLE] and "the inbox of" in page and 'Tap "Profile form"' in page
         assert bug.NOT_A_TEST_APP not in page
         await finish(stop, task)
@@ -194,7 +194,7 @@ def test_a_tapped_row_with_no_id_is_the_nth_row_never_its_text(tmp_path):
         await d.run_tool("a", "look", {})
         await d.run_tool("a", "tap", {"target": {"label": ROW}})
         r = await d.run_tool("a", "bug_report", {"from": "now", "note": "the row opens the wrong screen"})
-        folder = folder_of(r)
+        folder = folder_of(r, d.bug_home)
         page = (folder / "report.md").read_text("utf-8")
         assert "1. Tap the 1st row of the list." in page
         assert "Sarah" not in files_text(folder) and "4242" not in files_text(folder)
@@ -235,7 +235,7 @@ def test_a_failed_run_keeps_its_other_steps_and_their_expect_so_its_check_reprod
         assert e.value.code == "expect_failed"
         r = await d.run_tool("a", "bug_report", {"from": "failure", "verify": 2})
         assert r["text"].splitlines()[1] == "Reproduced: 2 of 2 runs.", r["text"]
-        script = json.loads((folder_of(r) / "repro.json").read_text("utf-8"))
+        script = json.loads((folder_of(r, d.bug_home) / "repro.json").read_text("utf-8"))
         assert script["steps"][0] == {"tool": "wait_for", "text": "Profile form", "timeout": 1}
         assert script["steps"][1]["expect"]["text"] == "Never on this screen"
         await finish(stop, task)
@@ -333,7 +333,7 @@ def test_l1_a_check_whose_port_cant_be_made_leaves_no_busy_mark(tmp_path, monkey
         from test_daemon_bug import failed_check
         await failed_check(d)
         r = await d.run_tool("a", "bug_report", {"from": "failure", "verify": False})
-        held = d._bugs().read(BUNDLE, folder_of(r).name)
+        held = d._bugs().read(BUNDLE, folder_of(r, d.bug_home).name)
 
         def broken(*a, **k):
             raise RuntimeError("no screen")

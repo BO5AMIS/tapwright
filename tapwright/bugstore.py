@@ -9,32 +9,38 @@ kept (by `seen.last`); a bug just made or updated, or one a check holds, is neve
 its own app's folder, and only when its folder name is its own id (Tapline 1.8.6's lesson): a folder planted elsewhere is
 never listed or read.
 
-Every change of an app's bugs is made under one lock of that app's folder (a lock file, so the command line and the daemon
-take turns too), and a bug is read again inside it right before it is written: what changed meanwhile (a sighting, another
-check) is kept, and a bug removed meanwhile is not made again (review R185 M5). Every rewrite reads the kept finding and the
-script through the redactor again and builds the page anew, so a value added to the vault since is hidden too (L2).
+Every change of an app's bugs is made under one lock of that app's folder (a pid lock file, pidlock.py, so the command line
+and the daemon take turns too; a live holder is never displaced, however long it holds it, and only its holder releases it),
+and a bug is read again inside it right before it is written: what changed meanwhile (a sighting, another check) is kept,
+and a bug removed meanwhile, or removed and made again, is not written over (review R185 M5; PR #21). A rewrite is staged
+whole beside the folder and swapped in by renames, so a reader under the lock (an export) sees one version, never a mix.
+Every rewrite reads the kept finding and the script through the redactor again and builds the page anew, so a value added
+to the vault since is hidden too (L2).
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
 import os
+import re
+import secrets
 import shutil
-import contextlib
 import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Iterator
 
-from . import bug, findings
+from . import bug, findings, pidlock
 
 KEPT = 100  # the newest bugs of an app (§29.2)
 SOURCES_KEPT = 50  # the newest sources `seen.sources` keeps (§29.5)
 TEXT_FILES = ("report.md", "report.html", "repro.json", "finding.json")
 LOCK_FILE = ".lock"  # in an app's bugs folder: one change of its bugs at a time, across processes
-LOCK_WAIT, LOCK_POLL, LOCK_STALE = 15.0, 0.02, 60.0  # seconds; a lock older than LOCK_STALE was left by a process that died
-HOLD_STALE = 3600.0  # a check's hold on a bug (`.<bug id>.held`) older than this was left behind: retention may remove it
+LOCK_WAIT, LOCK_POLL = 15.0, 0.02  # seconds (a lock is taken over only when its holder's process is gone: pidlock.py)
+HOLD_STALE = 3600.0  # a check's hold on a bug (`.<bug id>.<token>.held`) older than this was left behind: retention may remove it
+SWAP_WAIT = 2.0  # seconds a rewrite's rename retries while a reader has a file of the folder open (Windows)
 
 
 class BugGateError(Exception):
@@ -111,9 +117,10 @@ class BugStore:
         app_dir = self.app_dir(app)
         folder = app_dir / bug_id
         try:
-            if folder.is_symlink() or not folder.is_dir():
+            if app_dir.is_symlink() or folder.is_symlink() or not folder.is_dir():
                 return None
-            if os.path.realpath(folder) != os.path.join(os.path.realpath(app_dir), bug_id):
+            # (PR #21) contained in the store's own root, not in wherever the app's folder resolves to
+            if os.path.realpath(folder) != os.path.join(os.path.realpath(self.base), app_dir.name, bug_id):
                 return None
             data = json.loads((folder / "finding.json").read_text("utf-8"))
         except (OSError, ValueError, RecursionError):
@@ -168,35 +175,22 @@ class BugStore:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / LOCK_FILE
         deadline = time.monotonic() + LOCK_WAIT
-        while True:
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
-                break
-            except FileExistsError:
-                try:
-                    if time.time() - path.stat().st_mtime > LOCK_STALE:
-                        path.unlink()  # (left behind by a process that died)
-                        continue
-                except OSError:
-                    pass
-            except PermissionError:  # (Windows: the lock file is being removed just now)
-                pass
+        # (PR #21: a lock is never taken over for its age; a holder suspended for minutes still holds it, and only a lock
+        # whose holder's process is gone is taken over. Only its holder releases it.)
+        while (token := pidlock.take(path)) is None:
             if time.monotonic() > deadline:
                 raise BugFolderError(f"the bugs of {app} stayed locked for {LOCK_WAIT:g} s; try again.")
             time.sleep(LOCK_POLL)
         try:
             yield
         finally:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            pidlock.release(path, token)
 
     @contextlib.contextmanager
     def hold(self, app: str, bug_id: str) -> Iterator[None]:
-        """A check holds the bug while it runs: retention never removes it meanwhile (review R185 M5)."""
-        marker = self.app_dir(app) / f".{bug_id}.held"
+        """A check holds the bug while it runs: retention never removes it meanwhile (review R185 M5). Each hold has a
+        marker of its own, so a second check that stops at once never ends the first one's hold (PR #21)."""
+        marker = self.app_dir(app) / f".{bug_id}.{secrets.token_hex(6)}.held"
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(str(os.getpid()), encoding="utf-8")
@@ -212,9 +206,16 @@ class BugStore:
 
     def _held(self, app: str, bug_id: str) -> bool:
         try:
-            return time.time() - (self.app_dir(app) / f".{bug_id}.held").stat().st_mtime < HOLD_STALE
+            markers = [p for p in self.app_dir(app).iterdir() if p.name.startswith(f".{bug_id}.") and p.name.endswith(".held")]
         except OSError:
             return False
+        for marker in markers:
+            try:
+                if time.time() - marker.stat().st_mtime < HOLD_STALE:
+                    return True
+            except OSError:
+                continue
+        return False
 
     # ---- making, under the lock ----
 
@@ -245,13 +246,13 @@ class BugStore:
         if (self.app_dir(app) / bug_id).exists():
             raise BugFolderError(f"the folder of {bug_id} exists but can't be read (a damaged finding.json?). Move it away "
                                  "or remove it, then report the bug again.")
-        meta: dict = {"id": bug_id, "signature": sig, "place_key": place_key,
+        meta: dict = {"id": bug_id, "generation": secrets.token_hex(8), "signature": sig, "place_key": place_key,
                       "source": {k: source[k] for k in ("how", "run", "finding") if source.get(k) is not None},
                       # (W177, §29.9: the same bug found in two runs is count 2) the count is of sightings, one for each
                       # source; how often the sources saw it in all (a finding's own "x2") is `occurrences`
                       "seen": {"first": finding["when"], "last": finding["when"], "count": 1,
                                "occurrences": _occurrences(finding), "builds": [build_of(finding)],
-                               "sources": [source["key"]]},
+                               "sources": [source["key"]], "source_ids": [_source_id(source["key"])]},
                       "reproduced": reproduced, "picture_included": False, "test_app": bool(test_app)}
         if picture_source:
             meta["picture_source"] = picture_source
@@ -276,14 +277,25 @@ class BugStore:
         never merged (§29.5): it gets `bug_<sig>`, else `_2` and on, unless the same source made one already."""
         if place_key is not None:
             return bug.bug_id(sig), self.read(app, bug.bug_id(sig))
-        n = 1
-        while True:
-            held = self.read(app, bug.bug_id(sig, n))
-            if held is None and not (self.app_dir(app) / bug.bug_id(sig, n)).exists():
-                return bug.bug_id(sig, n), None
-            if held is not None and key in held.meta["seen"].get("sources", []):
+        # (PR #21) every kept id of this signature is searched for the source first: retention may have removed `bug_<sig>`
+        # and kept `bug_<sig>_2`; a free id is taken only when no kept one has the source
+        own = re.compile(rf"^{re.escape(bug.bug_id(sig))}(?:_([0-9]{{1,4}}))?$")
+        try:
+            names = sorted(p.name for p in self.app_dir(app).iterdir())
+        except OSError:
+            names = []
+        taken: set[int] = set()
+        for name in names:
+            if (m := own.match(name)) is None:
+                continue
+            taken.add(int(m.group(1) or 1))
+            held = self.read(app, name)
+            if held is not None and _known(held.meta["seen"], key):
                 return held.id, held
+        n = 1
+        while n in taken:
             n += 1
+        return bug.bug_id(sig, n), None
 
     def _sighting(self, held: Kept, finding: dict, source: dict, reproduced: dict,
                   gate: Callable[[dict[str, str]], str | None], *, picture: bytes | None = None, with_picture: bool = False,
@@ -295,11 +307,13 @@ class BugStore:
         meta = json.loads(json.dumps(held.meta))
         seen = meta["seen"]
         sources = list(seen.get("sources", []))
-        if source["key"] not in sources:
+        if not _known(seen, source["key"]):
             seen["occurrences"] = int(seen.get("occurrences", seen.get("count", 1))) + _occurrences(finding)
             seen["count"] = int(seen.get("count", 1)) + 1
             sources.append(source["key"])
-            seen["sources"] = sources[-SOURCES_KEPT:]
+            seen["sources"] = sources[-SOURCES_KEPT:]  # (the newest, for a person; every source counted is in source_ids)
+            ids = seen.get("source_ids") if isinstance(seen.get("source_ids"), list) else []
+            seen["source_ids"] = [*(i for i in ids if isinstance(i, str)), _source_id(source["key"])]
             seen["last"] = max(str(seen.get("last", "")), finding["when"])
             build = build_of(finding)
             if build not in seen.setdefault("builds", []):
@@ -321,11 +335,12 @@ class BugStore:
                 scrub: Callable[[str], str] | None = None) -> Made | None:
         """The result of a reproduction check (§29.4): `reproduced` replaced, and the page's `Reproduced` and `Environment`
         sections (the reset the check used) rewritten. The bug is read again under the lock first, so a sighting or a
-        picture added during the check is kept (review R185 M5); None when the bug was removed meanwhile (nothing is
-        written: a half bug is never made again)."""
+        picture added during the check is kept (review R185 M5); None when the bug was removed meanwhile, or removed and
+        made again from another report (its generation isn't the one checked: PR #21). Nothing is written then: a half bug
+        is never made again, and one report's check never lands on another."""
         with self.locked(held.app):
             now = self.read(held.app, held.id)
-            if now is None:
+            if now is None or now.meta.get("generation") != held.meta.get("generation"):
                 return None
             meta = json.loads(json.dumps(now.meta))
             meta["reproduced"] = reproduced
@@ -357,19 +372,21 @@ class BugStore:
             meta = findings.redact(meta, safe)  # type: ignore[assignment]
             try:
                 script = json.loads((held.folder / "repro.json").read_text("utf-8"))
-                script_text = _dumps(findings.redact(script, safe))
+                if not isinstance(script, dict):
+                    raise ValueError("not an object")
             except (OSError, ValueError, RecursionError):
-                script_text = None
+                # (PR #21) a script that can't be read again through the redactor: nothing is written, rather than a page
+                # that says it was updated beside a script no gate has seen
+                raise BugFolderError(f"the repro.json of {held.id} can't be read, so the bug was kept as it was. Move its "
+                                     "folder away or remove it, then report the bug again.") from None
+            script_text = _dumps(findings.redact(script, safe))
         page = bug.markdown(finding, meta, "picture.jpg" if meta.get("picture_included") else None)
         files = {"report.md": page, "report.html": bug.page_html(page), "finding.json": _dumps({**finding, "bug": meta})}
         if script_text is not None:
             files["repro.json"] = script_text
         if (bad := gate(files)) is not None:
             raise BugGateError(bad, update=True)
-        if picture is not None:
-            _write(held.folder / "picture.jpg", picture)
-        for name, text in files.items():
-            _write(held.folder / name, text)
+        self._publish(held.folder, files, picture)
         self._prune(held.app, keep=held.id)
         return Made(meta, held.folder, new, bug.title(finding["kind"], finding.get("place"), finding["got"]), finding)
 
@@ -377,6 +394,54 @@ class BugStore:
         page = bug.markdown(finding, meta, picture_file)
         return {"report.md": page, "report.html": bug.page_html(page), "repro.json": _dumps(script or {}),
                 "finding.json": _dumps({**finding, "bug": meta})}
+
+    def _publish(self, folder: Path, files: dict[str, str], picture: bytes | None) -> None:
+        """A rewrite as one version (PR #21): the whole new folder is staged beside it (what isn't rewritten, the picture,
+        copied over), then swapped in by two renames under the lock. A write that fails leaves the old folder as it was; a
+        swap that fails puts it back."""
+        stage = Path(tempfile.mkdtemp(prefix=f".{folder.name}.new.", dir=folder.parent))
+        old = folder.parent / f".{folder.name}.old.{secrets.token_hex(4)}"
+        try:
+            for name in os.listdir(folder):
+                source = folder / name
+                if name in files or (picture is not None and name == "picture.jpg") or source.is_symlink() \
+                        or not source.is_file():
+                    continue
+                shutil.copy2(source, stage / name)
+            if picture is not None:
+                _write(stage / "picture.jpg", picture)
+            for name, text in files.items():
+                _write(stage / name, text)
+            _rename(folder, old)
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        try:
+            _rename(stage, folder)
+        except BaseException:
+            try:
+                _rename(old, folder)
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+
+    def _tidy(self, app: str) -> None:
+        """Under the lock: what a process that died during a write left beside the bugs. A previous version whose folder is
+        gone goes back (it was whole); any other staged folder is removed (no writer is at work now)."""
+        try:
+            left = [p for p in self.app_dir(app).iterdir() if p.name.startswith(".bug_") and p.is_dir() and not p.is_symlink()]
+        except OSError:
+            return
+        for path in sorted(left, key=lambda p: ".old." not in p.name):
+            name = path.name[1:].split(".", 1)[0]
+            if ".old." in path.name and bug.BUG_ID.match(name) and not (path.parent / name).exists():
+                try:
+                    os.replace(path, path.parent / name)
+                    continue
+                except OSError:
+                    pass
+            shutil.rmtree(path, ignore_errors=True)
 
     def _write_new(self, folder: Path, files: dict[str, str], picture: bytes | None) -> None:
         """A new bug's folder, written whole beside it and then moved into place: a half-written bug is never seen."""
@@ -401,6 +466,7 @@ class BugStore:
             self._prune(app, keep)
 
     def _prune(self, app: str, keep: str | None = None) -> None:
+        self._tidy(app)
         bugs = self.bugs(app)
         extra = [k for k in bugs if k.id != keep][max(0, self.kept - (1 if keep else 0)):]
         for old in extra:
@@ -427,6 +493,31 @@ class BugStore:
                 lines.append(f"  {k.id}  {k.title}   seen {k.meta['seen']['count']}, last {str(k.meta['seen']['last'])[:10]}, "
                              f"{checked}")
         return lines
+
+
+def _source_id(key: str) -> str:
+    """A counted source, short (PR #21): `seen.sources` keeps the newest 50 for a person, `seen.source_ids` every one
+    counted, so a source seen again after it aged out of the list isn't counted again."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _known(seen: dict, key: str) -> bool:
+    ids = seen.get("source_ids")
+    return key in (seen.get("sources") or []) or (isinstance(ids, list) and _source_id(key) in ids)
+
+
+def _rename(source: Path, target: Path) -> None:
+    """A rename that waits a moment while a reader has a file in it open (Windows refuses the rename then)."""
+    deadline = time.monotonic() + SWAP_WAIT
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise BugFolderError("a bug's folder is in use (a file of it is open), so it was kept as it was. Try "
+                                     "again.") from None
+            time.sleep(LOCK_POLL)
 
 
 def _occurrences(finding: dict) -> int:

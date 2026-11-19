@@ -276,7 +276,7 @@ def read_run(explore_home: Path, run_dir: Path, finding_id: str) -> RunFinding:
     except (OSError, ValueError, RecursionError):
         raise BugError("bad_params", f"{run_dir.name} holds no explore report that can be read.") from None
     found = report.get("findings") if isinstance(report, dict) else None
-    if report.get("format") != "agent-tools-explore-report" or not isinstance(found, list):
+    if not isinstance(report, dict) or report.get("format") != "agent-tools-explore-report" or not isinstance(found, list):
         raise BugError("bad_params", f"{run_dir.name} is not an explore report.")
     raw = next((f for f in found if isinstance(f, dict) and f.get("id") == finding_id), None)
     if raw is None:
@@ -390,7 +390,7 @@ class Observed:
 def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observed | None:
     """The last 10 touches of this app that succeeded and weren't dry runs, as steps; None with no touch at all. A step that
     can't be written down cuts the path after it. `path_from` is the place the first kept step ran on when it was known
-    then, else the nearest later one's, else (no step at all) None."""
+    then (its own, else the place the touch before it left), else None."""
     every = [e for e in trail if e.get("tool") in NOW_TOUCHES and e.get("ok") and not e.get("dry_run")
              and e.get("app") in (None, app)]
     touches = every[-NOW_STEPS:]
@@ -404,12 +404,17 @@ def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observe
     last_bad = max((i for i, s in enumerate(steps) if s is None), default=-1)
     kept: list[int] = []
     for i in range(last_bad + 1, len(touches)):
-        # (W177) the same link opened twice in a row is one step for a person: the second open changes nothing
-        if kept and steps[i] == steps[kept[-1]] and (steps[i] or {}).get("tool") == "open_url":
+        # (W177) the same link opened twice in a row is one step for a person: the second open changes nothing. Not when
+        # either open lost part of its link (a query, a fragment: PR #21): the two may have been different links, and the
+        # page must say the saved link may not show it
+        if kept and steps[i] == steps[kept[-1]] and (steps[i] or {}).get("tool") == "open_url" \
+                and not touches[i].get("link_cut") and not touches[kept[-1]].get("link_cut"):
             continue
         kept.append(i)
     path = [steps[i] for i in kept]  # type: ignore[misc]
-    start = next((ran_on[i] for i in kept if ran_on[i]), None)
+    # (PR #21) the start is where the FIRST kept step ran; a later step's place is never named as it (the first step may
+    # have run on another screen): unknown, and the check then says so
+    start = ran_on[kept[0]] if kept else None
     cut = tuple(n for n, i in enumerate(kept) if touches[i].get("link_cut"))
     return Observed(path, start, last_bad >= 0, cut)  # type: ignore[arg-type]
 
