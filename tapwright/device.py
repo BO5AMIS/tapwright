@@ -17,6 +17,7 @@ import posixpath
 import re
 import sys
 import time
+import weakref
 from pathlib import Path
 
 from . import aio, store, trace
@@ -169,21 +170,36 @@ def _new_tunnel(userspace_tunnel, serial, make):
     return userspace_tunnel.UserspaceRsdTunnel(serial=serial, provider_factory=factory)
 
 
+_swap_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _swap_lock() -> asyncio.Lock:
+    """One lock per event loop (as pymobiledevice3's own lifecycle lock), made inside the loop that uses it."""
+    loop = asyncio.get_running_loop()
+    lock = _swap_locks.get(loop)
+    if lock is None:
+        lock = _swap_locks[loop] = asyncio.Lock()
+    return lock
+
+
 async def _open_tunnel(userspace_tunnel, tunnel, make):
-    """Open `tunnel`. Before 11.57 a network service can only be handed in by replacing the module's provider:
-    that is done for this one open and undone after it, so a later open over USB gets the library's own provider
-    again (1.9.0 left it replaced: every USB reconnect after a network one failed)."""
+    """Open `tunnel`. Before 11.57 the tunnel always calls the module's provider, so a network service can only be
+    handed in by replacing it: for this one open, undone after it, so a later open over USB gets the library's own
+    provider again (1.9.0 left it replaced). The swap, the open and the undo are one step under a lock: a second
+    open meanwhile would take this open's provider for its original, or have its own undone before it runs."""
     if make is None or _takes_factory(userspace_tunnel):
         return await tunnel.aopen()
 
     async def provider(serial, autopair, remotepairing_fallback=True):
         return await make(), None
-    original = userspace_tunnel._create_no_root_tunnel_provider
-    userspace_tunnel._create_no_root_tunnel_provider = provider
-    try:
-        return await tunnel.aopen()
-    finally:
-        userspace_tunnel._create_no_root_tunnel_provider = original
+    async with _swap_lock():
+        original = userspace_tunnel._create_no_root_tunnel_provider
+        userspace_tunnel._create_no_root_tunnel_provider = provider
+        try:
+            return await tunnel.aopen()
+        finally:
+            if userspace_tunnel._create_no_root_tunnel_provider is provider:  # never undo someone else's
+                userspace_tunnel._create_no_root_tunnel_provider = original
 
 
 class Device:
@@ -222,6 +238,7 @@ class Device:
         from pymobiledevice3.remote import userspace_tunnel
         on_usb = [d for d in await usbmux.list_devices() if d.connection_type == "USB"
                   and (self.udid is None or d.serial == self.udid)]
+        unclaimed: list = []  # a service found here that no tunnel has taken yet
         if self.host:
             if not self.port:
                 raise DeviceError("no pairing port known for a direct address: run `tapwright probe` once on the "
@@ -247,15 +264,25 @@ class Device:
             for extra in services[1:]:
                 await extra.close()
             found = services[0]
+            unclaimed.append(found)
 
             async def make():
+                unclaimed.clear()  # the tunnel owns it from here, and closes it with itself
                 return found
             self.via = "local network"
         self.tunnel = _new_tunnel(userspace_tunnel, self.udid, make)
         try:
             self.rsd = await _open_tunnel(userspace_tunnel, self.tunnel, make)
-        except Exception as e:
-            raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
+        except BaseException as e:
+            # an open that failed before taking the found service (a tunnel still active, say) leaves it to us
+            for service in unclaimed:
+                try:
+                    await service.close()
+                except (Exception, asyncio.CancelledError):
+                    pass
+            if isinstance(e, Exception):
+                raise DeviceError(f"couldn't open the developer tunnel over {self.via}: {e}") from e
+            raise
         self.udid = self.rsd.udid
         store.save_state(udid=self.udid)
         self.log(f"connected over {self.via}: {self.rsd.product_type} iOS {self.rsd.product_version}")

@@ -203,3 +203,147 @@ def test_the_installed_library_is_one_of_the_two_contracts():
         assert {"service", "lockdown"} <= set(userspace_tunnel.TunnelProvider._fields)
     else:
         assert callable(userspace_tunnel._create_no_root_tunnel_provider)
+
+
+class Svc:
+    """A network tunnel service that says how far an open got with it."""
+
+    def __init__(self, name, closed):
+        self.name, self.closed = name, closed
+
+    def start_tcp_tunnel(self):
+        raise RuntimeError(f"start_tcp_tunnel reached with {self.name}")
+
+    async def close(self):
+        self.closed.append(self.name)
+
+
+def test_two_network_opens_at_once_on_the_old_contract_each_get_their_own(world, monkeypatch):
+    """(review 1.9.1 L1) Before 11.57 the provider is swapped per open. Without one lock over swap, open and undo, a
+    second open took the first one's provider for its original, ran on the library's own (USB) provider, and left the
+    first one's in place."""
+    mod = _old_contract()
+    world.use(mod)
+    library = mod.UserspaceRsdTunnel.aopen
+    locks = {}
+
+    async def aopen(self):  # the library serializes opens on one lock, as the real one does
+        lock = locks.setdefault("lifecycle", asyncio.Lock())
+        async with lock:
+            return await library(self)
+    mod.UserspaceRsdTunnel.aopen = aopen
+
+    async def scenario():
+        gate = asyncio.Event()
+
+        async def direct(identifier, host, port):
+            await gate.wait()
+            return f"direct {host}"
+        monkeypatch.setattr(tunnel_service, "create_core_device_tunnel_service_using_remotepairing", direct)
+        a = asyncio.ensure_future(Device(log=lambda *x: None, host="a.host", port=1).connect())
+        b = asyncio.ensure_future(Device(log=lambda *x: None, host="b.host", port=1).connect())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        gate.set()
+        await asyncio.gather(a, b)
+    asyncio.run(scenario())
+    assert sorted(mod.opened) == ["direct a.host", "direct b.host"]
+    assert mod._create_no_root_tunnel_provider is mod.library_provider
+
+
+@pytest.mark.parametrize("contract", [_new_contract, _old_contract], ids=["11.57+", "before 11.57"])
+def test_a_found_service_no_tunnel_took_is_closed(world, monkeypatch, contract):
+    """(review 1.9.1 L2) An open that fails before it asks for the service (a tunnel still active in the process)
+    left the service found on the local network open, one more with every retry."""
+    mod = contract()
+    world.use(mod)
+    closed = []
+
+    async def mdns(udid=None, **kw):
+        return [Svc("wifi", closed)]
+    monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", mdns)
+
+    async def busy(self):
+        raise RuntimeError("A userspace tunnel is already active in this process")
+    mod.UserspaceRsdTunnel.aopen = busy
+    with pytest.raises(DeviceError, match="already active"):
+        _connect()
+    assert closed == ["wifi"]
+
+
+def test_a_found_service_the_tunnel_took_is_left_to_the_tunnel(world, monkeypatch):
+    """The tunnel closes a service it took (its exit stack): connect() doesn't close it a second time."""
+    mod = _new_contract()
+    world.use(mod)
+    closed = []
+
+    async def mdns(udid=None, **kw):
+        return [Svc("wifi", closed)]
+    monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", mdns)
+
+    async def takes_then_fails(self):
+        await self.provider_factory()
+        raise RuntimeError("handshake failed")
+    mod.UserspaceRsdTunnel.aopen = takes_then_fails
+    with pytest.raises(DeviceError, match="handshake failed"):
+        _connect()
+    assert closed == []
+
+
+def test_against_the_installed_library(world, monkeypatch):
+    """(review 1.9.1 L3) The real UserspaceRsdTunnel of whatever pymobiledevice3 is installed, with only the transports
+    faked: a fake that kept an old contract is how 1.9.0 shipped. Network opens reach the service, USB opens reach the
+    library's own provider, the module's provider is left as found, and a cancelled open puts it back too."""
+    try:
+        from pymobiledevice3.remote import userspace_tunnel
+    except Exception as e:  # the tunnel's own dependencies missing here
+        pytest.skip(f"pymobiledevice3's user-space tunnel doesn't import: {e}")
+    if (not hasattr(userspace_tunnel, "create_using_usbmux") or getattr(userspace_tunnel, "_active_tunnel", None)
+            is not None or not hasattr(userspace_tunnel, "_create_no_root_tunnel_provider")):
+        pytest.skip("this pymobiledevice3's tunnel can't be driven without a phone")
+    world.use(userspace_tunnel)
+    monkeypatch.setattr(tunnel_service, "USE_USERSPACE_TUNNEL", getattr(tunnel_service, "USE_USERSPACE_TUNNEL", False),
+                        raising=False)
+    original = userspace_tunnel._create_no_root_tunnel_provider
+    closed = []
+
+    async def mdns(udid=None, **kw):
+        return [Svc("wifi", closed)]
+    gate = {}
+
+    async def direct(identifier, host, port):
+        if "event" in gate:
+            await gate["event"].wait()
+        return Svc(f"direct {host}:{port}", closed)
+
+    async def usb_lockdown(serial=None, autopair=True, **kw):
+        raise RuntimeError("the library's USB provider was reached")
+    monkeypatch.setattr(tunnel_service, "get_remote_pairing_tunnel_services", mdns)
+    monkeypatch.setattr(tunnel_service, "create_core_device_tunnel_service_using_remotepairing", direct,
+                        raising=False)
+    monkeypatch.setattr(userspace_tunnel, "create_using_usbmux", usb_lockdown)
+
+    def fails(match, **kw):
+        with pytest.raises(DeviceError, match=match):
+            _connect(**kw)
+        assert userspace_tunnel._create_no_root_tunnel_provider is original
+        assert userspace_tunnel._active_tunnel is None
+
+    fails("over local network: start_tcp_tunnel reached with wifi")
+    world.usb = True
+    fails("over USB: the library's USB provider was reached")  # the 2026-11-20 00:49 sequence
+    fails("start_tcp_tunnel reached with direct 100.64.0.7:49152", host="100.64.0.7", port=49152)
+    fails("over USB: the library's USB provider was reached")
+    assert closed == ["wifi", "direct 100.64.0.7:49152"]  # the tunnel closed what it took
+
+    async def cancelled():
+        gate["event"] = asyncio.Event()
+        task = asyncio.ensure_future(Device(log=lambda *a: None, host="100.64.0.7", port=49152).connect())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(cancelled())
+    assert userspace_tunnel._create_no_root_tunnel_provider is original
+    assert userspace_tunnel._active_tunnel is None
