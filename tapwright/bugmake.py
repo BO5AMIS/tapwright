@@ -52,6 +52,9 @@ class Context:
 
 # ---- the finding, made safe ----
 
+_PRIVATE_ONLY = re.compile(r"^(?:\S+\s+){0,3}<private>\s*$")  # "04:49:22.373 info <private>": a line iOS hid whole
+
+
 def clean(raw: dict, scrub: Callable[[str], str], named: bool = True) -> dict:
     """A finding (§27 JSON, or `observed`) checked and redacted whole, then its paths cut to file names (its `got`,
     `expected`, logs and crash: review R185 M2), then cut; a `system` that isn't one of §29.8's kinds is `other`.
@@ -65,7 +68,8 @@ def clean(raw: dict, scrub: Callable[[str], str], named: bool = True) -> dict:
     out = findings.to_dict(made)
     out["got"] = "\n".join(bug.strip_paths(line) for line in out["got"].split("\n"))
     out["expected"] = bug.strip_paths(out["expected"])
-    out["logs"] = [bug.strip_paths(line)[:findings.LOG_CUT] for line in out["logs"]][-findings.MAX_LOGS:]
+    out["logs"] = [bug.strip_paths(line)[:findings.LOG_CUT] for line in out["logs"]
+                   if not _PRIVATE_ONLY.search(line)][-findings.MAX_LOGS:]  # (iOS's hidden lines tell a reader nothing)
     if "crash" in out:
         out["crash"] = {"reason": bug.strip_paths(out["crash"]["reason"]),
                         "frames": [bug.strip_paths(f) for f in out["crash"]["frames"]][:findings.MAX_FRAMES]}

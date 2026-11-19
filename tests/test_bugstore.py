@@ -331,3 +331,13 @@ def test_retention_runs_at_the_daemons_first_use_of_the_bugs(tmp_path):
         assert len(tools._bugs().bugs(APP)) == 1
     finally:
         bs.BugStore.__init__.__defaults__ = (real,)
+
+
+def test_a_log_line_ios_hid_whole_is_left_out_of_the_bug():
+    """The lead's phone check (2026-11-19): a failed check's Logs were 15 `info <private>` lines and one real one."""
+    raw = {"id": "f1", "kind": "crash", "app": APP, "app_version": "1", "build": "2", "tool": "tapwright", "tool_version": "1.8.5",
+           "when": "2026-11-14T09:21:07.512Z", "device": {"model": "iPhone16,1", "os": "iOS 19.1"}, "place": "place_4",
+           "path_from": "home", "path": [], "expected": "e", "got": "the app crashed: x",
+           "logs": ["04:49:22.373 info <private>", "04:49:22.480 info Running \"main\"", "04:49:22.5 error a <private> b"],
+           "count": 1, "crash": {"reason": "x", "frames": []}}
+    assert bugmake.clean(raw, lambda s: s)["logs"] == ["04:49:22.480 info Running \"main\"", "04:49:22.5 error a <private> b"]
