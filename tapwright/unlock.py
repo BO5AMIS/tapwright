@@ -504,11 +504,13 @@ def _on_glass(keys, screen: tuple[float, float] | None) -> bool:
 # ten digit keys, "Remind Me Later"); typing the passcode there schedules an iOS update. The lock screen's passcode view
 # lives in the cover sheet: every lock-screen and keypad tree read on the phone (serve.log, phone checks 1.7.8 to 1.8.5)
 # lists SBCoverSheetWindow and no other window. So the windows are an allow list (review R191 M1): any other window, a
-# "Remind Me Later" button or text about updating tonight refuses. A notification's or a Live Activity's words ("Order
+# "Remind Me Later" button or the update screen's own title ("Enter Passcode to Update ...") refuses. A notification's or a Live Activity's words ("Order
 # update", "Score updated") never do: they are text on the lock screen, not another keypad.
 LOCK_WINDOWS = frozenset({"sbcoversheetwindow"})  # the lock screen's own window ids (lowercase)
 REMIND_BUTTON = "remind me later"  # a button with this label (lowercase): the update passcode screen's
-UPDATE_TEXTS = ("update tonight", "enter passcode to update")  # static text holding one of these (lowercase): the same
+# static text that begins with this (lowercase): the update passcode screen's title. Only its beginning: a notification
+# on the cover sheet such as "Install the update tonight" is the lock screen's text (CodeRabbit, PR #23 cycle 1)
+UPDATE_TITLE = "enter passcode to update"
 
 
 def _window_ids(items: list[ui.Element]) -> list[str]:
@@ -530,7 +532,7 @@ def foreign_kind(tree: ui.Tree) -> str | None:
     items = [*tree.items, *tree.offscreen]
     if any(_is_button(e) and (e.label or e.name or "").strip().casefold() == REMIND_BUTTON for e in items):
         return "button"
-    if any(_is_text(e) and any(t in (e.label or e.name or "").casefold() for t in UPDATE_TEXTS) for e in items):
+    if any(_is_text(e) and (e.label or e.name or "").strip().casefold().startswith(UPDATE_TITLE) for e in items):
         return "text"
     if any(w not in LOCK_WINDOWS for w in _window_ids(items)):
         return "window"
@@ -635,21 +637,23 @@ class Unlocker:
         if entry is None:
             return self._not_lock_screen()
         digits = passcode.isascii() and passcode.isdigit()
-        if not entry.keys and digits and entry.field is None:
-            return Result(False, "not_proven", NOT_PROVEN)
-        if not digits and entry.field is None:
-            return Result(False, "not_proven", LETTERS_ON_KEYPAD)
-        if digits and entry.keys and not entry.on_screen and not await self._placed(phone, entry):
-            return Result(False, "not_proven", NOT_PROVEN)
+        if (why := await self._usable(phone, entry, digits)) is not None:
+            return why
         # the last checks, right before the keys: still locked, still no XCTest prompt, and (1.9.2) still the lock
-        # screen's own passcode view, with no other keypad come up over it since
+        # screen's own passcode view, with no other keypad come up over it since. The keys typed are the final read's
+        # (CodeRabbit, PR #23 cycle 1): a keypad that moved meanwhile is proven again where it is now, never typed on
+        # where it was.
         if not await phone.locked():
             return Result(True, "not_locked")
         prompt = await phone.xctest_prompt()
         if prompt is not False:
             return Result(False, "xctest_prompt", XCTEST) if prompt is True else Result(False, "not_proven", NOT_PROVEN)
-        if await self._entry(phone) is None:
+        final = await self._entry(phone)
+        if final is None:
             return self._not_lock_screen()
+        if (why := await self._usable(phone, final, digits, placed=entry)) is not None:
+            return why
+        entry = final
         if may_type is not None and (stop := may_type()) is not None:
             return stop  # (paused, or a person: never between keys, where a partial passcode counts as a wrong one)
         attempt = await self.ledger.begin(source, woke)  # counted, and latched, before the first key
@@ -673,6 +677,20 @@ class Unlocker:
             return Result(True, "unlocked")
         self._audit(audit, "typed on the lock screen; refused")
         return Result(False, "refused", REFUSED)
+
+    async def _usable(self, phone: LockScreen, entry: Entry, digits: bool, placed: Entry | None = None) -> Result | None:
+        """Why the passcode can't be typed into `entry`, or None. A keypad the tree lists off the screen must pass the hit
+        test (_placed), unless `placed` (an entry already proven so) has the very same keys in the very same places."""
+        if not entry.keys and digits and entry.field is None:
+            return Result(False, "not_proven", NOT_PROVEN)
+        if not digits and entry.field is None:
+            return Result(False, "not_proven", LETTERS_ON_KEYPAD)
+        if digits and entry.keys and not entry.on_screen:
+            proven = (placed is not None and not placed.on_screen  # (that one passed the hit test itself)
+                      and placed.keys == entry.keys and placed.frames == entry.frames)
+            if not proven and not await self._placed(phone, entry):
+                return Result(False, "not_proven", NOT_PROVEN)
+        return None
 
     @staticmethod
     async def _placed(phone: LockScreen, entry: Entry) -> bool:

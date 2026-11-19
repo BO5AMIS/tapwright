@@ -166,7 +166,7 @@ def test_install_creates_a_hidden_normal_priority_logon_task_with_no_time_limit_
 
 def test_install_says_so_when_the_started_daemon_never_answers():
     text, code = _svc(Tasks(), running=None).install(["serve", "--keep-alive"])
-    assert code == 0 and "no daemon answered within 10 s" in text and "Started it now" not in text
+    assert code == 0 and "still starting (no answer within 30 s)" in text and "the daemon answers" not in text
 
 
 def test_install_with_a_daemon_running_does_not_start_another():

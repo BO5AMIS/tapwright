@@ -29,7 +29,7 @@ from .schedules import TASK_FOLDER, Runner, default_command, system_runner
 
 TASK_NAME = f"{TASK_FOLDER}\\serve"
 LABEL = "com.tapwright.serve"  # the launchd agent's label, and the systemd unit's name
-START_WAIT = 10.0  # seconds `install` waits for the task's daemon to answer after starting it
+START_WAIT = 30.0  # seconds `install` waits for the task's daemon to answer (a first start took about 13 s on the PC)
 START_POLL = 0.5
 
 # serve's flags a service may carry: (flag, takes a value, a file or folder whose path is made absolute)
@@ -182,8 +182,9 @@ class Service:
             elif self._came_up():
                 said.append("Started it now: the daemon answers.")
             else:
-                said.append(f"Asked Task Scheduler to start it, but no daemon answered within {START_WAIT:.0f} s: see "
-                            "~/.tapwright/serve.log.")
+                # (the lead's phone check: a first start took about 13 s and came up) not a failure: it may still come
+                said.append(f"Started the task; the daemon is still starting (no answer within {START_WAIT:.0f} s). "
+                            "`tapwright service status` says when it runs; ~/.tapwright/serve.log has its log.")
         said.append("After the phone restarts, unlock it once and enter the passcode once more when it asks to allow UI "
                     "automation. A daemon restart (serve --stop, an upgrade) more than about 8 hours after the last "
                     "passcode entry asks once too, and a phone that locks needs the vault (--accounts) to be unlocked.")
@@ -282,10 +283,13 @@ def _differs(want: dict, have: dict) -> str:
 
 
 def _quote(word: str) -> str:
-    """A word of a systemd ExecStart line: quoted with double quotes when it holds anything but plain characters."""
+    """A word of a systemd ExecStart line: quoted with double quotes when it holds anything but plain characters, with
+    systemd's own escapes for a literal `$` (`$$`: systemd expands ${NAME} inside quotes too; CodeRabbit, PR #23 cycle 1)
+    and `%` (`%%`, a specifier)."""
     if word and all(c.isalnum() or c in "-_./:=,@" for c in word):
         return word
-    return '"' + word.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    word = word.replace("\\", "\\\\").replace('"', '\\"').replace("$", "$$").replace("%", "%%")
+    return '"' + word + '"'
 
 
 def _running_daemon() -> dict | None:

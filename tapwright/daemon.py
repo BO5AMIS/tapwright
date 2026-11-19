@@ -1767,8 +1767,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         alive = getattr(device, "runner_alive", None)
         if not isinstance(error, ConnectionLost) or alive is None or not alive():
             return False
+        # its /status asked a few times, as before a runner is replaced (device.REUSE_ASKS; CodeRabbit, PR #23 cycle 1):
+        # one missed answer from a busy runner must not cost the runner
+        probe = getattr(device, "_still_answers", None) or device.wda_alive
         try:
-            if not await device.wda_alive():
+            if not await probe():
                 return False
         except Exception:
             return False
@@ -2007,8 +2010,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         self._attempts += 1
                 except NotSetUp as e:
                     self._set_state("no-device", f"needs setup: {e}")
+                    self.stuck = None  # (as for PhoneNotFound below)
                 except PhoneNotFound:
                     self._set_state("no-device", "phone not found: plug it in and unlock it")
+                    # (CodeRabbit, PR #23 cycle 1) a lock found before is not a phone that's there: phone_last_seen keeps
+                    # the time it was last there (set just now from the old lock), and the idle stop can come
+                    self.stuck = None
                 except (PhoneLocked, AppNotAnswering) as e:
                     if self.stuck is None:
                         self.log(f"connected, but {e}")

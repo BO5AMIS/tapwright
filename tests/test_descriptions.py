@@ -56,7 +56,7 @@ def test_every_tool_carries_its_description():
     assert set(tools) == set(TOOLS)
     for name, tool in tools.items():
         if name in ONLY_HERE:
-            expected = EXTRA[name]
+            expected = SHARED_192.get(name, EXTRA[name])  # (unlock: its 1.9.2 words with hints on)
         elif name in EXTRA:
             expected = f"{SHARED_192.get(name, SHARED[name])}\nTapwright: {EXTRA[name]}"
         else:

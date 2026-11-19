@@ -12,6 +12,7 @@ runner that keeps running is never asked (serve.log, 11-13 to 11-19). So Tapwrig
   `--phone`; a missing vault or policy file; a `%` in a value). The flags are saved in `~/.tapwright/service.json`, and a
   daemon an agent's call starts (after `serve --stop`, or before the logon task ran) uses them. `service status` says
   whether the task is there, whether the daemon runs, and when it runs without the service's `--keep-alive` or vault.
+  `service install` waits up to 30 s for the daemon to answer, and says "still starting" past that.
   `service uninstall` removes the task (and the empty `\Tapwright` task folder). On macOS and Linux it prints the
   launchd agent (started again only after a failure) or the systemd user unit to add.
 - The daemon no longer stops after 30 minutes unused while a phone has been there within those 30 minutes (live, locked,
@@ -29,10 +30,11 @@ runner that keeps running is never asked (serve.log, 11-13 to 11-19). So Tapwrig
   is started either on a locked phone whose consent is older than 7.5 h, so the prompt comes up when a person unlocks
   it. A start that went on after the prompt records when (`~/.tapwright/automation.json`).
 - The passcode unlock types only on the lock screen's own passcode view: the cover sheet's window must be in the tree,
-  and any other window, a "Remind Me Later" button or text about updating tonight refuses it (`locked`, asking the user
+  and any other window, a "Remind Me Later" button or the update screen's title ("Enter Passcode to Update
+  ...") refuses it (`locked`, asking the user
   to close that screen; nothing is typed). iOS's "Enter Passcode to Update Tonight" is such a screen, and the passcode
   typed there schedules an iOS update. The words of notifications and Live Activities ("Order update") never refuse.
-  The screen is read again right before the first key.
+  The screen is read again right before the first key, and the keys typed are where that last read found them.
 - The `unlock` tool's description says the new rules with hints on; `--no-hints` keeps 1.8.5's words.
 
 ## 1.9.1 (2026-11-20)
