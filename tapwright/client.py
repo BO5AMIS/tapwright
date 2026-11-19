@@ -77,6 +77,15 @@ def set_maps(folder: str | None = None) -> None:
         SCOPE["X-Tapwright-Maps"] = str(Path(folder).expanduser().resolve())
 
 
+def set_hints(hints: bool = True) -> None:
+    """`tapwright mcp --no-hints` (AGENT-TOOLS §30.4): every call asks for answers without `Known:` and `Hint:` lines.
+    Hints on (the default) is sent as no header."""
+    if hints:
+        SCOPE.pop("X-Tapwright-Hints", None)
+    else:
+        SCOPE["X-Tapwright-Hints"] = "off"
+
+
 def set_accounts(file: str | None = None) -> None:
     """The test accounts file this process's agent uses (`tapwright mcp --accounts FILE`, AGENT-TOOLS §18.6), as an absolute
     path: only the path is sent, never what is in it. None is sent as no header."""

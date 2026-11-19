@@ -18,7 +18,14 @@ _CORE += (
 
 _TAPWRIGHT = 'apps lists installed apps; open_app and open_url navigate; press_button presses Home or volume; swipe drags between screen points.\nlook shows accessibility elements and optionally a screenshot/OCR. System UI may be absent from accessibility; use the current picture to choose coordinates when needed.\nalert text reads the current alert. accept/dismiss chooses its default action; name selects an exact visible button label, including localized labels. cancel defaults to a button named Cancel. Alerts also support dry_run.\nLegacy --apps, --dedicated, --policy and --no-policy options do not restrict device control in 1.7.5. --phone retains its separate configured automatic-unlock behavior. A locked phone: call unlock, which types the passcode saved for this phone (you never see it); with none saved, ask the user to unlock it.\nDo not claim that software can bypass a genuine XCTest passcode, trust, signing or biometric requirement. Report the actual platform gate.\n'
 
-INSTRUCTIONS = _CORE + "\n\n" + _TAPWRIGHT
+INSTRUCTIONS = _CORE + "\n\n" + _TAPWRIGHT  # (1.8.5's, word for word: what `--no-hints` gives, AGENT-TOOLS §30.4)
+
+
+def instructions(hints: bool = True) -> str:
+    """The MCP `instructions`: §30.1's token rules on top (1.9.0), unless `--no-hints` asks for 1.8.5's."""
+    from .tokentext import RULES
+    return RULES + "\n" + INSTRUCTIONS if hints else INSTRUCTIONS
+
 
 SHARED = {
     'look': (

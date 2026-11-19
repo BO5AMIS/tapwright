@@ -26,7 +26,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import client, device, exploretool, hostdialog, policy, repair, scriptrepair, ui, uxcheck
-from .descriptions import INSTRUCTIONS, describe
+from .descriptions import describe, instructions
 
 logger = logging.getLogger("tapwright")
 
@@ -132,7 +132,7 @@ class Target(BaseModel):
 
 
 READ_ONLY = ToolAnnotations(read_only_hint=True)
-server = TapwrightServer("tapwright", instructions=INSTRUCTIONS)
+server = TapwrightServer("tapwright", instructions=instructions(hints=True))
 CLIENT_ID = uuid.uuid4().hex  # this agent's own last look, kept by the daemon
 # the request being served, for the host's dialog (set by TapwrightServer.call_tool; None outside a request)
 _CONTEXT: contextvars.ContextVar[object | None] = contextvars.ContextVar("tapwright_mcp_context", default=None)
@@ -541,6 +541,13 @@ async def rotate(to: Literal["portrait", "landscape_left", "landscape_right"], l
     return await _tool("rotate", to=to, look=look, screenshot=screenshot, brief=brief)
 
 
+def set_hints(hints: bool) -> None:
+    """`tapwright mcp --no-hints` (AGENT-TOOLS §30.4): the instructions are 1.8.5's, and every call asks the daemon for
+    answers without `Known:` and `Hint:` lines."""
+    server._lowlevel_server.instructions = instructions(hints)
+    client.set_hints(hints)
+
+
 HEARTBEAT = 5.0  # s between the signs this process gives the daemon that it lives (a network condition is kept meanwhile)
 
 
@@ -558,9 +565,11 @@ def _heartbeat(stop: threading.Event) -> None:
 
 def run(screenshots: str | None = None, apps: list[str] | None = None, dedicated: bool = False,
         rules: policy.Policy | None = None, ux_rules: uxcheck.Rules | None = None, brief: bool = False,
-        maps: str | None = None, dialog: bool = True, accounts: str | None = None, phone: bool = False) -> None:
+        maps: str | None = None, dialog: bool = True, accounts: str | None = None, phone: bool = False,
+        hints: bool = True) -> None:
     global BRIEF_DEFAULT
     BRIEF_DEFAULT = brief
+    set_hints(hints)
     DIALOGS.enabled = dialog
     if apps or dedicated or rules is not None:
         logger.warning('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.')

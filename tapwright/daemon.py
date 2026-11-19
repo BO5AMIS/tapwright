@@ -30,6 +30,7 @@ from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as br
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
+from . import autoroute, tokentext
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
@@ -260,6 +261,8 @@ def _same_control(a: ui.Element, b: ui.Element) -> bool:
 _VIA: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_via", default=None)
 # The folder this call's per-app maps are kept in (`--maps DIR`, AGENT-TOOLS §18.9); None: the daemon's own, else ~/.tapwright/maps
 _MAPS: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_maps", default=None)
+# False when the call's MCP server was started with --no-hints (AGENT-TOOLS §30.4); None: the daemon's own setting
+_HINTS: contextvars.ContextVar[bool | None] = contextvars.ContextVar("tapwright_hints", default=None)
 # Whether a step of a `run` reads the screen after it, so that its move can be a road (§18.2). `run` takes its steps
 # without a read to be fast; a read adds about 0.2 s to each step, so this is off until the lead decides.
 READ_RUN_STEPS = False
@@ -437,6 +440,7 @@ REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't t
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
+DONE_KEYS = ("Done", "done")  # (1.9.0) the keyboard's own Done key: closes a form's keyboard that a touch outside doesn't
 KEYBOARD_HINT = "type_text into the field with submit: true closes it (it presses return)."
 SCROLL_HINT = 'scroll to it first (scroll with this target and to: "target").'  # AGENT-TOOLS v1.6: the one-call way
 # AGENT-TOOLS 1.13.1 (3): off_screen means no scroll can bring the element on screen, and says what to do then
@@ -1130,6 +1134,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._announced: dict | None = None  # the action message this agent call announced, for its log line
         self._granted_now = False  # this agent call went through on a person's OK (for its log line)
         self._outside_ignored: set[str] = set()  # apps whose forms ignore a touch outside the field: the keyboard reflex goes first
+        self._no_done: set[tuple] = set()  # (app, place) where the keyboard showed no Done key (1.9.0, _press_done)
         self._no_dismiss: set[str] = set()  # apps whose keyboard WebDriverAgent couldn't dismiss (see _dismiss_keyboard_now)
         self._recording: dict[str, dict] = {}  # client id -> the recording in progress (AGENT-TOOLS §9.4)
         # while a client records, its calls run one at a time: a check's guard, its save and its registration in the
@@ -1996,7 +2001,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     async def run_tool(self, client_id: str, name: str, args: dict, scope: "Scope | None" = None,
                        policy: "safety.Policy | None" = None, ux_rules: "uxcheck.Rules | None" = None,
                        via: str | None = None, maps: str | None = None, dialog: bool = False,
-                       accounts: str | None = None, app_hint: str | None = None) -> dict:
+                       accounts: str | None = None, app_hint: str | None = None, hints: bool | None = None) -> dict:
         """One agent tool call: {"text": str, "image": base64 JPEG or None, "image_size": [w, h] or None}.
         Raises Refused with a code from errors.CODES; any other failure is `internal` (logged).
         Legacy scope/policy arguments are accepted but do not authorize or restrict input.
@@ -2033,7 +2038,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             with self._phone_use(client_id):
                 return await self._run_tool_counted(client_id, name, args, scope, policy, ux_rules, via, maps, dialog,
-                                                    accounts)
+                                                    accounts, hints)
         finally:
             if rules_token is not None:
                 _FLOOR_RULES.reset(rules_token)
@@ -2041,7 +2046,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
                                 policy: "safety.Policy | None", ux_rules: "uxcheck.Rules | None", via: str | None,
-                                maps: str | None, dialog: bool, accounts: str | None) -> dict:
+                                maps: str | None, dialog: bool, accounts: str | None, hints: bool | None = None) -> dict:
+        htoken = _HINTS.set(hints) if hints is not None else None
         vtoken = _VIA.set(via) if via is not None else None  # how the call came, for the log (session_report)
         mtoken = _MAPS.set(maps) if maps is not None else None
         dtoken = _DIALOG.set(client_id) if dialog and not getattr(self.ceiling, "no_dialog", False) else None  # (serve --no-dialog)
@@ -2057,6 +2063,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 self._keep_thin_place(client_id)
             if vtoken is not None:
                 _VIA.reset(vtoken)
+            if htoken is not None:
+                _HINTS.reset(htoken)
             if mtoken is not None:
                 _MAPS.reset(mtoken)
             if dtoken is not None:
@@ -2128,6 +2136,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 said = self.scrub_everywhere(str(e))
                 if top_level and client_id in self._watch_notes:
                     said = self._with_watch_notes(client_id, said)
+                if top_level:
+                    said = self._tokens_after(client_id, name, args, said, e.code)
                 if said != str(e):  # an account's value is never in an error either
                     raise Refused(e.code, said, draft=e.draft) from None
                 raise
@@ -2139,6 +2149,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 answer = {**answer, "text": said}
             if top_level and client_id in self._watch_notes:  # the watchdog's messages since this agent's last call
                 answer = {**answer, "text": self._with_watch_notes(client_id, answer["text"])}
+            if top_level:
+                answer = {**answer, "text": self._tokens_after(client_id, name, args, answer["text"], None)}
             return self._first_answer(client_id, answer) if greets else answer
         finally:
             if ptoken is not None:
@@ -3040,7 +3052,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         made = trip.Trip(self, client_id, scope, req, args)
         run_grants = self._grants_run()  # a grant revoked while it drives stops it between moves (§19.5)
         try:
-            return await made.run()
+            try:
+                answer = await made.run()
+            except Refused as e:
+                if req.route is not None and not req.dry_run and e.code in autoroute.FAIL_CODES and made.bundle:
+                    if (said := self._auto_counted(made.root, made.bundle, req.route, False)) is not None:
+                        raise Refused(e.code, f"{e}\nNote: {said}", draft=e.draft) from None
+                raise
+            if req.route is not None and not req.dry_run and made.bundle:
+                self._auto_counted(made.root, made.bundle, req.route, True)
+            return answer
         finally:
             made.release()
             if run_grants is not None:
@@ -4026,7 +4047,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
-                        closed = await self._dismiss_keyboard_now(view)
+                        closed = await self._dismiss_keyboard_now(view, covered=True)
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
@@ -4657,6 +4678,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         the move made, and the `Place:` line. Nothing in a replay (it reads the map and never writes it) or in a journey
         in a user's eyes."""
         tree, bundle = view.tree, (view.app or (None, None))[1]
+        view.road_known = None
         if SCRIPT.get() is not None or ui.USERS_EYES.get() or tree is None or bundle is None or not self._may_map(bundle):
             return answer
         root = self._maps_root()
@@ -4680,6 +4702,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if name == "open_url":
             if (said := self.maps.link(root, bundle, seen.name, str(args.get("url")))) is not None:
                 notes.append(said)
+        move = None
         if box.get("mapping") and previous is not None and previous != seen.name and not typed_here:
             move = self._move_of(name, args, box, root, bundle, (previous, seen.name))
             if move is not None and _GRANTED.get():
@@ -4689,7 +4712,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 names = self._loaded().clean(roads.names_of(aim[1]) if aim and aim[1] is not None and move["tool"] != "back" else {})
                 made = self.maps.record(root, bundle, previous, seen.name, move, names,
                                         round((time.monotonic() - began) * 1000), await self._build_of(bundle), box["held"])
+                view.road_known = made is not None and not made.new
                 notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in (made.dropped if made else []))
+        if not _NESTED.get():
+            self._auto_follow(view, name, args, root, bundle, previous, seen.name, move, typed_here)
         if (problem := self.maps.problem_once(root, bundle)) is not None:
             notes.append(problem)
         text = answer["text"]
@@ -4698,6 +4724,247 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             lines.insert(1, PLACE_NEW if seen.new else f"Place: {seen.name}.")
             text = "\n".join(lines)
         return {**answer, "text": text + "".join(f"\nNote: {n}" for n in notes)} if (notes or text != answer["text"]) else answer
+
+    # ---- 1.9.0, "the Token Update" (AGENT-TOOLS 1.17 §30) ----
+    CHAIN_ENDS = ("replay", "record", "explore", "journey", "bug_report", "close_app", "notifications", "unlock")
+
+    def _auto_follow(self, view, name: str, args: dict, root: str | None, bundle: str, previous: str | None,
+                     here: str, move: dict | None, typed_here: bool) -> None:
+        """The way from the app's start this session is on (autoroute): a navigation move adds a step, anything else breaks
+        it from here, and a clean way to a new place is saved as the place's route. Never fails a call."""
+        chain = view.auto
+        if not isinstance(chain, autoroute.Chain) or chain.app != bundle or name in autoroute.NEUTRAL:
+            return
+        try:
+            if chain.here is None:
+                chain.begin(here)
+                return
+            if previous is None or previous != chain.here:
+                view.auto = None  # something moved the app that the chain didn't see (a look: false, a person)
+                return
+            if name == "scroll":
+                if here == previous:
+                    chain.scrolled(autoroute.scroll_step(args))
+                else:
+                    chain.taint()
+                    chain.moved(here, None)
+                return
+            nav = name in autoroute.NAV_TOOLS and not typed_here and not _GRANTED.get()
+            if not nav:
+                chain.taint()
+            way = chain.moved(here, autoroute.step_of(move) if nav else None)
+            if way:
+                self._auto_save(root, bundle, chain.start or previous, here, way)
+        except Exception as e:  # noqa: BLE001 - a route not saved is a route not known, never a failed call
+            self.log(f"auto route not kept: {type(e).__name__}: {self._redact(str(e))}")
+            view.auto = None
+
+    def _held_routes(self, root: str | None, bundle: str) -> tuple[list[dict], set[str]]:
+        """The app's saved routes that read (each with its `name`), and every route name its folder holds."""
+        data, file = self.maps.data(root, bundle), self.maps.file(root, bundle)
+        taken = set(data.get("routes", {}))
+        try:
+            if file.routes_dir.is_dir():
+                taken |= {p.stem for p in file.routes_dir.glob("*.json")}
+        except OSError:
+            pass
+        held = []
+        for name in list(data.get("routes", {})):
+            route = file.read_route(data, name)
+            if route is not None:
+                held.append({**route, "name": name})
+        return held, taken
+
+    def _auto_save(self, root: str | None, bundle: str, start: str, end: str, way: list[dict]) -> str | None:
+        """Save `way` as the route to `end` when it is the one to keep (autoroute.decide); its name, or None."""
+        file = self.maps.file(root, bundle)
+        data = self.maps.data(root, bundle)
+        if file.problem is not None:
+            return None
+        found, taken = self._held_routes(root, bundle)
+
+        def count(v: object) -> int:
+            return v if isinstance(v, int) and not isinstance(v, bool) else 0
+        held = [autoroute.Held(r["name"], r.get("start"), r.get("end"),
+                               len(r["steps"]) if isinstance(r.get("steps"), list) else 0, r.get("auto") is True,
+                               count(r.get("failed")), bool(r.get("variables"))) for r in found]
+        name = autoroute.decide(held, start, end, way, autoroute.base_name(data, end, way[-1]), taken)
+        if name is None or not routes.NAME.match(name) or self._route_held(name) is not None:
+            return None
+        before = next((r for r in found if r["name"] == name), None)
+        route = {**routes.route(name, bundle, start, end, [], [routes.escaped(step) for step in way]),
+                 "auto": True, "used": count(before.get("used")) if before else 0, "failed": 0}
+        route = batch.saved_script(route, self._redact, f"route {name}")
+        routes.check(route)
+        file.write_route(name, route)
+        self.maps.edit(root, bundle, lambda d: d["routes"].__setitem__(name, f"routes/{name}.json"))
+        self.log(f"auto route {name} kept ({len(way)} step{'' if len(way) == 1 else 's'}, {start} > {end})")
+        return name
+
+    def _auto_counted(self, root: str | None, bundle: str, name: str, worked: bool) -> str | None:
+        """A drive of a route that saved itself ended: it worked (counted as used, its failures start over) or it failed
+        (a second failure in a row drops it). The note when it was dropped."""
+        file = self.maps.file(root, bundle)
+        data = self.maps.data(root, bundle)
+        route = file.read_route(data, name)
+        if route is None or route.get("auto") is not True or file.problem is not None:
+            return None
+        used, failed = route.get("used"), route.get("failed")
+        used = used if isinstance(used, int) and not isinstance(used, bool) else 0
+        failed = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
+        if worked:
+            route.update(used=used + 1, failed=0)
+        elif failed + 1 >= autoroute.FAILS:
+            path = file.routes_dir / f"{name}.json"
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            self.maps.edit(root, bundle, lambda d: d["routes"].pop(name, None))
+            return f"route {name} dropped (its replay failed twice); the next way the app is driven there is kept instead."
+        else:
+            route["failed"] = failed + 1
+        path = file.routes_dir / f"{name}.json"
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        return None
+
+    def _hints_on(self, client_id: str) -> bool:
+        """Known: and Hint: lines (§30.2, §30.3): not with --no-hints (the call's or serve's), not for a scheduled run (no
+        model reads it), not in a journey in a user's eyes."""
+        if _HINTS.get() is False or getattr(self.ceiling, "no_hints", False):
+            return False
+        return not scheduled(client_id) and not ui.USERS_EYES.get()
+
+    def _known_names(self, bundle: str, here: str | None) -> list[str]:
+        """§30.2: the saved routes that reach a place in one call from where the app is (their start is here, or a way over
+        the map leads to it)."""
+        if here is None:
+            return []
+        root = self._maps_root()
+        data = self.maps.data(root, bundle)
+        if not data.get("routes"):
+            return []
+        held, _ = self._held_routes(root, bundle)
+        edges = self.maps.file(root, bundle).route_edges(data)
+
+        def reachable(start: str) -> bool:
+            return start == here or roads.plan(data, here, start, None, routes=edges).kind != "none"
+        return autoroute.known(held, here, reachable)
+
+    def _tokens_after(self, client_id: str, name: str, args: dict, text: str, code: str | None) -> str:
+        """The end of an agent's own call (1.9.0, §30): the way from the app's start follows what the call did, and the
+        answer gets the `Known:` line (the first that shows the app) and at most one `Hint:` line. Never fails a call."""
+        if SCRIPT.get() is not None:
+            return text  # a replay's own fresh start: its answers are the replay's, not the agent's
+        try:
+            view = self.control.client(client_id)
+            view.calls += 1
+            if name in self.CHAIN_ENDS or (name == "drive" and code is not None):
+                view.auto = None
+            elif name == "drive":
+                self._chain_after_drive(view, args)
+            if name == "logs":
+                view.logs_read = True
+            if not self._hints_on(client_id):
+                return text
+            return self._with_hints(view, name, args, self._with_known(view, text), code)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"hints left out: {type(e).__name__}")
+            return text
+
+    def _chain_after_drive(self, view, args: dict) -> None:
+        """After a drive: a route driven from the chain's start carries the chain on from its end; any other drive leaves
+        the way unknown."""
+        chain, route = view.auto, args.get("route")
+        bundle = (view.app or (None, None))[1]
+        view.auto = None
+        if not (isinstance(chain, autoroute.Chain) and isinstance(route, str) and chain.here == chain.start
+                and chain.broken_at is None and bundle == chain.app and view.place is not None):
+            return
+        root = self._maps_root()
+        saved = self.maps.file(root, bundle).read_route(self.maps.data(root, bundle), route)
+        if (saved is None or saved.get("start") != chain.start or saved.get("end") != view.place[1] or saved.get("variables")
+                or not isinstance(saved.get("steps"), list)):
+            return
+        chain.places.append(view.place[1])
+        chain.steps.append(list(saved["steps"]))
+        view.auto = chain
+
+    def _with_known(self, view, text: str) -> str:
+        """§30.2: the first answer of the session that shows the app's screen gets `Known:` after the screen's header."""
+        bundle = (view.app or (None, None))[1]
+        if bundle is None or bundle in view.known_told or not self._may_map(bundle):
+            return text
+        lines = text.split("\n")
+        at = next((i for i, line in enumerate(lines) if line.startswith("Screen ")), None)
+        if at is None:
+            return text
+        view.known_told.add(bundle)
+        here = view.place[1] if view.place is not None and view.place[0] == bundle else None
+        line = tokentext.known_line(self._known_names(bundle, here))
+        if line is None:
+            return text
+        at += 1
+        while at < len(lines) and lines[at].startswith(("App: ", "Place: ", "Keyboard: ")):
+            at += 1
+        lines.insert(at, line)
+        return "\n".join(lines)
+
+    def _with_hints(self, view, name: str, args: dict, text: str, code: str | None) -> str:
+        """§30.3: at most one `Hint:` line, after the Note: lines, each kind at most once per session."""
+        if name in ("tap", "back", "open_url"):
+            view.tap_streak = view.tap_streak + 1 if (code is None and view.road_known) else 0
+        elif name not in ("look", "wait", "wait_for", "logs"):
+            view.tap_streak = 0
+        view.road_known = None
+        chosen: str | None = None
+
+        def wants(kind: str) -> bool:
+            return chosen is None and kind not in view.hints_given
+        # (after a failed check: a crash's own note names logs already, and a frozen app's says to close it)
+        if wants("logs") and not view.logs_read and code == "expect_failed":
+            chosen = "logs"
+        if wants("known_way") and code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None:
+            chosen = "known_way"
+        if (wants("form") and code is None and name not in ("logs", "map", "apps")
+                and any(line.startswith("Screen ") for line in text.split("\n")[:4]) and self._is_form(view.items)):
+            chosen = "form"
+        if (wants("screenshot") and code is None and args.get("screenshot") is True and name in ACTIONS and name != "look"
+                and changes.NO_CHANGE not in text):
+            chosen = "screenshot"
+        if wants("long_task") and view.calls >= tokentext.LONG_TASK_CALLS:
+            chosen = "long_task"
+        if chosen is None:
+            return text
+        view.hints_given.add(chosen)
+        if chosen == "known_way":
+            return f"{text}\n{tokentext.hint(chosen, call=self._known_call(view))}"
+        return f"{text}\n{tokentext.hint(chosen)}"
+
+    def _known_call(self, view) -> str:
+        """The one call that reaches the place the app is at: its saved route, else drive to the place."""
+        bundle, place = view.place
+        try:
+            held, _ = self._held_routes(self._maps_root(), bundle)
+            mine = next((r["name"] for r in held if r.get("end") == place and not r.get("variables")), None)
+        except Exception:  # noqa: BLE001
+            mine = None
+        return f'`drive {{"route": "{mine}"}}`' if mine else f'`drive {{"to": "{place}"}}`'
+
+    @staticmethod
+    def _is_form(items: list) -> bool:
+        """A form: at least two fields, or one field with a switch beside it."""
+        fields = sum(1 for e in items if getattr(e, "role", None) == "input")
+        switches = sum(1 for e in items if getattr(e, "role", None) == "switch")
+        return fields >= 2 or (fields >= 1 and switches >= 1)
 
     def _held_titles(self, box: dict, root: str | None, bundle: str, previous: str | None) -> frozenset[str]:
         """The places whose title (as the map held it before this read, or as the screen showed it before the touch) is
@@ -4749,6 +5016,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.place, view.place_seen = ((bundle, seen.name) if seen is not None else None), self.control.generation
         if view.typed_at is not None and view.typed_at != view.place:
             view.typed_at = None
+        chain = view.auto
+        if seen is not None and isinstance(chain, autoroute.Chain) and chain.app == bundle and chain.here is None:
+            chain.begin(seen.name)  # (1.9.0, §30) the first screen after open_app is where its way starts
         notes = [problem] if (problem := self.maps.problem_once(root, bundle)) is not None else []
         if seen is None or not seen.had_map:
             return text, notes
@@ -4850,6 +5120,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._launched_with.pop(bundle_id, None)
         self._opened = bundle_id
         view.opened = True
+        view.auto = autoroute.Chain(bundle_id)  # (1.9.0, §30) the way from the app's start begins at what it shows now
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
         # target goes only to it, and no field of the app before is typed into again
         view.aimed_app, view.typed_field = (shown, bundle_id), None
@@ -6368,9 +6639,47 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
-        return await self._dismiss_keyboard_now(view)
+        return await self._dismiss_keyboard_now(view, covered=self._keyboard_covers(view, target))
 
-    async def _dismiss_keyboard_now(self, view) -> str:
+    def _keyboard_covers(self, view, target: ui.Target) -> bool:
+        """Does the keyboard lie over the target's centre (1.9.0)? Only then may its Done key close it first."""
+        try:
+            hit = ui.resolve(view.items, target)
+        except Refused:
+            return False
+        if not isinstance(hit, ui.Element):
+            return False  # (a point is the agent's own: nothing more than before is done for it)
+        cx, cy = hit.center
+        return any(b.kind == "Keyboard" and b.rect[0] <= cx < b.rect[0] + b.rect[2] and b.rect[1] <= cy < b.rect[1] + b.rect[3]
+                   for b in hit.covered_by)
+
+    async def _press_done(self, view, app: str | None) -> bool | None:
+        """(1.9.0) The keyboard's own Done key, for a target the keyboard covers in a form that ignores a touch outside and
+        a drag (React Native's multiline Notes with returnKeyType done: Wayfare's trip form). It is pressed only when the
+        keyboard shows a key named Done; a field whose Done key only added a new line gets that line taken out again, so
+        nothing typed is changed. Whether the keyboard closed; None when it wasn't tried (no Done key there before). It
+        is WebDriverAgent's dismissal with the key's name, which on an iPad also tries the hide key: when it fails, the plain
+        dismissal would too."""
+        s = self.session
+        where = (app, view.place[1] if view.place is not None else None)
+        if where in self._no_done:
+            return None
+        before = {(e.identifier, e.label): e.value for e in view.items if e.role == "input"}
+        self._touch_in_scope()  # (it goes out with no touch hook: checked here)
+        if await s.dismiss_keyboard(DONE_KEYS):
+            await self._silent_read(view)
+            return not view.read_keyboard
+        self._no_done.add(where)
+        await self._silent_read(view)
+        for e in view.items:  # a multiline field whose Done key is its return: the new line it typed is taken back
+            old = before.get((e.identifier, e.label))
+            if e.role == "input" and isinstance(old, str) and isinstance(e.value, str) and e.value == old + "\n":
+                await s.key("backspace")
+                await self._silent_read(view)
+                break
+        return not view.read_keyboard
+
+    async def _dismiss_keyboard_now(self, view, covered: bool = False) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
         dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else
         NOTE_KEYBOARD_STAYED: the answer says so."""
@@ -6410,6 +6719,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 await s.swipe(*drag, duration_ms=250)
                 await self._silent_read(view)
                 how = "dragged the form a little"
+            elif step == "dismiss" and covered and (done := await self._press_done(view, app)) is not None:
+                if done:
+                    how = "the keyboard's Done key"
+                elif app is not None:
+                    self._no_dismiss.add(app)
             elif step == "dismiss" and app not in self._no_dismiss:
                 # WebDriverAgent's dismissal looks for a key that hides the keyboard; an iPhone keyboard often has none,
                 # and the search takes about 4 s: once it failed in an app, it isn't tried there again this session

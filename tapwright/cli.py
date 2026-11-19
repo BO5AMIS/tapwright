@@ -1372,6 +1372,8 @@ def main() -> int:
                         "account; the values are typed, never shown. A call can't name another file")
     p.add_argument("--brief", action="store_true",
                    help="answer every action in brief unless the call says brief: false (the change block cut to 12 lines)")
+    p.add_argument("--no-hints", action="store_true",
+                   help="answers without the Known: and Hint: lines and instructions without the token rules: as in 1.8.5")
     p.add_argument("--maps", metavar="DIR",
                    help="where the per-app maps (<DIR>/<bundle id>/map.json and routes/) are kept, instead of "
                         "~/.tapwright/maps: keep them with a project so a team, CI and Tapline share one folder. A call "
@@ -1501,6 +1503,8 @@ def main() -> int:
                         'judges them) or {"max_taps_to_goal": n} / {"way_back": true} (the tool checks them)')
     p.add_argument("--brief", action="store_true",
                    help="answer every action in brief unless the call says brief: false (the change block cut to 12 lines)")
+    p.add_argument("--no-hints", action="store_true",
+                   help="answers without the Known: and Hint: lines and instructions without the token rules: as in 1.8.5")
     p.add_argument("--maps", metavar="DIR",
                    help="where the per-app maps (<DIR>/<bundle id>/map.json and routes/) are kept, instead of "
                         "~/.tapwright/maps: keep them with a project so a team, CI and Tapline share one folder")
@@ -1528,7 +1532,8 @@ def main() -> int:
             raise SystemExit(f"tapwright mcp: {e}" + _POLICY_HINT if a.policy and str(a.policy) in str(e) else
                              f"tapwright mcp: {e}") from e
         mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
-                       brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts, phone=a.phone)
+                       brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts, phone=a.phone,
+                       hints=not a.no_hints)
         return 0
     if a.cmd == "view":
         return view()
@@ -1642,7 +1647,8 @@ def main() -> int:
         ceiling = Ceiling(apps=tuple(x.strip() for x in (a.apps or "").split(",") if x.strip()), dedicated=a.dedicated,
                           phone=whole, policy=chosen, no_dialog=a.no_dialog,
                           accounts=str(Path(a.accounts).expanduser().resolve()) if a.accounts else None,
-                          maps=str(Path(a.maps).expanduser().resolve()) if a.maps else None, brief=a.brief)
+                          maps=str(Path(a.maps).expanduser().resolve()) if a.maps else None, brief=a.brief,
+                          no_hints=a.no_hints)
         return run(lambda: server.serve(port=port, keep_alive=a.keep_alive, new_token=a.new_token, phone=address,
                                         video=a.video, settle_on_video=a.settle_on_video, ceiling=ceiling))
     return run({"setup": setup, "doctor": doctor, "smoke": smoke, "probe": probe}[a.cmd], a)

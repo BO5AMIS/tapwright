@@ -1,0 +1,204 @@
+"""Routes saved by themselves (AGENT-TOOLS 1.17 §30, Tapwright's own): the way a session went from the app's start to a
+place, kept as a route of the app's map folder (`routes/<name>.json`, `"auto": true`) with no `record` call, and
+replayed in one call with `drive {"route": "<name>"}`.
+
+Navigation only. A chain starts at the place the app shows after `open_app`; each tap, back or open_url that leaves the
+place for another adds a step, made from the move the map keeps for its road (roads.move_of: an id, else a label or
+text, never a title, a list row's text or an id that carries content). Scrolls made at a place before leaving it go
+with the next step (by direction, to an end, or to a target by its id). Typing, a toggle, any other action, a touch the
+policy held, a tap that stayed on its place, a move the map can't keep (a list row with no id, a point) break the chain
+from where it happened: no place reached through that point is saved. Going back to a place already on the chain cuts
+the loop, so the way kept is the shortest the session found.
+
+A place keeps one route. A new one replaces it when it is shorter, or when the old one has failed since it last worked;
+a route whose replay fails twice in a row is dropped (counted by the daemon's drive). A route a person recorded is never
+touched: a place one of them already reaches from the start gets none of its own.
+
+Pure functions over plain data: no phone, no files.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from . import ui
+
+NAV_TOOLS = ("tap", "back", "open_url")
+NEUTRAL = ("run", "look", "wait", "wait_for", "apps", "logs", "map", "audit", "ux_check", "session_report",
+           "compare_screen", "viewer", "crash", "performance", "filmstrip")  # change nothing a route would need
+MAX_PENDING = 5  # scrolls kept at one place before its next step; more break the chain
+MAX_STEPS = 20  # a longer way isn't saved
+FAILS = 2  # a route whose replay fails this many times in a row is dropped
+NAME_MAX = 50
+FAIL_CODES = ("off_route", "not_found", "not_actionable", "expect_failed", "stale")  # a replay that failed, not one held up
+
+
+@dataclass
+class Chain:
+    """One session's way from the app's start: `places[0]` is the start, `steps[i]` the route steps from `places[i]` to
+    `places[i + 1]`. `broken_at`: the index of the place where a step that isn't navigation was made."""
+    app: str
+    places: list[str] = field(default_factory=list)
+    steps: list[list[dict]] = field(default_factory=list)
+    pending: list[dict] = field(default_factory=list)
+    broken_at: int | None = None
+
+    @property
+    def start(self) -> str | None:
+        return self.places[0] if self.places else None
+
+    @property
+    def here(self) -> str | None:
+        return self.places[-1] if self.places else None
+
+    def begin(self, place: str) -> None:
+        if not self.places:
+            self.places = [place]
+
+    def taint(self) -> None:
+        """A step that isn't navigation was made at the place the chain is at."""
+        at = len(self.places) - 1
+        self.broken_at = at if self.broken_at is None else min(self.broken_at, at)
+        self.pending = []
+
+    def scrolled(self, step: dict | None) -> None:
+        """A scroll at the place the chain is at: kept for the next step (None: one that can't be kept, left out)."""
+        if step is None:
+            return
+        if len(self.pending) >= MAX_PENDING:
+            self.taint()
+            return
+        self.pending.append(step)
+
+    def moved(self, dst: str, step: dict | None) -> list[dict] | None:
+        """A move from `here` that arrived at `dst`. `step`: the route step it is, None for one that can't be saved (it
+        breaks the chain). Returns the whole way from the start to `dst` when it is a clean one to save, else None."""
+        if dst == self.here:
+            if step is not None and step.get("tool") != "back":
+                self.taint()  # a tap that stayed: a form's value, a filter, a selection
+            return None
+        if step is None:
+            self.taint()
+        if dst in self.places:  # back on the chain: the loop is cut, and what broke it there may be left behind
+            k = self.places.index(dst)
+            self.places, self.steps, self.pending = self.places[:k + 1], self.steps[:k], []
+            if self.broken_at is not None and self.broken_at > k:
+                self.broken_at = None
+            return None
+        self.steps.append([*self.pending, step] if step is not None else [])
+        self.places.append(dst)
+        self.pending = []
+        if self.broken_at is not None:
+            return None
+        way = [s for part in self.steps for s in part]
+        return way if 0 < len(way) <= MAX_STEPS else None
+
+
+def step_of(move: dict | None) -> dict | None:
+    """The route step a road's move makes, as `run` takes it; None when it can't be replayed or isn't navigation."""
+    if not isinstance(move, dict):
+        return None
+    tool = move.get("tool")
+    if tool == "back":
+        return {"tool": "back"}
+    if tool == "open_url":
+        link = move.get("link")
+        return {"tool": "open_url", "url": link} if isinstance(link, str) and link and "{" not in link else None
+    if tool != "tap":
+        return None
+    target = move.get("target")
+    if not isinstance(target, dict) or target.get("row") or "x" in target:
+        return None  # a row with no id (its words are content) or a point (it breaks with the layout)
+    kept = {k: v for k, v in target.items() if k in ("id", "label", "text", "index")}
+    if not any(k in kept for k in ("id", "label", "text")):
+        return None
+    return {"tool": "tap", "target": kept}
+
+
+def scroll_step(args: dict) -> dict | None:
+    """A scroll as a route keeps it: by direction and amount, to an end, or to a target by its id (structural and no
+    test account's value). None for one aimed by words or a ref (left out: a tap scrolls to a target in the tree)."""
+    target = args.get("target")
+    to = args.get("to")
+    if target is not None:
+        ident = getattr(target, "id", None) if not isinstance(target, dict) else target.get("id")
+        if (not isinstance(ident, str) or not ui.structural_id(ident) or ui.private(ident)
+                or (getattr(target, "index", None) if not isinstance(target, dict) else target.get("index")) is not None):
+            return None
+        return {"tool": "scroll", "to": "target", "target": {"id": ident}} if to == "target" else None
+    if to in ("start", "end"):
+        return {"tool": "scroll", "to": to}
+    direction = args.get("direction")
+    if direction in ("up", "down", "left", "right"):
+        step: dict = {"tool": "scroll", "direction": direction}
+        amount = args.get("amount")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            step["amount"] = amount
+        return step
+    return None
+
+
+def clean(text: str) -> str:
+    """Words as a route's name: lower-case ASCII letters, digits and `_` (empty when nothing is left)."""
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:NAME_MAX].strip("_")
+
+
+def base_name(data: dict, end: str, last: dict) -> str:
+    """What a route to `end` is called (§30.2): the place's own name when a person named it, else the id (or label, or
+    text) of what the last step touched, else the place's name. Never a title: the map keeps titles only as hashes."""
+    place = data.get("places", {}).get(end, {})
+    if place.get("named"):
+        return end
+    target = last.get("target") if isinstance(last, dict) else None
+    if isinstance(target, dict):
+        for key in ("id", "label", "text"):
+            value = target.get(key)
+            if isinstance(value, str) and not ui.private(value) and (name := clean(value)):
+                return name
+    return clean(end) or "place"
+
+
+@dataclass(frozen=True)
+class Held:
+    """A saved route as the decision needs it."""
+    name: str
+    start: str | None
+    end: str | None
+    steps: int
+    auto: bool
+    failed: int
+    variables: bool
+
+
+def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
+           taken: set[str]) -> str | None:
+    """The name to save `way` under, or None when it isn't saved: a person's route already reaches `end` from `start`,
+    or this place's own route is no longer and still works. `wanted`: the name it would take; `taken`: every route name
+    the folder has (a twin in another case counts)."""
+    if any(not h.auto and h.start == start and h.end == end and not h.variables for h in held):
+        return None
+    mine = next((h for h in held if h.auto and h.end == end and h.start == start), None)
+    if mine is not None:
+        return mine.name if (len(way) < mine.steps or mine.failed > 0) else None
+    low = {t.lower() for t in taken}
+    name, n = wanted, 2
+    while name.lower() in low:
+        suffix = f"_{n}"
+        name, n = wanted[:NAME_MAX - len(suffix)] + suffix, n + 1
+    return name
+
+
+def known(held: list[dict], here: str | None, reachable) -> list[str]:
+    """The names for §30.2's `Known:` line: saved routes with an end, that replay in one call with no value to give
+    (`variables` empty), whose start `reachable(start)` says the app can get to from `here`, and that don't end where the
+    app is; the most used first, then by name. `held`: (name, route file) pairs as dicts with `name` added."""
+    out = []
+    for route in held:
+        end, start = route.get("end"), route.get("start")
+        if not isinstance(end, str) or not isinstance(start, str) or end == here or route.get("variables"):
+            continue
+        if not reachable(start):
+            continue
+        used = route.get("used")
+        out.append((-(used if isinstance(used, int) and not isinstance(used, bool) else 0), route["name"]))
+    return [name for _, name in sorted(out)]
