@@ -62,7 +62,7 @@
   command line's make and export go through it (its live values); without one, GitHub needs `--accounts` and the answer
   says which values were checked.
 
-## 1.8.0, "the Explorer"
+## 1.8.0 (2026-11-19), "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A
   deterministic breadth-first walk of the screens nobody has driven yet: each new place and road goes to the app's map
