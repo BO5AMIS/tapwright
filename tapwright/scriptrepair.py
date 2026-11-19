@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -477,7 +478,7 @@ def repair_markdown(name: str, repairs: list[Repair], at: datetime.datetime, ver
 
 def write_atomic(path: Path, text: str) -> None:
     """A temporary file in the same folder, then a rename: a reader never sees half a file."""
-    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(6)}.tmp")  # (one per write, as check_path)
     try:
         temp.write_text(text, encoding="utf-8")
         os.replace(temp, path)
@@ -526,8 +527,9 @@ def apply_needs_fresh(why: str) -> str:
 
 def check_path(script: Path) -> Path:
     """Where the repaired script is written to be replayed before it is kept: beside the script, under a name no replay or
-    listing takes for a script (not `.json`). It becomes `<script>.repaired.json` by a rename once it has run green."""
-    return script.with_name(f"{script.stem}.repaired.json.{os.getpid()}.checking")
+    listing takes for a script (not `.json`). It becomes `<script>.repaired.json` by a rename once it has run green. Unique to
+    the run (a random part, not only the process): two apply runs of one script in one daemon never share it (CodeRabbit, PR #20)."""
+    return script.with_name(f"{script.stem}.repaired.json.{os.getpid()}-{secrets.token_hex(6)}.checking")
 
 
 def write_check(script: Path, repaired: dict) -> Path:

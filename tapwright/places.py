@@ -182,9 +182,23 @@ def _identity(parts: dict) -> set[str]:
     return out
 
 
+def _kin_families(a: dict, b: dict) -> tuple[dict, dict]:
+    """Two reads' parts with each inner family named as its kin on the other side (`_kin`: `dest-card-cape` from
+    `dest-card-cape-town` is `dest-card` when the other read shows `dest-card`), so an unnamed list's identity compares
+    families as `_lists_agree` does (the shorter of two kin names on both sides; CodeRabbit, PR #20). Unrelated families (`settings-row`, `profile-row`) stay as they are."""
+    inner_a, inner_b = set(a.get("inner", ())), set(b.get("inner", ()))
+
+    def named(mine: set[str], theirs: set[str]) -> list[str]:
+        return sorted({x if x in theirs else min([x, *(y for y in theirs if _kin(x, y))], key=lambda s: (len(s), s))
+                       for x in mine})
+    if not (inner_a and inner_b) or inner_a == inner_b:
+        return a, b
+    return {**a, "inner": named(inner_a, inner_b)}, {**b, "inner": named(inner_b, inner_a)}
+
+
 def _ids_agree(a: dict, b: dict) -> bool:
     if current(a) and current(b):
-        ids_a, ids_b = _identity(a), _identity(b)
+        ids_a, ids_b = (_identity(p) for p in _kin_families(a, b))
         union = ids_a | ids_b
         return not union or len(ids_a & ids_b) / len(union) >= IDS_AGREE
     if not current(a) and not current(b):  # (two records of an older map: as they were compared before)
@@ -200,7 +214,8 @@ def _ids_agree(a: dict, b: dict) -> bool:
         return fixed <= old_ids
     inner = set(new.get("inner", ()))
     if inner:
-        return inner <= {stem(i) for i in old_ids}
+        stems = {stem(i) for i in old_ids}
+        return all(any(_kin(x, s) for s in stems) for x in inner)
     return not old_ids
 
 

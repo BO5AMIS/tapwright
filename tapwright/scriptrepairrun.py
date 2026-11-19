@@ -454,9 +454,10 @@ class RepairTools:
 
     async def _list_at_start(self, client_id: str, scope, screen: Screen) -> bool:
         """After a rejected scroll: the list scrolled back to its start, and the screen shows what the analysis read (the same
-        elements, by role, id and label). False when it doesn't."""
-        def shown(items: list[ui.Element]) -> list[tuple[str, str, str]]:
-            return [(e.role, e.identifier, e.label) for e in items if not e.in_alert]
+        elements, by role, id, label and value: rows a list reuses may differ by their value alone, CodeRabbit PR #20). False
+        when it doesn't."""
+        def shown(items: list[ui.Element]) -> list[tuple[str, str, str, str]]:
+            return [(e.role, e.identifier, e.label, e.value) for e in items if not e.in_alert]
         ok, _ = await self._run_steps(client_id, scope, [{"tool": "scroll", "to": "start"}])
         items = await self._read_now(client_id, scope, self.control.client(client_id)) if ok else None
         return items is not None and shown(items) == shown(screen.items)

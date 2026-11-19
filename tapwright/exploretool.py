@@ -157,7 +157,8 @@ class DaemonPhone:
         if tree.app is None or tree.app[1] != self.bundle:  # (a screen no app can be named for is no screen of this app)
             # an alert stays only when it is this app's own permission prompt: another app's alert is never answered
             # (review R180 L1: after a link opened Safari, its "OK" is a touch in another app)
-            alert = tree.alert if tree.alert is not None and self.d._alert_ours(self.bundle, tree.alert, tree.app[1]) else None
+            # a read that names no app can't say whose alert it is: dropped (CodeRabbit, PR #20)
+            alert = tree.alert if tree.alert is not None and tree.app is not None                 and self.d._alert_ours(self.bundle, tree.alert, tree.app[1]) else None
             return dataclasses.replace(tree, items=[], offscreen=[], behind=[], alert=alert)
         return tree
 

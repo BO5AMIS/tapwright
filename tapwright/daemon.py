@@ -6942,6 +6942,12 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         """The bundle id of the app the last read found in front, for the per-app policy."""
         return (self.session.app or (None, None))[1]
 
+    def _read_bundle(self) -> str | None:
+        """The app the newest read names (`Session.read_app`: a live read's root, which `session.app` doesn't follow), else
+        the last snapshot's (_app_bundle). What the skip floor judges a touch against (CodeRabbit, PR #20)."""
+        read = getattr(self.session, "read_app", None)
+        return read[1] if isinstance(read, tuple) and read[1] else self._app_bundle()
+
     def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
         """Where a finger would touch an element a bar (or the keyboard) is drawn over its centre: the middle of
         the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
@@ -7015,7 +7021,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 held(f"the alert button {name!r}" if isinstance(name, str) else "an alert answered without a button name")
             return
         if tool == "back":  # (review R180 H1) a way back is a move too: never in another app than the floor's
-            if (bundle or self._app_bundle()) != floor.app:
+            if (bundle or self._read_bundle()) != floor.app:
                 held("back in another app")
             return
         if tool == "swipe":
@@ -7025,7 +7031,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             if isinstance(target, ui.Target) and target.point is not None and tool in TOUCH_FLOOR_TOOLS:
                 held(f"the point ({round(target.point[0])}, {round(target.point[1])})")
             return
-        front = bundle or self._app_bundle()
+        front = bundle or self._read_bundle()  # (the live read's app: a refresh leaves session.app as the last look had it)
         if front != floor.app:
             held(f"{element.role} in another app")
         tree = getattr(self.session, "last_tree", None)
@@ -7042,8 +7048,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
     def _alert_ours(self, app: str, alert: ui.Alert, bundle: str | None = None) -> bool:
         """Is this alert one explore (or a repair) in `app` may answer: shown over that app, or its own permission prompt (iOS
         draws it in SpringBoard; its title names the app)? Another app's alert (Safari's, after a link) is never answered
-        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the last read's."""
-        front = bundle or self._app_bundle()
+        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the newest read's."""
+        front = bundle or self._read_bundle()
         if front == app:
             return True
         name = self.session.app_names.get(app) or ""

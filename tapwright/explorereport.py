@@ -14,13 +14,16 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Callable
 
 from . import explore, findings
 
 FORMAT, VERSION = "agent-tools-explore-report", 1
-KEEP = 20  # the newest folders of an app that are kept (§25.10)
+KEEP = 20  # the newest finished reports of an app that are kept (§25.10)
+DONE = "report.md"  # written last: a folder with it is a finished report, one without it a write that failed or is under way
+STALE_SECONDS = 3600.0  # an unfinished folder untouched this long is no run's write in progress: it is removed
 FOLDER = re.compile(r"^(\d{8}T\d{6}Z)(?:-(\d+))?$")  # (a second run in the same second gets `-2`: counted too, PR #20)
 STOP_WORDS = {
     "budget_minutes": "the budget (minutes) is used up.",
@@ -146,8 +149,10 @@ def _step(step: dict) -> str:
     return f"{step.get('tool')} {named[0]}={named[1]}" if named else str(step.get("tool"))
 
 
-def prune(app_folder: Path, keep: int = KEEP) -> None:
-    """The newest `keep` run folders of an app stay (§25.10); the others are removed. Only folders named as ours."""
+def prune(app_folder: Path, keep: int = KEEP, now: Callable[[], float] = time.time) -> None:
+    """The newest `keep` finished reports of an app stay (§25.10); the older ones are removed. Only folders named as ours. A
+    folder without its `report.md` (a write that failed) never counts against them: it is removed on its own once it is an
+    hour old, and kept before that, since it may be another run's report being written (CodeRabbit, PR #20)."""
     def order(p: Path) -> tuple[str, int]:
         found = FOLDER.match(p.name)
         assert found is not None
@@ -156,8 +161,16 @@ def prune(app_folder: Path, keep: int = KEEP) -> None:
         runs = sorted((p for p in app_folder.iterdir() if p.is_dir() and FOLDER.match(p.name)), key=order)
     except OSError:
         return
-    for old in runs[:max(0, len(runs) - keep)]:
+    finished = [p for p in runs if (p / DONE).is_file()]
+    for old in finished[:max(0, len(finished) - keep)]:
         shutil.rmtree(old, ignore_errors=True)
+    for unfinished in (p for p in runs if p not in finished):
+        try:
+            stale = now() - unfinished.stat().st_mtime > STALE_SECONDS
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(unfinished, ignore_errors=True)
 
 
 def folder_for(root: Path, app: str, when: datetime.datetime) -> Path:
@@ -194,7 +207,7 @@ def write(root: Path, result: explore.Result, who: explore.Identity, budget: exp
         if script is not None and f.repro is not None:
             _write(folder / f.repro, json.dumps(_redacted_script(script, scrub), indent=2, ensure_ascii=False) + "\n")
     _write(folder / "report.json", json.dumps(body, indent=2, ensure_ascii=False) + "\n")
-    _write(folder / "report.md", markdown(body, kept, scrub))
+    _write(folder / DONE, markdown(body, kept, scrub))  # (last: it marks the report finished, for prune)
     prune(folder.parent, KEEP)  # (only once this run's report is there: a failed write never costs a finished one, PR #20)
     return folder
 

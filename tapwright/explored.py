@@ -22,6 +22,9 @@ TEXT_MAX = 80  # characters of a label or text in a signature, after redaction (
 SIG_MAX = 400  # a longer signature is not one (an id has no cut)
 COLUMNS, ROWS = 4, 8  # the position grid of §25.3 (not the 3 by 3 of a script's `seen`)
 _PREFIXES = ("id:", "label:", "text:", "role:", "row:")
+# when a scroll scan of the place began (its `…` is the scan's) and when the last one ended: a merge with a copy saved
+# mid-scan doesn't bring that scan's `…` back after it ended (CodeRabbit, PR #20)
+SCANNING, SCANNED = "scanning", "scanned"
 _CODE = re.compile(r"^[a-z_]{1,40}$")
 _NAME = re.compile(r"^[a-z0-9_]{1,60}$")
 
@@ -218,6 +221,7 @@ def scan_open(data: dict, place: str, now: str) -> bool:
     if rec is None or MORE in rec["frontier"]:
         return False
     rec["frontier"] = [*rec["frontier"], MORE]
+    rec[SCANNING] = now  # (this `…` is a scan's: a merge drops it once the other side's scan ended after it, `merge_record`)
     return True
 
 
@@ -236,6 +240,7 @@ def scan_done(data: dict, place: str, left: list[str]) -> bool:
     if len(listed) > FRONTIER_MAX:
         return False
     rec["frontier"] = listed
+    rec[SCANNED] = max(str(rec.pop(SCANNING, "")), str(rec.get(SCANNED, "")), str(rec.get("last", "")))
     return True
 
 
@@ -311,8 +316,24 @@ def merge_record(disk: dict | None, memory: dict | None) -> dict | None:
     for s in [*disk["frontier"], *memory["frontier"]]:
         if s != MORE and s not in actions and s not in sigs:
             sigs.append(s)
-    more = MORE in disk["frontier"] or MORE in memory["frontier"]
+    ended = max(str(disk.get(SCANNED, "")), str(memory.get(SCANNED, "")))
+
+    def marks(side: dict) -> bool:
+        """Does this side's `…` still hold? Not when a scan ended at or after it was set: a scan's `…` from when that scan
+        began, an overflow `…` (no scan) from the side's own `last` (scan_done clears both once all is tried)."""
+        if MORE not in side["frontier"]:
+            return False
+        began = side.get(SCANNING) if isinstance(side.get(SCANNING), str) else str(side.get("last", ""))
+        return not (ended and began and ended >= began)
+    live = [side for side in (disk, memory) if marks(side)]
     newer = memory if str(memory.get("last", "")) >= str(disk.get("last", "")) else disk
     other = disk if newer is memory else memory
-    return copy.deepcopy({**other, **newer, "last": max(str(disk.get("last", "")), str(memory.get("last", ""))),
-                          "actions": list(actions.values()), "frontier": _capped(sigs, more)})
+    out = {**other, **newer, "last": max(str(disk.get("last", "")), str(memory.get("last", ""))),
+           "actions": list(actions.values()), "frontier": _capped(sigs, bool(live))}
+    out.pop(SCANNING, None)
+    still = [str(side[SCANNING]) for side in live if isinstance(side.get(SCANNING), str)]
+    if still:
+        out[SCANNING] = max(still)
+    if ended:
+        out[SCANNED] = ended
+    return copy.deepcopy(out)

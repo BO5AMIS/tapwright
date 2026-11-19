@@ -543,6 +543,7 @@ def test_reports_are_pruned_only_after_the_new_one_is_written_and_suffixed_folde
     app = tmp_path / APPID
     for n in range(20):
         (app / f"202611{10 + n:02d}T091500Z").mkdir(parents=True)
+        (app / f"202611{10 + n:02d}T091500Z" / "report.md").write_text("# report", "utf-8")  # (finished reports: W174)
     real = explorereport._write
 
     def failing(path, data):
@@ -556,8 +557,9 @@ def test_reports_are_pruned_only_after_the_new_one_is_written_and_suffixed_folde
     assert all((app / f"202611{10 + n:02d}T091500Z").exists() for n in range(20))  # a failed write cost no finished report
     monkeypatch.setattr(explorereport, "_write", real)
     (app / "20261129T091500Z-2").mkdir()
+    (app / "20261129T091500Z-2" / "report.md").write_text("# report", "utf-8")
     explorereport.prune(app, 20)
-    kept = sorted(p.name for p in app.iterdir() if explorereport.FOLDER.match(p.name))
+    kept = sorted(p.name for p in app.iterdir() if explorereport.FOLDER.match(p.name) and (p / "report.md").is_file())
     assert len(kept) == 20 and "20261129T091500Z-2" in kept and "20261110T091500Z" not in kept
 
 

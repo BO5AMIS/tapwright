@@ -518,7 +518,9 @@ the app (§28.4).
 
 - One folder per run: `~/.<tool>/explore/<app id>/<UTC time as YYYYMMDDTHHMMSSZ>/` (`~/.tapline/explore/`,
   `~/.tapwright/explore/`), with `report.json`, `report.md`, a picture per finding in `findings/` and a script per
-  finding in `repro/` (§27.1). The newest 20 folders of an app are kept; older ones are removed at start.
+  finding in `repro/` (§27.1). The newest 20 finished reports of an app (a folder with its `report.md`) are kept;
+  older ones are removed once the new report is written. A folder a failed write left without `report.md` is never
+  counted among the 20, and is removed once it is an hour old.
 - `report.md` is the same content for a person, with the findings first.
 - `report.json`:
 ```json
