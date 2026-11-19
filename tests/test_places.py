@@ -257,7 +257,9 @@ def test_a_secure_field_and_typed_text_are_not_in_a_key():
     dumped = json.dumps(read.key)
     assert "sara@example.com" not in dumped and "hunter2" not in dumped
     assert read.key["parts"]["kinds"] == ["form"]
-    assert read.key["parts"]["ids"] == ["email", "password", "signin"]
+    # (1.8.0, W168) the fields lie inside the form's scroll view: they scroll, so the form goes by its own id
+    assert read.key["parts"]["ids"] == [] and read.key["parts"]["lists"] == ["signin"]
+    assert read.key["parts"]["inner"] == ["email", "password"]
 
 
 def test_a_screen_with_no_ids_needs_its_title_to_be_the_same_place():

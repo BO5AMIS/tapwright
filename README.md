@@ -149,6 +149,7 @@ repository too.
 | `unlock` | unlocks a locked phone with the passcode saved for it (`--accounts FILE`, `phone.passcode`): the agent never sees or sends it, the tool types it only on iOS's lock screen (never the XCTest prompt), at most twice an hour and 3 times a day, and stops after a refusal. With none saved it answers `locked`: ask the user |
 | `notifications` | notifications from the whole phone's Notification Center, newest first, at most 20; `open: n` opens one. Notification Center is on the phone's screen for about a second while it is read; one-time codes are hidden |
 | `journey` | test a feature as a real user would: `start: true` with a `goal` (and a `persona`, `conditions`) shows the screen in a user's eyes (no ids, nothing off screen, no jump-scrolling), measures taps, time, wrong turns and hesitations, and `stress` tries leaving the app, a bad network, a double tap, rotating and relaunching; `stop: true` with `reached` writes a report folder under `~/.tapwright/reports/` (Markdown, HTML, screenshots, filmstrip, a GIF) and `export` puts it in a GitHub PR or issue through `gh`, only when you ask |
+| `explore` | search the app you are driving for what breaks, with no model: a deterministic breadth-first walk of its screens that saves the places and roads it finds to the map and writes a report folder under `~/.tapwright/explore/<app id>/<time>/` (`report.json`, `report.md`, a picture and a script per finding). It answers a summary, not the screen. `minutes` (10), `steps` (500), `depth` (8), `from` and `focus` (place names), `fill` (`none`, `test-data`, or `fixture:<name>.<field>`: it types only into fields whose id ends `-test-safe`, never a password or card, never submits), `continue` past a crash. It never signs in again after a reset (sign the app in with a test account before it; `account` isn't offered in 1.8.0). It never touches what the skip floor holds (`Delete`, `Send`, `Post`, `Pay`, `Sign out`, `Block`, account, privacy and security settings, the share sheet), flips a toggle and sets it back, never allows a permission prompt, asks nobody, ignores grants, stays in one app, and stops when a person touches the phone (`busy`), pauses it (`paused`) or the phone locks (`locked`: explore never unlocks it) after writing its report. The floor is checked as each move goes out, on the element it really lands on; a `--policy` file's words and its `explore.skip` list only add to it (`serve --policy`, `mcp --policy`, `tapwright explore --policy`, or a `tapwright call explore --policy`, which waits its `minutes` + 6 min). Not a step of `run` or a script, and refused in a `journey`. `tapwright explore [--minutes N] [--steps N] [--depth N] [--from PLACE] [--focus PLACE] [--fill test-data] [--continue] [--apps APP] [--policy FILE] [--maps DIR] [--accounts FILE]` runs the same search from the command line (exit 0: nothing found; 1: findings; 2: could not start, or a person or a pause stopped it) |
 
 Every action answers with what changed on the screen, not the whole list, and says how long the
 screen took to settle. Add `screenshot: true` for a picture. `tapwright mcp --screenshots DIR`
@@ -168,6 +169,25 @@ step with the check that proves it worked:
 ```
 
 With `record`, actions are saved in the same format. `tapwright replay sign-up.json --junit out.xml` runs the file again without an agent. Review scripts before executing them: app and policy flags do not limit their device access.
+
+**Scripts that repair themselves.** When the app's screens moved, `replay` with `repair: "suggest"` (or `tapwright replay
+FILE --apps ID --repair suggest`) replays the script as usual and adds the likely fix after the failed step; it tries no
+candidate (the script's own steps still run). `repair: "apply"` repairs a
+renamed or moved target, a new screen in the way, or a target now behind a scroll, as the run goes, and keeps a repair only
+when its own check holds (the step's `expect`, else the next step's target resolves to one element) and the whole script then
+runs to its end; at most 3 candidates a step and 5 repairs a script. Every move of a repair (each trial and the way back after a
+rejected one) passes the same skip floor as `explore`'s moves; in the check below only the repaired and inserted steps (and the
+step an inserted road or scroll leads to) do, while the script's own unchanged steps (its Sign out, say) run as a plain replay
+runs them. `apply` then replays the repaired file itself
+from the script's fresh start (so it takes about twice as long as a plain replay; the client waits up to 8 minutes) and refuses a
+script that can't start fresh (`"fresh": false`, or no `app`). It writes `FILE.repaired.json` and `FILE.repair.md` beside
+the script, never over it, and nothing at all when the run or that replay fails (a file that can't be written fails the
+run too). A failing `expect` is a finding, never repaired, and so is a
+step that types, a policy word, a native Back or a `draftsOnly` route. Every trial is a line of kind `repair` in the audit log.
+`--repair apply --adopt` (the command line, a person's choice; no tool call can adopt) replaces the script with the repaired one
+after that same run passed, keeping the original once as `FILE.orig.json`. The score only orders the candidates: Tapwright's
+weights are role 0.15, id_stem 0.35, words 0.35, position 0.10, component 0.05. `record` now saves each step's `place` and the
+`seen` facts of its element (role, position bucket, class, id stem; never text) so a repair can tell what moved.
 
 **Checks of how it looks, too.** `"expect": {"matches": "trip-saved"}` on a step (or a `compare_screen`
 step) holds when the screen matches the reference picture of that name. `record` keeps the pictures next to the

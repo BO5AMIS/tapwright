@@ -231,3 +231,16 @@ def test_the_policy_goes_in_a_header_and_the_default_leaves_it_out():
 
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Tapwright-Client": "agent-1", "X-Tapwright-Mode": "dedicated"}
+
+
+def test_the_explore_key_holds_a_skip_list_and_submit_ids_and_is_kept_when_the_policy_travels():
+    rules = policy.parse({"explore": {"skip": ["Archive"], "submit": ["save-profile"], "future": 1}})
+    assert rules.explore.skip == ("Archive",) and rules.explore.submit == ("save-profile",)
+    assert policy.parse(json.loads(rules.dumps()), header=True).explore == rules.explore
+    assert policy.parse({}).explore == policy.ExploreWords() and "explore" not in policy.DEFAULT.to_obj()
+
+
+@pytest.mark.parametrize("bad", [[], {"skip": "Archive"}, {"skip": [""]}, {"submit": [3]}])
+def test_a_bad_explore_key_is_refused(bad):
+    with pytest.raises(ValueError, match="explore"):
+        policy.parse({"explore": bad})

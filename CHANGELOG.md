@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.8.0 (2026-11-19), "the Explorer"
+
+- New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A
+  deterministic breadth-first walk of the screens nobody has driven yet: each new place and road goes to the app's map
+  (with an `explored` record per place, and a Coverage line in `map`), and the run ends with a report folder under
+  `~/.tapwright/explore/<app>/<time>/` (`report.json`, `report.md`, a picture and a repro script per finding): crashes
+  with their stack, error-level log lines, dead ends, slow screens, refused touches, accessibility and usability issues.
+  `minutes`, `steps`, `depth`, `from`, `focus`, `fill` (test values only into fields marked `-test-safe`, or a vault
+  fixture marked `"explore": true`), `continue` past a crash. It never signs in again after a reset: §25.8's `account`
+  can't pass the skip floor (it would type a password and submit a form), so 1.8.0 refuses it in plain words.
+- What explore never does, on the whole-phone daemon of 1.7.5: it stays in one app (the one `--apps` names, else the
+  app in front; never Home, Settings, Wallet or Passwords) and never touches what its skip floor holds: Delete, Buy,
+  Send, Post, Pay, Sign out and the like, a card, account, privacy and security screens, a system share sheet, a
+  password field, another app, a point or a swipe. It reads an element's label, value and id (an icon button's label may
+  be a glyph or an SF Symbol name such as `trash`; the id `delete-row` still holds it), and the common symbol names of
+  delete, send, share, pay and sign out are floor words. A switch with no id and no label is never flipped (listed as
+  skipped); a flip whose flip back a pause, a person or a locked phone prevented stops the run naming the switch and
+  what it was, and so does a flip that gets no clean answer (a timeout, a dropped line, a screen that can't be read, any
+  error): the switch is named as one that may be flipped. A held touch is skipped for every build only when the floor
+  names its word; a hold the dry run gives without one (another app in front, a sheet seen for a moment) is retried by
+  a later build. The floor is one gate checked as each move goes out, on the element
+  the touch really lands on after its lookup and any scroll (a dry run meets the same gate, `force` too); a `--policy` file's words
+  and its `explore.skip` list only add to it (a caller's policy is combined with `serve --policy`, never put in its
+  place; a caller's `explore.submit` ids are limited to serve's list; a `tapwright call explore --policy` or `call replay
+  --policy` with `repair` sends its file too, and no other call reads it). An id that carries content is kept in no action
+  signature (the map and the report), as in `seen`. An alert over another app is never answered. It answers a permission prompt with its denial, by the button's name;
+  submits no form; sets a flipped switch back; asks nobody. Pause and a person's input stop or hold it; a locked phone
+  ends it with `locked` ("the phone reads as locked (or Notification Center is open over it)"), and explore never
+  unlocks the phone (the agent may call `unlock`, then explore again). No
+  picture is kept while the phone is being unlocked or Notification Center may be open. A redactor that fails hides
+  the text instead of passing it on.
+- Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
+  target, a new screen in the way) and tries no candidate (the script's own steps still run); `repair: "apply"` tries up to 3 candidates per break, each a real
+  touch through the same skip floor (and so is its way back after a rejected one: a saved road through Sign out is never
+  driven; a road a repair drives or inserts is taps only, never a toggle or a long press; the floor's app is the script's
+  `app`), accepts one only when its check holds and the whole script then runs to its end,
+  and keeps a repair only after the repaired file itself has replayed green from the script's fresh start, the repaired and inserted steps
+  through the skip floor, the script's own unchanged steps as a plain replay runs them (apply takes about twice as long as a plain replay: the client waits up to 8 minutes, and
+  nothing is kept when the client stopped waiting); then it
+  writes `<script>.repaired.json` and `<script>.repair.md` beside the script (the original is unchanged). A script that
+  can't start fresh (`"fresh": false`, or no app) is only suggested: `apply` and `--adopt` refuse it. A failing
+  `expect`, a typing step, a native Back and a draftsOnly script are never repaired; at most 5 repairs a run; every
+  trial is an audit line of kind `repair`. Adopting is the user's: `tapwright replay FILE --repair apply --adopt`
+  (JUnit carries the suggestion). Recorded steps now keep `place` and `seen` (role, screen area, component, and the id's
+  stem, never text, and none for an id that carries content) so a repair can tell what moved.
+- A list scrolled differently is the same place (the map, routes, explore and repair). A place's key no longer counts
+  the identifiers inside a scrolling container (a React Native list's cards, a header that scrolls away): it goes by the
+  identifiers outside them, the lists' own identifiers, and, for a list without one, the families of its rows' ids
+  (`dest-card`, never the `kyoto` of `dest-card-kyoto`). Before, Back from a detail to a list left scrolled a few rows read
+  as another place, so explore called it a dead end, relaunched, and ended `cant_get_back` with little explored. Two
+  screens whose lists differ stay two places. A map saved before keeps its places and keys: a read is matched to an old
+  place when its fixed ids are all among the old place's ids and something beyond the tab bar agrees too (a fixed id or
+  a list id that isn't the tab bar's, else the rows' families kin to the old place's own content), so a screen it never
+  held (a detail pushed in a tab, whose only fixed ids are the tab bar's) becomes a new place instead of being taken for
+  the tab's list; new places get the new key. Two reads with no list compare as before 1.8.0 (the part for lists is left
+  out), so two screens of other kinds and tabs no longer merge on the tab bar's ids.
+- `tapwright call explore` waits for its `minutes` + 6 minutes, and `tapwright call replay` with `repair: "apply"` up to 8
+  minutes (run, replay and drive 200 s), as the MCP server does: before, the thin call gave up after 120 s while the run
+  went on.
+- `tapwright serve --policy` and `tapwright mcp --policy` read and check the file at start (its words reach explore's and
+  a repair's skip floor). From 1.7.5 to 1.7.9 the flag was ignored, so a host config written by `tapwright install --policy
+  FILE` whose file has since been moved or broken now stops the server from starting, with a message that says how to fix
+  it (restore the file, or run `tapwright install` again).
+
 ## 1.7.9 (2026-11-19)
 
 - `media add` takes videos: mp4, mov and m4v, told apart from HEIC pictures by their `ftyp` brand (an old .mov by its

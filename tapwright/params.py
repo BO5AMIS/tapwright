@@ -23,7 +23,7 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "run": ("steps", "trace", "dry_run", *_SHOT, *_BRIEF),
     "drive": ("to", "route", "with", "account", "then", "by", "dry_run", *_SHOT, *_BRIEF),
     "record": ("start", "stop", "name", "path", "route", "action"),
-    "replay": ("name", "path", *_SHOT, "update_references"),  # (update_references: the CLI's, not the MCP tool's)
+    "replay": ("name", "path", *_SHOT, "update_references", "repair"),  # (update_references: the CLI's, not the MCP tool's)
     "audit": ("types",),
     "ux_check": (),
     "media": ("add", "remove", "confirm"),
@@ -46,12 +46,14 @@ ALLOWED: dict[str, tuple[str, ...]] = {
     "rotate": ("to", *_SHOT, *_BRIEF),
     "journey": ("start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"),
+    "explore": ("minutes", "steps", "depth", "from", "focus", "fill", "continue", "account", "guide"),
 }
 # Names the daemon takes that the MCP tools' signatures don't have (tests/test_params.py holds the table to this)
 NOT_IN_MCP: dict[str, set[str]] = {t: {"index"} for t, names in ALLOWED.items() if "index" in names}
 NOT_IN_MCP["replay"] = {"update_references"}
 NOT_IN_MCP["scroll"] = NOT_IN_MCP["scroll"] | {"force"}
 NOT_IN_MCP["wait_for"] = NOT_IN_MCP.get("wait_for", set()) | {"network_idle"}  # Tapline's: answered unsupported, not bad_params
+NOT_IN_MCP["explore"] = {"account"}  # §25.8's, not offered in Tapwright 1.8.0: answered unsupported in plain words (R180 M3)
 
 
 def unknown(tool: str, args: dict) -> list[str]:

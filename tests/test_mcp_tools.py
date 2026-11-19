@@ -30,6 +30,7 @@ EXPECTED = {
     "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
     "rotate": {"to", "look", "screenshot", "brief"},
+    "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "guide"},  # (no account in 1.8.0: R180 M3)
     "journey": {"start", "goal", "persona", "conditions", "allow", "eyes", "stop", "reached", "why", "export", "stress",
                 "mode", "target", "survives", "done", "finding"},
     "audit": {"types"},
@@ -42,7 +43,7 @@ EXPECTED = {
     "compare_screen": {"name", "update", "width", "threshold", "ignore"},
     "run": {"steps", "trace", "dry_run", "look", "screenshot", "brief"},
     "record": {"start", "stop", "name", "path", "route", "action"},
-    "replay": {"name", "path", "look", "screenshot"},
+    "replay": {"name", "path", "look", "screenshot", "repair"},
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],

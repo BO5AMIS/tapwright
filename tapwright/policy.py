@@ -15,7 +15,8 @@ VERSIONS = (1, 2)
 BLOCKED, CONFIRM = "blocked", "confirm"
 DEFAULT_CONFIRM = ("Buy", "Purchase", "Subscribe", "Pay", "Delete", "Remove", "Send", "Post", "Publish",
                    "Sign out", "Log out", "Erase")
-_KEYS = ("version", "confirm", "block", "apps", "grants")
+_KEYS = ("version", "confirm", "block", "apps", "grants", "explore")
+_EXPLORE_KEYS = ("skip", "submit")
 _APP_KEYS = ("confirm", "block")
 
 
@@ -27,11 +28,20 @@ class AppWords:
 
 
 @dataclass(frozen=True)
+class ExploreWords:
+    """`"explore": {"skip": [...], "submit": [...]}` (§25.5, §25.7): words the explorer never touches, and ids of controls it
+    may treat as a form's submit. Only `explore` reads them; a tool that doesn't know the key ignores it."""
+    skip: tuple[str, ...] = ()
+    submit: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Policy:
     confirm: tuple[str, ...] = ()
     block: tuple[str, ...] = ()
     apps: dict[str, AppWords] = field(default_factory=dict)  # by bundle id; an app's lists replace the global ones
     file: str | None = None  # a version 2 file's absolute path: its grants are read from it at every touch (§19.5)
+    explore: ExploreWords = field(default_factory=ExploreWords)  # only `explore` reads it (§25.5)
 
     def words(self, app_bundle: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """(block, confirm) words in force for an app."""
@@ -65,6 +75,8 @@ class Policy:
         apps = {bundle: {k: list(v) for k, v in (("confirm", w.confirm), ("block", w.block)) if v is not None}
                 for bundle, w in self.apps.items()}
         obj = {"version": VERSION, "confirm": list(self.confirm), "block": list(self.block), "apps": apps}
+        if self.explore.skip or self.explore.submit:
+            obj["explore"] = {k: list(v) for k, v in (("skip", self.explore.skip), ("submit", self.explore.submit)) if v}
         if self.file is not None:  # (to the daemon: the grants are read from the file itself, never from a header)
             obj.update(version=2, file=self.file)
         return obj
@@ -127,7 +139,45 @@ def parse(obj: object, *, header: bool = False) -> Policy:
             raise ValueError(f'apps."{bundle}" must be an object with confirm and block lists')
         _unknown(own, _APP_KEYS, f'apps."{bundle}"')
         apps[bundle] = AppWords(*(_words(own[k], f'apps."{bundle}".{k}') if k in own else None for k in _APP_KEYS))
-    return Policy(_words(obj.get("confirm", []), "confirm"), _words(obj.get("block", []), "block"), apps, file)
+    explore = obj.get("explore", {})
+    if not isinstance(explore, dict):
+        raise ValueError('explore must be an object like {"skip": ["Archive"]}')
+    # (a key inside `explore` this tool doesn't know is ignored: a newer file may hold one, §25.5)
+    words = ExploreWords(*(_words(explore[k], f"explore.{k}") if k in explore else () for k in _EXPLORE_KEYS))
+    return Policy(_words(obj.get("confirm", []), "confirm"), _words(obj.get("block", []), "block"), apps, file, words)
+
+
+def _union(*lists: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """The words of every list, once each (ignoring case and spacing), in first-seen order; None when every list is None."""
+    if all(words is None for words in lists):
+        return None
+    out: dict[str, str] = {}
+    for words in lists:
+        for word in words or ():
+            out.setdefault(" ".join(word.split()).casefold(), word)
+    return tuple(out.values())
+
+
+def combined(daemon: Policy, call: Policy) -> Policy:
+    """`serve --policy` and a caller's own policy together, for the skip floor of explore and a repair's trials (§25.5): every
+    word of either, in each list (block, confirm, each app's own, `explore.skip`). A caller's policy only adds to the daemon's;
+    it never replaces it, so no word of `serve --policy` is lost. The daemon's file is kept. `explore.submit` loosens the floor
+    (the ids explore may tap on a form), so it goes the other way: a caller's ids are limited to serve's list (the ids on both,
+    in serve's spelling); a caller that names none leaves serve's list as it is (the lead's ruling, review R180)."""
+    apps: dict[str, AppWords] = {}
+    for bundle in dict.fromkeys([*daemon.apps, *call.apps]):
+        # each side's words IN FORCE for the app (`words`: its own list, else the global one), so an app's own list on one
+        # side (even an empty one) never hides the other side's global words for that app (CodeRabbit, PR #20)
+        (a_block, a_confirm), (b_block, b_confirm) = daemon.words(bundle), call.words(bundle)
+        own_a, own_b = daemon.apps.get(bundle, AppWords()), call.apps.get(bundle, AppWords())
+        # (a list neither side gives the app stays None: the app reads the combined global list, the same words)
+        apps[bundle] = AppWords(None if own_a.confirm is None and own_b.confirm is None else _union(a_confirm, b_confirm),
+                                None if own_a.block is None and own_b.block is None else _union(a_block, b_block))
+    asked = {" ".join(w.split()).casefold() for w in call.explore.submit}
+    submit = tuple(w for w in daemon.explore.submit if not asked or " ".join(w.split()).casefold() in asked)
+    words = ExploreWords(_union(daemon.explore.skip, call.explore.skip) or (), submit)
+    return Policy(_union(daemon.confirm, call.confirm) or (), _union(daemon.block, call.block) or (), apps,
+                  daemon.file if daemon.file is not None else call.file, words)
 
 
 def loads(text: str, *, header: bool = False) -> Policy:
@@ -151,5 +201,5 @@ def load(path: str | Path) -> Policy:
     except ValueError as e:
         raise ValueError(f"the policy file {path}: {e}") from None
     if json.loads(text).get("version") == 2:  # its grants are read from the file, again at every touch
-        rules = Policy(rules.confirm, rules.block, rules.apps, str(Path(path).expanduser().resolve()))
+        rules = Policy(rules.confirm, rules.block, rules.apps, str(Path(path).expanduser().resolve()), rules.explore)
     return rules

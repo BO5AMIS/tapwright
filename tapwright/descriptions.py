@@ -117,7 +117,12 @@ SHARED = {
         'Run a saved script like `run` and answer the same way: it stops at the first step that fails or whose '
         "expectation doesn't hold. Give `name` (a saved script) or `path` (a script file); without either, lists "
         'saved scripts. It starts the app fresh first unless the script says `"fresh": false`. The user can run '
-        'the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`).'
+        'the same script without an agent (`tapline replay <name>`, `tapwright replay <name>`). `repair: "suggest"` '
+        'runs it as usual and adds the likely fix after a failed step, trying no candidate; `"apply"` repairs a moved or '
+        'renamed target as it goes, only where its own check and the rest of the run hold, and writes '
+        '`<script>.repaired.json` and `.repair.md` beside the script only after that file replays green from the '
+        'script\'s fresh start (so `apply` needs a script that starts fresh; one with `"fresh": false` can use '
+        '`suggest`). A failing `expect` is never repaired. Adopting is the user\'s (command line).'
     ),
     'compare_screen': (
         'Visual regression: the first call for a `name` (or with `update: true`) saves the screen as the '
@@ -189,6 +194,17 @@ SHARED = {
         'road is repaired by another name or planned again; otherwise `off_route`: nothing more was touched, so '
         "go on by hand. In a user's-eyes journey it uses roads only, with no links or reflexes, unless the "
         "journey's start allows them. `dry_run: true` says the way; `brief: true` shortens the answer."
+    ),
+    'explore': (
+        'Search the app you drive for what breaks, with no model: a breadth-first walk that saves places and roads to '
+        'the map and writes a report folder (findings, each with a script that reaches it). Answers a summary, not '
+        'the screen. Optional: `minutes` (10), `steps` (500), `depth` (8), `from`, `focus` (place names), `fill` '
+        '(`"none"`, `"test-data"`, `"fixture:<name>.<field>"`: only into fields whose id ends `-test-safe`), '
+        '`continue` past a crash. It never signs in again after a reset (sign the app in first). It '
+        'stays in one app, skips Delete, Send, Post, Pay, Sign out and the like, submits no form, allows no permission '
+        'prompt and asks no one. A person touching the phone holds it up to 30 s, then ends it `busy`; a locked phone ends '
+        'it (it never unlocks). '
+        'Not a step of `run`; a call can last its `minutes`.'
     ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "

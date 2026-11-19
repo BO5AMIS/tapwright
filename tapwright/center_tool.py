@@ -138,6 +138,10 @@ class CenterTools:
         """Did an unlock run at any moment since `mono` (a screenshot asked of the phone then may show its keypad)?"""
         return any(end is None or end >= mono for _, end in self.__dict__.get("_unlock_spans", ()))
 
+    def center_since(self, mono: float) -> bool:
+        """Was Notification Center possibly open at any moment since `mono` (a screenshot asked of the phone then may show it)?"""
+        return any(end is None or end >= mono for _, end in self.__dict__.get("_center_spans", ()))
+
     def recording_covers(self, mono: float) -> bool:
         """Are a recording's frames being left out at `mono` (Notification Center open, or the phone being unlocked)?"""
         return self.center_covers(mono) or self.unlock_covers(mono)

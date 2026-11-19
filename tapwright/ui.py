@@ -261,6 +261,11 @@ class Structure:
     kinds: tuple[str, ...] = ()
     ids: tuple[str, ...] = ()
     title: str = ""
+    # (1.8.0, W168) what scrolls and what doesn't, so a list scrolled differently is still one place: `lists` holds the
+    # top-level scrolling containers on screen (a list, a scroll view, a web view), each by its identifier, "" for one
+    # without; `scrolled` holds those of `ids` that lie inside one (an RN row's testID, a header that scrolls away)
+    lists: tuple[str, ...] = ()
+    scrolled: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1232,6 +1237,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
 STRUCTURE_KINDS = {"NavigationBar": "nav", "TabBar": "tabs", "Toolbar": "toolbar", "Table": "list",
                    "CollectionView": "list", "ScrollView": "list", "WebView": "web"}
 INPUT_TYPES = {"TextField", "SecureTextField", "TextView"}  # a scroll view holding one of these is a form
+SCROLLERS = {"ScrollView", "Table", "CollectionView", "WebView"}  # what moves its content: what lies inside scrolls
 
 
 def _on_screen(node: ET.Element, screen: tuple[float, float, float, float] | None) -> bool:
@@ -1272,9 +1278,11 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
     text are content, so they take no part."""
     kinds: list[str] = []
     ids: set[str] = set()
+    lists: list[str] = []
+    scrolled: set[str] = set()
     bars: list[ET.Element] = []
 
-    def visit(node: ET.Element, in_container: bool) -> None:
+    def visit(node: ET.Element, in_container: bool, in_scroll: bool) -> None:
         kind = _kind(node)
         if kind in ("Keyboard", "Alert", "Cell"):
             return
@@ -1282,9 +1290,12 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         if not centred and not _reaches(node, screen):
             return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        if (centred and name and name != label and name not in IOS_NOISE
-                and kind not in ("Application", "Window", "NavigationBar") and structural_id(name)):
+        named = (centred and bool(name) and name != label and name not in IOS_NOISE
+                 and kind not in ("Application", "Window", "NavigationBar") and structural_id(name))
+        if named:
             ids.add(name)  # (an id that carries content never goes into a key: structural_id)
+            if in_scroll:
+                scrolled.add(name)
         shown = STRUCTURE_KINDS.get(kind)
         if shown == "list" and kind == "ScrollView" and any(_kind(n) in INPUT_TYPES for n in node.iter()):
             shown = "form"
@@ -1292,12 +1303,15 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
             shown = None  # (a node with no frame shows nothing of its own)
         if shown is not None and not in_container:
             kinds.append(shown)
+        scrolls = kind in SCROLLERS
+        if scrolls and shown is not None and not in_scroll:
+            lists.append(name if named else "")  # (the list itself doesn't move when its rows do)
         if kind == "NavigationBar" and centred:
             bars.append(node)
         for child in node:
-            visit(child, in_container or shown is not None)
+            visit(child, in_container or shown is not None, in_scroll or scrolls)
 
-    visit(root, False)
+    visit(root, False, False)
     title = ""
     if bars:
         bar = min(bars, key=lambda n: _rect(n)[1])
@@ -1305,7 +1319,7 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         heads = [n for n in texts if "Header" in (n.get("traits") or "")]
         pick = (heads or texts or [None])[0]
         title = (_text(pick.get("label")) or _text(pick.get("value"))) if pick is not None else _text(bar.get("name"))
-    return Structure(tuple(kinds), tuple(sorted(ids)), title)
+    return Structure(tuple(kinds), tuple(sorted(ids)), title, tuple(sorted(lists)), tuple(sorted(scrolled)))
 
 
 def _plain(node: ET.Element) -> Element | None:

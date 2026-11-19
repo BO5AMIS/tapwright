@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import names, places, roads, routes, store
+from . import explored, names, places, roads, routes, store
 
 log = logging.getLogger(__name__)
 LOCK_STALE = 10.0  # seconds after which a lock file is taken as left behind
@@ -73,10 +73,10 @@ def invalid(data: object) -> str | None:
 
 
 # the keys whose string values are the screen's words in a map: a target's or a road's names (id, label, text), a link
-# (a place's, a move's), a place's identifiers and selected tab. Nothing else is content: not the format, the version,
-# the app, the title key, a hash, a signature, a place's or a route's name, a reference or a time (those are made by the
+# (a place's, a move's), a place's identifiers, lists, inner families and selected tab. Nothing else is content: not the format, the version,
+# the app, the title key, a hash, a place's signature, a place's or a route's name, a reference or a time (those are made by the
 # code and a value in them would break the map: Codex, PR #10 cycle 5)
-CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url", "link", "ids", "tab"})
+CONTENT_KEYS = frozenset({"id", "label", "text", "value", "url", "link", "ids", "lists", "inner", "tab", "sig", "word"})
 
 
 def without_values(data: dict, scrub: Callable[[str], str]) -> dict:
@@ -92,10 +92,29 @@ def without_values(data: dict, scrub: Callable[[str], str]) -> dict:
         if isinstance(v, list):
             return [clean(x, content) for x in v]
         return v
+    data = _without_held_sigs(data, scrub)
     out = {k: clean(v, k in CONTENT_KEYS) for k, v in data.items() if k != "roads"}
     if "roads" in data:
         out["roads"] = [r for r in data["roads"] if clean(r, False) == r]
     return out
+
+
+def _without_held_sigs(data: dict, scrub: Callable[[str], str]) -> dict:
+    """An action signature holds the screen's words (§25.3): an action (or a frontier entry) whose signature holds a value
+    is dropped whole, as a road is, since a signature with half a word is none. The map given is not changed."""
+    def held(sig: object) -> bool:
+        return isinstance(sig, str) and scrub(sig) != sig
+    if not isinstance(data.get("places"), dict):
+        return data
+    out_places = {}
+    for name, place in data["places"].items():
+        rec = place.get("explored") if isinstance(place, dict) else None
+        if isinstance(rec, dict):
+            rec = {**rec, "actions": [a for a in rec.get("actions", []) if not (isinstance(a, dict) and held(a.get("sig")))],
+                   "frontier": [s for s in rec.get("frontier", []) if not held(s)]}
+            place = {**place, "explored": rec}
+        out_places[name] = place
+    return {**data, "places": out_places}
 
 
 def _normal(data: dict) -> dict:
@@ -103,6 +122,13 @@ def _normal(data: dict) -> dict:
         data.setdefault(section, empty())
     if not isinstance(data.get("titleKey"), str) or not re.fullmatch(r"[0-9a-f]+", data["titleKey"]):
         data["titleKey"] = places.empty_map("")["titleKey"]  # a hand-made file with no key gets one (titles are hashes)
+    for name, place in data["places"].items():
+        if "explored" in place:  # a record that isn't one is dropped, never a reason to leave the map alone (§28.1)
+            kept = explored.clean_record(place["explored"])
+            if kept is None:
+                del place["explored"]
+            else:
+                place["explored"] = kept
     return data
 
 
@@ -125,9 +151,12 @@ def _same_place(a: dict, b: dict) -> bool:
     """Two records with one signature: one place? A screen with no identifiers is told from the others of its kinds by
     its title alone (places.locate), so two such records are one place only when a title hash is shared (or neither
     has a title); with identifiers the signature is the identity."""
-    parts = a["key"].get("parts")
-    if isinstance(parts, dict) and parts.get("ids"):
-        return True
+    parts, other = a["key"].get("parts"), b["key"].get("parts")
+    if isinstance(parts, dict) and places.identified(parts):
+        # (1.8.0, W168) a signature leaves out what lies inside a list with its own id: two screens in one scroll view
+        # of the same id share it, and only their parts tell them apart
+        both = places.current(parts) and isinstance(other, dict) and places.current(other)
+        return not both or places.same_place(parts, other)
     ta, tb = set(a.get("titles", {}).values()), set(b.get("titles", {}).values())
     return bool(ta & tb) or not (ta or tb)
 
@@ -142,6 +171,8 @@ def merge(disk: dict, memory: dict) -> dict:
         for place in mem["places"].values():
             place["titles"] = {}
             place.pop("titleVaries", None)
+    disk_records = {n: p["explored"] for n, p in out["places"].items() if "explored" in p}
+    mem_records = {n: p["explored"] for n, p in mem["places"].items() if "explored" in p}
     by_key: dict[str, list[str]] = {}
     for name, p in out["places"].items():
         by_key.setdefault(places.key_id(p["key"]), []).append(name)
@@ -176,6 +207,19 @@ def merge(disk: dict, memory: dict) -> dict:
             by_key[kid] = [final if n == found else n for n in by_key[kid]]
         out["places"][final] = joined
         mem_names[name] = final
+    # the explored records (§28.2), once every rename is known: an action's `to` follows its own side's renames
+    held_records: dict[str, list[dict]] = {}
+    for source, renames in ((disk_records, disk_names), (mem_records, mem_names)):
+        for name, rec in source.items():
+            held_records.setdefault(_rename(renames, name), []).append(explored.rename_targets(rec, renames))
+    for final, place in out["places"].items():
+        sides = held_records.get(final, [])
+        place.pop("explored", None)
+        if sides:  # every record that is this place, folded in disk-then-memory order (more than two: CodeRabbit, PR #20)
+            merged = sides[0]
+            for later in sides[1:]:
+                merged = explored.merge_record(merged, later)
+            place["explored"] = merged
     all_roads: dict[tuple[str, str, str], dict] = {}
     for source, names in ((out["roads"], disk_names), (mem["roads"], mem_names)):
         for road in source:

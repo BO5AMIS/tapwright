@@ -75,13 +75,13 @@ def where(e: ui.Element, screen: tuple[float, float]) -> str:
     return f" (off screen, {side})"
 
 
-def find(target: ui.Target, items: list[ui.Element], off: list[ui.Element], screen: tuple[float, float]) -> str:
-    """`Closest: <element>, <element> (off screen, below).`, or "" when nothing is close."""
+def _nearest(target: ui.Target, items: list[ui.Element], off: list[ui.Element]) -> list[tuple[int, int, float, float, ui.Element]]:
+    """The close elements, closest first: (rank, off screen, y, x, element), at most MAX_CLOSEST."""
     ask = wanted(target)
     if ask is None:
-        return ""
+        return []
     query, is_id = ask
-    found: list[tuple[int, int, float, float, str]] = []
+    found: list[tuple[int, int, float, float, ui.Element]] = []
     seen: set[tuple[str, str, str]] = set()
     for off_screen, group in ((0, items), (1, off)):
         for e in group:
@@ -91,7 +91,19 @@ def find(target: ui.Target, items: list[ui.Element], off: list[ui.Element], scre
             if not ranks or key in seen:
                 continue
             seen.add(key)
-            line = e.line(ref=bool(e.ref), actions=False, place=False) + (where(e, screen) if off_screen else "")
-            found.append((min(ranks), off_screen, e.y, e.x, line))
+            found.append((min(ranks), off_screen, e.y, e.x, e))
     found.sort(key=lambda f: f[:4])
-    return f"Closest: {', '.join(f[4] for f in found[:MAX_CLOSEST])}." if found else ""
+    return found[:MAX_CLOSEST]
+
+
+def nearest(target: ui.Target, items: list[ui.Element], off: list[ui.Element] | None = None) -> list[ui.Element]:
+    """The elements a `Closest:` line would name for this target (§16.2), for a repair's candidates (§26.1)."""
+    return [f[4] for f in _nearest(target, items, off or [])]
+
+
+def find(target: ui.Target, items: list[ui.Element], off: list[ui.Element], screen: tuple[float, float]) -> str:
+    """`Closest: <element>, <element> (off screen, below).`, or "" when nothing is close."""
+    found = _nearest(target, items, off)
+    lines = [e.line(ref=bool(e.ref), actions=False, place=False) + (where(e, screen) if off_screen else "")
+             for _, off_screen, _, _, e in found]
+    return f"Closest: {', '.join(lines)}." if lines else ""

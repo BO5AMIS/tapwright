@@ -27,9 +27,9 @@ from typing import NamedTuple
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
-               diagnostics, dialog, driving, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
+               diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
-               places, reflex, report, roads, routes, store, trace, trip, ui, uxcheck)
+               places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
 from . import unlock as unlocklib, watchdog as watchlib
 from . import policy as safety
 from . import auditlog, center_tool, grants as grantlib, otp as otplib, schedules as schedulelib
@@ -128,6 +128,23 @@ class Sent(str):
     (in chat).` where any other OK ends `Note: allowed by a person (in chat).`"""
 # The scope (personal mode's app list) of the call being run, for a tool that makes calls of its own (`performance`)
 _SCOPE: contextvars.ContextVar["Scope | None"] = contextvars.ContextVar("tapwright_scope", default=None)
+# True while `explore` makes its own moves (AGENT-TOOLS §25.5): a touch the policy holds is never asked of a person (no dialog, no
+# live-view request) and no grant is looked at: the touch is refused as `needs_confirmation`, and a dry run says so.
+_EXPLORING: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_exploring", default=False)
+# The skip floor of the move being made by `explore`, or by a repair's trial (§25.5, §26.4): set by them for their own moves
+# only. Since 1.7.5 no policy word stops an agent's touch, so this is the ONE dispatch gate those moves pass: `_last_checks`
+# reads it on the element the touch really goes to (after resolution and any scroll), dry runs included (_floor_gate).
+_TOUCH_FLOOR: contextvars.ContextVar["explorefloor.Floor | None"] = contextvars.ContextVar("tapwright_touch_floor", default=None)
+# A repaired script's check replay: the floor gates only the steps the repair made (they carry `repaired`); the script's own
+# unchanged steps run as a plain replay would, as the person wrote them (lead's ruling on review R180 M6).
+_FLOOR_REPAIRED_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_floor_repaired_only", default=False)
+# The policy the caller sent (`tapwright mcp --policy`, `tapwright explore --policy`), for the skip floor alone: since 1.7.5 it
+# authorizes and restricts nothing else (the call's own policy is safety.NONE); its words only add to what explore and a
+# repair never touch, and its `explore` key is the user's skip list (§25.5).
+_FLOOR_RULES: contextvars.ContextVar["safety.Policy | None"] = contextvars.ContextVar("tapwright_floor_rules", default=None)
+# The crash reports `explore` has seen found while it runs (any call's crash check finds them first, and tells each once):
+# `_find_crash` adds each it returns, so the search can make a `crash` finding of it with its frames (§25.10).
+_CRASHES: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_explore_crashes", default=None)
 # True while a tool makes calls of its own: they are not recorded as steps (the tool's own step is)
 _NESTED: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_nested", default=False)
 # True while the call being run answers in brief (§13.4): set by run_tool for that call only, so a batch's own answer is
@@ -324,6 +341,8 @@ _DIALOG: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_
 _GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar("tapwright_grant_call", default=None)
 # The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
 _ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
+# the place a recorded touch went out from, filled inside its turn (CodeRabbit, PR #20); None outside a recorded call
+_PLACE_AT_TURN: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_place_at_turn", default=None)
 # The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
 BEFORE_TOUCH = frozenset({"not_actionable", "stale", "not_found", "ambiguous"})  # refusals made before a touch (A-L1)
 _RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str], float] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
@@ -447,6 +466,7 @@ def touch_name(tool: str) -> str:
 # v1.6: `force` let through what the checks would have refused. A real touch doesn't make the hidden element act
 NOTE_FORCED = "forced ({reason}): the touch may have landed on what is in front."
 KEYBOARD_TOOLS = ("tap", "long_press", "toggle", "type_text")  # the touches that close the keyboard before them
+TOUCH_FLOOR_TOOLS = ("tap", "long_press", "toggle", "type_text")  # a point target of these has no element the floor can judge
 REACH_TOOLS = KEYBOARD_TOOLS  # AGENT-TOOLS §16.2: on a target in the tree but off screen they scroll to it first
 SCROLLED_THEN = "Scrolled to it, then "
 NOTE_COVERED = "something outside the app (a system sheet or browser) may cover it."
@@ -1087,7 +1107,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
+class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -1983,6 +2003,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         dialog supports platform moments that require a person's intervention."""
         # Legacy app lists can identify a scheduled route's launch app; they never limit access.
         app_hint = app_hint or (scope.apps[0] if scope is not None and len(scope.apps) == 1 else None)
+        floor_rules = policy  # (only explore's and a repair's skip floor reads it: _FLOOR_RULES)
         scope, policy = None, safety.NONE
         left = self._photo_wait_left()
         if left is not None and name not in PHOTO_WAIT_FREE:
@@ -2006,11 +2027,14 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             # phone first. Nothing was done; the run waits and asks again (Codex, PR #12 cycle 1, M2)
             raise Refused("busy", schedulelib.ADMISSION_BUSY)
         hint_token = _APP_HINT.set(app_hint)
+        rules_token = _FLOOR_RULES.set(floor_rules) if floor_rules is not None else None  # (a nested call keeps its caller's)
         try:
             with self._phone_use(client_id):
                 return await self._run_tool_counted(client_id, name, args, scope, policy, ux_rules, via, maps, dialog,
                                                     accounts)
         finally:
+            if rules_token is not None:
+                _FLOOR_RULES.reset(rules_token)
             _APP_HINT.reset(hint_token)
 
     async def _run_tool_counted(self, client_id: str, name: str, args: dict, scope: "Scope | None",
@@ -2205,6 +2229,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
     async def _run_tool_policed(self, client_id: str, name: str, args: dict, scope: "Scope | None") -> dict:
         if name == "journey":  # AGENT-TOOLS §17: its own calls go through run_tool, so personal mode and the policy hold
             return await self._journey_tool(client_id, args, scope)
+        if name == "explore":  # AGENT-TOOLS §25: its moves go through run_tool too, one at a time, each an ordinary action
+            return await self._explore_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2215,6 +2241,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if name in LOGGED:
             started, self._announced, self._granted_now = time.monotonic(), None, False
             aimed = self._aim_for_recording(client_id, name, args)
+            # the place the move starts on, for the step a recording saves (§26.6): worked out before the call, which moves it
+            ran_on = self._place_before(self.control.client(client_id)) if client_id in self._recording else None
+            at_turn: list = []  # (the place as the touch got its turn: another agent may have moved the app meanwhile, PR #20)
+            turn_token = _PLACE_AT_TURN.set(at_turn) if ran_on is not None else None
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2238,8 +2268,13 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
+                if turn_token is not None:
+                    _PLACE_AT_TURN.reset(turn_token)
+            if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
+                ran_on = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
-            self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved)
+            self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
+                              place=ran_on[1] if ran_on is not None else None)
             return result
         if (name in READ_LOGGED or name in BATCH_TOOLS) and not _NESTED.get():
             started = time.monotonic()
@@ -2345,7 +2380,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             "hit_check": error.hit_check if error is not None else None,
             "app": self._bundle(), "chars": len(text) if isinstance(text, str) else None, "frames": frames,
             "answer_chars": len(said) if isinstance(said, str) else None,
-            "batch": BATCH.get(), "nested": True if _NESTED.get() else None,
+            "batch": BATCH.get(), "nested": True if _NESTED.get() else None, "explore": True if _EXPLORING.get() else None,
             "confirmed": True if self._granted_now and not read else None,
             "confirmed_by": self._granted_by if self._granted_now and not read else None,  # "chat" or "the live view"
             # §12 (1.14, 1.14.1): the grant that let the touch through and its count, or why a matching one didn't
@@ -2670,6 +2705,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 info = diagnostics.describe_crash(crash, exe, self.scrub_everywhere)
                 if info.filename not in self._crash_seen and diagnostics.newer(info, since or self._crash_since):
                     self._crash_seen.add(info.filename)
+                    if (seen := _CRASHES.get()) is not None:
+                        seen.append(info)
                     return info
             if n + 1 < polls:
                 await asyncio.sleep(self.crash_poll)
@@ -2858,7 +2895,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         return None
 
     def _record_step(self, client_id: str, name: str, args: dict, aimed: dict | None, secure: bool = False,
-                     resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None) -> None:
+                     resolved: list[tuple[ui.Element, list[ui.Element]]] | None = None, place: str | None = None) -> None:
         """An action that succeeded while this agent records becomes a step of its script. `secure`: the field the
         text really went into is a secure one (read by type_text itself, after any scroll); the guess made before
         the call (`next_secure`) counts too, and either hides the text. `resolved`: the element the touch was really
@@ -2914,6 +2951,11 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             rec.setdefault("unsaved", []).append(len(rec["steps"]) + 1)
         elif given is not None:
             return  # a target that can't be saved (a ref gone stale): leave the step out rather than guess
+        if place is not None:
+            step["place"] = place  # where the step ran, so a repair can tell a new screen in the way (§26.6)
+        if name in scriptrepair.REPAIRABLE and resolved and isinstance(args.get(key), dict) and args[key].get("x") is None:
+            found, items = resolved[0]  # what the touch really aimed at: its facts, with no text in them (§9.4, v1.16)
+            step["seen"] = scriptrepair.seen_of(found, items, tuple(self.session.screen or (0.0, 0.0)))
         rec["steps"].append(step)
         rec["app"] = rec["app"] or self._bundle()
 
@@ -2940,6 +2982,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             names = batch.saved()
             return _answer([f"Saved scripts: {', '.join(names)}." if names else
                             "No saved scripts yet: record one with record start: true, then stop: true."])
+        repair = self._repair_mode(args)  # §26.5: "suggest", "apply" or None; bad_params before anything is touched
         path = batch.resolve(args.get("name"), args.get("path"))
         data = batch.load_script(path)
         token = SCRIPT.set({"path": pathlib.Path(path), "update": bool(args.get("update_references"))})
@@ -2952,6 +2995,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         drafting = _DRAFTS_ROUTE.set(True) if data.get("version") == 2 and data.get("draftsOnly") is True else None
         run_grants = self._grants_run()
         try:
+            if repair is not None:
+                # (a file that says draftsOnly is never repaired, wherever it lies: like `drafting`, it only holds back more)
+                return await self._repair_replay(client_id, data, scope, args, pathlib.Path(path), repair, drafting is not None)
             return await self._replay(client_id, data, scope, args)
         finally:
             SCRIPT.reset(token)
@@ -2981,6 +3027,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _replay(self, client_id: str, data: dict, scope: "Scope | None", args: dict) -> dict:
         """A loaded script's steps, after its fresh start (the SCRIPT context is set by the caller)."""
+        steps, notes = await self._replay_prepare(client_id, data, scope)
+        return await self._batch(client_id, steps, scope, args, notes)
+
+    async def _replay_prepare(self, client_id: str, data: dict, scope: "Scope | None") -> tuple[list[dict], list[str]]:
+        """What a replay does before its steps (also `replay` with `repair`, §26.5): the fresh start, a route's drive to its
+        start; the steps as they will run and the notes that go with them."""
         if data.get("fresh", True) and data.get("app"):
             # (these calls are the replay's own: the first-answer note goes on the replay's answer. They are not marked
             # nested: a recording in progress saves the app restart, or a replay of it starts in the wrong app)
@@ -2993,10 +3045,15 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         if data.get("version") == 2:  # a route (§18.5): after the fresh start, drive to its start, then its steps
             routes.need(data, {}, None)
             nested = _NESTED.set(True)
+            # (review R180b L5) a repair's check replay gates only its repaired steps: the drive to the route's start is the
+            # script's own start, as the person wrote it, so the floor doesn't hold it there either (the trial ran it so)
+            floor_off = _TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() else None
             try:
                 await trip.Trip(self, client_id, scope, driving.Request(data["start"], None, {}, None, None, "any", False),
                                 {"look": False}).reach()
             finally:
+                if floor_off is not None:
+                    _TOUCH_FLOOR.reset(floor_off)
                 _NESTED.reset(nested)
             steps = routes.substitute(steps, {}, data.get("variables"))
         points = [n for n, step in enumerate(steps, 1)
@@ -3004,7 +3061,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         notes = [f"Note (step {n}): a point target; it breaks when the layout changes." for n in points]
         if data.get("fresh", True) and data.get("app"):
             notes.append("Note: the app was closed and opened again first (the script's \"fresh\").")
-        return await self._batch(client_id, steps, scope, args, notes)
+        return steps, notes
 
     async def _fresh_start(self, client_id: str, data: dict, scope: "Scope | None") -> None:
         """A script's fresh start: the app closed and opened, then step 1's target waited for."""
@@ -3288,6 +3345,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                                          f"{REVOKED_STOP.format(names=', '.join(json.dumps(g) for g in gone))}")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
+            # (the check replay gates the repaired and inserted steps, and the step an inserted road or scroll leads to, as the
+            # trial did: CodeRabbit, PR #20)
+            floor_off = (_TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and not scriptrepair.under_repair(steps, i - 1)
+                         else None)
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 if "if" in step or step.get("optional"):  # one check, right after the step before settled (§9.1)
@@ -3332,6 +3393,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                 break
             finally:
                 BATCH.reset(token)
+                if floor_off is not None:
+                    _TOUCH_FLOOR.reset(floor_off)
             if missed is not None:
                 why = missed if step["tool"] == "performance" else f"its action ran, but {missed}"
                 failed = ("expect_failed", f"Ran {done} of {n} steps; stopped at step {i} ({batch.summary(step)}): "
@@ -3917,6 +3980,10 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
                     # the wait's reads replaced the list: what they found may be another app's screen, and the check
                     # above was on the first read only (Codex, PR #9 cycle 1)
                     self._scope_from_read(scoped)
+            if target is not None and target.kind != "point" and name in TOUCH_FLOOR_TOOLS and _TOUCH_FLOOR.get() is not None:
+                # (review R180 L6) explore's and a repair's moves: the gate judges the element before the keyboard reflex's
+                # touch or a reach scroll goes out, not only before the touch itself (it judges again on the element reached)
+                self._floor_pregate(name, args, target)
             if by_lookup and target.kind != "point" and self._missing(s.items, target):
                 if self._missing(s.items, dataclasses.replace(target, index=None)):
                     # an alert hides the app's elements: say so, not "not found". (When only the `index` is
@@ -3953,6 +4020,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             trace.mark("resolved")
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
+            if (turned := _PLACE_AT_TURN.get()) is not None and not dry:
+                turned.append(box["from"])
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
             if not dry and client_id in self._recording and (touched := _RESOLVED.get()) is not None:
                 aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from
@@ -5861,6 +5930,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         # to refuse. Session is told not to tap: if the focus moved meanwhile, it refuses instead.
         no_tap = bool(field.focused) and self.session.tw_version >= 5
         if a.get("force"):
+            self._floor_gate("type_text", a, field)  # (`force` changes nothing for the skip floor: review R180 L4)
             if point is not None and (key := next((b for b in field.covered_by if b.kind == "Keyboard"
                                                    and ui._holds(b.rect, point)), None)) is not None:
                 # (Opus review 11) a touch there presses a key: it types into the focused field and focuses nothing
@@ -6421,9 +6491,9 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
     async def _reach(self, view, client_id: str, name: str, args: dict, target: ui.Target, dry: bool) -> ui.Target | None:
         """A target the tree has but the screen doesn't (AGENT-TOOLS §16.2): `tap`, `long_press`, `toggle` and
-        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. The policy
-        has its say on the target first, and again on the element that came on screen when that isn't the one it
-        checked. Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
+        `type_text` scroll it into view the way `scroll` with `to: "target"` does, then act, in one call. Under the skip
+        floor (explore's and a repair's moves) the dispatch gate judges the target before the scroll, and again the
+        element that came on screen as the touch goes out; an agent's own call has no gate (1.7.5). Where no scroll can bring it on screen, or it isn't in the tree at all (a lazy row), it is refused as
         before: `off_screen`, or `not_found` further on. Returns the target to act on when it scrolled (the element
         that came on screen, by ref), else None."""
         if name not in REACH_TOOLS:
@@ -6439,6 +6509,7 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
             raise
         if not isinstance(hit, ui.Element) or any(hit is e for e in view.items):
             return None  # (on screen already: the action touches it where it is)
+        self._floor_gate(name, args, hit)  # (no scroll toward what the floor holds: review R180 L6)
         said = ""
         shown = hit.line(ref=bool(hit.ref), actions=False, place=False)
         area = ui.scroll_holding(view.items, hit, s.screen)
@@ -6876,6 +6947,12 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         """The bundle id of the app the last read found in front, for the per-app policy."""
         return (self.session.app or (None, None))[1]
 
+    def _read_bundle(self) -> str | None:
+        """The app the newest read names (`Session.read_app`: a live read's root, which `session.app` doesn't follow), else
+        the last snapshot's (_app_bundle). What the skip floor judges a touch against (CodeRabbit, PR #20)."""
+        read = getattr(self.session, "read_app", None)
+        return read[1] if isinstance(read, tuple) and read[1] else self._app_bundle()
+
     def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
         """Where a finger would touch an element a bar (or the keyboard) is drawn over its centre: the middle of
         the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
@@ -6917,9 +6994,82 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
 
         Accessibility hit identity is incomplete on real devices. An unanswered or
         unrelated hit must not invent a covered-control error or an authorization gate.
+        The one exception is `explore`'s and a repair trial's own moves: their skip floor (_floor_gate).
         """
+        self._floor_gate(tool, a, element, bundle)
         point = aim(element) if element is not None and hit and aim is not None else None
         return element, point, ""
+
+    def _floor_gate(self, tool: str, a: dict, element: "ui.Element | None", bundle: str | None = None) -> None:
+        """The ONE dispatch gate of `explore`'s and a repair trial's moves (§25.5, §26.4; Tapline's lesson: checked on the
+        ACTUAL recipient, after resolution and scroll). Nothing when no floor is set (an agent's own call, 1.7.5). Else the
+        touch is refused `not_allowed: needs_confirmation` (`explore` and `check` skip it; a dry run is refused the same way,
+        so a dry run says what the real touch would meet) when what it goes to is held: an element (or what lies in it, or
+        over its centre) with a floor word, a screen the floor holds (a system sheet, Settings, a protected title), a field
+        never typed into, another app than the floor's, a point or a swipe (no element to judge), or an alert button other
+        than the one `safe_button` picks. `force` changes nothing here."""
+        floor = _TOUCH_FLOOR.get()
+        if floor is None:
+            return
+
+        def held(what: str, word: str | None = None) -> None:
+            said = f' (policy word "{word}")' if word else ""
+            raise Refused("not_allowed", f"needs_confirmation: {ui.clip(self.scrub_everywhere(what))} is on the skip "
+                                         f"floor{said}; explore and repair touch nothing it holds, and ask nobody.")
+        if tool == "alert":
+            if a.get("action") == "text":
+                return
+            shown, name = self.session.last_alert, a.get("name")
+            if shown is not None and not self._alert_ours(floor.app, shown, bundle):
+                held("an alert over another app")  # (review R180 L1: nothing is touched while another app is in front)
+            if shown is None or not isinstance(name, str) or explorefloor.safe_button(shown, floor) != name:
+                held(f"the alert button {name!r}" if isinstance(name, str) else "an alert answered without a button name")
+            return
+        if tool == "back":  # (review R180 H1) a way back is a move too: never in another app than the floor's
+            if (bundle or self._read_bundle()) != floor.app:
+                held("back in another app")
+            return
+        if tool == "swipe":
+            held("a swipe")
+        if element is None:
+            target = a.get("target")  # (parsed by _checked: a ui.Target)
+            if isinstance(target, ui.Target) and target.point is not None and tool in TOUCH_FLOOR_TOOLS:
+                held(f"the point ({round(target.point[0])}, {round(target.point[1])})")
+            return
+        front = bundle or self._read_bundle()  # (the live read's app: a refresh leaves session.app as the last look had it)
+        if front != floor.app:
+            held(f"{element.role} in another app")
+        tree = getattr(self.session, "last_tree", None)
+        if tree is not None and (screen := floor.screen(tree, front)) is not None:
+            held("this screen", screen.word)
+        items = [e for e in self.session.items if not e.in_alert]
+        if tool == "type_text" and explorefloor.never_typed(element):
+            held(f"{element.role} {element.label or element.identifier}")
+        if (hit := floor.touch(element, items)) is not None:
+            held(f"{element.role} {explorefloor.name_of(element)}", hit.word)
+        if _EXPLORING.get() and tool != "type_text" and (hit := floor.may_submit(element, items)) is not None:
+            held(f"{element.role} {explorefloor.name_of(element)}", hit.word)  # (§25.7: a form's submit, unless its id is listed)
+
+    def _alert_ours(self, app: str, alert: ui.Alert, bundle: str | None = None) -> bool:
+        """Is this alert one explore (or a repair) in `app` may answer: shown over that app, or its own permission prompt (iOS
+        draws it in SpringBoard; its title names the app)? Another app's alert (Safari's, after a link) is never answered
+        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the newest read's."""
+        front = bundle or self._read_bundle()
+        if front == app:
+            return True
+        name = self.session.app_names.get(app) or ""
+        return front in (SPRINGBOARD, PROMPT_FRONT, None) and bool(name) and name in alert.title
+
+    def _floor_pregate(self, tool: str, a: dict, target: ui.Target) -> None:
+        """The gate on the element a target names, before anything is touched for it (a keyboard reflex, a reach scroll):
+        on the screen or past its edge. A target that doesn't resolve to one element is left to the action to refuse."""
+        s = self.session
+        try:
+            found = ui.resolve([*s.items, *self._off_screen_now()], target)
+        except Refused:
+            return
+        if isinstance(found, ui.Element):
+            self._floor_gate(tool, a, found)
 
     async def _press(self, target: ui.Target, hold_ms: int, proven: bool = False) -> str:
         """One touch on the phone; twice, DOUBLE_TAP_GAP apart, for a journey's `double_tap` stress moment (§17.4).
@@ -7092,8 +7242,8 @@ class Daemon(journey_tool.JourneyTools, center_tool.CenterTools):
         action, name = a["action"], a.get("name")
         if action == "cancel":
             name = name or "Cancel"
+        await self._last_checks("alert", a, None, hit=False)  # (first: a dry run meets the same gate, review R180 L5)
         self._dry(a, f"Would {action} alert" + (f" using {name!r}." if name else "."))
-        await self._last_checks("alert", a, None, hit=False)
         if name is not None:
             return await self.session.alert(action, name=name)
         return await self.session.alert(action)

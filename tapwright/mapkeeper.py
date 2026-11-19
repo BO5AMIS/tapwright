@@ -155,6 +155,10 @@ class Maps:
         return done.note
 
     # ---- writing ----
+    def changed(self, root: str | None, app: str) -> None:
+        """The map in memory was edited in place (the explorer's `explored` record): save it in the background."""
+        self._changed(root, app)
+
     def _changed(self, root: str | None, app: str) -> None:
         key = self._key(root, app)
         self._dirty.add(key)

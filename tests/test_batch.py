@@ -141,7 +141,9 @@ def test_record_saves_successful_actions_by_id_then_replay_runs_them(tmp_path):
         assert r["text"] == f"Saved 1 steps to {path}."
         saved = json.loads(path.read_text("utf-8"))
         assert saved["format"] == "agent-tools-script" and saved["version"] == 1 and saved["name"] == "save it"
-        assert saved["steps"] == [{"tool": "tap", "target": {"id": "save"}}]
+        # (v1.16: a step keeps the facts of the element it aimed at, and never its text)
+        assert saved["steps"] == [{"tool": "tap", "target": {"id": "save"},
+                                   "seen": {"role": "button", "bucket": "c1r1", "id_stem": "save"}}]
         saved["fresh"] = False
         path.write_text(json.dumps(saved), "utf-8")
         taps = d.session.calls.count("tap")
@@ -206,7 +208,8 @@ def test_record_saves_under_its_name_with_a_wait_for_as_the_steps_expect_and_rep
         r = await d.run_tool("a", "record", {"stop": True})
         assert r["text"] == f"Saved 1 steps to {tmp_path / 'save it.json'}."
         saved = json.loads((tmp_path / "save it.json").read_text("utf-8"))
-        assert saved["steps"] == [{"tool": "tap", "target": {"id": "save"}, "expect": {"id": "save", "timeout": 3.0}}]
+        assert saved["steps"] == [{"tool": "tap", "target": {"id": "save"}, "expect": {"id": "save", "timeout": 3.0},
+                                   "seen": {"role": "button", "bucket": "c1r1", "id_stem": "save"}}]
         assert (await d.run_tool("a", "replay", {}))["text"] == "Saved scripts: save it."
         with pytest.raises(Refused) as e:
             await d.run_tool("a", "replay", {"name": "nope"})

@@ -25,7 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from . import client, device, hostdialog, policy, repair, ui, uxcheck
+from . import client, device, exploretool, hostdialog, policy, repair, scriptrepair, ui, uxcheck
 from .descriptions import INSTRUCTIONS, describe
 
 logger = logging.getLogger("tapwright")
@@ -169,6 +169,10 @@ def _timeout(tool: str, args: dict) -> float:
     """How long this client waits for the daemon's answer to one tool call."""
     if tool == "journey" and args.get("stop") and args.get("export") is not None:
         return EXPORT_TIMEOUT
+    if tool == "explore":  # a search runs up to its `minutes` (AGENT-TOOLS §25.2)
+        return exploretool.timeout_for(args)
+    if tool == "replay" and args.get("repair") == "apply":  # the run, then the repaired file's own replay (§26.4)
+        return scriptrepair.APPLY_TIMEOUT
     if tool == "media":
         return MEDIA_TIMEOUT
     return LONG_TIMEOUT if tool in ("run", "replay", "drive") else TIMEOUT
@@ -186,7 +190,7 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
             if BRIEF_DEFAULT:
                 args["brief"] = True
     try:
-        async with DIALOGS.during(_CONTEXT.get()) as dialog:  # while the call is out, the host's dialog is polled for
+        async with DIALOGS.during(_CONTEXT.get(), progress=tool == "explore") as dialog:  # while the call is out, the host's dialog is polled for
             # (only a call that has one says so, and may take as long as a person needs to answer)
             options = {"dialog": True} if dialog else {}
             answer = await asyncio.to_thread(client.call, tool, args, CLIENT_ID,
@@ -320,6 +324,18 @@ async def drive(to: str | None = None, route: str | None = None, values: dict[st
                        screenshot=screenshot, brief=brief)
 
 
+@server.tool(description=describe("explore"), structured_output=False)
+@_wire_names(**{"from": "start", "continue": "keep_going"})
+async def explore(minutes: float | None = None, steps: int | None = None, depth: int | None = None,
+                  start: str | None = Field(default=None, alias="from"), focus: str | None = None,
+                  fill: str | None = None, keep_going: bool | None = Field(default=None, alias="continue"),
+                  guide: str | None = None) -> CallToolResult:
+    # (`from` and `continue` are Python's words: the arguments are their aliases. Each is sent only when given.)
+    given = {"minutes": minutes, "steps": steps, "depth": depth, "from": start, "focus": focus, "fill": fill,
+             "continue": keep_going, "guide": guide}
+    return await _tool("explore", **{k: v for k, v in given.items() if v is not None})
+
+
 @server.tool(description=describe("record"), structured_output=False)
 async def record(start: bool = False, stop: bool = False, name: str | None = None,
                  path: str | None = None, route: str | None = None,
@@ -333,9 +349,10 @@ async def record(start: bool = False, stop: bool = False, name: str | None = Non
 
 @server.tool(description=describe("replay"), structured_output=False)
 async def replay(name: str | None = None, path: str | None = None, look: bool = True,
-                 screenshot: bool = False) -> CallToolResult:
+                 screenshot: bool = False, repair: str | None = None) -> CallToolResult:
     return await _tool("replay", **({"name": name} if name else {}),
-                       **({"path": str(Path(path).resolve())} if path else {}), look=look, screenshot=screenshot)
+                       **({"path": str(Path(path).resolve())} if path else {}), **({"repair": repair} if repair else {}),
+                       look=look, screenshot=screenshot)
 
 
 @server.tool(annotations=READ_ONLY, description=describe("audit"), structured_output=False)
