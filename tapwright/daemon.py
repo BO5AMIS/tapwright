@@ -3067,7 +3067,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             except Refused as e:
                 if counts and made.bundle and made.route_done:
                     # (CodeRabbit, PR #22) the route ran and arrived; a `then` step after it failed: the route worked
-                    await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp)
+                    await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp, made.route_end_now)
                 elif (counts and made.bundle and made.route_started and e.code in autoroute.FAIL_CODES):
                     # (review 1.9.0 H3) only a failure of the route's own steps counts: not the way to its start
                     said = await self._auto_counted(made.root, made.bundle, req.route, False, made.route_stamp)
@@ -3075,7 +3075,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         raise Refused(e.code, f"{e}\nNote: {said}", draft=e.draft) from None
                 raise
             if counts and made.bundle:
-                await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp)
+                end = made.route_end_now
+                if made.route_end_moved and end is None:  # a screen the map didn't know yet: the place the arrival saved
+                    shown = self.control.client(client_id).place
+                    end = shown[1] if shown is not None and shown[0] == made.bundle else None
+                await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp, end)
             return answer
         finally:
             made.release()
@@ -4923,7 +4927,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return False
 
     async def _auto_counted(self, root: str | None, bundle: str, name: str, worked: bool,
-                            stamp: int | None = None) -> str | None:
+                            stamp: int | None = None, end: str | None = None) -> str | None:
         """A drive of a route that saved itself ended: it worked (counted as used, its failures start over) or it failed
         (a second failure in a row drops it). The note when it was dropped. Only for the version that ran (CodeRabbit,
         PR #22): `stamp` is its file's modification time as the drive read it; a route replaced meanwhile isn't touched.
@@ -4934,7 +4938,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async with self._auto_lock(root, bundle):
             snapshot = copy.deepcopy(self.maps.data(root, bundle))
             try:
-                dropped = await asyncio.to_thread(self._auto_counted_io, file, snapshot, name, worked, stamp)
+                dropped = await asyncio.to_thread(self._auto_counted_io, file, snapshot, name, worked, stamp, end)
             except Exception as e:  # noqa: BLE001
                 self.log(f"auto route not counted: {type(e).__name__}")
                 return None
@@ -4944,9 +4948,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         called = f"route {name}" if self._plain_name(name) else "the route"  # (review 1.9.0 M1)
         return f"{called} dropped (its replay failed twice); the next way the app is driven there is kept instead."
 
-    def _auto_counted_io(self, file, data: dict, name: str, worked: bool, stamp: int | None) -> bool:
+    def _auto_counted_io(self, file, data: dict, name: str, worked: bool, stamp: int | None,
+                         end: str | None = None) -> bool:
         """The worker's part of _auto_counted: whether the route was dropped (all under the map's lock: Opus 2 L1)."""
-        return file.auto_result(name, stamp, worked, autoroute.FAILS, mapfile.now())
+        return file.auto_result(name, stamp, worked, autoroute.FAILS, mapfile.now(), end)
 
     def _hints_wanted(self) -> bool:
         """--no-hints is off for this call (the call's and serve's)."""
@@ -5072,8 +5077,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if at is None:
             return text
         here = view.place[1] if view.place is not None and view.place[0] == bundle else None
-        if here is None:
-            return text  # (review 1.9.0 L6) where the app is isn't known: the line isn't spent
+        if here is None or reflex.starting(view.tree, bundle) is not None:
+            # (review 1.9.0 L6; the phone check) where the app is isn't known, or it is still starting ("Loading from
+            # Metro…"): the line isn't spent
+            return text
         view.known_told.add(bundle)
         line = tokentext.known_line(self._known_names(bundle, here))
         if line is None:

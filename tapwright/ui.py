@@ -1314,7 +1314,7 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
         if not centred and not _reaches(node, screen):
             return  # wholly off screen
         label, name = _text(node.get("label")), _text(node.get("name"))
-        named = (centred and bool(name) and name != label and name not in IOS_NOISE
+        named = (centred and bool(name) and name != label and name not in IOS_NOISE and name not in KEYBOARD_IDS
                  and kind not in ("Application", "Window", "NavigationBar") and structural_id(name))
         if named:
             ids.add(name)  # (an id that carries content never goes into a key: structural_id)
@@ -1946,6 +1946,10 @@ BLANK_CLEAR = 44.0
 # iOS's own views that carry an identifier but nothing to read or act on: listing them is noise (a first-time agent
 # asked what `image id=AdditionalDimmingOverlay` was, 2026-11-11; it is the dimming under the navigation bar)
 IOS_NOISE = frozenset({"AdditionalDimmingOverlay"})
+# (1.9.0, the phone check) what the keyboard and the text selection put in the tree while a field is being edited: never
+# part of a place's key, so a form with the keyboard up is the same place as without it
+KEYBOARD_IDS = frozenset({"dictation", "inputView", "_UITextSelectionRangeAdjustmentContainerView",
+                          "com.apple.text.grabber.leading", "com.apple.text.grabber.trailing"})
 SPRINGBOARD_ROOT = 'bundleId="com.apple.springboard"'  # in the tree's first element when SpringBoard is in front
 SHEET_BESIDE = 60.0  # points of screen a sheet must leave free on a side for a touch beside it
 SHEET_GRIP = 14.0  # how far below a sheet's top edge a finger takes hold to pull it down

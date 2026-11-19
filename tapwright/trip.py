@@ -27,6 +27,7 @@ def _account_var():
 
 POLL = 0.1  # seconds between reads while waiting for the next target
 PERSON_WAIT = 30.0  # seconds a drive waits for a person to finish before it says `busy`
+END_SETTLE = 2.0  # seconds a route's end is given to come in before it is judged (1.9.0, the phone check)
 SETTLE_READS = 2  # reads that show the same other known place before it counts as arrived there
 NOT_HERE = "it isn't on this screen"
 LED_ELSEWHERE = "it led to a screen that isn't where the road goes"
@@ -88,6 +89,8 @@ class Trip:
         self.route_started = False  # its own steps began (only a failure from there counts against it: 1.9.0 H3)
         self.route_done = False  # it ran and arrived: a `then` step's failure after it isn't the route's (CodeRabbit, PR #22)
         self.route_stamp: int | None = None  # its file's modification time as read: results go to that version only
+        self.route_end_now: str | None = None  # the place its end turned out to be (a route that saved itself, 1.9.0)
+        self.route_end_moved = False  # judged arrived on the same screen under another place (route_end_now may be new)
         self.ran: list[tuple[str, int]] = []  # the routes run on the way: (name, steps)
         self.writes = True  # a replay reads the map and never writes it (§18.9)
         self.edges: list[roads.RouteEdge] = []
@@ -495,13 +498,48 @@ class Trip:
         end = route.get("end")
         if not end:
             return
-        place = self.place_of(await self._read())
+        tree = await self._read()
+        place = self.place_of(tree)
+        waited = self.clock()
+        while place != end and self.clock() - waited < END_SETTLE:  # (the phone check) a screen still coming in
+            await self.d.control.sleep(POLL)
+            tree = await self._read()
+            place = self.place_of(tree)
+        if place != end and route.get("auto") is True and self.same_screen(end, tree, route.get("start")):
+            # (the phone check, 2026-11-19) a route that saved itself may have kept the screen as it came in (the screen it
+            # left still drawn beside it): the end's own ids are all here, so this is that screen. Arrived; the route is
+            # told its end as it is now (route_end_now), and never counted a failure for it
+            self.route_end_now = place
+            self.route_end_moved = True
+            place = end
         if place != end:
             n = len(route["steps"])
             there = place or "a screen the map doesn't know"
             await self.off_route(n, n, None, f"the route ended at {there}, not {end}", place)
         if not self.chain or self.chain[-1] != end:
             self.chain.append(end)
+
+    def same_screen(self, end: str, tree: ui.Tree | None, start: str | None) -> bool:
+        """Is the screen read now the route's end, though another place matched it? The end's own ids (its fixed ids but
+        those of the route's start, of the places a road leads into it from, and the keyboard's) are all on this screen,
+        and this screen is no place the drive passed on its way."""
+        if tree is None:
+            return False
+        data = self.data
+        record = data["places"].get(end)
+        parts = (record or {}).get("key", {}).get("parts")
+        if not isinstance(parts, dict):
+            return False
+        before = {start, *(r.get("from") for r in data.get("roads", []) if r.get("to") == end)} - {end, None}
+        shared: set[str] = set()
+        for name in before:
+            other = data["places"].get(name, {}).get("key", {}).get("parts")
+            if isinstance(other, dict):
+                shared |= set(other.get("ids", ()))
+        own = set(parts.get("ids", ())) - shared - ui.KEYBOARD_IDS
+        here = set(places.parts_of(tree).get("ids", ()))
+        now = self.place_of(tree)
+        return bool(own) and own <= here and (now is None or now not in before)
 
     def dropped(self, gone: list[tuple[str, str]]) -> None:
         self.notes.extend(f"road dropped: {a} > {b} (it failed twice)." for a, b in gone)

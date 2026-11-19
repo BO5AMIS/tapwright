@@ -13,7 +13,9 @@ works, and `--no-hints` gives 1.8.5's behaviour back.
   may submit it break the way from there; only a route the tool saved itself carries it on after a drive, a person's
   route never. One
   route per place: a shorter way replaces it, one whose own steps fail twice is dropped (not reaching its start never
-  counts), and at most 50 per app. A person's route is never replaced.
+  counts; an end read while the screen was still coming in is judged on the same screen by its own ids, and set to
+  where it settles), and at most 50 per app. A person's route is never replaced. The keyboard's own ids are never part
+  of a place.
 - The first answer of a session that shows an app says what it can reach in one call with nothing to give, the most
   used first, else the most recently reached: `Known: plan_trip, dest_card_kyoto (one call each: drive {"route":
   "<name>"})`. Only routes that are strictly navigation are offered (no nested drive, typing, vault value, floor word

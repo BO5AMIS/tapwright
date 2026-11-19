@@ -451,7 +451,8 @@ class MapFile:
         """A saved route's file as a dict, or None when the map has no such route or its file can't be read."""
         return self._route_file(data.get("routes", {}).get(name))
 
-    def auto_result(self, name: str, stamp: int | None, worked: bool, fails: int, now: str) -> bool:
+    def auto_result(self, name: str, stamp: int | None, worked: bool, fails: int, now: str,
+                    end: str | None = None) -> bool:
         """(1.9.0; Opus 2 L1) A drive's result for a route that saved itself, under the map's lock as every route writer:
         re-read, the version checked (`stamp`, its modification time as the drive read it), then counted (used and
         failures) or, at `fails` failures in a row, dropped (its file and index entry). Whether it was dropped."""
@@ -473,6 +474,8 @@ class MapFile:
             failed = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
             if worked:
                 route.update(used=used + 1, failed=0, reached=now)
+                if end is not None:
+                    route["end"] = end  # (1.9.0) where it really arrives, as the drive judged it
             elif failed + 1 >= fails:
                 try:
                     path.unlink()

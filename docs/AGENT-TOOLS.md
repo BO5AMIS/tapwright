@@ -1421,14 +1421,19 @@ small, fast agent; a bug report is `bug_report`.
   they were made); a person's route never does.
 - A place keeps one route of the tool's own, whatever start it was reached from: a shorter way replaces it, and so does
   a working way when it has failed since. A replay (`drive {"route": ...}`) whose own steps fail twice in a row drops it
-  (`Note: route <name> dropped ...`); not reaching the route's start never counts. At most 50 such routes per app: past
+  (`Note: route <name> dropped ...`); not reaching the route's start never counts. Its end is given 2 s to come in; a
+  route whose end was read as the screen came in (the screen it left still drawn beside it) is judged arrived when the
+  end's own ids (not its start's, not those of a place a road leads in from, not the keyboard's) are all on the screen,
+  and its end is set to the place the screen settles as. The keyboard's and the text selection's own ids (`dictation`,
+  `inputView`, the selection grabbers) are never part of a place's key. At most 50 such routes per app: past
   that the least used and oldest go. A person's route is never replaced, and a place a person's route reaches from the
   same start gets none of its own.
 - The name: the name given with `map {"name"}`, else the id of the move that reaches the place (`plan-trip` gives
   `plan_trip`; an id is the developer's, not content), else the place's own `place_<n>`. Never a label, a text or a
   title: they are the screen's words and can be private. `Known:` shows the route's name, since that is what
   `drive {"route": ...}` takes (the leads' reading of the frozen §30.2).
-- The first answer of a session that shows the app, once where the app is is known, has after its header
+- The first answer of a session that shows the app, once where the app is is known and it isn't still starting (a
+  "Loading from Metro…" screen doesn't spend it), has after its header
   `Known: <name>, ... (one call each: drive {"route": "<name>"})`: the saved routes whose steps are strictly navigation
   (taps, back, links and scrolls; no nested `drive`, no typing, no vault, account or one-time value, no toggle, not
   draftsOnly, no target with a word the skip floor holds such as Delete or Send) and replay with nothing the agent
