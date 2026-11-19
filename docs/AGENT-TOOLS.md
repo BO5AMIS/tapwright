@@ -1455,19 +1455,23 @@ when the daemon restarts (an idle stop and a start, an update) under the same MC
 reconnect keeps them.
 
 ### 30.4 The keyboard over a target
-A tap whose target the keyboard covers closes it first, as before (a touch on passive space, a short drag, the dismiss
-key). When the app ignores those (Wayfare's trip form: its last field is a multiline Notes), a Done is pressed, never a
-key that names a submit: only a button named exactly `Done`, and only
-- an input accessory's or toolbar's button attached to the keyboard: in the keyboard's window, not one of its keys,
-  touching the keys' top edge (2 pt at most). Never a sheet's or a form's own button; or
+A tap whose target the keyboard covers (its centre over the keyboard's frame) closes it first. The order is 1.8.5's
+with one step added: a touch on passive space, a short drag of the form, then a Done (below), then the keyboard's own
+dismiss key; in an app that ignored a touch outside before, the drag comes first, then the Done and the dismiss key, and
+the touch last. A Done is never a key that names a submit: only a button named exactly `Done`, and only
+- an input accessory's or toolbar's button attached to the keyboard: in the keyboard's window, inside a toolbar or a
+  bar at most 60 pt tall on the keys' top edge, not one of its keys, touching that edge (2 pt at most). Never a sheet's
+  or a form's own button; or
 - the keyboard's Done key while the focused field is multiline (a text view), whose value can be read (not empty, not
-  its placeholder). Done in a multiline field rarely submits: React Native's `submitBehavior="blurAndSubmit"` does fire
-  the field's own submit handler, so the answer always says what Done did.
+  its placeholder). Done there usually adds a line or closes the keyboard, but React Native's
+  `submitBehavior="blurAndSubmit"` also runs the field's own submit handler, which no tree shows: the answer always says
+  what Done did to the field.
 
-Never return, Go, Send, Search, Next or Join. If Done added exactly a line break at the end (the value read just before
-and after), it is taken back with one backspace, and the answer's `Note:` says so; if the value changed any other way,
-the field isn't touched again and the `Note:` says a line break may have been added. Whatever Done did, WebDriverAgent's
-plain dismissal is still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`;
+Never return, Go, Send, Search, Next or Join. If Done added exactly a line break at the end and the keyboard is still up
+with the field focused (the value read just before and after), it is taken back with one backspace, and the answer's
+`Note:` says so. If the keyboard closed with the line break in it, or the value changed any other way, the field isn't
+touched again and the `Note:` says a line break may have been added: check the field. Whatever Done did,
+WebDriverAgent's plain dismissal is still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`;
 otherwise the tap is refused `covered` as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
 ### 30.5 `--no-hints`
