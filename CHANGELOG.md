@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.5, "the Bug Report"
+## 1.8.5 (2026-11-19), "the Bug Report"
 
 - New tool `bug_report` (and `tapwright bug`): one page for whoever fixes a bug, readable in a minute and holding nothing
   private (AGENT-TOOLS 1.16.2 §29). A folder per bug under `~/.tapwright/bugs/<app id>/<bug id>/` with `report.md`,
