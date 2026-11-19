@@ -484,3 +484,50 @@ def test_one_input_without_a_submit_button_is_no_form():
     assert not D._is_form_hint([*search, button("e3", "Share", "share")])  # a share is no form's save
     two = [el("e1", "input", "A", "a"), el("e2", "input", "B", "b"), button("e3", "Next", "next")]
     assert D._is_form_hint(two)  # §30.3's own reading still holds
+
+
+# ---- item 7: Tapwright's own instruction lines trimmed; logs shows the app's own lines ----
+
+from tapwright import descriptions  # noqa: E402
+
+CODES = ["not_found", "ambiguous", "not_actionable", "stale", "busy", "paused", "locked", "in_background", "reconnecting",
+         "not_connected", "timeout", "bad_params", "unsupported", "not_allowed", "internal", "expect_failed", "off_route",
+         "not_answering"]
+REASONS = ["disabled", "off_screen", "covered", "under_tab_bar", "behind_alert", "no_action"]
+
+
+def test_the_instructions_lose_the_1_7_5_lines_and_keep_every_code_and_the_shared_block():
+    text = descriptions.instructions(True)
+    assert text.startswith(tokentext.RULES + "\n")  # §30.1's block, word for word, on top
+    for gone in ("1.7.5", "Legacy --apps", "No app list or label-based approval", "no longer an app-list",
+                 "retains its geometry override"):
+        assert gone not in text, gone
+    assert not [c for c in CODES if f"`{c}`" not in text]
+    assert not [r for r in REASONS if r not in text]
+    assert "Start with open_app (or a look at the app in front): its answer shows the screen and `Known:`" in text
+    assert text.count("dry_run: true") == 1 and len(text) < len(tokentext.RULES) + len(descriptions.INSTRUCTIONS)
+    assert descriptions.instructions(False) == descriptions.INSTRUCTIONS  # --no-hints: 1.8.5's, word for word
+
+
+def test_logs_shows_the_apps_own_lines_and_counts_the_systems(tmp_path):
+    from tapwright import diagnostics
+
+    async def go():
+        d = mapped(tmp_path)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        ring = d._rings.setdefault(BUNDLE, diagnostics.LogRing())
+        ring.add(diagnostics.LogEntry(1_800_000_000_000, "info", "app says hello"))
+        for n in range(3):
+            ring.add(diagnostics.LogEntry(1_800_000_000_001 + n, "info", f"UIKit chatter {n}", own=False))
+        r = await d.run_tool("a", "logs", {})
+        assert "app says hello" in r["text"] and "UIKit chatter" not in r["text"]
+        assert "+3 system lines (a framework in the app's process, not its own code): `all: true` shows them." in r["text"]
+        every = await d.run_tool("a", "logs", {"all": True})
+        assert "UIKit chatter 2" in every["text"] and "system lines" not in every["text"]
+        plain = await d.run_tool("a", "logs", {}, hints=False)  # --no-hints: 1.8.5's logs, every line
+        assert "UIKit chatter 0" in plain["text"]
+        with pytest.raises(Refused):
+            await d.run_tool("a", "logs", {"all": "yes"})
+        await finish(stop, task)
+    run(go)

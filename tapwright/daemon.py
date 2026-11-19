@@ -783,6 +783,10 @@ def _checked_diag(name: str, args: dict) -> dict:
         if grep is not None and not isinstance(grep, str):
             raise Refused("bad_params", f"grep must be a text, not {grep!r}")
         out["grep"] = grep or None
+        every = given.get("all", False)
+        if not isinstance(every, bool):
+            raise Refused("bad_params", f"all must be true or false, not {every!r}")
+        out["all"] = every
         limit = given.get("limit", diagnostics.LOG_DEFAULT_LIMIT)
         if (isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit)
                 or limit != int(limit)
@@ -2666,8 +2670,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             ring = self._rings.get(bundle)
             if bundle in self._log_dead and not (ring and ring.entries):
                 raise Refused("unsupported", f"{diagnostics.LOGS_NO_SOURCE} ({self._log_dead[bundle]})")
+            # (1.9.0 round 2) the app's own lines by default; `all: true`, or --no-hints (1.8.5), shows every line
+            own = not args.get("all") and self._hints_wanted()
             text, self._diag_count = diagnostics.logs_answer(self._rings.get(bundle), args.get("since"),
-                                                             args["level"], args["grep"], args["limit"])
+                                                             args["level"], args["grep"], args["limit"], own=own)
             return {"text": text, "image": None, "image_size": None}
         return await self._crash(bundle, shown, args)
 

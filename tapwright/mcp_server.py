@@ -435,9 +435,10 @@ async def media(add: list[str] | None = None, remove: bool | Literal["all"] = Fa
 
 @server.tool(annotations=READ_ONLY, description=describe("logs"), structured_output=False)
 async def logs(since: int | None = None, level: Literal["error", "warning", "info"] = "info",
-               grep: str | None = None, limit: int = 100) -> CallToolResult:
+               grep: str | None = None, limit: int = 100, all: bool = False) -> CallToolResult:
+    # (`all`, 1.9.0 round 2: every line, a system framework's in the app's process too; sent only when asked)
     return await _tool("logs", **({"since": since} if since is not None else {}), level=level,
-                       **({"grep": grep} if grep else {}), limit=limit)
+                       **({"grep": grep} if grep else {}), limit=limit, **({"all": True} if all else {}))
 
 
 @server.tool(description=describe("crash"), structured_output=False)
