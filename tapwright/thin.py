@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import secrets
 import socket
@@ -24,9 +25,46 @@ import urllib.parse
 from pathlib import Path
 
 EXIT_REFUSED, EXIT_UNREACHABLE = 2, 3
-CALL_TIMEOUT = 120.0  # seconds `tapwright call` waits for an answer by default
+CALL_TIMEOUT = 120.0  # seconds `tapwright call` waits for an answer by default (as mcp_server.TIMEOUT)
 MEDIA_CALL_TIMEOUT = 900.0  # media: a video is copied, then imported (as mcp_server.MEDIA_TIMEOUT)
+# the longer waits mcp_server._timeout gives (copied: see the docstring; tests/test_thin.py checks they still agree)
+LONG_CALL_TIMEOUT = 200.0  # run, replay, drive (mcp_server.LONG_TIMEOUT)
+EXPORT_CALL_TIMEOUT = 600.0  # a journey's stop with export (mcp_server.EXPORT_TIMEOUT)
+APPLY_CALL_TIMEOUT = 480.0  # replay with repair "apply": the run, then the repaired file's own replay (scriptrepair.APPLY_TIMEOUT)
+EXPLORE_MINUTES = 10.0  # explore's default budget (explore.MINUTES)
+EXPLORE_MARGIN = 60 + 5 * 60  # a minute for the report and a person's waits (exploretool.timeout_for)
+FLOOR_TOOLS = ("explore", "replay")  # the calls whose own moves pass the skip floor, as server.FLOOR_TOOLS (replay with repair)
+BUG_BASE, BUG_RUN, BUG_RUNS, BUG_EXPORT = 120.0, 60.0 + 60.0, 3, 600.0  # bug_report: bugcheck.timeout_for (3 runs by default)
 NO_DAEMON = "tapwright serve isn't running (or its address file is unreadable): start it with `tapwright serve`."
+
+
+def default_timeout(tool: str, args: dict) -> float:
+    """How long a call waits for its answer when `--timeout` isn't given: as long as the MCP server waits for the same call
+    (mcp_server._timeout), so an explore of 10 minutes or a repair's apply isn't cut off at 2 minutes while it goes on
+    (review R180b M3)."""
+    if tool == "journey" and args.get("stop") and args.get("export") is not None:
+        return EXPORT_CALL_TIMEOUT
+    if tool == "explore":  # its time budget, a minute for the report, and a person's waits
+        minutes = args.get("minutes")
+        finite = isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and math.isfinite(minutes)
+        return (float(minutes) if finite else EXPLORE_MINUTES) * 60 + EXPLORE_MARGIN
+    if tool == "bug_report":  # its `verify` runs and its export (bugcheck.timeout_for)
+        verify = args.get("verify")
+        runs = BUG_RUNS if verify is True else verify if isinstance(verify, int) and not isinstance(verify, bool) else 0
+        if verify is None and (args.get("finding") is not None or args.get("from") == "failure"):
+            runs = BUG_RUNS
+        return BUG_BASE + runs * BUG_RUN + (BUG_EXPORT if args.get("export") is not None else 0.0)
+    if tool == "replay" and args.get("repair") == "apply":
+        return APPLY_CALL_TIMEOUT
+    if tool == "media":
+        return MEDIA_CALL_TIMEOUT
+    return LONG_CALL_TIMEOUT if tool in ("run", "replay", "drive") else CALL_TIMEOUT
+
+
+def floor_call(tool: str, args: dict) -> bool:
+    """Does this call's own moves pass the skip floor (explore; replay with repair), so `--policy` reaches it (as server.py
+    reads X-Tapwright-Policy for these calls only)?"""
+    return tool in FLOOR_TOOLS and (tool != "replay" or args.get("repair") is not None)
 
 
 def _home() -> Path:
@@ -84,7 +122,9 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
+def _headers(a: argparse.Namespace, token: str, floor: bool = False) -> dict[str, str]:
+    """`floor`: the call is one whose own moves pass the skip floor (`floor_call`): a `--policy` file's words reach it (they
+    only add to what those moves never touch, over serve's own); on any other call `--policy` restricts nothing."""
     client = a.client or str(os.getppid())
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
          "X-Agent-Client": client, "X-Tapwright-Client": client,  # the shared name; the old one for an older daemon
@@ -97,7 +137,9 @@ def _headers(a: argparse.Namespace, token: str) -> dict[str, str]:
         apps = a.apps if a.apps is not None else os.environ.get("TAPWRIGHT_APPS", "")
         if apps.strip():
             h["X-Tapwright-Apps"] = apps
-    if a.policy:
+    if a.policy and floor:
+        h["X-Tapwright-Policy"] = _json_line(a.policy, "policy")
+    elif a.policy:
         print('Tapwright provides whole-phone control. --apps, --dedicated, --policy and --no-policy are compatibility options, not access restrictions; permission decisions belong to the agent.', file=sys.stderr)
     if a.ux_rules:
         h["X-Tapwright-Ux-Rules"] = _json_line(a.ux_rules, "ux rules")
@@ -203,14 +245,14 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_REFUSED
     if a.timeout is None:
-        a.timeout = MEDIA_CALL_TIMEOUT if a.tool == "media" else CALL_TIMEOUT
+        a.timeout = default_timeout(a.tool, args)
     info = _serve_info()
     port, token = info.get("port"), info.get("token")
     if not isinstance(port, int) or not isinstance(token, str) or not token:
         print(f"tapwright call: {NO_DAEMON}", file=sys.stderr)
         return EXIT_UNREACHABLE
     try:
-        headers = _headers(a, token)
+        headers = _headers(a, token, floor_call(a.tool, args))
     except ValueError as e:
         print(f"tapwright call: {e}", file=sys.stderr)
         return EXIT_REFUSED

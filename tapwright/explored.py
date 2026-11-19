@@ -10,6 +10,7 @@ Nothing here allows anything (§28.3): a record is never read as a permission, a
 every touch by the caller.
 """
 import copy
+import itertools
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -22,6 +23,9 @@ TEXT_MAX = 80  # characters of a label or text in a signature, after redaction (
 SIG_MAX = 400  # a longer signature is not one (an id has no cut)
 COLUMNS, ROWS = 4, 8  # the position grid of §25.3 (not the 3 by 3 of a script's `seen`)
 _PREFIXES = ("id:", "label:", "text:", "role:", "row:")
+# when a scroll scan of the place began (its `…` is the scan's) and when the last one ended: a merge with a copy saved
+# mid-scan doesn't bring that scan's `…` back after it ended (CodeRabbit, PR #20)
+SCANNING, SCANNED = "scanning", "scanned"
 _CODE = re.compile(r"^[a-z_]{1,40}$")
 _NAME = re.compile(r"^[a-z0-9_]{1,60}$")
 
@@ -210,6 +214,49 @@ def mark_seen(data: dict, place: str, sigs: list[str], now: str) -> bool:
     return True
 
 
+_SCAN_SEQ = itertools.count(1)
+
+
+def _scan_mark(now: str) -> str:
+    """When a scan began, as `now` plus a sequence: compared as text it sorts after `now` itself (a `last` or a scan that
+    ended in that second) and after this process's earlier marks."""
+    return f"{now}#{next(_SCAN_SEQ):09d}"
+
+
+def scan_open(data: dict, place: str, now: str) -> bool:
+    """The place's screen is being enumerated past what showed first (a scroll is about to be made): its frontier ends in `…`
+    until `scan_done`, so a run that stops before the scan ends leaves the place a frontier place, never `explored` with what
+    lay below untried (CodeRabbit, PR #20)."""
+    rec = _ensure(data, place, now)
+    if rec is None or MORE in rec["frontier"]:
+        return False
+    rec["frontier"] = [*rec["frontier"], MORE]
+    # (this `…` is a scan's: a merge drops it once the other side's scan ended after it, `merge_record`). `now` has one-second
+    # precision, so each scan's mark carries a sequence that sorts after the bare second and after any earlier scan of this
+    # process: a scan that ended and one that began in the same second stay apart (CodeRabbit, PR #20 cycle 2).
+    rec[SCANNING] = _scan_mark(now)
+    return True
+
+
+def scan_done(data: dict, place: str, left: list[str]) -> bool:
+    """The place's whole screen was enumerated and every action on it was taken up: `left` are the signatures seen in that
+    scan that are still untried (a deferred toggle). The `…` goes when the frontier, with those, fits in 50: nothing lies past
+    it any more (an overflow marker that never cleared kept a fully tried place a frontier place for ever, CodeRabbit PR #20)."""
+    rec = record(data, place)
+    if rec is None or MORE not in rec["frontier"]:
+        return False
+    tried = {a["sig"] for a in rec["actions"]}
+    listed = [s for s in rec["frontier"] if s != MORE]
+    for sig in left:
+        if valid_signature(sig) and sig not in tried and sig not in listed:
+            listed.append(sig)
+    if len(listed) > FRONTIER_MAX:
+        return False
+    rec["frontier"] = listed
+    rec[SCANNED] = max(str(rec.pop(SCANNING, "")), str(rec.get(SCANNED, "")), str(rec.get("last", "")))
+    return True
+
+
 def _capped(sigs: list[str], more: bool) -> list[str]:
     return sigs[:FRONTIER_MAX] + [MORE] if more or len(sigs) > FRONTIER_MAX else sigs
 
@@ -282,8 +329,24 @@ def merge_record(disk: dict | None, memory: dict | None) -> dict | None:
     for s in [*disk["frontier"], *memory["frontier"]]:
         if s != MORE and s not in actions and s not in sigs:
             sigs.append(s)
-    more = MORE in disk["frontier"] or MORE in memory["frontier"]
+    ended = max(str(disk.get(SCANNED, "")), str(memory.get(SCANNED, "")))
+
+    def marks(side: dict) -> bool:
+        """Does this side's `…` still hold? Not when a scan ended at or after it was set: a scan's `…` from when that scan
+        began, an overflow `…` (no scan) from the side's own `last` (scan_done clears both once all is tried)."""
+        if MORE not in side["frontier"]:
+            return False
+        began = side.get(SCANNING) if isinstance(side.get(SCANNING), str) else str(side.get("last", ""))
+        return not (ended and began and ended >= began)
+    live = [side for side in (disk, memory) if marks(side)]
     newer = memory if str(memory.get("last", "")) >= str(disk.get("last", "")) else disk
     other = disk if newer is memory else memory
-    return copy.deepcopy({**other, **newer, "last": max(str(disk.get("last", "")), str(memory.get("last", ""))),
-                          "actions": list(actions.values()), "frontier": _capped(sigs, more)})
+    out = {**other, **newer, "last": max(str(disk.get("last", "")), str(memory.get("last", ""))),
+           "actions": list(actions.values()), "frontier": _capped(sigs, bool(live))}
+    out.pop(SCANNING, None)
+    still = [str(side[SCANNING]) for side in live if isinstance(side.get(SCANNING), str)]
+    if still:
+        out[SCANNING] = max(still)
+    if ended:
+        out[SCANNED] = ended
+    return copy.deepcopy(out)

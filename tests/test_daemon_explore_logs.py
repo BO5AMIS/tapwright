@@ -63,7 +63,8 @@ def test_a_policy_word_the_dry_run_holds_is_skipped_and_never_asked(tmp_path):
         stop, task = await started(d)
         r = await d.run_tool("a", "explore", {}, None, rules)
         assert "go-language" not in {k for _, k in d.session.tapped}
-        assert not d._confirms and d.dialog_channel("a").after(0) == [] or all(e.get("type") == "progress" for e in d.dialog_channel("a").after(0))
+        assert not d._confirms  # (each on its own: a progress line never stands for no question asked, PR #20)
+        assert all(e.get("type") == "progress" for e in d.dialog_channel("a").after(0))
         body = body_of(r)
         assert any(s["sig"] == "id:go-language" and s["why"] == "policy" and s["word"] == "Language" for s in body["skipped"])
         await finish(stop, task)

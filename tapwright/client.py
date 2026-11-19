@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from . import policy, store, uxcheck
 
@@ -72,7 +73,8 @@ def set_maps(folder: str | None = None) -> None:
     if not folder:
         SCOPE.pop("X-Tapwright-Maps", None)
     else:
-        SCOPE["X-Tapwright-Maps"] = str(os.path.abspath(os.path.expanduser(folder)))
+        # resolved as `serve --maps` holds it (Path.resolve(): symlinks too), so the ceiling's compare agrees (CodeRabbit, PR #20)
+        SCOPE["X-Tapwright-Maps"] = str(Path(folder).expanduser().resolve())
 
 
 def set_accounts(file: str | None = None) -> None:
@@ -81,7 +83,7 @@ def set_accounts(file: str | None = None) -> None:
     if not file:
         SCOPE.pop("X-Tapwright-Accounts", None)
     else:
-        SCOPE["X-Tapwright-Accounts"] = str(os.path.abspath(os.path.expanduser(file)))
+        SCOPE["X-Tapwright-Accounts"] = str(Path(file).expanduser().resolve())  # (as `serve --accounts` holds it)
 
 
 PROOF_PREFIX = b"tapwright-proof-v2\x00"  # as server.PROOF_PREFIX (this module must not import server: starlette)

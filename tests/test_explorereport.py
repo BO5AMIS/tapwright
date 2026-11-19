@@ -108,6 +108,7 @@ def test_the_newest_twenty_folders_of_an_app_are_kept(tmp_path):
     base = tmp_path / "com.example.app"
     for n in range(25):
         (base / f"202611{n + 1:02d}T000000Z").mkdir(parents=True)
+        (base / f"202611{n + 1:02d}T000000Z" / "report.md").write_text("# report", "utf-8")  # (finished reports: W174)
     (base / "notes").mkdir()
     out = explorereport.write(tmp_path, result(), identity(), explore.Budget(), NOW, NOW, str)
     kept = sorted(p.name for p in base.iterdir() if p.name != "notes")

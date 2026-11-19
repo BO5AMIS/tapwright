@@ -4,7 +4,7 @@ import argparse
 import json
 from xml.etree import ElementTree as ET
 
-from tapwright import auditlog, cli, client, schedules, store
+from tapwright import auditlog, cli, client, schedules, scriptrepair, store
 
 
 def files(tmp_path, original='{"format": "agent-tools-script", "version": 1, "name": "sign_in", "app": "com.example.app", "steps": [{"tool": "tap", "target": {"id": "old"}}]}',
@@ -26,6 +26,12 @@ PASSED = {"text": "Ran 1 of 1 steps in 1.0 s, with 1 repair (not adopted).\nRepa
                   "Wrote sign_in.repaired.json and sign_in.repair.md. The original is unchanged."}
 
 
+def checked(tmp_path) -> dict:
+    """PASSED as the daemon says it: its `Checked:` line names the digest of the repaired file the run wrote (PR #20)."""
+    sha = scriptrepair.digest((tmp_path / "sign_in.repaired.json").read_bytes())
+    return {"text": PASSED["text"].replace("all 1 steps passed.", f"all 1 steps passed (sha256 {sha}).")}
+
+
 def patched(monkeypatch, tmp_path, answer=PASSED):
     calls: list[dict] = []
 
@@ -33,7 +39,7 @@ def patched(monkeypatch, tmp_path, answer=PASSED):
         calls.append({"tool": tool, **args})
         if isinstance(answer, Exception):
             raise answer
-        return answer
+        return checked(tmp_path) if answer is PASSED else answer
     monkeypatch.setattr(client, "call", call)
     monkeypatch.setattr(client, "set_scope", lambda apps, dedicated=False: None)
     monkeypatch.setattr(store, "HOME", tmp_path / "home")
@@ -88,7 +94,7 @@ def test_adopt_needs_the_audit_line(tmp_path, monkeypatch, capsys):
     script = files(tmp_path)
     (tmp_path / "home").mkdir()
     (tmp_path / "home" / "audit").write_text("a file where the log's folder should be", "utf-8")
-    assert cli.replay(ns(script, repair="apply", adopt=True)) == 0
+    assert cli.replay(ns(script, repair="apply", adopt=True)) == 2  # (a checked repair not adopted fails the command, PR #20)
     assert "audit log couldn't be written" in capsys.readouterr().out
     assert json.loads(script.read_text("utf-8"))["steps"][0]["target"] == {"id": "old"} and (tmp_path / "sign_in.repaired.json").exists()
 
@@ -153,7 +159,7 @@ def test_adopt_needs_the_line_that_says_the_repaired_file_replayed_green(tmp_pat
     unchecked = {"text": "\n".join(line for line in PASSED["text"].splitlines() if not line.startswith("Checked: "))}
     patched(monkeypatch, tmp_path, unchecked)
     script = files(tmp_path)
-    assert cli.replay(ns(script, repair="apply", adopt=True)) == 0
+    assert cli.replay(ns(script, repair="apply", adopt=True)) == 2
     assert "nothing was adopted" in capsys.readouterr().out
     assert json.loads(script.read_text("utf-8"))["steps"][0]["target"] == {"id": "old"} and not (tmp_path / "sign_in.orig.json").exists()
     assert audit(tmp_path) == []

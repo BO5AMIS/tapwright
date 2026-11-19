@@ -47,6 +47,7 @@ FAKE_TEXT, FAKE_EMAIL = "Test", "test@example.com"  # §25.6: the only fake valu
 TOGGLE_ROLES = ("switch", "radio", "checkbox")
 WAITING_CODES = ("paused", "busy", "locked")  # a refusal that ends the run (§25.9)
 RETRY_CODES = ("stale", "timeout")  # a refusal that says nothing about the element: not recorded
+BEFORE_TOUCH = ("not_found", "ambiguous", "not_actionable", "not_allowed", "stale")  # refused before any touch went out
 MOVE_TOOLS = ("tap", "back")  # the moves a way is driven by: never a long_press, a swipe or a toggle (§25.4)
 
 
@@ -84,6 +85,12 @@ class PhoneStop(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+def _why(stop: Exception) -> str:
+    """What stopped a toggle's flip back, for its note: a stop's reason, else a refusal's code."""
+    reason = getattr(stop, "reason", None) or getattr(stop, "code", None)
+    return str(reason) if reason else type(stop).__name__
 
 
 class Halt(Exception):
@@ -331,6 +338,8 @@ class Explorer:
         self.resets_in_row = 0
         self.at: str | None = None  # the place the app was last seen at
         self._announced: set[str] = set()
+        self._typed_places: set[str] = set()  # where `fill` typed: a leg from there taps only `explore.submit` (CodeRabbit, PR #20)
+        self._new: tuple[str, ui.Tree] | None = None  # a place first seen by a move, announced once its hop is known
         self._listed: dict[str, set[str]] = {}  # the signatures already put on each place's frontier in this run
 
     # ---- hooks ----
@@ -371,35 +380,45 @@ class Explorer:
         target = ui.Target(ref=element.ref)
         check = await self.phone.check(target, "toggle")
         if check.kind != "ok":
-            self._skip(place, action.sig, explorefloor.Skip("policy", check.word))
+            self._held_by_check(place, action.sig, check)
             return True
         mark = self.phone.mark()
         self._spend()
         self.moves.append((place, action.sig))
-        moved = await self._moved(await self.phone.toggle(target, not before))
-        if moved.code is not None:
+        try:
+            moved = await self._moved(await self.phone.toggle(target, not before))
+        except Refused as e:  # (an answer that isn't a Moved: the touch may have gone out)
+            self._toggle_lost(element, before, e.code, maybe=True)
+        if moved.code in BEFORE_TOUCH:
             await self._refused(place, action, moved)
             return True
+        if moved.code is not None:
+            # (review R180b M1) a timeout, a dropped line, an app that stopped answering or any other error comes after the
+            # touch may have gone out: the switch may be flipped, so the run stops naming it and what it was
+            self._toggle_lost(element, before, moved.code, maybe=True)
         # from the flip to the read after the flip back, nothing ends the run but a flip that can't be shown to be restored
         # (review R180 M1): a pause, a person, a locked phone or the budget in between stops the run naming the switch left
         # changed and what it was (it doesn't fight the person: the flip back is tried once, never waited for)
         try:
             now = await self._toggle_value(place, action)
-        except (PhoneStop, Halt) as stop:
-            self._toggle_lost(element, before, stop.reason)
+        except (PhoneStop, Halt, Refused) as stop:  # (a screen that can't be read: R180b M1)
+            self._toggle_lost(element, before, _why(stop))
         if now is not None and now.checked == before:  # the flip did nothing: nothing to set back
             self._mark(place, action.sig, "same")
             return True
         if now is None or now.checked is None:
             self._toggle_lost(element, before)
         self.steps += 1  # the flip back is a touch too, which the budget never refuses (one move with the flip, §25.7)
-        back = await self.phone.toggle(ui.Target(ref=now.ref), before)
+        try:
+            back = await self.phone.toggle(ui.Target(ref=now.ref), before)
+        except (PhoneStop, Refused) as stop:  # (the restoring touch itself stopped: the switch is named, CodeRabbit PR #20)
+            self._toggle_lost(element, before, _why(stop))
         if back.code is not None:
             self._toggle_lost(element, before, back.code)
         try:
             again = await self._toggle_value(place, action)
-        except (PhoneStop, Halt) as stop:
-            self._toggle_lost(element, before, stop.reason)
+        except (PhoneStop, Halt, Refused) as stop:
+            self._toggle_lost(element, before, _why(stop))
         if again is None or again.checked != before:
             self._toggle_lost(element, before)
         self.flipped += 1
@@ -423,14 +442,19 @@ class Explorer:
             return None
         return next((a.element for a in self._actions(look.tree, place, False) if a.sig == action.sig and a.element is not None), None)
 
-    def _toggle_lost(self, element: ui.Element, before: bool | None = None, why: str | None = None) -> NoReturn:
+    def _toggle_lost(self, element: ui.Element, before: bool | None = None, why: str | None = None,
+                     maybe: bool = False) -> NoReturn:
         """A flip that can't be shown to be restored ends the run (§25.7): the phone is left as it is, and the stop names the
         switch and the value it had (`id=notify-switch, was on`). `why`: what came between the flip and the flip back (a pause,
-        a person, a locked phone), said in a note."""
+        a person, a locked phone), said in a note. `maybe`: the flip itself got no clean answer (a timeout, a dropped line), so
+        the switch may or may not be flipped (`id=notify-switch, may be flipped, was on`: review R180b M1)."""
         name = f"id={element.identifier}" if element.identifier else f'label={element.label or "?"}'
         was = "" if before is None else f", was {'on' if before else 'off'}"
-        self.detail = f"{name}{was}"
-        if why is not None:
+        self.detail = f"{name}, may be flipped{was}" if maybe else f"{name}{was}"
+        if maybe:
+            self.notes.append(f"the switch {name} got no clean answer to its flip ({why or 'no answer'}); it may be flipped"
+                              f" and is left as it is{was}")
+        elif why is not None:
             self.notes.append(f"the switch {name} was flipped and couldn't be set back ({why}); it is left changed{was}")
         raise Halt("toggle_not_restored")
 
@@ -569,8 +593,11 @@ class Explorer:
     def _foreign(self, tree: ui.Tree) -> bool:
         return tree.app is None or tree.app[1] != self.who.app
 
-    async def _look(self, arrived: bool) -> Look:
-        """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is."""
+    async def _look(self, arrived: bool, hold_new: bool = False) -> Look:
+        """Read the screen, answer an alert (a permission prompt is never allowed), and say what place it is. `hold_new`: a place
+        first seen here is announced (its checks run) only by `_announce`, once the move that reached it is registered, so
+        what is found there has the way to it (CodeRabbit, PR #20)."""
+        self._new = None
         tree = await self.phone.read()
         # §29.8 (review R185 M6): the kind of system sheet or prompt in front at the moment, for the findings made from here
         self._system_now = explorefloor.system_of(tree)
@@ -598,9 +625,19 @@ class Explorer:
         self.at = seen.name
         self.seen.setdefault(seen.name)
         if seen.name not in self._announced:  # first seen in this run: the hook of part 2b's audit and ux checks
-            self._announced.add(seen.name)
-            await self.on_new_place(seen.name, tree)
+            if hold_new:
+                self._new = (seen.name, tree)
+            else:
+                self._announced.add(seen.name)
+                await self.on_new_place(seen.name, tree)
         return Look(tree, seen.name, seen.new)
+
+    async def _announce(self) -> None:
+        """The place `_look(..., hold_new=True)` saw first, announced now (its first-visit checks)."""
+        held, self._new = self._new, None
+        if held is not None and held[0] not in self._announced:
+            self._announced.add(held[0])
+            await self.on_new_place(*held)
 
     # ---- the actions of a place (§25.3, §25.4) ----
 
@@ -705,6 +742,7 @@ class Explorer:
             if moved.code is None:
                 self.typed += 1
                 self._typed_here = True
+                self._typed_places.add(place)
 
     def _fill_text(self, field: ui.Element) -> str:
         """What a marked field gets: the fixture's field with `fixture:…` (§25.6), else a fake value."""
@@ -720,7 +758,7 @@ class Explorer:
             self._typed_here = False
 
     async def _expand_place(self, place: str) -> None:
-        done: set[str] = set()
+        done: dict[str, None] = {}  # (in the order seen: what a finished scan leaves untried goes back on the frontier)
         scrolls = 0
         lost = 0
         typing = self.fill.mode != "none"
@@ -757,11 +795,15 @@ class Explorer:
                 if scrolls < SCROLLS and tree.below > 0 and not any(
                         self.floor.element(e) for e in tree.items if e.role == "scroll"):  # a scroll view is a recipient too
                     scrolls += 1
+                    if explored.scan_open(self.data, place, mapfile.now()):  # (kept a frontier place until the scan ends)
+                        self.map.changed()
                     self._spend()
                     await self._moved(await self.phone.scroll())
                     continue
+                if explored.scan_done(self.data, place, [s for s in done if not explored.is_tried(self.data, place, s, self.build)]):
+                    self.map.changed()
                 break
-            done.add(action.sig)
+            done[action.sig] = None
             if explored.is_tried(self.data, place, action.sig, self.build):
                 continue
             if self._typed_here and action.kind != "back" and (action.element is None
@@ -785,6 +827,15 @@ class Explorer:
         if self.elapsed() >= self.budget.minutes * 60:
             raise Halt("budget_minutes")
 
+    def _held_by_check(self, place: str, sig: str, check: Check) -> None:
+        """The dry run held a touch (review R180b L4, as `_refused`): a skip kept for every build only when it names the word
+        that holds the element (the floor, the policy, the skip list); otherwise (another app in front, a sheet seen for a
+        moment) it is `refused` for this build only, so a later build tries it again."""
+        if check.word:
+            self._skip(place, sig, explorefloor.Skip("policy", check.word))
+        else:
+            self._mark(place, sig, "refused", code=check.kind)
+
     def _skip(self, place: str, sig: str, why: explorefloor.Skip) -> None:
         if explored.mark_skipped(self.data, place, sig, why.why, mapfile.now(), why.word):
             self.map.changed()
@@ -806,7 +857,7 @@ class Explorer:
         target = ui.Target(ref=element.ref)
         check = await self.phone.check(target)
         if check.kind != "ok":
-            self._skip(place, action.sig, explorefloor.Skip("policy", check.word))
+            self._held_by_check(place, action.sig, check)
             return True
         mark = self.phone.mark()
         titles = places.titled_places(self.data, element.label, element.value)
@@ -816,7 +867,14 @@ class Explorer:
         if moved.code is not None:
             await self._refused(place, action, moved)
             return True
-        look = await self._look(True)
+        look = await self._look(True, hold_new=True)
+        try:
+            return await self._after_tap(place, action, element, items, titles, moved, look, mark)
+        finally:
+            self._new = None  # (announced by _after_tap once the hop is known; a later look announces it otherwise)
+
+    async def _after_tap(self, place: str, action: Action, element: ui.Element, items: list[ui.Element], titles: frozenset[str],
+                         moved: Moved, look: Look, mark: int) -> bool:
         watch = await self.phone.watch(mark)
         step = action.step
         if moved.left and not look.foreign and not look.sheet and watch.crash is None:  # (the daemon already came back)
@@ -850,6 +908,7 @@ class Explorer:
             self._mark(place, action.sig, "same")
             return True
         self._arrived(place, look, action, element, items, titles, moved)
+        await self._announce()
         await self._return_to(place)
         return True
 
@@ -1113,6 +1172,8 @@ class Explorer:
                 return False
             if self.floor.touch(element, items) is not None or self.floor.may_submit(element, items) is not None:
                 return False
+            if edge.src in self._typed_places and element.identifier not in self.floor.submit_ids:
+                return False  # (§25.7: where it typed, a form may still hold the fake values; only a listed submit is touched)
             target = ui.Target(ref=element.ref)
             if (await self.phone.check(target)).kind != "ok":
                 return False

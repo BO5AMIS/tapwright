@@ -341,6 +341,8 @@ _DIALOG: contextvars.ContextVar[str | None] = contextvars.ContextVar("tapwright_
 _GRANT_CALL: contextvars.ContextVar["GrantCall | None"] = contextvars.ContextVar("tapwright_grant_call", default=None)
 # The saved routes running now (a drive of one, a replay of one): a grant that names a route covers only these (§19.1)
 _ROUTES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tapwright_routes", default=())
+# the place a recorded touch went out from, filled inside its turn (CodeRabbit, PR #20); None outside a recorded call
+_PLACE_AT_TURN: contextvars.ContextVar[list | None] = contextvars.ContextVar("tapwright_place_at_turn", default=None)
 # The grants in force when the outermost run (run, replay, drive) began: one revoked since stops it between moves (§19.5)
 BEFORE_TOUCH = frozenset({"not_actionable", "stale", "not_found", "ambiguous"})  # refusals made before a touch (A-L1)
 _RUN_GRANTS: contextvars.ContextVar["tuple[grantlib.Book, frozenset[str], float] | None"] =     contextvars.ContextVar("tapwright_run_grants", default=None)
@@ -2250,6 +2252,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # kept out of every bug report from before it is sent
             trail_from, trail_aim = self._bug_aim(client_id, name, args)
             self._bug_typed(name, args)
+            at_turn: list = []  # (the place as the touch got its turn: another agent may have moved the app meanwhile, PR #20)
+            turn_token = _PLACE_AT_TURN.set(at_turn) if ran_on is not None else None
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2273,6 +2277,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
+                if turn_token is not None:
+                    _PLACE_AT_TURN.reset(turn_token)
+            if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
+                ran_on = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
             self._bug_touch(name, args, trail_aim, trail_from)
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
@@ -3047,10 +3055,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if data.get("version") == 2:  # a route (§18.5): after the fresh start, drive to its start, then its steps
             routes.need(data, {}, None)
             nested = _NESTED.set(True)
+            # (review R180b L5) a repair's check replay gates only its repaired steps: the drive to the route's start is the
+            # script's own start, as the person wrote it, so the floor doesn't hold it there either (the trial ran it so)
+            floor_off = _TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() else None
             try:
                 await trip.Trip(self, client_id, scope, driving.Request(data["start"], None, {}, None, None, "any", False),
                                 {"look": False}).reach()
             finally:
+                if floor_off is not None:
+                    _TOUCH_FLOOR.reset(floor_off)
                 _NESTED.reset(nested)
             steps = routes.substitute(steps, {}, data.get("variables"))
         points = [n for n, step in enumerate(steps, 1)
@@ -3344,7 +3357,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                          f"{REVOKED_STOP.format(names=', '.join(json.dumps(g) for g in gone))}")
                 break
             t0, token = clock(), BATCH.set({"id": ident, "step": i})
-            floor_off = _TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and "repaired" not in step else None
+            # (the check replay gates the repaired and inserted steps, and the step an inserted road or scroll leads to, as the
+            # trial did: CodeRabbit, PR #20)
+            floor_off = (_TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() and not scriptrepair.under_repair(steps, i - 1)
+                         else None)
             before = len(self._recording[client_id]["steps"]) if client_id in self._recording else None
             try:
                 if "if" in step or step.get("optional"):  # one check, right after the step before settled (§9.1)
@@ -4022,6 +4038,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             trace.mark("resolved")
             # where the app is and what the move aims at, as the agent's list shows them, before the touch (§18.2)
             box["from"] = self._place_before(view)
+            if (turned := _PLACE_AT_TURN.get()) is not None and not dry:
+                turned.append(box["from"])
             box["aim"] = self._aim(args, s.items) if box["mapping"] and not dry else None
             if not dry and client_id in self._recording and (touched := _RESOLVED.get()) is not None:
                 aimed_at = self._aim(use, s.items)  # the element this very touch is aimed at, in the list it is aimed from
@@ -6947,6 +6965,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """The bundle id of the app the last read found in front, for the per-app policy."""
         return (self.session.app or (None, None))[1]
 
+    def _read_bundle(self) -> str | None:
+        """The app the newest read names (`Session.read_app`: a live read's root, which `session.app` doesn't follow), else
+        the last snapshot's (_app_bundle). What the skip floor judges a touch against (CodeRabbit, PR #20)."""
+        read = getattr(self.session, "read_app", None)
+        return read[1] if isinstance(read, tuple) and read[1] else self._app_bundle()
+
     def _touch_point(self, element: ui.Element) -> tuple[float, float] | None:
         """Where a finger would touch an element a bar (or the keyboard) is drawn over its centre: the middle of
         the part that shows after every overlapping bar is cut away, nearest the centre. None when no bar
@@ -7020,7 +7044,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 held(f"the alert button {name!r}" if isinstance(name, str) else "an alert answered without a button name")
             return
         if tool == "back":  # (review R180 H1) a way back is a move too: never in another app than the floor's
-            if (bundle or self._app_bundle()) != floor.app:
+            if (bundle or self._read_bundle()) != floor.app:
                 held("back in another app")
             return
         if tool == "swipe":
@@ -7030,7 +7054,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if isinstance(target, ui.Target) and target.point is not None and tool in TOUCH_FLOOR_TOOLS:
                 held(f"the point ({round(target.point[0])}, {round(target.point[1])})")
             return
-        front = bundle or self._app_bundle()
+        front = bundle or self._read_bundle()  # (the live read's app: a refresh leaves session.app as the last look had it)
         if front != floor.app:
             held(f"{element.role} in another app")
         tree = getattr(self.session, "last_tree", None)
@@ -7047,8 +7071,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
     def _alert_ours(self, app: str, alert: ui.Alert, bundle: str | None = None) -> bool:
         """Is this alert one explore (or a repair) in `app` may answer: shown over that app, or its own permission prompt (iOS
         draws it in SpringBoard; its title names the app)? Another app's alert (Safari's, after a link) is never answered
-        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the last read's."""
-        front = bundle or self._app_bundle()
+        (review R180 L1). `bundle`: the app in front, when the caller knows it; else the newest read's."""
+        front = bundle or self._read_bundle()
         if front == app:
             return True
         name = self.session.app_names.get(app) or ""

@@ -64,6 +64,7 @@ class Run:
     accepted: list[tuple[int, str]] = dataclasses.field(default_factory=list)  # (the original step, its phrase), for a later rejection
     start: int = 0  # where the run goes on from, in `work`
     scope: object = None  # the call's scope, for the replay that checks the repaired file
+    data: dict | None = None  # the original script, as loaded (its route identity, for the check)
 
 
 def renumbered(text: str, offset: int, total: int) -> str:
@@ -106,7 +107,10 @@ class RepairTools:
             # (before anything is touched: a repair is kept only after the emitted file replays green from the script's start)
             raise Refused("bad_params", scriptrepair.apply_needs_fresh(why))
         steps, notes = await self._replay_prepare(client_id, data, scope)
-        bundle = self._bundle() or ""
+        # the floor's app is the script's own (apply requires it), never whatever was in front after the fresh start (a
+        # permission prompt's SpringBoard, another app): review R180b L7
+        app = data.get("app")
+        bundle = app if isinstance(app, str) and app else self._bundle() or ""
         if mode == "suggest":
             return await self._suggest(client_id, data, steps, notes, scope, args, bundle, drafts_only)
         return await self._apply(client_id, data, steps, notes, scope, args, path, bundle, drafts_only)
@@ -130,7 +134,7 @@ class RepairTools:
         clock = self.control.clock
         run = Run(path, str(data.get("name") or path.stem), bundle,
                   [Work(step, orig, n) for n, (step, orig) in enumerate(zip(steps, data["steps"]), 1)], clock(), list(notes),
-                  scope=scope)
+                  scope=scope, data=data)
         total = len(data["steps"])
         try:
             while True:
@@ -219,12 +223,19 @@ class RepairTools:
         """The candidates tried in turn, under the repair's floor; True when one was accepted."""
         started = await self._repair_where()
         original = run.work[at]
-        for candidate in analysis.list[:scriptrepair.MAX_CANDIDATES]:
+        tried_list = analysis.list[:scriptrepair.MAX_CANDIDATES]
+        for n_tried, candidate in enumerate(tried_list, 1):
             tried = await self._try(client_id, scope, run, at, candidate, all_steps)
             record = self._record_of(run, original, candidate, tried)
             phrase = scriptrepair.phrase(record)
             if not tried.ok:
                 self._repair_audit(run, f"step {record.step}: {phrase}, rejected ({tried.why})")
+                if candidate.kind == "scroll" and tried.inserted and n_tried < len(tried_list)                         and not await self._list_at_start(client_id, scope, screen):
+                    # (a scrolled list is the same map place: the next candidates were read on the list as it was, and a
+                    # repeated row id would now pick another row. Back at the top as it was, or the repair stops: PR #20)
+                    run.notes.append("Note: a scroll was tried and rejected, and the list couldn't be shown as it was before "
+                                     "it; the repair stopped.")
+                    return False
                 if not await self._back_at_start(client_id, scope, run, started, screen):
                     run.notes.append("Note: a repair was tried and rejected, and the app couldn't be taken back to where the "
                                      "step started; the repair stopped.")
@@ -260,10 +271,16 @@ class RepairTools:
             replacement["target"] = cand.target
             if cand.seen:
                 replacement["seen"] = cand.seen
-        # (the candidate's moves run under the repair's floor, which _repair_one holds for every move of the repair)
-        ok, why = await self._run_steps(client_id, scope, [*before, replacement])
+        # (the candidate's moves run under the repair's floor, which _repair_one holds for every move of the repair). A scroll
+        # candidate's scrolls were made by _scroll_toward already: only the step runs now, or a second scroll could pass the row
+        # (CodeRabbit, PR #20); a road's moves run here, before the step
+        moves = [*before, replacement] if cand.kind == "road" else [replacement]
+        skipped: set[int] = set()
+        ok, why = await self._run_steps(client_id, scope, moves, skipped)
         if not ok:
             return Tried(False, why, inserted=before)
+        if len(moves) in skipped:  # (its `if` didn't hold: the step never ran, so nothing shows the repair works, PR #20)
+            return Tried(False, "the step was skipped (its if or optional didn't hold), so it never ran", inserted=before)
         checked = await self._check_one(client_id, scope, step, all_steps[at + 1] if at + 1 < len(all_steps) else None)
         if checked is not None:
             return Tried(False, checked, inserted=before)
@@ -281,10 +298,13 @@ class RepairTools:
                 return f"({key} {expect[key]!r})".replace("'", '"')
         return ""
 
-    async def _run_steps(self, client_id: str, scope, steps: list[dict]) -> tuple[bool, str]:
-        """Steps run as the batch runs them (every touch through the checks of any touch): (held, why not)."""
+    async def _run_steps(self, client_id: str, scope, steps: list[dict], skipped: set[int] | None = None) -> tuple[bool, str]:
+        """Steps run as the batch runs them (every touch through the checks of any touch): (held, why not). `skipped` gets the
+        numbers (from 1) of the steps the batch skipped."""
         try:
-            await self._batch(client_id, steps, scope, {"look": False}, [])
+            done = await self._batch(client_id, steps, scope, {"look": False}, [])
+            if skipped is not None:
+                skipped.update(scriptrepair.skipped_steps(done.get("text", "")))
         except Refused as e:
             if e.code in ABORT:
                 raise
@@ -407,7 +427,8 @@ class RepairTools:
 
     def _proven_taps(self, root, bundle, a: str, b: str, build) -> list[tuple[dict, dict]] | None:
         """The way from place `a` to place `b` that a repair may put in front of a step: a chain of proven roads, every move a
-        tap (or long press, or toggle) aimed at an element by name (§18.2). No link, no route, no back, no swipe, no point."""
+        tap aimed at an element by name (§18.2). No link, no route, no back, no swipe, no point; never a long press or a toggle,
+        which no flip back follows (review R180b L1: as explore drives only taps)."""
         if not bundle or not self._may_map(bundle):
             return None
         plan = roads.plan(self.maps.data(root, bundle), a, b, build, "taps", routes=(), tool=roads.TOOL)
@@ -416,7 +437,7 @@ class RepairTools:
         out: list[tuple[dict, dict]] = []
         for road in plan.roads:
             move = road["move"]
-            if move.get("tool") not in roads.TARGETED or not isinstance(move.get("target"), dict) or "x" in move["target"]:
+            if move.get("tool") != "tap" or not isinstance(move.get("target"), dict) or "x" in move["target"]:
                 return None
             try:
                 tool, call = driving.call_of(move, {}, road.get("names"), False)
@@ -434,6 +455,16 @@ class RepairTools:
         read = places.read_place(tree, self._language.get(shown))
         place = places.locate(self.maps.data(self._maps_root(), shown), read)[0] if self._may_map(shown) else None
         return place, str(read.key.get("signature"))
+
+    async def _list_at_start(self, client_id: str, scope, screen: Screen) -> bool:
+        """After a rejected scroll: the list scrolled back to its start, and the screen shows what the analysis read (the same
+        elements, by role, id, label and value: rows a list reuses may differ by their value alone, CodeRabbit PR #20). False
+        when it doesn't."""
+        def shown(items: list[ui.Element]) -> list[tuple[str, str, str, str]]:
+            return [(e.role, e.identifier, e.label, e.value) for e in items if not e.in_alert]
+        ok, _ = await self._run_steps(client_id, scope, [{"tool": "scroll", "to": "start"}])
+        items = await self._read_now(client_id, scope, self.control.client(client_id)) if ok else None
+        return items is not None and shown(items) == shown(screen.items)
 
     async def _back_at_start(self, client_id: str, scope, run: Run, started: tuple[str | None, str | None],
                              screen: Screen) -> bool:
@@ -486,8 +517,7 @@ class RepairTools:
         try:
             checking = scriptrepair.write_check(run.script, repaired)
         except OSError as e:
-            return {**answer, "text": "\n".join([first, said, f"Note: couldn't write the repaired script to check it "
-                                                              f"({e.strerror or e}); nothing was kept.", *run.notes])}
+            raise self._unwritten(run, [first, said], f"couldn't write the repaired script to check it ({e.strerror or e})") from None
         try:
             checked = await self._check_repaired(client_id, run, checking)
             if not await self._caller_waits():  # (review R180 M4) nobody would see it: never written after the client left
@@ -498,16 +528,24 @@ class RepairTools:
                 left.tidied = True  # type: ignore[attr-defined]
                 raise left
             written = scriptrepair.keep_checked(run.script, checking, markdown)
-            wrote = f"Wrote {written[0]} and {written[1]}. The original is unchanged."
         except OSError as e:
-            wrote = f"Note: couldn't write the repaired files ({e.strerror or e}); nothing was kept."
-            written, checked = [], ""
+            raise self._unwritten(run, [first, said, checked], f"couldn't write the repaired files ({e.strerror or e})") from None
         finally:
             checking.unlink(missing_ok=True)
-        if written:
-            self._learn_repairs(run, build)
+        self._learn_repairs(run, build)
+        wrote = f"Wrote {written[0]} and {written[1]}. The original is unchanged."
         rest = answer["text"].split("\n")[1:]
-        return {**answer, "text": "\n".join([first, said, *([checked] if checked else []), wrote, *rest, *run.notes])}
+        return {**answer, "text": "\n".join([first, said, checked, wrote, *rest, *run.notes])}
+
+    def _unwritten(self, run: Run, lines: list[str], why: str) -> Refused:
+        """The run and its check passed but the files couldn't be written: a failed apply (CodeRabbit, PR #20), never an answer
+        that reads as a success. Each accepted repair gets its `rejected` line; nothing is kept."""
+        for step, phrase in run.accepted:
+            self._repair_audit(run, f"step {step}: {phrase}, rejected ({why})")
+        run.accepted.clear()
+        out = Refused("internal", "\n".join([*lines, f"Note: {why}; nothing was kept.", *run.notes]))
+        out.tidied = True  # type: ignore[attr-defined]
+        return out
 
     @staticmethod
     async def _caller_waits() -> bool:
@@ -537,11 +575,24 @@ class RepairTools:
             # its own Sign out step must not make every repair of it unkeepable)
             gate = _d()._TOUCH_FLOOR.set(self._repair_floor(run))
             only = _d()._FLOOR_REPAIRED_ONLY.set(True)
+            # the route identity `<script>.repaired.json` will have when it is replayed alone: never the original's (the map's
+            # own `routes/<name>.json`), whose grants a standalone replay of the repaired file won't get (CodeRabbit, PR #20)
+            own = self._saved_route_name(run.script, run.data) if run.data is not None else None
+            routes = _d()._ROUTES.set(tuple(r for r in _d()._ROUTES.get() if r != own)) if own else None
             try:
                 checked = await self._replay(client_id, data, run.scope, {"look": False})
             finally:
+                if routes is not None:
+                    _d()._ROUTES.reset(routes)
                 _d()._FLOOR_REPAIRED_ONLY.reset(only)
                 _d()._TOUCH_FLOOR.reset(gate)
+            steps = data["steps"]
+            missed = sorted(n for n in scriptrepair.skipped_steps(checked["text"]) if scriptrepair.under_repair(steps, n - 1))
+            if missed:  # (a repaired step that was skipped never ran: the replay shows nothing about the repair, PR #20)
+                at = missed[0]
+                raise Refused("expect_failed", f"Ran {at - 1} of {len(steps)} steps; stopped at step {at} "
+                                               f"({batch.summary(steps[at - 1])}): the repaired step was skipped (its if or "
+                                               "optional didn't hold), so it never ran")
         except Refused as e:
             first = str(e).split("\n")[0]
             found = re.match(r"Ran \d+ of \d+ steps; stopped at step (\d+)", first)
@@ -560,7 +611,11 @@ class RepairTools:
         ran = checked["text"].split("\n")[0]
         found = re.match(r"Ran (\d+) of (\d+) steps", ran)
         count = found.group(2) if found else str(len(data["steps"]))
-        return f"{scriptrepair.CHECKED}replayed {name} from the script's fresh start: all {count} steps passed."
+        try:  # (the very bytes that replayed: the rename keeps them, and `--adopt` installs only those, CodeRabbit PR #20)
+            sha = f" (sha256 {scriptrepair.digest(checking.read_bytes())})"
+        except OSError:
+            sha = ""
+        return f"{scriptrepair.CHECKED}replayed {name} from the script's fresh start: all {count} steps passed{sha}."
 
     def _learn_repairs(self, run: Run, build: str | None) -> None:
         """A repair that passed becomes known on the map for this build (§26.5): a road that has the old move takes the new

@@ -162,8 +162,9 @@ def _ranked(step: dict, brk: Break, screen: Screen, old: Old, matching: list[ui.
             continue
         in_bucket = bool(seen.get("role") and seen.get("bucket") and element.role == seen["role"]
                          and bucket_of(element.rect, screen.screen) == seen["bucket"])
-        if not (brk.code == "ambiguous" or id(element) in near or in_bucket or parts.get("id_stem", 0) > 0
-                or parts.get("words", 0) >= 0.5):
+        # (§26.1: a similar id, label or text counts only with the same role, when the old role is known: CodeRabbit, PR #20)
+        similar = (parts.get("id_stem", 0) > 0 or parts.get("words", 0) >= 0.5) and (old.role is None or element.role == old.role)
+        if not (brk.code == "ambiguous" or id(element) in near or in_bucket or similar):
             continue  # the pool of §26.1: a `Closest:` match, a similar id, label or text, or the same role in the same bucket
         scored.append(Scored(element, parts, score))
     return rank(scored)
@@ -189,6 +190,20 @@ def road_held(floor: explorefloor.Floor, move: dict, names: dict) -> explorefloo
     return next((hit for w in words if (hit := floor.named(w)) is not None), None)
 
 
+def _holds_private(move: dict, names: dict, scrub: Callable[[str], str]) -> bool:
+    """Does a road move (its target, or a name its element had) hold a private value: a test account's or the vault's, which
+    the scrubber would hide? Such a move is never written into a repaired file."""
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [s for v in value.values() for s in strings(v)]
+        if isinstance(value, list):
+            return [s for v in value for s in strings(v)]
+        return []
+    return any(not _usable(text, scrub) for text in [*strings(move.get("target")), *strings(names or {})])
+
+
 def _road(step: dict, expected: str, here: str, screen: Screen) -> Analysis:
     """A new screen in the way: the proven road from where the app is to the place the step expected, put before it."""
     road = screen.way(here, expected)
@@ -196,6 +211,9 @@ def _road(step: dict, expected: str, here: str, screen: Screen) -> Analysis:
         return Analysis("none", reason=f"the step ran on {expected}, the app is on {here}, and no proven road of taps leads there")
     if any(road_held(screen.floor, move, names) is not None for move, names in road):
         return Analysis("none", reason=f"a road move to {expected} can't be inserted: it carries a policy word")
+    if any(_holds_private(move, names, screen.scrub) for move, names in road):
+        # (a road saved before a value became an account's would put that value into the repaired file: CodeRabbit, PR #20)
+        return Analysis("none", reason=f"a road move to {expected} can't be inserted: it names a test account's value")
     moves = [move for move, _ in road]
     shown = ", ".join(step_name(m) for m in moves)
     return Analysis("ok", [Candidate("road", f"insert {shown} to reach {expected}, then {step_name(step)}", f"before it: {shown}",
