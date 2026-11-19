@@ -86,3 +86,14 @@ def test_the_status_bar_and_what_elements_say_already_are_left_out(monkeypatch):
         assert ocr_lines == ['o1 "Kyoto, Japan" @49,406 105x20']
         await finish(stop, task)
     run(go)
+
+
+def test_a_half_installed_extra_counts_as_not_installed(monkeypatch):
+    """CI, 2026-11-19: rapidocr and onnxruntime were found but numpy wasn't, so `look ocr` crashed instead of answering
+    with the install note."""
+    import importlib.util as iu
+    from tapwright import ocr
+    real = iu.find_spec
+    monkeypatch.setattr(iu, "find_spec", lambda name, *a: object() if name in ("rapidocr", "onnxruntime", "PIL")
+                        else (None if name == "numpy" else real(name, *a)))
+    assert ocr.installed() is False

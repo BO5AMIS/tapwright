@@ -35,7 +35,8 @@ reader: Callable[[bytes, tuple[float, float]], list[Seen]] | None = None  # test
 
 def installed() -> bool:
     """Is the optional extra here (`pip install "tapwright[ocr]"`)?"""
-    return importlib.util.find_spec("rapidocr") is not None and importlib.util.find_spec("onnxruntime") is not None
+    # every module read() imports: a half-installed extra (rapidocr without numpy, seen on CI) is not installed
+    return all(importlib.util.find_spec(m) is not None for m in ("rapidocr", "onnxruntime", "numpy", "PIL"))
 
 
 def available() -> bool:
