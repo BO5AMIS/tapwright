@@ -3439,7 +3439,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # a failure adds the app's log from the failed step on, after the change block (AGENT-TOOLS §15.4)
         logs = await self._failure_logs(scope, i, marks) if failed else []
         if not _NESTED.get():  # (1.8.5, §29.3) the agent's own run or replay: a failed check is kept for `from: "failure"`
-            await self._bug_failure_seen(client_id, failed, steps, i, start_place, place_then, logs,
+            # (W177b) the place the answer's `Place:` line named: the read after the run, which a thin call's new view needs
+            await self._bug_failure_seen(client_id, failed, steps, i, start_place, self._place_before(view), logs,
                                          steps[i - 1].get("expect") if failed and 0 < i <= len(steps) else None,
                                          run_id=ident)
         else:

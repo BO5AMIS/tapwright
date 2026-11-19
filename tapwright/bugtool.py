@@ -184,11 +184,14 @@ class BugTools:
             shown = ", ".join(f"{k} {v!r}" for k, v in expect.items() if k in ("text", "id", "label", "matches", "gone"))
             got = failed[1].split("\n", 1)[0]
             got = got.split(": its action ran, but ", 1)[-1] if ": its action ran, but " in got else got
+            # (W177b) the place the run's answer named (its read after the run), else the newest read's; and the app's own
+            # log lines, as from "now" keeps them, never the run's whole "Logs (since step n):" block with iOS's lines
+            place = end[1] if end is not None and end[0] == bundle else self._bug_place_read(bundle)
             record = bugmake.failure_record(
                 app=bundle, identity=identity, when=utc_ms(datetime.datetime.now(datetime.timezone.utc)), steps=steps,
                 failed_at=at, expected=f"step {at} holds its check ({shown or 'expect'})", got=got,
                 path_from=start[1] if start is not None and start[0] == bundle else None,
-                place=end[1] if end is not None and end[0] == bundle else None, logs=logs, aims=aims,
+                place=place, logs=await self._bug_logs(bundle), aims=aims,
                 link_of=lambda url: self._bug_link(bundle, url))
         except Exception as e:  # noqa: BLE001 - a failure that can't be kept is no failure to report; said in serve.log
             record = None
@@ -198,6 +201,17 @@ class BugTools:
                 said = ""
             self.log(f'bug_report: a failed check couldn\'t be kept for from "failure" ({type(e).__name__}: {said})')
         self._bug_failed(client_id, record)
+
+    def _bug_place_read(self, bundle: str) -> str | None:
+        """The place the newest read of the screen is (the session's last tree, as a look would save it), or None."""
+        tree = getattr(self.session, "last_tree", None)
+        if tree is None or tree.app is None or tree.app[1] != bundle or not self._may_map(bundle):
+            return None
+        try:
+            seen = self.maps.observe(self._maps_root(), bundle, tree, arrived=False, lang=self._language.get(bundle))
+        except Exception:  # noqa: BLE001 - a place that can't be read is a place not known
+            return None
+        return seen.name if seen is not None else None
 
     def _bug_failed(self, client_id: str, record: dict | None) -> None:
         """Keep (or clear) a client's last failed check. A thin `tapwright call` is a process of its own, and its default

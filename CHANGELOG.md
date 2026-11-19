@@ -83,6 +83,9 @@
   locked (the owner's lock went unseen and `unlock` answered "The phone isn't locked."), and an unlocked one with
   Notification Center open as locked.
 
+- A bug made `from: "failure"` names the place the run's answer named (a thin run's own read; it said "an unnamed
+  screen"), and its Logs are the app's own lines, as `from: "now"` keeps them, not the run's log block with iOS's lines.
+
 ## 1.8.0 (2026-11-19), "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A
