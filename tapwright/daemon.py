@@ -4060,7 +4060,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     if name in KEYBOARD_TOOLS and view.read_keyboard and not dry and self._under_keyboard(target):
                         # the keyboard hides it, and a short form can't scroll it up: a person closes the keyboard
                         # first (a first-time agent was told off_screen for Wayfare's "Create account", 2026-11-11)
-                        closed = await self._dismiss_keyboard_now(view, covered=self._offscreen_under_keyboard(view, target))
+                        aimed = self._offscreen_under_keyboard(view, target)
+                        closed = await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed)
                         if not self._missing(s.items, target):
                             box["closed"] = closed
                     if "closed" not in box:
@@ -6837,21 +6838,23 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         bottom = s.screen[1] - (SCROLL_BOTTOM_INSET if bottom is None else bottom)
         if not await self._outside_focus(view, name, target, bottom, shown_inputs):
             return ""
-        return await self._dismiss_keyboard_now(view, covered=self._keyboard_covers(view, target))
+        aimed = self._keyboard_covers(view, target)
+        return await self._dismiss_keyboard_now(view, covered=aimed is not None, aimed=aimed)
 
-    def _keyboard_covers(self, view, target: ui.Target) -> bool:
-        """Does the keyboard lie over the target's centre (1.9.0)? Only then may its Done key close it first."""
+    def _keyboard_covers(self, view, target: ui.Target) -> "ui.Element | None":
+        """The target's element when the keyboard lies over its centre (1.9.0); only then may a Done close it first."""
         try:
             hit = ui.resolve(view.items, target)
         except Refused:
-            return False
+            return None
         if not isinstance(hit, ui.Element):
-            return False  # (a point is the agent's own: nothing more than before is done for it)
+            return None  # (a point is the agent's own: nothing more than before is done for it)
         cx, cy = hit.center
-        return any(b.kind == "Keyboard" and b.rect[0] <= cx < b.rect[0] + b.rect[2] and b.rect[1] <= cy < b.rect[1] + b.rect[3]
-                   for b in hit.covered_by)
+        covered = any(b.kind == "Keyboard" and b.rect[0] <= cx < b.rect[0] + b.rect[2]
+                      and b.rect[1] <= cy < b.rect[1] + b.rect[3] for b in hit.covered_by)
+        return hit if covered else None
 
-    async def _press_done(self, view, app: str | None) -> bool | None:
+    async def _press_done(self, view, app: str | None, aimed: "ui.Element | None" = None) -> bool | None:
         """(1.9.0, §30) A Done that closes the keyboard over a covered target, in a form that ignores a touch outside and a
         drag (Wayfare's trip form: its last field is a multiline Notes). Never a key that names a submit: only a button
         named exactly Done, and only (a) an input accessory's or toolbar's button attached to the keyboard, not one of its
@@ -6871,6 +6874,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return True
             self._no_done.add((app, place, "accessory"))
             return False
+        if not self._submit_aimed(aimed, view.items, app):
+            # (lead's ruling on CodeRabbit 4628458079) in a multiline field Done may run the field's own submit handler: it
+            # is pressed only when the agent's tap was going to submit anyway (a submit-worded button the floor doesn't hold)
+            return None
         field = await self._focused_input(view)
         if field is None or field.type != "TextView":  # (b) only in a multiline field: elsewhere Done may submit
             return None  # (not remembered: another field focused on this screen is judged afresh; CodeRabbit, PR #22)
@@ -6901,6 +6908,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                         "check its value.")
         return not view.read_keyboard
 
+    def _submit_aimed(self, aimed: "ui.Element | None", items: list, app: str | None) -> bool:
+        """Is the tap's own target a submit button (the H1 fix's submit words: Save, Submit, Continue, Confirm, Sign in...)
+        that the floor doesn't hold (Send, Post, Buy, Delete...)?"""
+        if aimed is None or aimed.role != "button":
+            return False
+        floor = explorefloor.Floor(safety.DEFAULT, app or "")
+        if floor.touch(aimed, items) is not None:
+            return False
+        return any(explorefloor._first(explorefloor.SUBMIT_WORDS, explorefloor._plain(n)) is not None
+                   for n in explorefloor.names_of(aimed))
+
     @staticmethod
     def _done_on_keyboard(view) -> "ui.Element | None":
         """A button named exactly Done attached to the keyboard (review 1.9.0 M6): in the keyboard's window (its input
@@ -6923,7 +6941,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return e
         return None
 
-    async def _dismiss_keyboard_now(self, view, covered: bool = False) -> str:
+    async def _dismiss_keyboard_now(self, view, covered: bool = False, aimed: "ui.Element | None" = None) -> str:
         """Close the keyboard the way a person does: one touch where nothing responds, then WebDriverAgent's own
         dismissal if it is still up; neither presses return. NOTE_KEYBOARD when it ended up closed, else
         NOTE_KEYBOARD_STAYED: the answer says so."""
@@ -6966,7 +6984,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             elif step == "dismiss" and ((covered and self._hints_wanted()) or app not in self._no_dismiss):
                 # (1.9.0) a Done first, for a covered target; never with --no-hints (1.8.5's behaviour). Whatever it did,
                 # WebDriverAgent's plain dismissal is still tried once where it hasn't failed (review 1.9.0 L2)
-                done = await self._press_done(view, app) if covered and self._hints_wanted() else None
+                done = await self._press_done(view, app, aimed) if covered and self._hints_wanted() else None
                 if done:
                     how = "the keyboard's Done key"
                 elif view.read_keyboard and app not in self._no_dismiss:
@@ -7004,21 +7022,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         now = {(e.role, e.label, e.identifier) for e in after}
         return sum(key in now for key in before) < len(before) / 2
 
-    def _offscreen_under_keyboard(self, view, target: ui.Target) -> bool:
+    def _offscreen_under_keyboard(self, view, target: ui.Target) -> "ui.Element | None":
         """(CodeRabbit, PR #22) The very match the target names (its index too) lies over the keyboard's frame now: only
         then may a Done close it first. A match clipped by a short list above the keyboard is not covered by it."""
         keyboard = next((b for e in view.items for b in e.covered_by if b.kind == "Keyboard"), None)
         if keyboard is None:
-            return False
+            return None
         try:
             hit = ui.resolve(getattr(self.session, "offscreen", []), target)
         except Refused:
-            return False
+            return None
         if not isinstance(hit, ui.Element):
-            return False
+            return None
         cx, cy = hit.center
         kx, ky, kw, kh = keyboard.rect
-        return kx <= cx < kx + kw and ky <= cy < ky + kh
+        return hit if kx <= cx < kx + kw and ky <= cy < ky + kh else None
 
     def _under_keyboard(self, target: ui.Target) -> bool:
         """Is the target an element the last read found past its scroll view's edge but still on the phone's

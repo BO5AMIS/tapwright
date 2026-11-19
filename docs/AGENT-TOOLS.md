@@ -1463,9 +1463,12 @@ the touch last. A Done is never a key that names a submit: only a button named e
   bar at most 60 pt tall on the keys' top edge, not one of its keys, touching that edge (2 pt at most). Never a sheet's
   or a form's own button; or
 - the keyboard's Done key while the focused field is multiline (a text view), whose value can be read (not empty, not
-  its placeholder). Done there usually adds a line or closes the keyboard, but React Native's
-  `submitBehavior="blurAndSubmit"` also runs the field's own submit handler, which no tree shows: the answer always says
-  what Done did to the field.
+  its placeholder), and only when the tap's own target is a submit button the skip floor doesn't hold (the submit words:
+  Save, Submit, Continue, Confirm, Sign in...; never Send, Post, Buy or Delete), so the agent meant to submit anyway
+  (Wayfare's Notes, then Save trip). Done there usually adds a line or closes the keyboard, but React Native's
+  `submitBehavior="blurAndSubmit"` also runs the field's own submit handler, which no tree shows; so for any other
+  target (a chat composer's Send, a plain button) the tap is refused as in 1.8.5. The answer always says what Done did
+  to the field.
 
 Never return, Go, Send, Search, Next or Join. If Done added exactly a line break at the end and the keyboard is still up
 with the field focused (the value read just before and after), it is taken back with one backspace, and the answer's

@@ -411,9 +411,11 @@ from test_daemon import KEYBOARD_NOTE, keyboard_up  # noqa: E402
 from fakes import button  # noqa: E402
 
 
-def multiline(s, value="Bench trip"):
-    """Field A, which has the focus, is a text view (React Native's multiline TextInput) holding `value`."""
-    s.tree = [dataclasses.replace(e, type="TextView", value=value) if e.identifier == "a" else e for e in s.tree]
+def multiline(s, value="Bench trip", low="Save trip"):
+    """Field A, which has the focus, is a text view (React Native's multiline TextInput) holding `value`; the button the
+    keyboard covers (`low`) is labelled `low` (a submit button, as Wayfare's Save trip under its Notes)."""
+    s.tree = [dataclasses.replace(e, type="TextView", value=value) if e.identifier == "a"
+              else dataclasses.replace(e, label=low) if e.identifier == "low" else e for e in s.tree]
 
 
 def uncover_low_when_closed(s):

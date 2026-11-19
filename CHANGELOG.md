@@ -27,7 +27,7 @@ works, and `--no-hints` gives 1.8.5's behaviour back.
 - A tap whose target the keyboard covers presses a Done when a touch outside, a drag and the dismiss key don't close it
   (Wayfare's trip form, whose last field is multiline): only a button named exactly Done, and only an input accessory's
   attached to the keyboard, or the keyboard's own Done key while the focused field is multiline and holds a readable
-  value. Never return, Go, Send, Search, Next or Join. A line break Done adds at the end is taken back with one
+  value, and only when the tap's target is a submit button the floor doesn't hold (Save trip after Notes). Never return, Go, Send, Search, Next or Join. A line break Done adds at the end is taken back with one
   backspace; any other change is left alone; the answer says either. Otherwise the tap is refused as in 1.8.5, with a
   hint that Return can submit.
 - `--no-hints` (on `tapwright mcp`, `serve` and `call`, or `TAPWRIGHT_NO_HINTS=1`): no `Known:` or `Hint:` lines, no

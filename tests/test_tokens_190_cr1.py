@@ -338,3 +338,41 @@ def test_the_line_break_is_taken_back_by_what_the_keyboard_shows_not_the_runners
         assert s.calls.count("key:backspace") == 1 and field.value == "Bench trip"
         await finish(stop, task)
     run(go)
+
+
+# ---- the lead's ruling on 4628458079: a multiline Done only for a tap that submits anyway ----
+
+@pytest.mark.parametrize("label", ["Low", "Send", "Delete draft", "Buy now"])
+def test_a_multiline_done_is_never_pressed_for_a_target_that_isnt_a_submit_the_floor_allows(label):
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False, done_key=True)
+        s = d.session
+        multiline(s, low=label)  # a chat composer's Send, a plain button, a held word
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "low"}})
+        assert e.value.code == "not_actionable" and str(e.value).startswith("covered:")
+        assert ("Done",) not in s.dismiss_keys
+        await finish(stop, task)
+    run(go)
+
+
+@pytest.mark.parametrize("label", ["Save trip", "Submit", "Continue", "Confirm", "Sign in"])
+def test_a_multiline_done_closes_the_keyboard_for_a_submit_button(label):
+    async def go():
+        d, stop, task = await keyboard_up(blank_tap_closes=False, dismiss_ok=False, done_key=True)
+        s = d.session
+        multiline(s, low=label)
+        await d.run_tool("a", "look", {"screenshot": False})
+        plain = s.dismiss_keyboard
+
+        async def done_closes(keys=()):
+            closed = await plain(keys)
+            if closed:
+                s.tree = [dataclasses.replace(e, covered_by=()) if e.identifier == "low" else e for e in s.tree]
+            return closed
+        s.dismiss_keyboard = done_closes
+        r = await d.run_tool("a", "tap", {"target": {"id": "low"}})
+        assert s.dismiss_keys == [("Done",)] and r["text"].endswith(KEYBOARD_NOTE)
+        await finish(stop, task)
+    run(go)
