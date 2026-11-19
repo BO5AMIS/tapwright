@@ -1402,7 +1402,8 @@ that save calls; nothing is taken away, and `--no-hints` gives 1.8.5's answers a
 
 ### 30.1 The token rules
 The MCP `instructions` begin with the shared block (word for word in Tapline), `<replay>` being `drive {"route": "<name>"}`:
-read each answer; known steps in one `run` with an `expect`; target by id; a screenshot only to judge looks; use `Known:`;
+read each answer; known steps in one `run` with an `expect`; target by id; a screenshot only to judge looks
+(`screenshot: false` on a `look` that only reads); use `Known:`;
 on a long or unknown task hand the driving to one small, fast agent; a bug report is `bug_report`.
 
 ### 30.2 Routes that save themselves, and `Known:`
@@ -1415,23 +1416,30 @@ on a long or unknown task hand the driving to one small, fast agent; a bug repor
 - A place keeps one route: a shorter way replaces it, and so does a working way when it has failed since. A replay
   (`drive {"route": ...}`) that fails twice in a row drops it (`Note: route <name> dropped ...`). A person's route is
   never replaced, and a place a person's route already reaches gets none of its own.
-- The name: the place's own name when a person named it, else the id (or label, or text) of what the last step touched
-  (`plan-trip` gives `plan_trip`), else the place's name. Never a title (the map keeps titles only as hashes).
+- The name: the name given with `map {"name"}`, else the id of the move that reaches the place (`plan-trip` gives
+  `plan_trip`; an id is the developer's, not content), else the place's own `place_<n>`. Never a label, a text or a
+  title: they are the screen's words and can be private.
 - The first answer of a session that shows the app has, after its header, `Known: <name>, ... (one call each: drive
   {"route": "<name>"})`: the saved routes with no variables whose start can be reached from where the app is, the most
-  used first, at most 8 and then `+N more`. Nothing known: no line.
+  used first, else the most recently reached, at most 8 and then `+N more`. Nothing known: no line.
 
 ### 30.3 Hints
 After the `Note:` lines, at most one `Hint:` per answer, each kind once per session: a form opened (fill and save in
 one `run`); 3 single taps in a row along known roads (the one call that gets there); a screenshot asked on an action
-whose text had the changes; a long session (15 calls: hand the driving to a small agent); an `expect_failed` before
-`logs` was read.
+whose text had the changes; a long task (from the session's 20th call: "On a long task, the main session can hand
+the driving to one small, fast agent; if you are that agent, carry on.", harmless to a helper, whose calls come over
+the same server); the app logged an error of its own or crashed and `logs` wasn't read since (never a tool error such
+as `not_found`).
 
 ### 30.4 The keyboard over a target
 A tap whose target the keyboard covers closes it first, as before (a touch on passive space, a short drag, the dismiss
-key); when the app ignores those (Wayfare's trip form: its last field is a multiline Notes), the keyboard's own Done key
-is pressed, only when it has one. A field whose Done key only added a line gets it taken back; nothing is typed or
-submitted. The answer says `Note: closed the keyboard first.`
+key); when the app ignores those (Wayfare's trip form: its last field is a multiline Notes), a Done is pressed, never
+a key that can submit: only a button named exactly `Done`, and only when it is an input accessory's or toolbar's button
+just above the keyboard (not a key of it), or the keyboard's Done key while the focused field is multiline (Done can't
+submit there). Never return, Go, Send, Search, Next or Join. A new line that Done added to a multiline field, read just
+before and after, is taken back with one backspace, and the answer's `Note:` says so. The answer says
+`Note: closed the keyboard first.`; otherwise the tap is refused `covered` as in 1.8.5, whose hint now says that Return
+can submit, send or add a line.
 
 ### 30.5 `--no-hints`
 `tapwright mcp --no-hints` (sent to the daemon with each call) and `tapwright serve --no-hints`: no `Known:` and no

@@ -7,19 +7,23 @@ works, and `--no-hints` gives 1.8.5's answers and instructions word for word.
 
 - Routes save themselves: the way a session went from the app's start to a screen (taps, back, open_url and the scrolls
   before them) is kept as that screen's route in the app's map folder (`"auto": true`), with no `record` call, and
-  `drive {"route": "<name>"}` replays it in one call. Navigation only: typed text, form values, toggles, a touch the
+  `drive {"route": "<name>"}` replays it in one call. A route is named by the name given with `map {"name"}`, else by
+  the id of the move that reaches the place, else `place_<n>`: never by a label or a title. Navigation only: typed text, form values, toggles, a touch the
   policy held and anything after them are never saved. The shortest working way is kept, a shorter one replaces it, and
   a route whose replay fails twice is dropped. A person's route is never replaced.
-- The first answer of a session that shows an app says what it can reach in one call: `Known: plan_trip, kyoto (one
-  call each: drive {"route": "<name>"})`.
+- The first answer of a session that shows an app says what it can reach in one call, the most used first, else the
+  most recently reached: `Known: plan_trip, dest_card_kyoto (one call each: drive {"route": "<name>"})`.
 - The MCP instructions begin with the shared token rules: known steps in one `run` with an `expect`, target by id, a
-  screenshot only to judge looks, use `Known:`, hand a long task's driving to one small agent, a bug report is
+  screenshot only to judge looks (`screenshot: false` on a `look` that only reads), use `Known:`, hand a long task's driving to one small agent, a bug report is
   `bug_report`.
 - `Hint:` lines, at most one per answer and each once per session: a form opened, three taps along a known way, a
-  screenshot the text already covered, a long session, a failed check before `logs` was read.
-- A tap whose target the keyboard covers closes the keyboard with its own Done key when a touch outside, a drag and the
-  dismiss key don't (Wayfare's trip form, whose last field is multiline): `Note: closed the keyboard first.` A new line
-  the Done key adds to a multiline field is taken back; nothing is typed or submitted.
+  screenshot the text already covered, a long task (from the 20th call, worded so a helper agent carries on), the app's
+  own logged error or a crash since `logs` was last read (never a tool error).
+- A tap whose target the keyboard covers presses a Done when a touch outside, a drag and the dismiss key don't close
+  it (Wayfare's trip form, whose last field is multiline): only a button named exactly Done, and only an input
+  accessory's or toolbar's just above the keyboard, or the keyboard's own Done key while the focused field is multiline.
+  Never return, Go, Send, Search, Next or Join. A new line that Done adds to a multiline field is taken back with one
+  backspace, and the answer says so. Otherwise the tap is refused as in 1.8.5, with a hint that Return can submit.
 - `tapwright mcp --no-hints` and `tapwright serve --no-hints`: no `Known:` or `Hint:` lines, and 1.8.5's instructions.
 - Tests keep the tool's home in a folder of their own: a daemon test no longer writes maps or reports to
   `~/.tapwright`.
