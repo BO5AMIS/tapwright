@@ -91,3 +91,11 @@ def _tool_home_in_tmp(monkeypatch, tmp_path):
     somewhere now saves a route there by itself (AGENT-TOOLS 1.17 §30)."""
     from tapwright import store
     monkeypatch.setattr(store, "HOME", tmp_path / "tapwright-home")
+
+
+@pytest.fixture(autouse=True)
+def _no_reuse_pause(monkeypatch):
+    """(1.9.1) A running runner's /status is asked a few times before it is replaced (device.REUSE_ASKS); the pause
+    between asks is a real second on the phone and none in a test."""
+    from tapwright import device
+    monkeypatch.setattr(device, "REUSE_GAP", 0.0)

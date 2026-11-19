@@ -111,7 +111,7 @@ def test_the_gate_holds_a_locked_phone_only_when_the_consent_is_spent(monkeypatc
                     await d.start_wda("runner.id", wait=5)
                 assert d.runner is old and not old.done()  # the gate stops nothing that runs
             else:
-                answers = iter([False, True])
+                answers = iter([False] * device_module.REUSE_ASKS + [True])
                 d.wda_alive = lambda: _value(next(answers))
                 await d.start_wda("runner.id", wait=5)
                 assert d.runner is not old

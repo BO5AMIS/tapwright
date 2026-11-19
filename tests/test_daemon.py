@@ -5116,6 +5116,56 @@ def test_a_start_held_by_the_lock_state_says_why_and_never_offers_unlock(held):
     run(go)
 
 
+class _RunnerSession(FakeSession):
+    """(1.9.1) A session whose first `ensure` calls fail as scripted; its device has a runner that is alive or not and
+    whose /status answers or not."""
+
+    def __init__(self, fails: list, runner_alive: bool = True, answers: bool = True):
+        super().__init__()
+        self.fails = list(fails)
+        self.device.runner_alive = lambda: runner_alive
+
+        async def wda_alive():
+            return answers
+        self.device.wda_alive = wda_alive
+
+    async def ensure(self):
+        if self.fails:
+            self._record("ensure")
+            raise self.fails.pop(0)
+        await super().ensure()
+
+
+def _timed_out() -> ConnectionLost:
+    return ConnectionLost("WebDriverAgent didn't answer POST /session within 30 s")
+
+
+def test_a_session_that_timed_out_on_a_running_runner_is_asked_for_again_not_reset():
+    """11-19 05:48 and 05:51: POST /session timed out on a runner that still answered /status, and the reset replaced the
+    runner. Now the session is asked for once more on the same runner first."""
+    async def go():
+        s = _RunnerSession([_timed_out()])
+        d = make(s)
+        await d._connect()
+        assert "reset" not in s.calls and s.sid == "S"
+    run(go)
+
+
+@pytest.mark.parametrize("fails, alive, answers", [
+    ([_timed_out(), _timed_out()], True, True),  # asked again, and that timed out too
+    ([_timed_out()], False, True),  # the runner's task ended: nothing to keep
+    ([_timed_out()], True, False),  # its WebDriverAgent doesn't answer /status
+    ([DeviceError("WebDriverAgent: HTTP 500: boom")], True, True),  # not a timeout: as before
+], ids=["again-timed-out", "runner-ended", "no-status", "not-a-timeout"])
+def test_otherwise_a_reconnect_resets_as_before(fails, alive, answers):
+    async def go():
+        s = _RunnerSession(fails, runner_alive=alive, answers=answers)
+        d = make(s)
+        await d._connect()
+        assert s.calls.count("reset") == 1 and s.sid == "S"
+    run(go)
+
+
 def test_a_call_after_the_passcode_was_typed_gets_the_phone_not_the_last_starts_answer():
     """Seen on the phone 2026-11-10: the passcode was in, nothing had been started since (the starts thin
     out), and a tap answered `locked` 20 s before the phone was back. The call's own start is what counts."""

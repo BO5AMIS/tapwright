@@ -146,6 +146,8 @@ class LockState:
 GRANT_HORIZON = 7.5 * 3600
 GRANT_FILE: Path | None = None  # when iOS last gave its consent; None: ~/.tapwright/automation.json (tests set their own)
 LOCK_STATE_WAIT = 5.0  # seconds the lock state may take to come back; then it is not known
+REUSE_ASKS = 3  # times a running runner's /status is asked before it is replaced (each wda_alive waits up to 3 s) ...
+REUSE_GAP = 1.0  # ... this many seconds apart
 
 
 def _grant_file() -> Path:
@@ -333,7 +335,7 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
-        if self.runner and not self.runner.done() and await self.wda_alive():
+        if self.runner and not self.runner.done() and await self._still_answers():
             if self.awaiting_passcode or self._prompt_rounds:
                 record_grant()  # the start that waited at the prompt went on: the passcode was entered just now
             self.awaiting_passcode, self._prompt_rounds = False, 0
@@ -407,6 +409,23 @@ class Device:
                 pass
         raise await self._or_passcode(
             DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)"))
+
+    def runner_alive(self) -> bool:
+        """Is the task that keeps this process's test runner alive still running (its test session not ended)?"""
+        return self.runner is not None and not self.runner.done()
+
+    async def _still_answers(self) -> bool:
+        """(1.9.1) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
+        a runner busy with one long request (an audit's read of a big screen) can miss one /status, and replacing it costs
+        iOS's passcode prompt once its consent is about 8 h old. A runner whose task ended isn't asked (see runner_alive)."""
+        for ask in range(REUSE_ASKS):
+            if ask:
+                await asyncio.sleep(REUSE_GAP)
+                if not self.runner_alive():
+                    return False
+            if await self.wda_alive():
+                return True
+        return False
 
     async def lock_state(self) -> LockState | None:
         """The phone's lock state from CoreDevice (iOS 17+), without WebDriverAgent: answers before any runner is

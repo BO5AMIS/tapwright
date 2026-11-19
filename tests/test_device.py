@@ -269,7 +269,7 @@ def test_a_new_runner_replaces_the_old_one_cleanly(monkeypatch):
     async def scenario():
         d = Device(log=lambda *a: None)
         d.rsd = object()
-        answers = iter([False, True])  # the old WebDriverAgent is gone; the new one answers
+        answers = iter([False] * device_module.REUSE_ASKS + [True])  # the old WebDriverAgent is gone; the new one answers
 
         async def wda_alive():
             return next(answers)
