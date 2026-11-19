@@ -107,7 +107,10 @@ class RepairTools:
             # (before anything is touched: a repair is kept only after the emitted file replays green from the script's start)
             raise Refused("bad_params", scriptrepair.apply_needs_fresh(why))
         steps, notes = await self._replay_prepare(client_id, data, scope)
-        bundle = self._bundle() or ""
+        # the floor's app is the script's own (apply requires it), never whatever was in front after the fresh start (a
+        # permission prompt's SpringBoard, another app): review R180b L7
+        app = data.get("app")
+        bundle = app if isinstance(app, str) and app else self._bundle() or ""
         if mode == "suggest":
             return await self._suggest(client_id, data, steps, notes, scope, args, bundle, drafts_only)
         return await self._apply(client_id, data, steps, notes, scope, args, path, bundle, drafts_only)
@@ -424,7 +427,8 @@ class RepairTools:
 
     def _proven_taps(self, root, bundle, a: str, b: str, build) -> list[tuple[dict, dict]] | None:
         """The way from place `a` to place `b` that a repair may put in front of a step: a chain of proven roads, every move a
-        tap (or long press, or toggle) aimed at an element by name (§18.2). No link, no route, no back, no swipe, no point."""
+        tap aimed at an element by name (§18.2). No link, no route, no back, no swipe, no point; never a long press or a toggle,
+        which no flip back follows (review R180b L1: as explore drives only taps)."""
         if not bundle or not self._may_map(bundle):
             return None
         plan = roads.plan(self.maps.data(root, bundle), a, b, build, "taps", routes=(), tool=roads.TOOL)
@@ -433,7 +437,7 @@ class RepairTools:
         out: list[tuple[dict, dict]] = []
         for road in plan.roads:
             move = road["move"]
-            if move.get("tool") not in roads.TARGETED or not isinstance(move.get("target"), dict) or "x" in move["target"]:
+            if move.get("tool") != "tap" or not isinstance(move.get("target"), dict) or "x" in move["target"]:
                 return None
             try:
                 tool, call = driving.call_of(move, {}, road.get("names"), False)

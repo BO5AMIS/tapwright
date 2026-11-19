@@ -3045,10 +3045,15 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         if data.get("version") == 2:  # a route (§18.5): after the fresh start, drive to its start, then its steps
             routes.need(data, {}, None)
             nested = _NESTED.set(True)
+            # (review R180b L5) a repair's check replay gates only its repaired steps: the drive to the route's start is the
+            # script's own start, as the person wrote it, so the floor doesn't hold it there either (the trial ran it so)
+            floor_off = _TOUCH_FLOOR.set(None) if _FLOOR_REPAIRED_ONLY.get() else None
             try:
                 await trip.Trip(self, client_id, scope, driving.Request(data["start"], None, {}, None, None, "any", False),
                                 {"look": False}).reach()
             finally:
+                if floor_off is not None:
+                    _TOUCH_FLOOR.reset(floor_off)
                 _NESTED.reset(nested)
             steps = routes.substitute(steps, {}, data.get("variables"))
         points = [n for n, step in enumerate(steps, 1)

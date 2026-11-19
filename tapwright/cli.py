@@ -1021,6 +1021,10 @@ def write_junit(out: str, results: list[tuple[str, str, str, float]]) -> None:
     ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
 
 
+_POLICY_HINT = (". Since 1.8.0 the --policy file is read at start (its words reach explore's skip floor): fix or restore it, "
+                "or run `tapwright connect` again without --policy (or with another file) to rewrite the host's config")
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "call":  # an installed `tapwright` script that predates __main__.main
         from .thin import main as call
@@ -1272,7 +1276,10 @@ def main() -> int:
             chosen = policies.load(a.policy) if a.policy else None
             ux_rules = uxcheck.load(a.ux_rules) if a.ux_rules else None
         except ValueError as e:
-            raise SystemExit(f"tapwright mcp: {e}") from e
+            # (review R180b L6: from 1.8.0 the file is read at start, as explore's skip floor uses it; a host config written by
+            # `tapwright connect --policy FILE` before then may name a file since moved or broken)
+            raise SystemExit(f"tapwright mcp: {e}" + _POLICY_HINT if a.policy and str(a.policy) in str(e) else
+                             f"tapwright mcp: {e}") from e
         mcp_server.run(screenshots=a.screenshots, apps=apps, dedicated=a.dedicated, rules=chosen, ux_rules=ux_rules,
                        brief=a.brief, maps=a.maps, dialog=not a.no_dialog, accounts=a.accounts, phone=a.phone)
         return 0
@@ -1376,7 +1383,10 @@ def main() -> int:
             # call: CodeRabbit, PR #20)
             chosen = policies.load(a.policy) if a.policy else None
         except ValueError as e:
-            raise SystemExit(f"tapwright serve: {e}") from e
+            # (review R180b L6: from 1.8.0 the file is read at start, as explore's skip floor uses it; a host config written by
+            # `tapwright connect --policy FILE` before then may name a file since moved or broken)
+            raise SystemExit(f"tapwright serve: {e}" + _POLICY_HINT if a.policy and str(a.policy) in str(e) else
+                             f"tapwright serve: {e}") from e
         whole, address = serve_phone(a.phone, a.address)
         if whole and (a.apps or a.dedicated):
             raise SystemExit("tapwright serve: --phone can't be used with --apps or --dedicated")

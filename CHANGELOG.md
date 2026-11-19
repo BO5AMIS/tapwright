@@ -17,10 +17,14 @@
   be a glyph or an SF Symbol name such as `trash`; the id `delete-row` still holds it), and the common symbol names of
   delete, send, share, pay and sign out are floor words. A switch with no id and no label is never flipped (listed as
   skipped); a flip whose flip back a pause, a person or a locked phone prevented stops the run naming the switch and
-  what it was. The floor is one gate checked as each move goes out, on the element
+  what it was, and so does a flip that gets no clean answer (a timeout, a dropped line, a screen that can't be read, any
+  error): the switch is named as one that may be flipped. A held touch is skipped for every build only when the floor
+  names its word; a hold the dry run gives without one (another app in front, a sheet seen for a moment) is retried by
+  a later build. The floor is one gate checked as each move goes out, on the element
   the touch really lands on after its lookup and any scroll (a dry run meets the same gate, `force` too); a `--policy` file's words
   and its `explore.skip` list only add to it (a caller's policy is combined with `serve --policy`, never put in its
-  place; a caller's `explore.submit` ids are limited to serve's list). An id that carries content is kept in no action
+  place; a caller's `explore.submit` ids are limited to serve's list; a `tapwright call explore --policy` or `call replay
+  --policy` with `repair` sends its file too, and no other call reads it). An id that carries content is kept in no action
   signature (the map and the report), as in `seen`. An alert over another app is never answered. It answers a permission prompt with its denial, by the button's name;
   submits no form; sets a flipped switch back; asks nobody. Pause and a person's input stop or hold it; a locked phone
   ends it with `locked` ("the phone reads as locked (or Notification Center is open over it)"), and explore never
@@ -30,7 +34,8 @@
 - Self-repairing replays: `replay` with `repair: "suggest"` adds the likely fix to a failure (a renamed, moved or hidden
   target, a new screen in the way) and tries no candidate (the script's own steps still run); `repair: "apply"` tries up to 3 candidates per break, each a real
   touch through the same skip floor (and so is its way back after a rejected one: a saved road through Sign out is never
-  driven), accepts one only when its check holds and the whole script then runs to its end,
+  driven; a road a repair drives or inserts is taps only, never a toggle or a long press; the floor's app is the script's
+  `app`), accepts one only when its check holds and the whole script then runs to its end,
   and keeps a repair only after the repaired file itself has replayed green from the script's fresh start, the repaired and inserted steps
   through the skip floor, the script's own unchanged steps as a plain replay runs them (apply takes about twice as long as a plain replay: the client waits up to 8 minutes, and
   nothing is kept when the client stopped waiting); then it
@@ -46,7 +51,18 @@
   (`dest-card`, never the `kyoto` of `dest-card-kyoto`). Before, Back from a detail to a list left scrolled a few rows read
   as another place, so explore called it a dead end, relaunched, and ended `cant_get_back` with little explored. Two
   screens whose lists differ stay two places. A map saved before keeps its places and keys: a read is matched to an old
-  place when its fixed ids are all among the old place's ids; new places get the new key.
+  place when its fixed ids are all among the old place's ids and something beyond the tab bar agrees too (a fixed id or
+  a list id that isn't the tab bar's, else the rows' families kin to the old place's own content), so a screen it never
+  held (a detail pushed in a tab, whose only fixed ids are the tab bar's) becomes a new place instead of being taken for
+  the tab's list; new places get the new key. Two reads with no list compare as before 1.8.0 (the part for lists is left
+  out), so two screens of other kinds and tabs no longer merge on the tab bar's ids.
+- `tapwright call explore` waits for its `minutes` + 6 minutes, and `tapwright call replay` with `repair: "apply"` up to 8
+  minutes (run, replay and drive 200 s), as the MCP server does: before, the thin call gave up after 120 s while the run
+  went on.
+- `tapwright serve --policy` and `tapwright mcp --policy` read and check the file at start (its words reach explore's and
+  a repair's skip floor). From 1.7.5 to 1.7.9 the flag was ignored, so a host config written by `tapwright connect --policy
+  FILE` whose file has since been moved or broken now stops the server from starting, with a message that says how to fix
+  it (restore the file, or run `tapwright connect` again).
 
 ## 1.7.9 (2026-11-19)
 

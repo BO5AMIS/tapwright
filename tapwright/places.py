@@ -6,7 +6,9 @@ the kinds of the top-level containers, the selected tab, and what lies on top (a
 counted. What lies inside a list (its rows, a header that scrolls with them) moves with every scroll, so it decides
 nothing, except as the families of its identifiers for a list that has no identifier of its own (1.8.0, W168). `parts`
 keeps those pieces, so two reads can be compared part by part. A place saved before 1.8.0 keeps its parts; a read is
-compared with it by its fixed identifiers (they must all be among the old ones), so an older map still works.
+compared with it by its fixed identifiers (they must all be among the old ones) and by something beyond the tab bar every
+screen of a tab shares (a non-tab fixed id, a list's id, or the families inside its list kin to the old place's own
+content), so an older map still works and a screen it never held is not taken for one it did (R180b M2).
 
 Never in a key, a name or the map file: a list row's text, a param's value, typed text, anything from a secure field.
 A navigation title is the one piece of content that is looked at: it breaks a tie between two places. It never names
@@ -51,6 +53,7 @@ class PlaceRead:
     key: dict
     title: str
     lang: str
+    chrome: frozenset[str] = frozenset()  # the tab bar's ids (`tab_ids`): never stored, only to compare with an old place
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,12 @@ def stem(identifier: str) -> str:
     and the part that names the row's content (`kyoto`) never reaches the map."""
     cut = _LAST_PART.sub("", identifier) if _LAST_PART.search(identifier) else _DIGITS.sub("", identifier)
     return cut or identifier
+
+
+def tab_ids(tree: ui.Tree) -> frozenset[str]:
+    """The identifiers of the tab bar's buttons, as an answer shows them: chrome every screen of every tab shares, so they
+    alone never say which screen of a tab this is (R180b M2)."""
+    return frozenset(ui.shown(e.identifier) for e in tree.items if e.role == "tab" and e.identifier)
 
 
 def parts_of(tree: ui.Tree) -> dict:
@@ -164,7 +173,7 @@ def read_place(tree: ui.Tree, lang: str | None = None) -> PlaceRead:
     language the app was started with, when it is known."""
     parts = parts_of(tree)
     title = " ".join(tree.structure.title.split())
-    return PlaceRead({"signature": signature(parts), "parts": parts}, title, language_of(title, lang))
+    return PlaceRead({"signature": signature(parts), "parts": parts}, title, language_of(title, lang), tab_ids(tree))
 
 
 def current(parts: dict) -> bool:
@@ -196,7 +205,12 @@ def _kin_families(a: dict, b: dict) -> tuple[dict, dict]:
     return {**a, "inner": named(inner_a, inner_b)}, {**b, "inner": named(inner_b, inner_a)}
 
 
-def _ids_agree(a: dict, b: dict) -> bool:
+def _jaccard(a: set[str], b: set[str]) -> bool:
+    union = a | b
+    return not union or len(a & b) / len(union) >= IDS_AGREE
+
+
+def _ids_agree(a: dict, b: dict, chrome: frozenset[str] = frozenset()) -> bool:
     if current(a) and current(b):
         ids_a, ids_b = (_identity(p) for p in _kin_families(a, b))
         union = ids_a | ids_b
@@ -206,13 +220,23 @@ def _ids_agree(a: dict, b: dict) -> bool:
         union = ids_a | ids_b
         return not union or len(ids_a & ids_b) / len(union) >= IDS_AGREE
     # a read now and a place saved before 1.8.0, whose ids hold the rows that were on screen then: the read's fixed ids
-    # and lists must all be among them (rows that scrolled since don't count); with none, the families inside the list
+    # and lists must all be among them (rows that scrolled since don't count). The tab bar's ids (`chrome`) are among every
+    # old place of the tab, so something beyond them must agree too (R180b M2): a fixed id or a list's id that isn't the
+    # tab bar's; else the families inside the read's list kin to the old place's own content (its ids beyond the read's
+    # fixed ones); else, with no list content to go by, most of the old place's ids (Jaccard)
     new, old = (a, b) if current(a) else (b, a)
     old_ids = set(old.get("ids", ()))
     fixed = set(new.get("ids", ())) | {i for i in new.get("lists", ()) if i}
-    if fixed:
-        return fixed <= old_ids
     inner = set(new.get("inner", ()))
+    if fixed:
+        if not fixed <= old_ids:
+            return False
+        if fixed - chrome:
+            return True
+        if inner:
+            own = {stem(i) for i in old_ids - fixed}
+            return any(_kin(x, s) for x in inner for s in own)
+        return _jaccard(fixed, old_ids)
     if inner:
         stems = {stem(i) for i in old_ids}
         return all(any(_kin(x, s) for s in stems) for x in inner)
@@ -239,16 +263,23 @@ def _kin(x: str, y: str) -> bool:
     return long_.startswith(short) and long_[len(short)] in "-_. "
 
 
-def similarity(a: dict, b: dict) -> float:
+def similarity(a: dict, b: dict, chrome: frozenset[str] = frozenset()) -> float:
     """How much of two reads' parts agree, 0 to 1 (WEIGHTS). A sheet or alert over one and not the other is another
     place outright: 0. Rows of a list never decide it (1.8.0, W168): a list scrolled by ten rows is the same place;
-    two different lists are not (`lists`, weighed so that alone it falls under the threshold)."""
+    two different lists are not (`lists`, weighed so that alone it falls under the threshold). `chrome`: the tab bar's ids
+    of a read now, which alone never match it to a place saved before 1.8.0 (R180b M2)."""
     if a.get("layer") != b.get("layer"):
         return 0.0
-    lists_agree = not (current(a) and current(b)) or _lists_agree(a, b)
-    agree = {"ids": _ids_agree(a, b), "lists": lists_agree,
+    # `lists` counts only when both reads tell what scrolls and either shows a list; otherwise it is left out of the sum and
+    # of the whole (R180b L2: a free share for it let two screens of different kinds and tabs merge on the tab bar's ids)
+    weights = dict(WEIGHTS)
+    if not (current(a) and current(b) and (a.get("lists") or b.get("lists"))):
+        del weights["lists"]
+    agree = {"ids": _ids_agree(a, b, chrome), "lists": "lists" in weights and _lists_agree(a, b),
              "kinds": a.get("kinds") == b.get("kinds"), "tab": a.get("tab") == b.get("tab"), "layer": True}
-    return round(math.fsum(WEIGHTS[part] for part, ok in agree.items() if ok), 9)  # (exact: 1.0 for all, on every Python)
+    whole = math.fsum(weights.values())
+    # (exact: 1.0 for all, on every Python)
+    return round(math.fsum(weights[part] for part, ok in agree.items() if ok and part in weights) / whole, 9)
 
 
 def same_place(a: dict, b: dict, threshold: float = THRESHOLD) -> bool:
@@ -330,6 +361,24 @@ def _next_number(data: dict) -> int:
 
 # ---- finding and saving places ----
 
+SHARED_FROM = 3  # an old map's places from which ids most of them share are taken for chrome (`shared_ids`)
+
+
+def shared_ids(data: dict) -> frozenset[str]:
+    """Ids that more than half the map's places saved before 1.8.0 hold (a tab bar that isn't a TabBar, a header every
+    screen has): chrome that tells none of them apart, so it alone never matches a read to one (R180b M2). None until the
+    map has SHARED_FROM such places."""
+    olds = [set(p["key"]["parts"].get("ids", ())) for p in data["places"].values()
+            if isinstance(p.get("key", {}).get("parts"), dict) and not current(p["key"]["parts"])]
+    if len(olds) < SHARED_FROM:
+        return frozenset()
+    counts: dict[str, int] = {}
+    for ids in olds:
+        for i in ids:
+            counts[i] = counts.get(i, 0) + 1
+    return frozenset(i for i, n in counts.items() if n * 2 > len(olds))
+
+
 def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
     """The saved place this read is, and how well it fits; (None, 0.0) when it is none. The best fit at or over the
     threshold wins; fits within TIE of each other are told apart by the navigation title, then by the newest.
@@ -337,11 +386,12 @@ def locate(data: dict, read: PlaceRead) -> tuple[str | None, float]:
     tell it from any other screen of the same kinds."""
     wanted = title_hash(data["titleKey"], read.lang, read.title) if read.title else None
     fits: list[tuple[float, bool, str, str]] = []
+    chrome = read.chrome | shared_ids(data)
     for name, place in data["places"].items():
         parts = place["key"].get("parts")
         if not isinstance(place["key"].get("signature"), str) or not isinstance(parts, dict):
             continue  # another tool's kind of key
-        score = similarity(read.key["parts"], parts)
+        score = similarity(read.key["parts"], parts, chrome)
         if score < THRESHOLD:
             continue
         has_title = wanted is not None and place.get("titles", {}).get(read.lang) == wanted

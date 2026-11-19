@@ -47,6 +47,7 @@ FAKE_TEXT, FAKE_EMAIL = "Test", "test@example.com"  # §25.6: the only fake valu
 TOGGLE_ROLES = ("switch", "radio", "checkbox")
 WAITING_CODES = ("paused", "busy", "locked")  # a refusal that ends the run (§25.9)
 RETRY_CODES = ("stale", "timeout")  # a refusal that says nothing about the element: not recorded
+BEFORE_TOUCH = ("not_found", "ambiguous", "not_actionable", "not_allowed", "stale")  # refused before any touch went out
 MOVE_TOOLS = ("tap", "back")  # the moves a way is driven by: never a long_press, a swipe or a toggle (§25.4)
 
 
@@ -84,6 +85,12 @@ class PhoneStop(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+def _why(stop: Exception) -> str:
+    """What stopped a toggle's flip back, for its note: a stop's reason, else a refusal's code."""
+    reason = getattr(stop, "reason", None) or getattr(stop, "code", None)
+    return str(reason) if reason else type(stop).__name__
 
 
 class Halt(Exception):
@@ -372,22 +379,29 @@ class Explorer:
         target = ui.Target(ref=element.ref)
         check = await self.phone.check(target, "toggle")
         if check.kind != "ok":
-            self._skip(place, action.sig, explorefloor.Skip("policy", check.word))
+            self._held_by_check(place, action.sig, check)
             return True
         mark = self.phone.mark()
         self._spend()
         self.moves.append((place, action.sig))
-        moved = await self._moved(await self.phone.toggle(target, not before))
-        if moved.code is not None:
+        try:
+            moved = await self._moved(await self.phone.toggle(target, not before))
+        except Refused as e:  # (an answer that isn't a Moved: the touch may have gone out)
+            self._toggle_lost(element, before, e.code, maybe=True)
+        if moved.code in BEFORE_TOUCH:
             await self._refused(place, action, moved)
             return True
+        if moved.code is not None:
+            # (review R180b M1) a timeout, a dropped line, an app that stopped answering or any other error comes after the
+            # touch may have gone out: the switch may be flipped, so the run stops naming it and what it was
+            self._toggle_lost(element, before, moved.code, maybe=True)
         # from the flip to the read after the flip back, nothing ends the run but a flip that can't be shown to be restored
         # (review R180 M1): a pause, a person, a locked phone or the budget in between stops the run naming the switch left
         # changed and what it was (it doesn't fight the person: the flip back is tried once, never waited for)
         try:
             now = await self._toggle_value(place, action)
-        except (PhoneStop, Halt) as stop:
-            self._toggle_lost(element, before, stop.reason)
+        except (PhoneStop, Halt, Refused) as stop:  # (a screen that can't be read: R180b M1)
+            self._toggle_lost(element, before, _why(stop))
         if now is not None and now.checked == before:  # the flip did nothing: nothing to set back
             self._mark(place, action.sig, "same")
             return True
@@ -396,14 +410,14 @@ class Explorer:
         self.steps += 1  # the flip back is a touch too, which the budget never refuses (one move with the flip, §25.7)
         try:
             back = await self.phone.toggle(ui.Target(ref=now.ref), before)
-        except PhoneStop as stop:  # (the restoring touch itself stopped: the switch is named, CodeRabbit PR #20)
-            self._toggle_lost(element, before, stop.reason)
+        except (PhoneStop, Refused) as stop:  # (the restoring touch itself stopped: the switch is named, CodeRabbit PR #20)
+            self._toggle_lost(element, before, _why(stop))
         if back.code is not None:
             self._toggle_lost(element, before, back.code)
         try:
             again = await self._toggle_value(place, action)
-        except (PhoneStop, Halt) as stop:
-            self._toggle_lost(element, before, stop.reason)
+        except (PhoneStop, Halt, Refused) as stop:
+            self._toggle_lost(element, before, _why(stop))
         if again is None or again.checked != before:
             self._toggle_lost(element, before)
         self.flipped += 1
@@ -427,14 +441,19 @@ class Explorer:
             return None
         return next((a.element for a in self._actions(look.tree, place, False) if a.sig == action.sig and a.element is not None), None)
 
-    def _toggle_lost(self, element: ui.Element, before: bool | None = None, why: str | None = None) -> NoReturn:
+    def _toggle_lost(self, element: ui.Element, before: bool | None = None, why: str | None = None,
+                     maybe: bool = False) -> NoReturn:
         """A flip that can't be shown to be restored ends the run (§25.7): the phone is left as it is, and the stop names the
         switch and the value it had (`id=notify-switch, was on`). `why`: what came between the flip and the flip back (a pause,
-        a person, a locked phone), said in a note."""
+        a person, a locked phone), said in a note. `maybe`: the flip itself got no clean answer (a timeout, a dropped line), so
+        the switch may or may not be flipped (`id=notify-switch, may be flipped, was on`: review R180b M1)."""
         name = f"id={element.identifier}" if element.identifier else f'label={element.label or "?"}'
         was = "" if before is None else f", was {'on' if before else 'off'}"
-        self.detail = f"{name}{was}"
-        if why is not None:
+        self.detail = f"{name}, may be flipped{was}" if maybe else f"{name}{was}"
+        if maybe:
+            self.notes.append(f"the switch {name} got no clean answer to its flip ({why or 'no answer'}); it may be flipped"
+                              f" and is left as it is{was}")
+        elif why is not None:
             self.notes.append(f"the switch {name} was flipped and couldn't be set back ({why}); it is left changed{was}")
         raise Halt("toggle_not_restored")
 
@@ -804,6 +823,15 @@ class Explorer:
         if self.elapsed() >= self.budget.minutes * 60:
             raise Halt("budget_minutes")
 
+    def _held_by_check(self, place: str, sig: str, check: Check) -> None:
+        """The dry run held a touch (review R180b L4, as `_refused`): a skip kept for every build only when it names the word
+        that holds the element (the floor, the policy, the skip list); otherwise (another app in front, a sheet seen for a
+        moment) it is `refused` for this build only, so a later build tries it again."""
+        if check.word:
+            self._skip(place, sig, explorefloor.Skip("policy", check.word))
+        else:
+            self._mark(place, sig, "refused", code=check.kind)
+
     def _skip(self, place: str, sig: str, why: explorefloor.Skip) -> None:
         if explored.mark_skipped(self.data, place, sig, why.why, mapfile.now(), why.word):
             self.map.changed()
@@ -825,7 +853,7 @@ class Explorer:
         target = ui.Target(ref=element.ref)
         check = await self.phone.check(target)
         if check.kind != "ok":
-            self._skip(place, action.sig, explorefloor.Skip("policy", check.word))
+            self._held_by_check(place, action.sig, check)
             return True
         mark = self.phone.mark()
         titles = places.titled_places(self.data, element.label, element.value)

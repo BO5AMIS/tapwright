@@ -476,11 +476,13 @@ def repair_markdown(name: str, repairs: list[Repair], at: datetime.datetime, ver
     return "\n".join(lines) + "\n"
 
 
-def write_atomic(path: Path, text: str) -> None:
-    """A temporary file in the same folder, then a rename: a reader never sees half a file."""
+def write_atomic(path: Path, text: str | bytes) -> None:
+    """A temporary file in the same folder, then a rename: a reader never sees half a file. Text is written as UTF-8 with its
+    own line ends (`
+` on every system); bytes exactly as they are (review R180b L3: what adopt installs is what was checked)."""
     temp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(6)}.tmp")  # (one per write, as check_path)
     try:
-        temp.write_text(text, encoding="utf-8")
+        temp.write_bytes(text if isinstance(text, bytes) else text.encode("utf-8"))
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
@@ -596,8 +598,7 @@ def adopt(script: Path, audit: Callable[[str], bool], expected: str | None = Non
         return False, f"nothing to adopt: {repaired.name} isn't there (a run with --repair apply writes it when it passes)"
     try:
         raw = repaired.read_bytes()
-        text = raw.decode("utf-8")
-        json.loads(text)
+        json.loads(raw.decode("utf-8"))
     except (OSError, ValueError) as e:
         return False, f"can't adopt {repaired.name}: {getattr(e, 'strerror', None) or e}"
     if expected is not None and digest(raw) != expected:
@@ -618,7 +619,7 @@ def adopt(script: Path, audit: Callable[[str], bool], expected: str | None = Non
                     pass
             finally:
                 staged.unlink(missing_ok=True)
-        write_atomic(script, text)
+        write_atomic(script, raw)  # (the very bytes the run checked, never decoded and written again)
         repaired.unlink(missing_ok=True)
     except OSError as e:
         return False, f"couldn't adopt {repaired.name}: {getattr(e, 'strerror', None) or e}"
