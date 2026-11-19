@@ -1,6 +1,6 @@
 """The passcode unlock (AGENT-TOOLS §18.6, §11.5, §24.5; unlock.py). With fakes: no phone. The passcode is typed only
 when the lock screen's passcode entry is proven in SpringBoard's tree, never into an app or the XCTest prompt, at most
-twice an hour, never again after a refusal, and it never appears in what comes back. All values are synthetic."""
+twice an hour when it doesn't unlock (1.9.1: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
 import asyncio
 
 import pytest
@@ -178,18 +178,55 @@ def test_a_changed_passcode_in_the_file_may_be_tried_after_a_refusal():
     assert run(u.unlock(screen, "135790", source=unlock.Source("v.json", 2, 10))).code == "unlocked"
 
 
-def test_at_most_two_attempts_an_hour():
+def test_an_unlock_that_works_is_never_limited():
+    """(1.9.1, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
+    unlocked as often as it likes. The wakes that type are not counted either."""
     u, clock = unlocker()
     screen = Screen()
-    for _ in range(2):
+    for _ in range(20):
         screen.is_locked = True
         assert run(u.unlock(screen, PASSCODE)).code == "unlocked"
         clock.t += 60
-    screen.is_locked = True
+    assert len(screen.pressed) == 20 and u.tries_left() == 2
+
+
+def _refused_then_reset(u, clock, screen) -> None:
+    assert run(u.unlock(screen, PASSCODE)).code == "refused"
+    assert run(u.ledger.reset())[0]  # a person checked the vault and cleared the refusal
+    clock.t += 60
+
+
+def test_at_most_two_failed_attempts_an_hour_even_after_a_reset():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    _refused_then_reset(u, clock, screen)
+    _refused_then_reset(u, clock, screen)
     r = run(u.unlock(screen, PASSCODE))
-    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and "twice this hour" in r.message
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and "failed twice this hour" in r.message
     clock.t += 3600
+    screen.right = PASSCODE  # the phone's passcode is the file's again
     assert run(u.unlock(screen, PASSCODE)).code == "unlocked" and len(screen.pressed) == 3
+
+
+def test_at_most_three_failed_attempts_a_day():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    for _ in range(3):
+        _refused_then_reset(u, clock, screen)
+        clock.t += 3600
+    r = run(u.unlock(screen, PASSCODE))
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 3 and "3 times today" in r.message
+
+
+def test_successes_between_failures_do_not_count():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    _refused_then_reset(u, clock, screen)
+    screen.right = PASSCODE
+    for _ in range(5):
+        screen.is_locked = True
+        assert run(u.unlock(screen, PASSCODE)).code == "unlocked"
+    assert u.tries_left() == 1  # only the refused one counts
 
 
 def test_a_typing_error_counts_as_a_refusal_and_never_echoes_what_was_sent():

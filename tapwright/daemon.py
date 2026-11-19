@@ -1724,9 +1724,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 except (NotSetUp, PhoneLocked, AppNotAnswering):  # the tunnel is fine: rebuilding it won't help
                     raise
                 except Exception as e:
-                    self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
-                    await s.reset()
-                    await s.ensure()
+                    if not await self._session_again_on_runner(s, e):
+                        self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
+                        await s.reset()
+                        await s.ensure()
             else:
                 await s.ensure()
             s.session_settings = {**PRESETS[self.preset], **NO_IDLE_WAIT}  # (a session re-created later gets them in ensure)
@@ -1734,6 +1735,33 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._fps = self._preset_fps()
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
+
+    async def _session_again_on_runner(self, s, error: Exception) -> bool:
+        """(1.9.1, plug and forget) A new session timed out on a runner that is still running and still answers /status
+        (11-19 05:48 and 05:51: an audit kept WebDriverAgent busy, POST /session got no answer in 30 s, and the reset
+        that followed replaced the runner). Ask for the session once more on the same runner before anything is torn
+        down: a new runner costs iOS's passcode prompt once its consent is about 8 h old. True when that worked; False
+        (nothing changed) when it doesn't apply or didn't work, and the caller resets as before."""
+        device = s.device
+        alive = getattr(device, "runner_alive", None)
+        if not isinstance(error, ConnectionLost) or alive is None or not alive():
+            return False
+        try:
+            if not await device.wda_alive():
+                return False
+        except Exception:
+            return False
+        self.log(f"WebDriverAgent didn't answer ({error}), but its runner still answers: asking it for a session again")
+        s.sid = None
+        try:
+            await s.ensure()
+        except (NotSetUp, PhoneLocked, AppNotAnswering):
+            raise
+        except Exception as again:
+            self.log(f"the runner didn't give a session again ({again})")
+            return False
+        self.log("kept the running runner")
+        return True
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
@@ -5501,8 +5529,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with
         the passcode saved in serve's own vault (`--accounts FILE`, `phone.passcode`), in every mode: personal,
         dedicated and `--phone` alike. The agent never sees or sends the passcode; every rule of unlock.py holds (only
-        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 attempts an hour and 3 a day, none after a
-        refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
+        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 failed attempts an hour and 3 a day, none
+        after a refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
         `drive` or a journey it is refused, and a lock there still ends them (§19.5). Paused: `paused`; a person at
         the phone: `busy`. No passcode saved: `locked`, asking the user."""
         if not self._top_level() or client_id in self._journeys:

@@ -30,9 +30,11 @@ with its passcode entry showing, types the passcode there, and checks that the p
     lights each key as it is touched). The audit log gets `vault` with the name `phone.passcode`, never a value.
     It is not in the text redactor either: a 4 to 6 digit passcode replaced in answers would turn every date and price
     into a test of it, and it is never typed anywhere text can show it (the lock screen shows dots).
-  - **At most 2 attempts an hour and 3 a day, across processes, and none after a refusal.** An attempt is a passcode
-    typed. The attempts and the refusal are kept on disk (`~/.tapwright/unlock-state.json`, written whole and changed
-    under a lock), so a new daemon (the last one stopped when idle, or was shut down) knows them. After an attempt that
+  - **At most 2 failed attempts an hour and 3 a day, across processes, and none after a refusal.** An attempt is a
+    passcode typed; one that unlocks the phone is taken off the counts when it ends (1.9.1, the owner's decision: iOS's
+    lockout counts only wrong passcodes, so an unattended phone can be unlocked as often as it locks). One whose end
+    isn't known (the process died while typing) stays counted. The attempts and the refusal are kept on disk
+    (`~/.tapwright/unlock-state.json`, written whole and changed under a lock), so a new daemon (the last one stopped when idle, or was shut down) knows them. After an attempt that
     leaves the phone locked, nothing more is typed (`locked: the passcode in the file was refused`): iOS delays the lock
     screen after a few wrong ones, and erases the phone after ten when "Erase Data" is on. The record keeps nothing of
     the passcode, not even a hash: the refusal is tied to the vault file (its path, modification time and size). A
@@ -85,10 +87,10 @@ REFUSED_HELD = (f"the phone is locked, and the passcode unlock stopped after a r
                 f"a person checks phone.passcode in the vault and runs `{RESET}`. Ask the user to unlock it")
 NO_PASSCODE = ("the phone reads as locked (or Notification Center is open over it); ask the user to unlock it or "
                "close Notification Center")
-LIMITED = ("the phone is locked, and the passcode unlock was already tried twice this hour (at most 2 an hour, so iOS's "
-           "lockout delays are never reached); ask the user to unlock it")
-LIMITED_DAY = ("the phone is locked, and the passcode unlock was already tried 3 times today (at most 3 a day); ask the "
-               "user to unlock it")
+LIMITED = ("the phone is locked, and the passcode unlock already failed twice this hour (at most 2 attempts that don't "
+           "unlock an hour, so iOS's lockout delays are never reached); ask the user to unlock it")
+LIMITED_DAY = ("the phone is locked, and the passcode unlock already failed 3 times today (at most 3 attempts that don't "
+               "unlock a day); ask the user to unlock it")
 NO_RECORD = (f"the phone is locked, and the passcode unlock's record of attempts can't be read or written, so nothing "
              f"was typed; ask the user to unlock it (`{RESET}` starts a new record)")
 UNDER_WAY = "the passcode unlock is under way in another process; try again in a moment"
@@ -355,13 +357,19 @@ class Ledger:
             if data is None or data.get("attempt") != attempt:
                 return None, None
             if unlocked:
-                return {**data, "refused": None, "retried": False, "pending": None, "attempt": None}, None
+                # (1.9.1, the owner's decision) an attempt that unlocked the phone is taken off the counts: iOS's lockout
+                # counts only wrong passcodes, so only those (and attempts whose end isn't known) are limited
+                tries = list(data["tries"])
+                if data.get("pending") in tries:
+                    tries.remove(data["pending"])
+                return {**data, "tries": tries, "refused": None, "retried": False, "pending": None, "attempt": None}, None
             return {**data, "pending": None, "attempt": None}, None
         await self._change(change)
 
     async def reset(self) -> tuple[bool, str]:
         """`tapwright unlock-reset`, a person's command: the refusal is cleared, so the vault's passcode may be tried
-        again; the counts (2 an hour, 3 a day) still hold. A record that can't be read is started again."""
+        again; the counts of failed attempts (2 an hour, 3 a day) still hold. A record that can't be read is started
+        again."""
         def change(data: dict | None) -> "tuple[dict | None, Result | None]":
             if data is None:
                 return _fresh(), Result(True, "new")
@@ -375,8 +383,8 @@ class Ledger:
             return True, f"The passcode unlock's record at {self.path} couldn't be read; it was started again."
         if result.code == "none":
             return True, "The passcode unlock wasn't stopped by a refused passcode; nothing to clear."
-        return True, ("Cleared: the passcode unlock may type the vault's phone.passcode again (at most 2 an hour and 3 a "
-                      "day). Check first that it is the phone's passcode: each wrong one counts on the phone.")
+        return True, ("Cleared: the passcode unlock may type the vault's phone.passcode again (at most 2 failed "
+                      "attempts an hour and 3 a day). Check first that it is the phone's passcode: each wrong one counts on the phone.")
 
     def stopped(self) -> bool:
         """Is the unlock stopped by a refusal, or by a record that can't be read (for `doctor --unattended`)?"""
