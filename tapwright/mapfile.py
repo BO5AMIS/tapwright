@@ -412,8 +412,22 @@ class MapFile:
         names = list(data.get("routes", {}))
         if not HIDE_AUTO.get():
             return names
-        return [n for n in names if self._route_file(data["routes"][n], hide=False) is None
-                or self._route_file(data["routes"][n], hide=False).get("auto") is not True]
+        out = []
+        for n in names:
+            route = self._route_file(data["routes"][n], hide=False)  # (read once: CodeRabbit, PR #22)
+            if route is None or route.get("auto") is not True:
+                out.append(n)
+        return out
+
+    def route_stamp(self, data: dict, name: str) -> int | None:
+        """A route file's modification time (ns): which version of it a drive ran (CodeRabbit, PR #22)."""
+        rel = data.get("routes", {}).get(name)
+        if not isinstance(rel, str):
+            return None
+        try:
+            return (self.folder / rel).resolve().stat().st_mtime_ns
+        except OSError:
+            return None
 
     def _route_file(self, rel: object, hide: bool = True) -> dict | None:
         if not isinstance(rel, str):

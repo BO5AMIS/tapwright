@@ -66,6 +66,7 @@ class Chain:
     def scrolled(self, step: dict | None) -> None:
         """A scroll at the place the chain is at: kept for the next step (None: one that can't be kept, left out)."""
         if step is None:
+            self.taint()  # (CodeRabbit, PR #22) a scroll a route can't replay may have brought what the next tap needs
             return
         if len(self.pending) >= MAX_PENDING:
             self.taint()
@@ -169,22 +170,32 @@ def scroll_step(args: dict) -> dict | None:
     test account's value). None for one aimed by words or a ref (left out: a tap scrolls to a target in the tree)."""
     target = args.get("target")
     to = args.get("to")
+    step: dict = {"tool": "scroll"}
     if target is not None:
         ident = getattr(target, "id", None) if not isinstance(target, dict) else target.get("id")
         if (not isinstance(ident, str) or not ui.structural_id(ident) or ui.private(ident)
                 or (getattr(target, "index", None) if not isinstance(target, dict) else target.get("index")) is not None):
             return None
-        return {"tool": "scroll", "to": "target", "target": {"id": ident}} if to == "target" else None
+        if to == "target":
+            return {"tool": "scroll", "to": "target", "target": {"id": ident}}
+        step["target"] = {"id": ident}  # (the list that holds it is the one scrolled)
     if to in ("start", "end"):
-        return {"tool": "scroll", "to": to}
+        step["to"] = to
+    elif to is not None:
+        return None
+    # (CodeRabbit, PR #22) the direction and amount given are kept (a horizontal list scrolled to its end); a scroll with
+    # neither direction nor end scrolls down, as the tool does
     direction = args.get("direction")
     if direction in ("up", "down", "left", "right"):
-        step: dict = {"tool": "scroll", "direction": direction}
-        amount = args.get("amount")
-        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-            step["amount"] = amount
-        return step
-    return None
+        step["direction"] = direction
+    elif direction is not None:
+        return None
+    elif "to" not in step:
+        step["direction"] = "down"
+    amount = args.get("amount")
+    if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+        step["amount"] = amount
+    return step
 
 
 def clean(text: str) -> str:
@@ -203,7 +214,8 @@ def base_name(data: dict, end: str, last: dict) -> str:
     ident = target.get("id") if isinstance(target, dict) else None
     if isinstance(ident, str) and ui.structural_id(ident) and not ui.private(ident) and (name := clean(ident)):
         return name
-    return clean(end) or "place"
+    # (CodeRabbit, PR #22) the place's own name only when it is a numbered one: an older map may hold a name a title gave it
+    return end if re.fullmatch(r"place_\d+", end) else "place"
 
 
 @dataclass(frozen=True)

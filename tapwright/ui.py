@@ -301,6 +301,7 @@ class Tree:
 
 
 BARS = {"NavigationBar", "StatusBar", "Toolbar", "TabBar"}  # what iOS draws over the content's edges
+ACCESSORY_MAX = 60.0  # (1.9.0) the tallest bar taken for the keyboard's input accessory
 COVERING_BARS = {"NavigationBar", "Toolbar", "TabBar", "Keyboard"}  # what a touch at an element's centre can land on instead
 # A layer is a later child of some node, at most LAYER_MAX_DEPTH levels below the Application (deeper is React
 # Native's own nesting, where a header and a body both fill the screen), covering LAYER_COVER of the screen.
@@ -1111,7 +1112,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 icon_only=icon_only_button(node, kind, label, rect, in_tab_bar),
                                 no_trait=loose is not None)
             candidate.placed, candidate.raw_rect = _placed(node)
-            candidate.by_keyboard = keys_top is not None and not in_keyboard
+            candidate.by_keyboard = keys_top is not None and not in_keyboard and _accessory_bar(node, keys_top)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had
@@ -1162,6 +1163,19 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                 window, up = up, parents.get(up)
             if window is not n:
                 keyboard_windows[window] = min(_rect(n)[1], keyboard_windows.get(window, math.inf))
+    def _accessory_bar(node: ET.Element, keys_top: float) -> bool:
+        """(1.9.0; CodeRabbit, PR #22) Is this node in the keyboard's input accessory or toolbar: below the window, an
+        ancestor that is a Toolbar, or a bar at most ACCESSORY_MAX tall whose bottom touches the keys' top (2 pt)? Being
+        in the keyboard's window alone isn't enough."""
+        up = parents.get(node)
+        while up is not None and _kind(up) not in ("Window", "Application"):
+            if _kind(up) == "Toolbar":
+                return True
+            _, y, _, h = _rect(up)
+            if 0 < h <= ACCESSORY_MAX and abs(y + h - keys_top) <= 2:
+                return True
+            up = parents.get(up)
+        return False
     keyboard_rects = [_keyboard_view(n, parents, screen_rect) for n in root.iter()
                       if _kind(n) == "Keyboard" and _rect(n)[3] > 0]
     if _kind(root) == "Application" and (bundle := _text(root.get("bundleId"))):

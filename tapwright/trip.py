@@ -86,6 +86,8 @@ class Trip:
         self.goal = req.to or ""  # the place the moves go to: the call's `to`, or a route's start
         self.route: dict | None = None  # the route a call drives (`route`)
         self.route_started = False  # its own steps began (only a failure from there counts against it: 1.9.0 H3)
+        self.route_done = False  # it ran and arrived: a `then` step's failure after it isn't the route's (CodeRabbit, PR #22)
+        self.route_stamp: int | None = None  # its file's modification time as read: results go to that version only
         self.ran: list[tuple[str, int]] = []  # the routes run on the way: (name, steps)
         self.writes = True  # a replay reads the map and never writes it (§18.9)
         self.edges: list[roads.RouteEdge] = []
@@ -282,6 +284,8 @@ class Trip:
             held = ", ".join(file.visible(self.data)) or "none yet"
             raise Refused("not_found", f"no saved route called {name}; the routes are: {held}")
         routes.check({**found, "name": found.get("name", name)})
+        if self.req.route == name:
+            self.route_stamp = file.route_stamp(self.data, name)
         return {**found, "name": name}
 
     async def run(self) -> dict:
@@ -297,6 +301,7 @@ class Trip:
                 self.route_started = True
                 await self.run_route(self.route["name"], self.route)
                 await self.check_end(self.route)
+                self.route_done = True
         except Refused as e:
             raise await self.with_screen(e) from None
         return await self.arrive()
