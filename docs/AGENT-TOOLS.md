@@ -1398,55 +1398,85 @@ In each tool, on Wayfare, on the real phone. The bugs are planted and listed in 
 ## 30. The Token Update (1.9.0; AGENT-TOOLS 1.17)
 
 The cost of a task is decided by its number of calls: each re-reads the whole context. 1.9.0 adds lines and defaults
-that save calls; nothing is taken away, and `--no-hints` gives 1.8.5's answers and instructions word for word.
+that save calls; nothing is taken away, and `--no-hints` gives 1.8.5's behaviour back (§30.5). The shared contract is
+[AGENT-TOOLS 1.17](history/AGENT-TOOLS-1.17.md) §30; this is what Tapwright does.
 
 ### 30.1 The token rules
 The MCP `instructions` begin with the shared block (word for word in Tapline), `<replay>` being `drive {"route": "<name>"}`:
 read each answer; known steps in one `run` with an `expect`; target by id; a screenshot only to judge looks
-(`screenshot: false` on a `look` that only reads); use `Known:`;
-on a long or unknown task hand the driving to one small, fast agent; a bug report is `bug_report`.
+(`screenshot: false` on a `look` that only reads); use `Known:`; on a long or unknown task hand the driving to one
+small, fast agent; a bug report is `bug_report`.
 
 ### 30.2 Routes that save themselves, and `Known:`
 - A session's way from the app's start (the screen after `open_app`) to a place is saved as that place's route
   (`routes/<name>.json` in the app's map folder, `"auto": true`), with no `record` call. Navigation only: `tap`, `back`,
-  `open_url`, and the scrolls made at a place before leaving it. Typed text, a toggle, any other action, a touch the
-  policy held, a tap that stays on its screen, a list row with no id or a point break the way from there: no place
-  reached through it is saved. Its steps are the targets the map keeps for roads (an id, else a label or text; never a
-  title, a row's words or an id that carries content).
-- A place keeps one route: a shorter way replaces it, and so does a working way when it has failed since. A replay
-  (`drive {"route": ...}`) that fails twice in a row drops it (`Note: route <name> dropped ...`). A person's route is
-  never replaced, and a place a person's route already reaches gets none of its own.
+  `open_url`, and the scrolls made at a place before leaving it. Its steps are the targets the map keeps for roads (an
+  id, else a label or text; never a title, a row's words or an id that carries content).
+- What breaks the way from where it happened (no place reached through it is saved): any typing (a `type_text`, a `run`
+  with a step that isn't navigation, typing with `look: false`); a toggle or any other action; a touch the policy held;
+  a tap that stays on its screen (with or without a visible change); a list row with no id or a point; and a tap that
+  leaves a form by a control that may submit it: the skip floor's words (Delete, Send, Buy...), its submit words on a
+  screen with an input (Save, Submit, Continue, Confirm, Sign in...), or any tap that leaves a form (2 or more inputs and
+  a button). A `drive` of a person's route carries the way on only when every step of that route is plain navigation.
+- A place keeps one route of the tool's own, whatever start it was reached from: a shorter way replaces it, and so does
+  a working way when it has failed since. A replay (`drive {"route": ...}`) whose own steps fail twice in a row drops it
+  (`Note: route <name> dropped ...`); not reaching the route's start never counts. At most 50 such routes per app: past
+  that the least used and oldest go. A person's route is never replaced, and a place a person's route reaches from the
+  same start gets none of its own.
 - The name: the name given with `map {"name"}`, else the id of the move that reaches the place (`plan-trip` gives
   `plan_trip`; an id is the developer's, not content), else the place's own `place_<n>`. Never a label, a text or a
-  title: they are the screen's words and can be private.
-- The first answer of a session that shows the app has, after its header, `Known: <name>, ... (one call each: drive
-  {"route": "<name>"})`: the saved routes with no variables whose start can be reached from where the app is, the most
-  used first, else the most recently reached, at most 8 and then `+N more`. Nothing known: no line.
+  title: they are the screen's words and can be private. `Known:` shows the route's name, since that is what
+  `drive {"route": ...}` takes (the leads' reading of the frozen §30.2).
+- The first answer of a session that shows the app, once where the app is is known, has after its header
+  `Known: <name>, ... (one call each: drive {"route": "<name>"})`: the saved routes that replay with nothing the agent
+  hasn't given (no variable, no account, no link value), whose start can be reached from where the app is without a
+  link's value, the most used first, else the most recently reached, at most 8 and then `+N more`. A name the redaction
+  would change is left out. Nothing known: no line. None in a user's-eyes journey.
 
 ### 30.3 Hints
-After the `Note:` lines, at most one `Hint:` per answer, each kind once per session, never on a safety refusal
-(`not_allowed`: needs_confirmation, a floor hold); when several apply, logs > known way > form > screenshot > long task.
-The sentences are the shared ones, word for word (tapwright/tokentext.py). A form opened (a new screen, the full list,
-with 2 or more inputs and a button: "fill the fields and save in one `run`, with an `expect` on the save step."); 3
-single taps in a row along known roads to a place a saved route reaches ("this way is known: `drive {"route":
-"<name>"}` reaches <name> in one call."); a screenshot asked on an action whose text had the changes; a long task (from the session's 20th call: "On a long task, the main session can hand
-the driving to one small, fast agent; if you are that agent, carry on.", harmless to a helper, whose calls come over
-the same server); the app logged an error of its own or crashed and `logs` wasn't read since (never a tool error such
-as `not_found`).
+After the `Note:` lines, at most one `Hint:` per answer, each kind once per session. None on a safety refusal
+(`not_allowed`: needs_confirmation, blocked, a floor hold, a person's decline; and `paused`), none in a user's-eyes
+journey, a scheduled run or the command line's own calls (`tapwright replay`, `tapwright explore`). When several apply:
+logs > known way > form > screenshot > long task. The sentences are the shared ones, word for word
+(tapwright/tokentext.py):
+- the app logged an error of its own or crashed since `logs` was last read (never a tool error such as `not_found`):
+  "the app logged an error: `logs` shows it.";
+- 3 single taps in a row along known roads to a place a saved route reaches: "this way is known:
+  `drive {"route": "<name>"}` reaches <name> in one call.";
+- a form opened (a new screen, the full list, with 2 or more inputs and a button): "fill the fields and save in one
+  `run`, with an `expect` on the save step.";
+- a screenshot asked on an action whose text had the changes: "the text answer had the changes; ask for a screenshot
+  only to judge how something looks.";
+- a long task, from the session's 20th call: "on a long task, the main session can hand the driving to one small, fast
+  agent; if you are that agent, carry on." (harmless to a helper, whose calls come over the same server).
+
+A session is the agent's client as the daemon keeps it. The once-per-session lines (`Known:`, each hint) start again
+when the daemon restarts (an idle stop and a start, an update) under the same MCP connection; a phone or runner
+reconnect keeps them.
 
 ### 30.4 The keyboard over a target
 A tap whose target the keyboard covers closes it first, as before (a touch on passive space, a short drag, the dismiss
-key); when the app ignores those (Wayfare's trip form: its last field is a multiline Notes), a Done is pressed, never
-a key that can submit: only a button named exactly `Done`, and only when it is an input accessory's or toolbar's button
-just above the keyboard (not a key of it), or the keyboard's Done key while the focused field is multiline (Done can't
-submit there). Never return, Go, Send, Search, Next or Join. A new line that Done added to a multiline field, read just
-before and after, is taken back with one backspace, and the answer's `Note:` says so. The answer says
-`Note: closed the keyboard first.`; otherwise the tap is refused `covered` as in 1.8.5, whose hint now says that Return
-can submit, send or add a line.
+key). When the app ignores those (Wayfare's trip form: its last field is a multiline Notes), a Done is pressed, never a
+key that names a submit: only a button named exactly `Done`, and only
+- an input accessory's or toolbar's button attached to the keyboard: in the keyboard's window, not one of its keys,
+  touching the keys' top edge (2 pt at most). Never a sheet's or a form's own button; or
+- the keyboard's Done key while the focused field is multiline (a text view), whose value can be read (not empty, not
+  its placeholder). Done in a multiline field rarely submits: React Native's `submitBehavior="blurAndSubmit"` does fire
+  the field's own submit handler, so the answer always says what Done did.
+
+Never return, Go, Send, Search, Next or Join. If Done added exactly a line break at the end (the value read just before
+and after), it is taken back with one backspace, and the answer's `Note:` says so; if the value changed any other way,
+the field isn't touched again and the `Note:` says a line break may have been added. Whatever Done did, WebDriverAgent's
+plain dismissal is still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`;
+otherwise the tap is refused `covered` as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
 ### 30.5 `--no-hints`
-`tapwright mcp --no-hints` (sent to the daemon with each call) and `tapwright serve --no-hints`: no `Known:` and no
-`Hint:` line, and the instructions without the token rules. Routes still save themselves; that adds nothing to an answer.
+`--no-hints` restores 1.8.5's behaviour entirely: no `Known:` and no `Hint:` line, no route saved by itself and none of
+them shown (`map`, `drive` and its lists don't see them), no Done press, and 1.8.5's refusal hint. It reaches every
+path: `tapwright mcp --no-hints` (which also gives 1.8.5's instructions), `tapwright serve --no-hints` (every call to
+that daemon), `tapwright call --no-hints`, and `TAPWRIGHT_NO_HINTS=1` for the MCP server, the thin call and
+`tapwright replay`/`explore`. The instructions are the MCP process's: with only `serve --no-hints`, start the MCP server
+with `--no-hints` (or the variable) too to get 1.8.5's instructions.
 
 ## Historical design
 
