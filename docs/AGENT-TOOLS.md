@@ -906,6 +906,12 @@ The shared text above is what both tools must match. These are the parts only on
 - **A permission prompt** is answered "not now" or "don't allow", never allowed.
 - **Reset is a relaunch** with `open_app`, which keeps data: `reset: relaunch only, data kept` (§25.8). After a crash it
   relaunches the app itself, and `continue` goes on from there.
+- **A loading screen** (1.8.5). After a relaunch, and before its first read, explore waits (up to 30 s) until the app's
+  screen is one it can be used on: not a near-empty screen with a loading indicator or loading words (a development
+  build's `Loading from Metro…`, `Downloading 45%`), nor a blank one (a screen with nothing to touch that stays the same
+  for 8 s counts as the app's own). When the app is still loading at the deadline, the answer and the report say so.
+- **Typed field values** (1.8.5). No file explore writes holds the value of a text field: an element line of an input (a
+  text field, a text view, a search or secure field) quoted in a finding or a note shows `value=<field value>`.
 - **Places** are `place_<n>` until a person names them (§25.12).
 - **The component part** of the score is read from the accessibility class.
 - **Tests:** the scope test (§25.13), with a system share sheet and a permission prompt in the red-team screens.
@@ -956,8 +962,11 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   (locked)`); while it runs no explore starts.
 - **The reset** is Tapwright's own, a relaunch (`close_app`, `open_app`), which keeps data: `reset: relaunch only, data kept`.
   Tapwright has no `app_command reset`, so `reset: "app"` isn't checked and says so; `account` isn't used (the relaunch keeps
-  a sign-in; the check never signs in). A run whose relaunch or way to the start (the map's proven roads, §18.4) fails isn't
-  made; with none made: `not checked (no reset reached a known place)`.
+  a sign-in; the check never signs in). After the relaunch the check waits (up to 30 s) for the app's screen as explore
+  does (a loading screen, a blank one); then it drives to the start, and when the screen it then reads isn't the start (a
+  link opened while the app was still loading is lost) it waits and tries the way once more. A run whose relaunch or way
+  to the start (the map's proven roads, §18.4) fails isn't made; with none made: `not checked (no reset reached a known
+  place)`, with `; the app was still loading after 30 s` when it was.
 - **What a run matches** (§29.4): the bug's signature, with the run's place key, `got` and crash facts as explore would make
   them (`the app crashed: <reason>`, the first error log line, `it left the app`, `not_actionable: <why>`, a settle over
   3 s); `expect_failed` the same step's `expect`; `a11y` and `ux` the first issues on the same place; `observed` the same
@@ -966,7 +975,20 @@ The section below is the 1.16.2 design frozen with Tapline. Tapwright reads it o
   with why.
 - **`from: "failure"`** keeps the run's steps as they were replayed: each step's arguments and `expect`, with only what can
   hold a value changed (a typed text is `${typed}`, a link its pattern, a content row the n-th row); a `drive` with values
-  can't be written down. `repro.json` is those steps.
+  can't be written down. `repro.json` is those steps. Each `tapwright call` is a process of its own, and its default
+  client is its parent process, so a thin `run` and the thin `bug_report` after it are two clients: a thin call with no
+  failed check of its own takes the last one a thin call left (any thin run that ends otherwise clears it). An MCP client
+  only ever sees its own.
+- **The page** (1.8.5). An accessibility or usability bug's title is its first issue's rule and target (`Accessibility on
+  place_31: Contrast: id bug-note`), never a cut element line. `from: "now"` starts on the place before its first step
+  (the place the touch before it left, when that one's own isn't known; a thin call's first read takes the place the last
+  thin call's read left, while the screen hasn't changed), and the same link opened twice in a row is one step. Its logs
+  are the app's own lines: what a system framework in the app's process logs (XCTest answering the runner, preferences,
+  power logging) is left out. A bug no check was asked for says `Reproduced: not checked.`, with no reason.
+- **Typed field values.** No file of a bug holds the value of a text field: an element line of an input quoted in a
+  finding shows `value=<field value>`, as in explore's report.
+- **The count** (§29.5, §29.9) is of sightings, one for each source: the same bug found in two explore runs is `count: 2`,
+  however often each run saw it. How often they saw it in all is `seen.occurrences`, and the page says it when it is more.
 - **The folder** changes under one lock of the app's bugs (a lock file, shared with the command line); a check reads the bug
   again right before it writes, so a sighting made meanwhile is kept, and a bug removed meanwhile isn't made again. Retention
   never removes a bug a check holds. Every rewrite reads the kept finding and script through the redactor again, so a value

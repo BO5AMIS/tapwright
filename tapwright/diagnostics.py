@@ -59,6 +59,7 @@ class LogEntry:
     at: int  # epoch ms
     level: str  # error, warning or info
     text: str
+    own: bool = True  # logged by the app's own code, not by a system framework in its process (device.own_line)
 
 
 def level_of(raw: int, text: str) -> str:

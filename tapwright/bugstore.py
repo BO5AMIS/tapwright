@@ -247,8 +247,11 @@ class BugStore:
                                  "or remove it, then report the bug again.")
         meta: dict = {"id": bug_id, "signature": sig, "place_key": place_key,
                       "source": {k: source[k] for k in ("how", "run", "finding") if source.get(k) is not None},
-                      "seen": {"first": finding["when"], "last": finding["when"], "count": finding.get("count", 1),
-                               "builds": [build_of(finding)], "sources": [source["key"]]},
+                      # (W177, §29.9: the same bug found in two runs is count 2) the count is of sightings, one for each
+                      # source; how often the sources saw it in all (a finding's own "x2") is `occurrences`
+                      "seen": {"first": finding["when"], "last": finding["when"], "count": 1,
+                               "occurrences": _occurrences(finding), "builds": [build_of(finding)],
+                               "sources": [source["key"]]},
                       "reproduced": reproduced, "picture_included": False, "test_app": bool(test_app)}
         if picture_source:
             meta["picture_source"] = picture_source
@@ -285,14 +288,16 @@ class BugStore:
     def _sighting(self, held: Kept, finding: dict, source: dict, reproduced: dict,
                   gate: Callable[[dict[str, str]], str | None], *, picture: bytes | None = None, with_picture: bool = False,
                   test_app: bool = True, scrub: Callable[[str], str] | None = None) -> Made:
-        """The same signature again (§29.5): the count grows once per source, `last` and `builds` follow. The first finding
+        """The same signature again (§29.5): the count grows by one per source (W177), its occurrences by the finding's own
+        count, `last` and `builds` follow. The first finding
         and its script stay; the page's `Reproduced` (when it was checked) and `Seen before` follow. The call that updates
         the bug may add its picture (`with_picture`, §29.2; review R185 L3) when the bug has none in it yet."""
         meta = json.loads(json.dumps(held.meta))
         seen = meta["seen"]
         sources = list(seen.get("sources", []))
         if source["key"] not in sources:
-            seen["count"] = int(seen.get("count", 1)) + int(finding.get("count", 1))
+            seen["occurrences"] = int(seen.get("occurrences", seen.get("count", 1))) + _occurrences(finding)
+            seen["count"] = int(seen.get("count", 1)) + 1
             sources.append(source["key"])
             seen["sources"] = sources[-SOURCES_KEPT:]
             seen["last"] = max(str(seen.get("last", "")), finding["when"])
@@ -422,3 +427,9 @@ class BugStore:
                 lines.append(f"  {k.id}  {k.title}   seen {k.meta['seen']['count']}, last {str(k.meta['seen']['last'])[:10]}, "
                              f"{checked}")
         return lines
+
+
+def _occurrences(finding: dict) -> int:
+    """How many times one source saw the finding (its own `count`, §25.10), at least 1."""
+    count = finding.get("count", 1)
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 1 else 1

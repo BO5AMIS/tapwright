@@ -24,10 +24,11 @@ from .control import Refused
 
 KEYS = ("finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture", "export")
 TRAIL = 50  # the touches the daemon keeps for `from: "now"` (it uses the last 10 of the app)
-NOT_ASKED = "not asked"
+NOT_ASKED = bugmake.bug.NOT_ASKED
 NO_PHONE = "no phone connected"
 CHECK_BUSY = "stopped (busy): an explore or another bug check is running on this phone"
-BATCHES_KEPT = 8  # the runs whose touches are kept by step, for the failure of the one that ends (`_bug_batch_aims`)
+THIN = "\x00thin-call"  # (W177) the key of the thin calls' last failed check: no client id can be it
+BATCHES_KEPT = 8 # the runs whose touches are kept by step, for the failure of the one that ends (`_bug_batch_aims`)
 ACCOUNT_NOTE = ("Note: account isn't used: the check relaunches the app, which keeps its data (a sign-in included), and never "
                 "signs in.")
 NO_LOG = ('from "now" needs the action log, and it is off (tapwright serve --no-log): the last touches aren\'t known, so '
@@ -171,6 +172,7 @@ class BugTools:
         if failed is None or failed[0] != "expect_failed" or not isinstance(expect, dict):
             self._bug_failed(client_id, None)
             return
+        record = None
         try:
             bundle = self._bundle()
             if bundle is None:
@@ -188,20 +190,45 @@ class BugTools:
                 path_from=start[1] if start is not None and start[0] == bundle else None,
                 place=end[1] if end is not None and end[0] == bundle else None, logs=logs, aims=aims,
                 link_of=lambda url: self._bug_link(bundle, url))
-        except Exception:  # noqa: BLE001 - a failure that can't be kept is no failure to report
+        except Exception as e:  # noqa: BLE001 - a failure that can't be kept is no failure to report; said in serve.log
             record = None
+            try:
+                said = findings.safe_scrub(self.accounts.bug_scrub)(str(e))[:200]
+            except Exception:  # noqa: BLE001
+                said = ""
+            self.log(f'bug_report: a failed check couldn\'t be kept for from "failure" ({type(e).__name__}: {said})')
         self._bug_failed(client_id, record)
 
-    def _bug_touch(self, name: str, args: dict, aimed: dict | None, place: tuple[str, str] | None, by: str = "agent") -> None:
+    def _bug_failed(self, client_id: str, record: dict | None) -> None:
+        """Keep (or clear) a client's last failed check. A thin `tapwright call` is a process of its own, and its default
+        client is its parent process (a new shell for each command): its `run` and its `bug_report` reach the daemon as two
+        clients. So a run that came by the thin call is also kept as the thin calls' last one (`THIN`), which a thin call
+        with none of its own reads (W177: every from "failure" was not_found on the phone)."""
+        for key in (client_id, THIN) if _d()._VIA.get() == "call" else (client_id,):
+            if record is None:
+                self._bug_failures.pop(key, None)
+            else:
+                self._bug_failures[key] = record
+
+    def _bug_failure_of(self, client_id: str) -> dict | None:
+        own = self._bug_failures.get(client_id)
+        if own is None and _d()._VIA.get() == "call":
+            return self._bug_failures.get(THIN)
+        return own
+
+    def _bug_touch(self, name: str, args: dict, aimed: dict | None, place: tuple[str, str] | None, by: str = "agent",
+                   after: tuple[str, str] | None = None) -> None:
         """A touch that went through, as `from: "now"` reads it (§29.3): never a typed value, a target as a road names it,
         a content row as the n-th row (M1), a link only as its place's pattern (§18.3: a link may carry a secret in its
-        query or its path; review R185 H1). A tool's own move is not the agent's (L7)."""
+        query or its path; review R185 H1). A tool's own move is not the agent's (L7). `after`: the place the touch's own
+        read left, which is where the next touch starts when that one's isn't known (W177)."""
         d = _d()
         if name not in bugmake.NOW_TOUCHES or args.get("dry_run") or d._NESTED.get() or d._EXPLORING.get():
             return
         bundle = self._bundle()
         entry: dict = {"tool": name, "ok": True, "app": bundle, "by": by,
-                       "place": place[1] if place is not None and place[0] == bundle else None}
+                       "place": place[1] if place is not None and place[0] == bundle else None,
+                       "after": after[1] if after is not None and after[0] == bundle else None}
         if isinstance(aimed, dict) and aimed.get("row") is True:
             entry["target"] = {"row": True, "index": aimed.get("index", 1)}
         elif isinstance(aimed, dict) and any(isinstance(aimed.get(k), str) and aimed[k] for k in ("id", "label", "text")):
@@ -267,12 +294,6 @@ class BugTools:
         """A person's input in the live view: it has no name to write down (a point), so a path starts after it."""
         self._bug_trail.append({"tool": "tap", "ok": True, "app": self._bundle(), "by": "person", "target": {"point": True}})
 
-    def _bug_failed(self, client_id: str, record: dict | None) -> None:
-        if record is None:
-            self._bug_failures.pop(client_id, None)
-        else:
-            self._bug_failures[client_id] = record
-
     # ---- the tool ----
     _bug_pruned: bool = False
 
@@ -320,7 +341,7 @@ class BugTools:
                 made = await asyncio.to_thread(bugmake.from_run, ctx, got, with_picture=with_picture, reproduced=reproduced,
                                                named=named)
             elif args["from"] == "failure":
-                failure = self._bug_failures.get(client_id)
+                failure = self._bug_failure_of(client_id)
                 if failure is None:
                     raise Refused("not_found", NO_FAILURE)
                 named = await self._bug_named(failure["finding"]["app"])
@@ -464,7 +485,9 @@ class BugTools:
             picture=picture, system=system_of(snap.tree), with_picture=with_picture, reproduced=reproduced, named=named)
 
     async def _bug_logs(self, bundle: str) -> list[str]:
-        """The app's last 20 log lines of any level (§29.3), each `HH:MM:SS.mmm level text`; redacted when the bug is made."""
+        """The app's last 20 log lines of any level (§29.3), each `HH:MM:SS.mmm level text`; redacted when the bug is made.
+        Only the app's own lines: what a system framework in its process logged (XCTest answering the runner's reads,
+        preferences, power logging) is no line of the app (W177)."""
         try:
             self.ensure_logs(bundle)
             await self._refresh_logs(bundle)
@@ -474,7 +497,7 @@ class BugTools:
         if ring is None:
             return []
         out = []
-        for e in ring.shown()[-findings.MAX_LOGS:]:
+        for e in [e for e in ring.shown() if e.own][-findings.MAX_LOGS:]:
             at = datetime.datetime.fromtimestamp(e.at / 1000, datetime.timezone.utc)
             out.append(f"{at.strftime('%H:%M:%S')}.{at.microsecond // 1000:03d} {e.level} {e.text}")
         return out

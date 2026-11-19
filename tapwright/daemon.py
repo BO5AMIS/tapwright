@@ -2052,6 +2052,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
             return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy, ux_rules)
         finally:
+            if via == "call" and not _NESTED.get():
+                self._keep_thin_place(client_id)
             if vtoken is not None:
                 _VIA.reset(vtoken)
             if mtoken is not None:
@@ -2282,7 +2284,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
                 ran_on = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
-            self._bug_touch(name, args, trail_aim, trail_from)
+            self._bug_touch(name, args, trail_aim, trail_from, after=self._place_before(self.control.client(client_id)))
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
                               place=ran_on[1] if ran_on is not None else None)
             return result
@@ -2437,13 +2439,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         stream of the same process stopped (the phone replays what it logged just before, which the ring has). An
         entry from before the process started is the previous owner of that pid's, and is dropped."""
         floor = None if proc.started is None else int(proc.started * 1000) - LOG_START_SLACK_MS
-        async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
+        async for item in self.session.device.app_log_stream(proc.pid):
+            at, raw, text, entry_pid = item[:4]
+            own = bool(item[4]) if len(item) > 4 else True  # (whose code logged it: device.own_line)
             if entry_pid == proc.pid:
                 got[0] += 1
                 text = self.scrub_everywhere(text)  # a test account's value is never kept, so no retention cut can split one
                 if floor is None or at >= floor:
                     # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
-                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
+                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text, own), after, vouched=False)
 
     async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc) -> None:
         """After a stream of `proc` ended, once: were the lines no answer has vouched for the app's? When another process
@@ -4600,10 +4604,28 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         given = _GIVEN.get()
         return given is None or bundle in given
 
+    _thin_place: "tuple[tuple[str, str], int] | None" = None  # (the place, the screen generation) a thin call's read left
+
+    def _keep_thin_place(self, client_id: str) -> None:
+        """After a thin call: the place its read left, with the screen generation then, for the next thin call (W177)."""
+        try:
+            view = self.control.client(client_id)
+            if view.place is not None and view.place_seen == self.control.generation and not view.dropped:
+                self._thin_place = (view.place, view.place_seen)
+        except Exception:  # noqa: BLE001 - a place not kept is a place not known, never a failed call
+            pass
+
     def _place_before(self, view) -> tuple[str, str] | None:
         """The place the app is at as the agent's last read left it, for a move about to be made: only while nothing has
         changed the screen since (a person, a look: false action, a dropped line), and the app is still the one."""
         place = view.place
+        if place is None and view.place_seen == -1 and not view.dropped and _VIA.get() == "call":
+            # (W177) a thin call is a process of its own, often with a client of its own (its parent process): its view has
+            # never read. The place the thin calls' last read left, while nothing has changed the screen since, is its place
+            shared = self._thin_place
+            if shared is not None and shared[1] == self.control.generation:
+                place = shared[0]
+            return place if place is not None and place[0] == (getattr(self.session, "app", None) or (None, None))[1] else None
         if place is None or view.place_seen != self.control.generation or view.dropped:
             return None
         return place if place[0] == (getattr(self.session, "app", None) or (None, None))[1] else None

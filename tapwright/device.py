@@ -413,14 +413,17 @@ class Device:
         return [p.pid for p in await self.app_processes(bundle_id)]
 
     async def app_log_stream(self, pid: int):
-        """The unified log entries of one process, as they come: (epoch ms, os_trace level byte, text, pid). The
-        stream is asked for that pid only, and an entry of any other pid is dropped here as well."""
+        """The unified log entries of one process, as they come: (epoch ms, os_trace level byte, text, pid, own). The
+        stream is asked for that pid only, and an entry of any other pid is dropped here as well. `own`: the line was
+        logged by code of the app's own bundle (`own_line`), not by a system framework loaded into it (XCTest's
+        accessibility server, WebDriverAgent's queries, preferences, power logging)."""
         from pymobiledevice3.services.os_trace import OsTraceService
         service = OsTraceService(lockdown=self.rsd)
         try:
             async for entry in service.syslog(pid=pid):
                 if entry.pid == pid:
-                    yield int(entry.timestamp.timestamp() * 1000), int(entry.level), entry.message, entry.pid
+                    own = own_line(getattr(entry, "image_name", ""), getattr(entry, "filename", ""))
+                    yield int(entry.timestamp.timestamp() * 1000), int(entry.level), entry.message, entry.pid, own
         finally:
             await self._close(service)
 
@@ -815,6 +818,22 @@ class Device:
 
 
 START_SLACK = 1.0  # seconds two readings of one process's start time may differ
+
+
+def own_line(image: object, executable: object) -> bool:
+    """Was a log line logged by the app's own code (W177)? Its sender image lies in the app's bundle (the `.app` folder its
+    executable is in: the app itself, its frameworks, Hermes). A line from a system framework loaded into the process
+    (XCTest's accessibility server answering WebDriverAgent, CFPreferences, power logging) isn't. When the phone doesn't
+    say, the line counts as the app's."""
+    if not isinstance(image, str) or not isinstance(executable, str) or not image or not executable:
+        return True
+    at = executable.find(".app/")
+    if at < 0:
+        return True
+
+    def plain(path: str) -> str:
+        return path[len("/private"):] if path.startswith("/private/") else path
+    return plain(image).startswith(plain(executable[:at + len(".app/")]))
 
 
 @dataclasses.dataclass(frozen=True)

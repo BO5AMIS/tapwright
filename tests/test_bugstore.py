@@ -85,7 +85,7 @@ def test_a_bug_from_a_finding_has_its_folder_and_files(tmp_path):
     assert json.loads((made.folder / "repro.json").read_text("utf-8"))["steps"][0] == {"tool": "tap", "target": {"id": "trips-tab"}}
     answer = bugmake.answer(made, ctx.scrub, home=tmp_path)
     assert answer.splitlines()[0] == f"New bug: {made.title}"
-    assert answer.splitlines()[1] == "Reproduced: not checked (not asked)."
+    assert answer.splitlines()[1] == "Reproduced: not checked."  # (no check asked: no reason, W177)
     assert answer.splitlines()[2] == "Seen: 1 time, 2026-11-14, build 1.5.0 (220)."
     assert answer.splitlines()[3] == f"Folder: ~/bugs/{APP}/{made.meta['id']}"
 
@@ -290,7 +290,7 @@ def test_the_observed_finding_from_the_last_touches(tmp_path):
                             with_picture=False, named=True)
     page = (made.folder / "report.md").read_text("utf-8")
     assert page.startswith("# Observed on place_20: Total shows $12.50 after 2 coupons <tester's password>")
-    assert "Expected: (not given). Got:" in page and "not checked (not asked)" in page
+    assert "Expected: (not given). Got:" in page and "## Reproduced\nnot checked\n" in page  # (no check asked: W177)
     assert "- A system sheet was in front: share sheet." in page and not (made.folder / "picture.jpg").exists()
     assert json.loads((made.folder / "finding.json").read_text("utf-8"))["system"] == "share sheet"
     assert bugmake.answer(made, ctx.scrub, reason_shown=False).splitlines()[1] == "Reproduced: not checked."

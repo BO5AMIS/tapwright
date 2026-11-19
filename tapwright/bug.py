@@ -25,6 +25,7 @@ SYSTEM_SHEETS = findings.SYSTEM_SHEETS
 HOWS = ("explore", "failure", "journey", "now")
 HOW_WORDS = {"explore": "explore", "failure": "a failed check", "journey": "a journey", "now": "seen while driving"}
 STEPS_SHOWN = 15
+NOT_ASKED = "not asked"  # the `why` of a bug no check was asked for: the page and the answer say only `not checked`
 TITLE_MAX = 80
 UNSYMBOLICATED = "unsymbolicated"
 SIGNATURE_HEX = 16
@@ -185,8 +186,41 @@ def short_got(got: str) -> str:
     return f"{text[:45]} … {text[-30:]}"
 
 
+_ISSUE = re.compile(r"^\s*\d+\.\s+([a-z][a-z_]*):\s+(.*)$")
+_ELEMENT = re.compile(r'^(?:e\d+\s+)?([a-z]+)(?:\s+\(from others\))?(?:\s+("(?:[^"\\]|\\.)*"))?(.*)$')
+_ELEMENT_ID = re.compile(r"(?<![\w-])id=(\S+)")
+ISSUE_NAME_MAX = 30
+
+
+def issue_title(got: str) -> str | None:
+    """The short title of an accessibility or usability finding (W177): its first issue's rule and what it is about,
+    `Contrast: id bug-note`, `Dead end: text "Nothing here leads…"`, never an element line cut mid-word. None when the
+    first line isn't an issue line."""
+    m = _ISSUE.match(first_line(got))
+    if m is None:
+        return None
+    rule = m.group(1).replace("_", " ").strip().capitalize()
+    rest = m.group(2).strip()
+    element = _ELEMENT.match(rest) if not rest.startswith("the screen") else None
+    if element is None:
+        return f"{rule}: the screen"
+    role, quoted, tail = element.group(1), element.group(2), element.group(3)
+    ident = _ELEMENT_ID.search(tail)
+    if ident is not None:
+        return f"{rule}: id {ident.group(1).rstrip(':,;')}"
+    if quoted:
+        try:
+            name = one_line(str(json.loads(quoted)))
+        except ValueError:
+            name = one_line(quoted.strip('"'))
+        name = name if len(name) <= ISSUE_NAME_MAX else name[:ISSUE_NAME_MAX - 1].rstrip() + "…"
+        return f'{rule}: {role} "{name}"'
+    return f"{rule}: a {role}"
+
+
 def title(kind: str, place: str | None, got: str) -> str:
-    return f"{KIND_WORDS.get(kind, kind)} on {place or 'an unnamed screen'}: {short_got(got)}"
+    shown = (issue_title(got) if kind in findings.MULTILINE_KINDS else None) or short_got(got)
+    return f"{KIND_WORDS.get(kind, kind)} on {place or 'an unnamed screen'}: {shown}"
 
 
 def bug_id(sig: str, n: int = 1) -> str:
@@ -272,6 +306,8 @@ def step_line(step: dict, name: str | None = None, others: bool = False, needs_p
 def reproduced_lines(meta: dict, kind: str) -> list[str]:
     r = meta.get("reproduced") or {}
     if r.get("checked") is False:
+        if r.get("why") == NOT_ASKED:
+            return ["not checked"]  # (§29.3, §29.9: no check was asked for, so there is no reason to give; W177)
         return [f"not checked ({one_line(str(r.get('why') or 'no check'))})"]
     n, of = r.get("n", 0), r.get("of", 0)
     runs = f"{n} of {of} runs"
@@ -287,7 +323,10 @@ def seen_lines(meta: dict) -> list[str]:
     times = f"{s['count']} {'time' if s['count'] == 1 else 'times'}"
     builds = s["builds"]
     shown = f"build {builds[0]}" if len(builds) == 1 else f"builds {', '.join(builds)}"
-    return [f"{times}; first {s['first'][:10]}, last {s['last'][:10]}; {shown}."]
+    occurrences = s.get("occurrences")
+    more = (f" It showed {occurrences} times in all (a run can show it more than once)."
+            if isinstance(occurrences, int) and not isinstance(occurrences, bool) and occurrences > s["count"] else "")
+    return [f"{times}; first {s['first'][:10]}, last {s['last'][:10]}; {shown}.{more}"]
 
 
 def picture_lines(finding: dict, meta: dict, picture_file: str | None) -> list[str]:

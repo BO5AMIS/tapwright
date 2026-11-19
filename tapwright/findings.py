@@ -99,6 +99,19 @@ def redact(value: object, scrub: Callable[[str], str]) -> object:
 
 
 HIDDEN = "(hidden: the redactor failed on this text)"
+FIELD_VALUE = "<field value>"  # what an element line of a text field shows instead of what is in it (W177)
+# an element line of an input (a text field, a text view, a search field, a secure field): `input "Note" id=n value="…"`,
+# with its value a JSON string (ui.clip). The role starts the line or follows its ref; the value is the line's own `value=`
+_INPUT_VALUE = re.compile(r'((?:^|(?<=[\s:(]))(?:e\d+\s+)?input\b[^\n]*?(?<![\w-])value=)"(?:[^"\\\n]|\\.)*"')
+
+
+def hide_values(text: str) -> str:
+    """Every element line of a text field with its value replaced by `<field value>` (W177): what a person typed into a
+    field (a note, a search, a code) is no text a report keeps, whoever typed it, and an explore report or a bug page may
+    quote such a line (an accessibility issue, a usability one). Other lines are left as they are."""
+    if "value=" not in text:
+        return text
+    return _INPUT_VALUE.sub(lambda m: f"{m.group(1)}{FIELD_VALUE}", text)
 
 
 def safe_scrub(scrub: Callable[[str], str]) -> Callable[[str], str]:
@@ -219,7 +232,8 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
         tool=_label(tool, "tool", _TOOL), tool_version=_label(safe(tool_version), "tool_version", _ID_TEXT),
         when=_label(when or now_ms(), "when", _WHEN),
         device=Device(_label(safe(device.model), "device model", _ID_TEXT), _label(safe(device.os), "device os", _ID_TEXT)),
-        expected=_one_line(safe(_text(expected, "expected"))), got=_got(kind, safe(_text(got, "got"))),
+        expected=_one_line(hide_values(safe(_text(expected, "expected")))),
+        got=_got(kind, hide_values(safe(_text(got, "got")))),
         place=None if place is None else _label(place, "place", _PLACE),
         path_from=None if path_from is None else _label(path_from, "path_from", _PLACE),
         path=tuple(_step(s, scrub) for s in path),

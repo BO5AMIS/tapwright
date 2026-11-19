@@ -62,6 +62,23 @@
   command line's make and export go through it (its live values); without one, GitHub needs `--accounts` and the answer
   says which values were checked.
 
+- Phone checks (W177): `verify` works on a development build. After the relaunch the check waits (up to 30 s) until the
+  app's screen is no loading screen (`Loading from Metro…`, `Downloading n%`, a spinner, a blank screen), then drives to
+  the start, and tries the way once more when the screen isn't the start (a link opened while the app was loading was
+  lost, so every run was `not checked (no reset reached a known place)`); a check that met the deadline says `the app was
+  still loading after 30 s`. `explore` waits the same way before its first read and after each relaunch (started on the
+  loading screen it answered `0 places, frontier empty`).
+- `bug_report from: "failure"` finds the failure a thin `tapwright call run` left: each thin call is a process with a client
+  of its own (its parent process), so the run and the report were two clients. A thin call now also takes the last failed
+  check a thin call left; a failure that can't be kept is said in serve.log instead of being swallowed. A thin call's
+  first touch also knows the place the last thin read left, so `from: "now"` pages start `Start on <place>.`
+- Explore reports no longer keep typed field values: an element line of a text field (an accessibility or usability issue
+  quoting `id=bug-note value="…"`) shows `value=<field value>` in `report.md`, `report.json` and every bug file.
+- Pages: an accessibility or usability bug's title is its rule and target (`Contrast: id bug-note`); `from: "now"` logs
+  are the app's own lines (no XCTest or system framework lines), the same link opened twice in a row is one step, and a
+  bug no check was asked for says `Reproduced: not checked.`. The count of a bug is of sightings (two explore runs: count
+  2), with how often they saw it in all kept as `seen.occurrences`.
+
 ## 1.8.0 (2026-11-19), "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A

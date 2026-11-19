@@ -33,6 +33,7 @@ UNREACHABLE = "an unreachable place has no steps"
 NO_START = "the screen it started on isn't known"
 NO_KEY = "the screen's key isn't known"  # (an `observed` bug with no place key: any end would count, review R185 L11)
 NO_RESET = "no reset reached a known place"
+STILL_LOADING = "the app was still loading after 30 s"  # (as exploretool.STILL_LOADING)
 NO_APP_RESET = ('reset "app" clears the app\'s data with app_command reset, which Tapwright doesn\'t have; reset "own" '
                 "relaunches the app and keeps its data")
 PENDING = "the check didn't finish"
@@ -242,7 +243,8 @@ async def check(port: Port, target: Target, steps: list[dict], runs: int, *, bui
             return needs_person(*result)
         shown += 1 if result else 0
     if made == 0:
-        return not_checked(NO_RESET)
+        # (W177) a development build still on its loading screen at the deadline: said, so a person knows why
+        return not_checked(f"{NO_RESET}; {STILL_LOADING}" if getattr(port, "still_loading", False) else NO_RESET)
     return {"n": shown, "of": made, "build": build, "when": when(), "reset": RESET_OWN}
 
 
@@ -285,9 +287,31 @@ class DaemonCheck:
 
     async def reset(self) -> bool:
         await self._call("close_app", {"app": self.app})
-        return await self._call("open_app", {"app": self.app, "look": False})
+        if not await self._call("open_app", {"app": self.app, "look": False}):
+            return False
+        await self._launched()  # (W177: a development build shows "Loading from Metro…" first; a link opened then is lost)
+        return True
+
+    async def _launched(self) -> bool:
+        from .explore import PhoneStop
+        try:
+            return await self.phone.launched(opened=True)
+        except PhoneStop as e:
+            raise Stopped(str(e) or "busy") from None
+
+    @property
+    def still_loading(self) -> bool:
+        return self.phone.still_loading
 
     async def reach(self, place: str) -> bool:
+        """The way to `place` after a reset, checked by the place the screen then is; when it isn't there (a link opened
+        while the app was still loading is lost), the app is waited for and the way is tried once more (W177)."""
+        if await self._reach_once(place) and await self._at(place) is not False:
+            return True
+        await self._launched()
+        return await self._reach_once(place) and await self._at(place) is not False
+
+    async def _reach_once(self, place: str) -> bool:
         from . import driving, trip
         from .control import Refused
         made = trip.Trip(self.d, self.cid, self.scope, driving.Request(place, None, {}, None, None, "any", False),
@@ -301,6 +325,20 @@ class DaemonCheck:
             return False
         finally:
             made.release()
+
+    async def _at(self, place: str) -> bool | None:
+        """Is the app on `place` now, as the map locates the screen? None when it can't be told (no map of it)."""
+        from . import places
+        try:
+            data = self.d.maps.data(self.d._maps_root(), self.app)
+            tree = await self._tree()
+        except Exception:  # noqa: BLE001 - a screen that can't be read can't be told
+            return None
+        if not isinstance(data, dict) or place not in (data.get("places") or {}):
+            return None
+        if tree is None or self.d._bundle() != self.app or not places.has_structure(tree):
+            return False
+        return places.locate(data, places.read_place(tree, self.d._language.get(self.app)))[0] == place
 
     async def _tree(self):
         view = self.d.control.client(self.cid)

@@ -391,15 +391,25 @@ def observed_path(trail: list[dict], app: str, place_now: str | None) -> Observe
     """The last 10 touches of this app that succeeded and weren't dry runs, as steps; None with no touch at all. A step that
     can't be written down cuts the path after it. `path_from` is the place the first kept step ran on when it was known
     then, else the nearest later one's, else (no step at all) None."""
-    touches = [e for e in trail if e.get("tool") in NOW_TOUCHES and e.get("ok") and not e.get("dry_run")
-               and e.get("app") in (None, app)][-NOW_STEPS:]
+    every = [e for e in trail if e.get("tool") in NOW_TOUCHES and e.get("ok") and not e.get("dry_run")
+             and e.get("app") in (None, app)]
+    touches = every[-NOW_STEPS:]
     if not touches:
         return None
+    # (W177) where each touch ran: its own place, else the place the touch before it left (its read after the move)
+    offset = len(every) - len(touches)
+    ran_on = [e.get("place") or (every[offset + n - 1].get("after") if offset + n > 0 else None)
+              for n, e in enumerate(touches)]
     steps = [step_of(e) for e in touches]
     last_bad = max((i for i, s in enumerate(steps) if s is None), default=-1)
-    kept = list(range(last_bad + 1, len(touches)))
+    kept: list[int] = []
+    for i in range(last_bad + 1, len(touches)):
+        # (W177) the same link opened twice in a row is one step for a person: the second open changes nothing
+        if kept and steps[i] == steps[kept[-1]] and (steps[i] or {}).get("tool") == "open_url":
+            continue
+        kept.append(i)
     path = [steps[i] for i in kept]  # type: ignore[misc]
-    start = next((touches[i].get("place") for i in kept if touches[i].get("place")), None)
+    start = next((ran_on[i] for i in kept if ran_on[i]), None)
     cut = tuple(n for n, i in enumerate(kept) if touches[i].get("link_cut"))
     return Observed(path, start, last_bad >= 0, cut)  # type: ignore[arg-type]
 
@@ -419,7 +429,7 @@ def from_now(ctx: Context, *, app: str, note: str, expected: str | None, identit
         raw["system"] = system
     finding = clean(raw, ctx.safe(), named)
     return _make(ctx, finding, place_key=place_key, how="now", key=f"now/{when}", run=None, script=None, picture=picture,
-                 with_picture=with_picture, reproduced=reproduced or {"checked": False, "why": "not asked"},
+                 with_picture=with_picture, reproduced=reproduced or {"checked": False, "why": bug.NOT_ASKED},
                  extras={"steps_cut": observed.cut, "links_cut": list(observed.links_cut)}, named=named)
 
 
@@ -506,7 +516,8 @@ def answer(made: bugstore.Made, scrub: Callable[[str], str], *, reason_shown: bo
     head = f"New bug: {made.title}" if made.new else f"Known bug (seen {times}): {made.title}"
     r = made.meta["reproduced"]
     if r.get("checked") is False:
-        line = f"Reproduced: not checked ({r['why']})." if reason_shown else "Reproduced: not checked."
+        shown = reason_shown and r.get("why") != bug.NOT_ASKED  # (no check asked for: no reason to give, §29.3; W177)
+        line = f"Reproduced: not checked ({r['why']})." if shown else "Reproduced: not checked."
     else:
         n, of = r["n"], r["of"]
         line = f"Reproduced: {n} of {of} runs" + (": not reproduced." if n == 0 else " (flaky)." if n < of else ".")

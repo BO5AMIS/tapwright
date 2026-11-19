@@ -11,6 +11,8 @@ the way. Pure functions: no phone.
 """
 from __future__ import annotations
 
+import re
+
 from . import batch, ui
 from .control import Refused
 
@@ -96,6 +98,32 @@ def said(reflex: dict, seen_text: str, aimed: str | None) -> str:
 def loading(items: list[ui.Element]) -> bool:
     """Is a loading indicator on screen? Then a target that isn't there yet may be coming (§18.7)."""
     return any(e.type in LOADING_TYPES or e.role in LOADING_ROLES for e in items)
+
+
+# (W177) a screen an app shows while it starts: a development build's "Loading from Metro…" / "Downloading 45%", a splash
+# with a spinner, "Please wait". Only on a screen with almost nothing to touch: words like these on a real screen (a list
+# row "Downloading…") never hold a run up
+STARTING_WORDS = re.compile(r"(?i)(?:\b(?:loading|downloading|bundling|please wait|starting up|connecting to)\b"
+                            r"|(?<![\w.])\d{1,3}(?:\.\d+)?\s?%)")
+STARTING_MAX_CONTROLS = 2  # a loading screen offers at most this many things to touch (a Dismiss, a Reload)
+CONTROL_ROLES = ("button", "link", "cell", "tab", "input", "switch", "slider")
+
+
+def starting(tree: ui.Tree | None, bundle: str) -> str | None:
+    """Is the app's screen one it shows while it is still starting (W177)? `"elsewhere"`: the app isn't in front yet;
+    `"loading"`: a loading indicator or loading words on a screen with almost nothing to touch; `"empty"`: nothing at all
+    to touch (a blank splash). None: a screen of the app that can be used."""
+    if tree is None or tree.app is None or tree.app[1] != bundle:
+        return "elsewhere"
+    if tree.alert is not None:
+        return None  # (an alert is answered by whoever reads next: it is no loading screen)
+    controls = [e for e in tree.items if e.role in CONTROL_ROLES and not e.in_alert]
+    if len(controls) <= STARTING_MAX_CONTROLS and (loading(tree.items) or any(
+            STARTING_WORDS.search(f"{e.label} {e.value}") for e in tree.items if not e.in_alert)):
+        return "loading"
+    if not controls:
+        return "empty"
+    return None
 
 
 def waited(seconds: float) -> str:

@@ -202,10 +202,12 @@ class FakeDevice:
                 return Proc(pid, self.starts.get(pid), bundle)
         return None
 
-    def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None) -> None:
+    def emit(self, pid: int, at: int, text: str, raw: int = 0, from_pid: int | None = None, own: bool | None = None) -> None:
         """An entry the log stream of `pid` gives (os_trace level byte `raw`); `from_pid` is the pid the entry says
-        it comes from (another process's, to prove it is dropped)."""
-        self.streams.setdefault(pid, asyncio.Queue()).put_nowait((at, raw, text, pid if from_pid is None else from_pid))
+        it comes from (another process's, to prove it is dropped). `own`: whether the app's own code logged it (the real
+        stream's fifth part, device.own_line); None gives the four parts an older stream gave."""
+        entry = (at, raw, text, pid if from_pid is None else from_pid)
+        self.streams.setdefault(pid, asyncio.Queue()).put_nowait(entry if own is None else (*entry, own))
 
     async def app_log_stream(self, pid: int):
         """The pid's stream: what the phone replays first (`replay`), then what `emit` gives; a None put in the queue

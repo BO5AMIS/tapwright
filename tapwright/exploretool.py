@@ -24,7 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from . import (__version__, accounts as accountlib, explore, explorefloor, explorereport, findings, grants, journey_report,
-               mapkeeper, store, ui)
+               mapkeeper, reflex, store, ui)
 from .control import AGENT_MAX_WAIT_S, Refused
 from .explore import Check, CrashFacts, Moved, PhoneStop, Watch
 
@@ -45,6 +45,11 @@ READ_TRIES = 5  # a look that hits a dropped line is made again this many times,
 POLICY_WORD = re.compile(r'policy word "([^"]*)"')
 DETAIL = re.compile(r"^[a-z_]{1,40}$")
 SETTLED = re.compile(r"Settled in (\d+(?:\.\d+)?) s")
+# (W177) after a launch, a development build shows "Loading from Metro…" / "Downloading n%" for seconds, and a link opened
+# then is lost: the app's screen is waited for, up to LAUNCH_WAIT, before anything reads or reaches a place
+LAUNCH_WAIT, LAUNCH_POLL = 30.0, 0.5
+LAUNCH_QUIET = 8.0  # a screen with nothing to touch that stays the same this long is the app's own (an empty first screen)
+STILL_LOADING = f"the app was still loading after {LAUNCH_WAIT:g} s"
 AWAY = "came to the front after the touch"  # the daemon's note when another app took the front (NOTE_TAKEN)
 
 
@@ -131,6 +136,7 @@ class DaemonPhone:
         self._waited = 0.0
         self._began = daemon._wall()  # a crash report of the app counts from the run's start
         self.crashes: list = []  # the reports the daemon's own crash checks found while the search ran (daemon._CRASHES)
+        self.still_loading = False  # the last launch wait ended at its deadline with the app still loading (W177)
 
     # ---- reading ----
     async def read(self) -> ui.Tree:
@@ -198,7 +204,51 @@ class DaemonPhone:
         return await self._act("scroll", {"to": "start"})
 
     async def open_app(self) -> Moved:
-        return await self._act("open_app", {"app": self.bundle})
+        moved = await self._act("open_app", {"app": self.bundle})
+        if moved.code is None:
+            await self.launched(opened=True)  # (W177: a relaunch that shows a loading screen is waited out)
+        return moved
+
+    async def launched(self, opened: bool = False) -> bool:
+        """After a launch (`opened`), or before a run's first read: wait, up to LAUNCH_WAIT, until the app's screen is one it
+        can be used on, not a loading screen (reflex.starting). A screen with nothing to touch that stays the same for
+        LAUNCH_QUIET is taken as the app's own. True when the screen is ready (or another app is in front and nothing was
+        opened); False at the deadline, and `still_loading` says so. Raises PhoneStop for a pause, a lock or a person."""
+        control = self.d.control
+        began = control.clock()
+        empty: tuple[float, tuple] | None = None
+        while True:
+            await self.gate()
+            try:
+                tree = await self._quiet_tree()
+            except Refused as e:
+                if e.code in ("paused", "busy", "locked"):
+                    raise PhoneStop(e.code) from None
+                tree = None
+            state = reflex.starting(tree, self.bundle)
+            now = control.clock()
+            if state is None or (state == "elsewhere" and not opened):
+                self.still_loading = False
+                return True
+            if state == "empty":
+                shape = tuple((e.role, e.label, e.identifier) for e in (tree.items if tree is not None else []))
+                if empty is None or empty[1] != shape:
+                    empty = (now, shape)
+                elif now - empty[0] >= LAUNCH_QUIET:
+                    self.still_loading = False
+                    return True
+            else:
+                empty = None
+            if now - began >= LAUNCH_WAIT:
+                self.still_loading = state != "elsewhere"  # (an app that never came to the front isn't "loading")
+                return False
+            await control.sleep(LAUNCH_POLL)
+
+    async def _quiet_tree(self) -> ui.Tree | None:
+        """The screen as it is, read with no picture and nothing in the action log (as a run's own read)."""
+        view = self.d.control.client(self.cid)
+        await self.d._read(lambda: self.d._silent_read(view))
+        return getattr(self.d.session, "last_tree", None)
 
     async def open_url(self, link: str) -> Moved:
         return await self._act("open_url", {"url": link})
@@ -373,6 +423,11 @@ class ExploreTools:
         (findings.safe_scrub), never shown as it was."""
         return findings.safe_scrub(self.scrub_everywhere)(text)
 
+    def _report_scrub(self, text: str) -> str:
+        """What the report files get: `_safe_scrub`, and every text field's value in an element line hidden (W177: a value
+        typed before the run, quoted by an accessibility issue, was in report.md)."""
+        return findings.hide_values(self._safe_scrub(text))
+
     def _explore_fill(self, parsed: Args, bundle: str) -> explore.Fill:
         """`fill` checked against the vault (§25.6): the fixture it names must be marked `"explore": true`."""
         loaded = self._loaded()
@@ -460,7 +515,15 @@ class ExploreTools:
         tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
                   d._CRASHES.set(phone.crashes), d._TOUCH_FLOOR.set(explorer.floor))  # (the one dispatch gate of its moves)
         began = datetime.datetime.now(datetime.timezone.utc)
+        loading = False
         try:
+            try:
+                # (W177) started on a loading screen, the first read found no place: "frontier empty" in 2 s
+                loading = not await phone.launched()
+            except PhoneStop:
+                pass  # (the run's own first move meets it again and stops with its reason)
+            if loading:
+                explorer.notes.append(STILL_LOADING)
             result = await explorer.run()
         finally:
             d._TOUCH_FLOOR.reset(tokens[4])
@@ -478,7 +541,10 @@ class ExploreTools:
         if result.stopped in explorereport.ERRORS:
             raise Refused(result.stopped, explorereport.error_text(result, folder, self._safe_scrub))
         text = explorereport.answer(result, folder, self._safe_scrub)
-        return {"text": text + (f"\nNote: {note}" if note else ""), "image": None, "image_size": None}
+        notes = [f"Note: {STILL_LOADING} when the run began."] if loading else []
+        if note:
+            notes.append(f"Note: {note}")
+        return {"text": "\n".join([text, *notes]), "image": None, "image_size": None}
 
     async def _explore_write(self, result: explore.Result, who: explore.Identity, budget: explore.Budget,
                              began: datetime.datetime, place_keys: dict | None = None) -> tuple[Path | None, str | None]:
@@ -486,7 +552,7 @@ class ExploreTools:
         root = self.explore_home if self.explore_home is not None else store.HOME / "explore"
         ended = datetime.datetime.now(datetime.timezone.utc)
         try:
-            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._safe_scrub,
+            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._report_scrub,
                                            place_keys)
         except OSError as e:
             return None, self._safe_scrub(f"the report couldn't be written: {e.strerror or e}")
