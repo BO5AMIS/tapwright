@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.9.1
+
+Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter
+iPhone Passcode for XCTest") only when a new test runner starts, and only once its last consent is about 8 hours old; a
+runner that keeps running is never asked (serve.log, 11-13 to 11-19). So Tapwright now keeps its runner.
+
+- `tapwright service install [serve's flags]`: a Windows logon task (hidden, no time limit, least privilege) runs
+  `tapwright serve --keep-alive` with the flags given, `--accounts` included as an absolute path (the passcode stays in
+  the vault file). `service uninstall` removes it, `service status` says whether it is there and the daemon runs. On
+  macOS and Linux it prints the launchd agent or the systemd user unit to add.
+- The daemon no longer stops after 30 minutes unused while a phone is connected (or is being connected to, or waits at
+  the passcode prompt); with no phone it stops as before.
+- The passcode unlock: an attempt that unlocks the phone is no longer counted. The limits (2 an hour, 3 a day) apply
+  only to attempts that don't unlock it; the stop after a refused passcode and `tapwright unlock-reset` are unchanged.
+- A reconnect keeps the running runner when only a request timed out: a new session is asked for once more on the same
+  runner (its `/status` asked up to 3 times) before the connection is rebuilt and the runner replaced, as before.
+- No runner is started on a phone that restarted and hasn't been unlocked since (CoreDevice's lock state, read without
+  WebDriverAgent): calls answer `locked`, "unlock it once with its passcode". With `TAPWRIGHT_LOCK_GATE=1`, no runner is
+  started either on a locked phone whose consent is older than 7.5 h, so the prompt comes up when a person unlocks it.
+  A start that went on after the prompt records when (`~/.tapwright/automation.json`).
+
 ## 1.9.0, "the Token Update"
 
 Fewer calls per task (AGENT-TOOLS 1.17 §30). Nothing is taken away: every 1.8.5 call, argument and answer still
