@@ -137,7 +137,7 @@ def test_no_hints_keeps_1_8_5s_keyboard_and_finding_notes():
 
 from mapfakes import APP, screen  # noqa: E402
 from test_daemon import started  # noqa: E402
-from test_tokens_190 import mapped, saved  # noqa: E402
+from test_tokens_190 import mapped, saved, walk_to_form  # noqa: E402
 
 from tapwright import autoroute, tokentext  # noqa: E402
 from tapwright.control import Refused  # noqa: E402
@@ -460,3 +460,27 @@ def test_an_expect_after_a_link_waits_out_a_reloading_app_and_opens_the_link_aga
         assert "the link was opened once more" in r["text"]
         await finish(stop, task)
     run(go)
+
+
+# ---- item 5: the form hint fires on one field and a Save ----
+
+def test_one_input_and_a_save_button_is_a_form_for_its_hint(tmp_path):
+    async def go():
+        d = mapped(tmp_path)
+        d.session.screens["form"] = screen("Plan a trip", ids=("trip-save", "to-detail", "f1"), inputs=("trip-notes",))
+        stop, task = await started(d)
+        answers = await walk_to_form(d)
+        assert answers[-1]["text"].splitlines()[-1] == tokentext.HINTS["form"]
+        await finish(stop, task)
+    run(go)
+
+
+def test_one_input_without_a_submit_button_is_no_form():
+    from fakes import button, el
+    D = daemon_module.Daemon
+    search = [el("e1", "input", "Search destinations", "explore-search"), button("e2", "Kyoto", "dest-card-kyoto")]
+    assert not D._is_form_hint(search)
+    assert D._is_form_hint([*search, button("e3", "Save trip", "trip-save")])
+    assert not D._is_form_hint([*search, button("e3", "Share", "share")])  # a share is no form's save
+    two = [el("e1", "input", "A", "a"), el("e2", "input", "B", "b"), button("e3", "Next", "next")]
+    assert D._is_form_hint(two)  # §30.3's own reading still holds

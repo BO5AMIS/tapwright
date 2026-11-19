@@ -5291,10 +5291,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             "logs": lambda: CRASH_NOTE in text or self._app_errored(view),
             "known_way": lambda: (code is None and view.tap_streak >= tokentext.KNOWN_WAY_TAPS and view.place is not None
                                   and self._known_name(view) is not None),
-            # a new screen (the full list) holding 2 or more inputs and a button
+            # a new screen (the full list) holding an input and a submit-worded button (1.9.0 round 2: §30.3's "2 or
+            # more inputs" never fired on a trip form of one field and steppers)
             "form": lambda: (code is None and name not in ("logs", "map", "apps")
                              and any(line.startswith("Screen ") for line in text.split("\n")[:4])
-                             and self._is_form(view.items)),
+                             and self._is_form_hint(view.items)),
             "screenshot": lambda: (code is None and args.get("screenshot") is True and name in ACTIONS and name != "look"
                                    and changes.NO_CHANGE not in text),
             "long_task": lambda: view.calls >= tokentext.LONG_TASK_CALLS,
@@ -5348,6 +5349,21 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             found = [r for r in found if key is not None and isinstance(r.get("steps"), list)
                      and autoroute.target_key(r["steps"]) == key]
         return found[0]["name"] if len(found) == 1 else None
+
+    FORM_WORDS = tuple(w for w in explorefloor.SUBMIT_WORDS if w != "Share")  # (1.9.0 round 2) a form's own save
+
+    @classmethod
+    def _is_form_hint(cls, items: list) -> bool:
+        """(1.9.0 round 2, Tapwright's reading of §30.3) A form, for its hint: 1 or more inputs and a button worded as a
+        save or submit (Save, Submit, Continue, Sign in, Create, Confirm...), or §30.3's 2 or more inputs and a button. The
+        H1 rule (`_is_form`, a tap that leaves a form is no navigation) keeps its own definition."""
+        if not any(getattr(e, "role", None) == "input" for e in items):
+            return False
+        if cls._is_form(items):
+            return True  # (§30.3's own reading still holds: 2 or more inputs and a button)
+        return any(getattr(e, "role", None) == "button" and getattr(e, "enabled", True) is not False
+                   and any(explorefloor._first(cls.FORM_WORDS, explorefloor._plain(n)) is not None
+                           for n in explorefloor.names_of(e)) for e in items)
 
     @staticmethod
     def _is_form(items: list) -> bool:
