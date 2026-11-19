@@ -23,6 +23,9 @@ MAX_LOGS = 20
 LOG_CUT = 300
 MAX_FRAMES = 8
 TYPED = "${typed}"  # what a step that typed carries instead of the text (§27.1)
+# §29.8 (Tapwright): a system sheet or prompt that was in front at the moment, by its kind only; any other is `other`.
+# A picture taken with one in front is always private: it shows the owner's own things (share suggestions, contacts).
+SYSTEM_SHEETS = ("share sheet", "permission prompt", "system alert", "purchase sheet", "other")
 _ID = re.compile(r"^f[0-9]{1,6}$")
 _WHEN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 _PLACE = re.compile(r"^[a-z0-9_]{1,60}$")
@@ -77,6 +80,7 @@ class Finding:
     component_stack: tuple[str, ...] = ()
     repro: str | None = None
     count: int = 1
+    system: str | None = None  # §29.8: the kind of system sheet in front at the moment (SYSTEM_SHEETS), never its content
 
 
 # ---- redaction (§27.2) ----
@@ -95,6 +99,19 @@ def redact(value: object, scrub: Callable[[str], str]) -> object:
 
 
 HIDDEN = "(hidden: the redactor failed on this text)"
+FIELD_VALUE = "<field value>"  # what an element line of a text field shows instead of what is in it (W177)
+# an element line of an input (a text field, a text view, a search field, a secure field): `input "Note" id=n value="…"`,
+# with its value a JSON string (ui.clip). The role starts the line or follows its ref; the value is the line's own `value=`
+_INPUT_VALUE = re.compile(r'((?:^|(?<=[\s:(]))(?:e\d+\s+)?input\b[^\n]*?(?<![\w-])value=)"(?:[^"\\\n]|\\.)*"')
+
+
+def hide_values(text: str) -> str:
+    """Every element line of a text field with its value replaced by `<field value>` (W177): what a person typed into a
+    field (a note, a search, a code) is no text a report keeps, whoever typed it, and an explore report or a bug page may
+    quote such a line (an accessibility issue, a usability one). Other lines are left as they are."""
+    if "value=" not in text:
+        return text
+    return _INPUT_VALUE.sub(lambda m: f"{m.group(1)}{FIELD_VALUE}", text)
 
 
 def safe_scrub(scrub: Callable[[str], str]) -> Callable[[str], str]:
@@ -128,8 +145,10 @@ def _text(value: object, what: str) -> str:
     return value
 
 
-def _label(value: object, what: str, pattern: re.Pattern[str]) -> str:
+def _label(value: object, what: str, pattern: re.Pattern[str], held: Callable[[str], str] | None = None) -> str:
     text = _text(value, what)
+    if held is not None and held(text) != text:  # (a label that holds a vault value is no label: refused, never shown)
+        raise FindingError(f"{what} holds a private value, so it isn't kept")
     if not pattern.match(text):
         raise FindingError(f"{what} isn't one: {text!r}")
     return text
@@ -189,18 +208,26 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
          path_from: str | None = None, path: list[dict] | tuple[dict, ...] = (), picture_file: str | None = None,
          test_app: bool = False, logs: list[str] | tuple[str, ...] = (), crash_reason: str | None = None,
          crash_frames: list[str] | tuple[str, ...] = (), component_stack: list[str] | tuple[str, ...] = (),
-         repro: str | None = None, count: int = 1) -> Finding:
+         repro: str | None = None, count: int = 1, kinds: tuple[str, ...] = KINDS, system: str | None = None,
+         labels: Callable[[str], str] | None = None) -> Finding:
     """A finding as §27.1 has it, made safe: all text redacted whole, then cut (a log line at 300 characters, at most 20
     lines, the top 8 frames, at most 10 issues). `picture_file` is where the picture was saved (`findings/f3.jpg`), None for
-    none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding."""
-    if kind not in KINDS:
-        raise FindingError(f"kind is one of {', '.join(KINDS)}, not {kind!r}")
+    none; it is private unless `test_app` (§27.2). `FindingError` for what can't be a finding.
+
+    `labels` (review R185b H1): the redactor the tool's own labels (the versions, the build, the device, the files) are
+    checked with, never changed by: one that holds a value is refused. A bug report passes the vault's values and codes
+    only, so a value typed in the session (`220`, `2026`) is no reason to refuse a build; `scrub` by default."""
+    held = scrub if labels is None else labels
+    if kind not in kinds:  # (`kinds`: a bug report also takes `observed`, its own kind, §29.3)
+        raise FindingError(f"kind is one of {', '.join(kinds)}, not {kind!r}")
     if (crash_reason is not None or crash_frames) and kind != "crash":
         raise FindingError("only a crash finding has a crash")
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise FindingError("count is a whole number from 1")
     if crash_frames and crash_reason is None:
         raise FindingError("a crash has its reason")
+    if system is not None:
+        system = system if system in SYSTEM_SHEETS else "other"
 
     def safe(text: str) -> str:  # redaction is always before a cut
         if not isinstance(text, str):
@@ -209,18 +236,22 @@ def make(*, finding_id: str, kind: str, app: str, app_version: str, build: str, 
     crash = Crash(safe(crash_reason), tuple(safe(f) for f in crash_frames[:MAX_FRAMES])) if crash_reason is not None else None
     return Finding(
         id=_label(finding_id, "id", _ID), kind=kind, app=_text(app, "app"),
-        app_version=_label(safe(app_version), "app_version", _ID_TEXT), build=_label(safe(build), "build", _ID_TEXT),
-        tool=_label(tool, "tool", _TOOL), tool_version=_label(safe(tool_version), "tool_version", _ID_TEXT),
+        # (review R185b H1) a version, a build, a model and an OS are the tool's own labels, nothing free (`_ID_TEXT`): never
+        # read through the redactor, so a typed `220` can't make a build `<typed value>` and refuse the finding
+        app_version=_label(app_version, "app_version", _ID_TEXT, held), build=_label(build, "build", _ID_TEXT, held),
+        tool=_label(tool, "tool", _TOOL), tool_version=_label(tool_version, "tool_version", _ID_TEXT, held),
         when=_label(when or now_ms(), "when", _WHEN),
-        device=Device(_label(safe(device.model), "device model", _ID_TEXT), _label(safe(device.os), "device os", _ID_TEXT)),
-        expected=_one_line(safe(_text(expected, "expected"))), got=_got(kind, safe(_text(got, "got"))),
+        device=Device(_label(device.model, "device model", _ID_TEXT, held), _label(device.os, "device os", _ID_TEXT, held)),
+        expected=_one_line(hide_values(safe(_text(expected, "expected")))),
+        got=_got(kind, hide_values(safe(_text(got, "got")))),
         place=None if place is None else _label(place, "place", _PLACE),
         path_from=None if path_from is None else _label(path_from, "path_from", _PLACE),
         path=tuple(_step(s, scrub) for s in path),
-        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/", scrub), not test_app),
+        picture=None if picture_file is None else Picture(_file(picture_file, "picture file", "findings/", held),
+                                                          not test_app or system is not None),
         logs=tuple(safe(line)[:LOG_CUT] for line in logs[:MAX_LOGS]), crash=crash,
         component_stack=tuple(safe(c) for c in component_stack),
-        repro=None if repro is None else _file(repro, "repro", "repro/", scrub), count=count)
+        repro=None if repro is None else _file(repro, "repro", "repro/", held), count=count, system=system)
 
 
 def visible_picture(finding: Finding, asked: bool = False) -> str | None:
@@ -275,6 +306,8 @@ def to_dict(finding: Finding) -> dict:
     if finding.repro is not None:
         out["repro"] = finding.repro
     out["count"] = finding.count
+    if finding.system is not None:
+        out["system"] = finding.system
     return out
 
 
@@ -282,7 +315,8 @@ def dumps(finding: Finding) -> str:
     return json.dumps(to_dict(finding), indent=2, ensure_ascii=False) + "\n"
 
 
-def parse(raw: object, scrub: Callable[[str], str]) -> Finding:
+def parse(raw: object, scrub: Callable[[str], str], kinds: tuple[str, ...] = KINDS,
+          labels: Callable[[str], str] | None = None) -> Finding:
     """A finding read from JSON text or a dict (either tool's), checked and redacted as `make` does; a key it doesn't know is
     ignored. A picture with no `private`, or any value but `false`, is private. `FindingError` for what isn't one."""
     if isinstance(raw, (str, bytes)):
@@ -316,6 +350,9 @@ def parse(raw: object, scrub: Callable[[str], str]) -> Finding:
     count = raw.get("count", 1)
     if isinstance(count, bool) or not isinstance(count, int):
         raise FindingError("count is a whole number from 1")
+    system = raw.get("system")
+    if system is not None and not isinstance(system, str):
+        system = "other"
     return make(finding_id=text("id"), kind=text("kind"), app=text("app"), app_version=text("app_version"), build=text("build"),
                 tool=text("tool"), tool_version=text("tool_version"), when=text("when"),
                 device=Device(text("model", device), text("os", device)), expected=text("expected"), got=text("got"),
@@ -323,4 +360,5 @@ def parse(raw: object, scrub: Callable[[str], str]) -> Finding:
                 picture_file=None if picture is None else text("file", picture),
                 test_app=picture is not None and picture.get("private") is False,
                 logs=lists["logs"], crash_reason=None if crash is None else text("reason", crash), crash_frames=frames,
-                component_stack=lists["component_stack"], repro=maybe("repro"), count=count)
+                component_stack=lists["component_stack"], repro=maybe("repro"), count=count, kinds=kinds, system=system,
+                labels=labels)

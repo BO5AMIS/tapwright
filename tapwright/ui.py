@@ -23,6 +23,11 @@ from .device import DeviceError
 # that call only): the formatting below then shows only what is on the glass: no ids, icon-only buttons without their
 # label, `more below` instead of counts. One filter here, so every answer that prints an element follows it.
 USERS_EYES: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_users_eyes", default=False)
+# True while explore or a bug check reads a screen's issues for a finding (PR #21): an input's line then never shows what is
+# in it, also when it has no label and its value would be the quoted text (`input "what was typed"`); its value is
+# `value=<field value>` (findings.FIELD_VALUE). Ordinary answers show fields as they are.
+FIELD_VALUES_HIDDEN: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_field_values_hidden", default=False)
+FIELD_VALUE = "<field value>"
 
 # The tree read, measured in Task 0: 0.1-0.4 s where plain JSON took 0.5-9 s. It has no `visible`
 # or focus attribute, so visibility comes from the rect. The fork's compact read (route version 5) says which element
@@ -205,22 +210,24 @@ class Element:
         rule 1). The actions a role implies are never listed (rule 4). The label is the quoted text, so there
         is no separate `label=`."""
         eyes = USERS_EYES.get()
+        hidden = self.role == "input" and FIELD_VALUES_HIDDEN.get()  # (a finding's line: what is in a field isn't shown)
+        text = self.label if hidden else self.text
         parts = [self.ref] if ref else []
         parts.append(self.role)
-        if self.others and self.text:
+        if self.others and text:
             parts.append(MARK_OTHERS)  # between the role and the quoted text, never cut (§21.1)
-        if eyes and self.icon_only and self.text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
+        if eyes and self.icon_only and text:  # AGENT-TOOLS §17.1: the label is VoiceOver's, not on the glass
             parts.append("(icon only)")
-            parts.append(f"(VoiceOver: {clip(self.text)})")
-        elif self.text:
-            parts.append(clip(self.text))
+            parts.append(f"(VoiceOver: {clip(text)})")
+        elif text:
+            parts.append(clip(text))
         if self.identifier and not eyes:  # a user sees no ids
             parts.append(f"id={shown(self.identifier)}")
         # a switch's value ("1", "0") is already `checked=`; an empty input's placeholder is `placeholder=` (v1.7)
         if self.shows_placeholder:
             parts.append(f"placeholder={clip(self.placeholder)}")
-        elif self.value and self.value != self.text and self.checked is None:
-            parts.append(f"value={clip(self.value)}")
+        elif self.value and self.value != text and self.checked is None:
+            parts.append(f"value={FIELD_VALUE if hidden else clip(self.value)}")
         if not self.enabled:
             parts.append("disabled")
         if self.selected:

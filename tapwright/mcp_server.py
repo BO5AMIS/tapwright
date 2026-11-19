@@ -171,6 +171,9 @@ def _timeout(tool: str, args: dict) -> float:
         return EXPORT_TIMEOUT
     if tool == "explore":  # a search runs up to its `minutes` (AGENT-TOOLS §25.2)
         return exploretool.timeout_for(args)
+    if tool == "bug_report":  # its reproduction runs (§29.4) and its export (§29.7)
+        from . import bugcheck
+        return bugcheck.timeout_for(args)
     if tool == "replay" and args.get("repair") == "apply":  # the run, then the repaired file's own replay (§26.4)
         return scriptrepair.APPLY_TIMEOUT
     if tool == "media":
@@ -334,6 +337,19 @@ async def explore(minutes: float | None = None, steps: int | None = None, depth:
     given = {"minutes": minutes, "steps": steps, "depth": depth, "from": start, "focus": focus, "fill": fill,
              "continue": keep_going, "guide": guide}
     return await _tool("explore", **{k: v for k, v in given.items() if v is not None})
+
+
+@server.tool(description=describe("bug_report"), structured_output=False)
+@_wire_names(**{"from": "source"})
+async def bug_report(finding: str | None = None, run: str | None = None,
+                     source: str | None = Field(default=None, alias="from"), note: str | None = None,
+                     expected: str | None = None, verify: int | bool | None = None, reset: str | None = None,
+                     account: str | None = None, bug: str | None = None, with_picture: bool | None = None,
+                     export: dict | None = None) -> CallToolResult:
+    # (`from` is Python's word: the argument is its alias. Each is sent only when given.)
+    given = {"finding": finding, "run": run, "from": source, "note": note, "expected": expected, "verify": verify,
+             "reset": reset, "account": account, "bug": bug, "with_picture": with_picture, "export": export}
+    return await _tool("bug_report", **{k: v for k, v in given.items() if v is not None})
 
 
 @server.tool(description=describe("record"), structured_output=False)

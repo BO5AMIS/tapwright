@@ -1,6 +1,6 @@
 """The audit log (docs/AGENT-TOOLS.md §23): the record of what was done under a person's standing permission. JSON
 lines in ~/.tapwright/audit/YYYY-MM.jsonl, one per grant use, revocation, vault value typed, one-time code, scheduled
-run and person's approval. It is not the action log (§12) and not the accessibility `audit` (§10).
+run, person's approval, script repair and bug report export (§29.7). It is not the action log (§12) and not the accessibility `audit` (§10).
 
 - `t` is UTC to the millisecond; `tool` is "tapwright".
 - `detail` never holds a value: it is redacted (§20.3) with the `scrub` the log is given, and names a vault entry, never
@@ -22,7 +22,9 @@ from typing import Callable
 
 from . import pidlock
 
-KINDS = ("grant", "revoke", "vault", "otp", "schedule", "approval", "repair")  # (repair: a script repair's trials and its adoption, §26.7)
+KINDS = ("grant", "revoke", "vault", "otp", "schedule", "approval", "repair", "export")
+# (repair: a script repair's trials and its adoption, §26.7; export: a bug report leaving its folder, §29.7, its detail the
+# target and the bug id, never content)
 KEEP_DAYS = 90
 TOOL = "tapwright"
 _FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")

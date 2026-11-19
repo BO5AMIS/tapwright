@@ -33,7 +33,9 @@ EXPORT_CALL_TIMEOUT = 600.0  # a journey's stop with export (mcp_server.EXPORT_T
 APPLY_CALL_TIMEOUT = 480.0  # replay with repair "apply": the run, then the repaired file's own replay (scriptrepair.APPLY_TIMEOUT)
 EXPLORE_MINUTES = 10.0  # explore's default budget (explore.MINUTES)
 EXPLORE_MARGIN = 60 + 5 * 60  # a minute for the report and a person's waits (exploretool.timeout_for)
-FLOOR_TOOLS = ("explore", "replay")  # the calls whose own moves pass the skip floor, as server.FLOOR_TOOLS (replay with repair)
+FLOOR_TOOLS = ("explore", "replay", "bug_report")  # the calls whose own moves pass the skip floor, as server.FLOOR_TOOLS (replay with repair)
+BUG_BASE, BUG_RUN, BUG_RUNS, BUG_EXPORT = 120.0, 60.0 + 60.0 + 2 * 30.0, 3, 600.0  # bug_report: bugcheck.timeout_for (3 runs
+# by default; each run with its two launch waits, review R185b M1)
 NO_DAEMON = "tapwright serve isn't running (or its address file is unreadable): start it with `tapwright serve`."
 
 
@@ -47,6 +49,12 @@ def default_timeout(tool: str, args: dict) -> float:
         minutes = args.get("minutes")
         finite = isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and math.isfinite(minutes)
         return (float(minutes) if finite else EXPLORE_MINUTES) * 60 + EXPLORE_MARGIN
+    if tool == "bug_report":  # its `verify` runs and its export (bugcheck.timeout_for)
+        verify = args.get("verify")
+        runs = BUG_RUNS if verify is True else verify if isinstance(verify, int) and not isinstance(verify, bool) else 0
+        if verify is None and (args.get("finding") is not None or args.get("from") == "failure"):
+            runs = BUG_RUNS
+        return BUG_BASE + runs * BUG_RUN + (BUG_EXPORT if args.get("export") is not None else 0.0)
     if tool == "replay" and args.get("repair") == "apply":
         return APPLY_CALL_TIMEOUT
     if tool == "media":

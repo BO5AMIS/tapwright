@@ -32,6 +32,9 @@
   tapwright unlock-reset
                      after the phone refused the vault's passcode, the passcode unlock types nothing until you check
                      phone.passcode and run this (at most 2 attempts an hour and 3 a day in any case)
+  tapwright bug <report folder> <finding id> [--with-picture] [--verify N] [--accounts FILE]; bug list [--app ID];
+                     bug verify <bug id> [--verify N]; bug export <bug id> --to zip|issue [--repo O/N] [--yes]
+                     a one-page bug report of an explore finding under ~/.tapwright/bugs (the phone only to verify)
   tapwright mcp [--screenshots DIR]  the MCP server for agents (stdio); it talks to the daemon
   tapwright install --client claude|codex|cursor --apps ID[,ID] [--dedicated | --phone] [--project DIR]
                      [--policy FILE | --no-policy] [--ux-rules FILE]
@@ -978,6 +981,236 @@ def explore(a, sleep=time.sleep, clock=time.monotonic) -> int:
     return 1 if found and int(found.group(1)) > 0 else 0
 
 
+def _daemon_alive() -> bool:
+    """Is a `tapwright serve` running now (it answers with its token)? Never starts one."""
+    import json as jsonlib
+    from . import client, store as storelib
+    try:
+        info = jsonlib.loads((storelib.HOME / "serve.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(info, dict) and client.healthy(info) is not None
+
+
+BUG_VALUES_VAULT = "the vault values of --accounts only (no daemon is running: not the session's typed values or codes)"
+BUG_VALUES_NONE = "no values (no daemon is running and no --accounts was given)"
+BUG_ISSUE_NEEDS_VALUES = ("Error not_allowed: no daemon is running, so the values a bug must never hold (the session's typed "
+                          "values, the codes) can't be checked, and no --accounts names the vault's. Start tapwright serve, or "
+                          "give --accounts FILE; nothing was sent.")
+
+
+def bug_cmd(a, out=print, ask=None, call=None, alive=None) -> int:
+    """`tapwright bug` (AGENT-TOOLS §29.3):
+    - `bug <report folder> <finding id> [--with-picture] [--verify N]` makes a bug of an explore report's finding with no phone;
+      with `--verify` the daemon then checks it on the phone (§29.4);
+    - `bug list [--app ID]` lists the bugs kept;
+    - `bug verify <bug id> [--verify N]` checks a kept bug again, on the phone (through the daemon, as the tool does);
+    - `bug export <bug id> --to zip|issue [--repo owner/name] [--public] [--with-picture] [--yes] [--app ID]` (§29.7), with no
+      phone: GitHub asks `Send to GitHub? [y/N]`, and without a terminal `--yes` answers it.
+    Exit 0: a bug was made or updated and it reproduced or wasn't checked (or the export was written); 1: it was made and
+    didn't reproduce (`0 of N`); 2: it couldn't be made or sent, or a person, a pause or a refusal stopped it. Every file is
+    grepped before it is written or sent (§29.6). While a daemon runs, the make and the export go through it (review R185
+    M3), so its live values hold (the vault's, the codes, the session's typed values); without one the redactor holds only
+    the values of `--accounts`, the answer says so, and an export to GitHub is refused without `--accounts`. `alive`: is a
+    daemon running (tests)."""
+    from . import accounts as accountlib, bugmake, bugstore, mapkeeper, store as storelib
+    words = list(a.what)
+    bugs = bugstore.BugStore(storelib.HOME / "bugs")
+    if words[:1] == ["list"]:
+        if len(words) != 1:
+            out("tapwright bug list takes no other word; --app ID narrows it to one app")
+            return 2
+        lines = bugs.listing(a.app)
+        out("\n".join(lines) if lines else "No bugs are kept.")
+        return 0
+    verify = getattr(a, "verify", None)
+    if verify is not None and not 1 <= verify <= 10:
+        out("Error bad_params: --verify is how many runs check it: 1 to 10")
+        return 2
+    if words[:1] == ["verify"]:
+        if len(words) != 2:
+            out("usage: tapwright bug verify <bug id> [--verify N]")
+            return 2
+        return _bug_call({"bug": words[1], "verify": verify or 3}, out, call, app=getattr(a, "app", None))
+    loaded = accountlib.load(a.accounts) if a.accounts else accountlib.NONE
+    if loaded.problem is not None:
+        out(f"tapwright bug: {loaded.problem}")
+        return 2
+    keep = accountlib.Store()
+    keep.remember(loaded)
+    running = (alive or _daemon_alive)()
+    if running and a.accounts:
+        # (PR #21) the daemon makes and exports with its own vault; a file given here would be read by nobody, and its
+        # values would go unchecked: refused, never ignored
+        out(BUG_ACCOUNTS_WITH_DAEMON)
+        return 2
+    if words[:1] == ["export"]:
+        return _bug_export_cmd(a, words, bugs, keep, out, ask, call, running)
+    if len(words) != 2:
+        out("usage: tapwright bug <report folder> <finding id> [--with-picture] [--verify N] | bug list [--app ID] | "
+            "bug verify <bug id> | bug export <bug id> --to zip|issue")
+        return 2
+    if running:  # (the daemon makes it, with its live values: review R185 M3; it checks it too when asked)
+        given = Path(words[0]).expanduser()
+        made_args: dict = {"finding": words[1], "run": str(given if given.is_absolute() else Path.cwd() / given),
+                           "verify": verify or False}
+        if a.with_picture:
+            made_args["with_picture"] = True
+        return _bug_call(made_args, out, call)
+    maps = mapkeeper.Maps(getattr(a, "maps", None))
+    ctx = bugmake.Context(bugs, keep.bug_scrub, keep.bug_gate, lambda app: _map_or_none(maps, app))
+    home = storelib.HOME / "explore"
+    folder = Path(words[0]).expanduser()
+    try:
+        got = bugmake.read_run(home, folder if folder.is_absolute() else Path.cwd() / folder, words[1])
+        made = bugmake.from_run(ctx, got, with_picture=a.with_picture,
+                                reproduced={"checked": False, "why": "the check didn't finish" if verify else BUG_NOT_ASKED})
+    except bugmake.BugError as e:
+        out(f"Error {e.code}: {ctx.safe()(str(e))}")
+        return 2
+    except bugstore.BugGateError as e:
+        out(f"Error not_allowed: the bug was not made: {e} Nothing was written.")
+        return 2
+    except (ValueError, OSError) as e:
+        out(f"Error bad_params: {ctx.safe()(str(e))}")
+        return 2
+    if verify:  # the bug is made; the phone checks it (the daemon finds it by its id and its app)
+        return _bug_call({"bug": made.meta["id"], "verify": verify}, out, call, app=made.finding["app"])
+    out(bugmake.answer(made, ctx.scrub, home=Path.home()) + f"\nChecked for: {BUG_VALUES_VAULT if a.accounts else BUG_VALUES_NONE}.")
+    return 0
+
+
+BUG_NOT_ASKED = "not asked: tapwright bug verify <bug id> checks it on the phone"
+BUG_ACCOUNTS_WITH_DAEMON = ("Error bad_params: --accounts is for when no daemon is running. tapwright serve is running, and "
+                            "it makes and exports bugs with its own vault (the one it was started with: tapwright serve "
+                            "--accounts FILE). Leave --accounts out, or start the daemon with that file; nothing was made "
+                            "or sent.")
+
+
+def _bug_call(args: dict, out, call=None, app: str | None = None) -> int:
+    """A `bug_report` call to the daemon (the phone's side: the reproduction check), with the exit code of §29.3. `app`: the
+    app whose bug `args["bug"]` is, sent as the call's app (PR #21: the daemon then takes that app's bug when two apps hold
+    the id, never the one in front)."""
+    from . import bugcheck, client
+    call = call or client.call
+    before = client.SCOPE.get("X-Tapwright-Apps")
+    if app:
+        client.SCOPE["X-Tapwright-Apps"] = app
+    try:
+        answer = call("bug_report", args, "cli-bug", timeout=bugcheck.timeout_for(args))
+    except client.DaemonError as e:
+        out(f"Error {e.code}: {e}")
+        return 2
+    finally:
+        if app:
+            if before is None:
+                client.SCOPE.pop("X-Tapwright-Apps", None)
+            else:
+                client.SCOPE["X-Tapwright-Apps"] = before
+    text = answer.get("text", "")
+    out(text)
+    if args.get("export") is not None and not args.get("verify"):
+        return 0  # (PR #21) an export that answered was written: the saved check's result is no exit of it
+    return bug_exit(text)
+
+
+def bug_exit(text: str) -> int:
+    """The exit code of an answer (§29.3): 1 when it didn't reproduce (`0 of N`), 2 when a person, a pause or a refusal
+    stopped the check, else 0. A stop of this check comes before the page's saved result (PR #21: a check that paused
+    keeps the last check's `0 of 3` on its page, and is still a stop)."""
+    lines = text.splitlines()
+    line = lines[1] if len(lines) > 1 else ""
+    stopped = ("stopped (", "needs a person")
+    if any(ln.startswith("Note: not checked this time (") and any(w in ln for w in stopped) for ln in lines):
+        return 2
+    if line.startswith("Reproduced: 0 of "):
+        return 1
+    if line.startswith("Reproduced: not checked (") and any(w in line for w in stopped):
+        return 2
+    return 0
+
+
+def _bug_export_cmd(a, words: list[str], bugs, keep, out, ask=None, call=None, daemon: bool = False) -> int:
+    """`tapwright bug export <bug id> --to zip|issue ...` (§29.7), no phone. `daemon`: one is running (`call` reaches it); the export goes
+    through it when `daemon` (its live values, its audit line: review R185 M3). Without one it is made here with the values of
+    `--accounts`, and an export to GitHub needs `--accounts`. A bug of an app that isn't one of the daemon's test apps needs
+    a yes for any export (H2)."""
+    import sys
+    from . import auditlog, bugexport
+    from .control import Refused
+    if len(words) != 2 or getattr(a, "to", None) is None:
+        out("usage: tapwright bug export <bug id> --to zip | --to issue --repo owner/name [--public] [--with-picture] [--yes]")
+        return 2
+    bug_id = words[1]
+    holders = bugs.holders(bug_id)
+    app = getattr(a, "app", None)
+    if app is not None and app not in holders:
+        holders = []
+    elif app is not None:
+        holders = [app]
+    if not holders:
+        out(f'Error not_found: no bug "{bug_id}" is kept{f" for {app}" if app else ""}; tapwright bug list names them.')
+        return 2
+    if len(holders) > 1:
+        out(f"Error ambiguous: {bug_id} is a bug of {', '.join(holders)}: name the app with --app.")
+        return 2
+    held = bugs.read(holders[0], bug_id)
+    if held is None:
+        out(f'Error not_found: no bug "{bug_id}" is kept.')
+        return 2
+    raw: dict = {"to": a.to}
+    other_app = held.meta.get("test_app") is not True
+    if a.to == "issue" or other_app:
+        if a.to == "issue":
+            raw.update(repo=getattr(a, "repo", None), public=bool(getattr(a, "public", False)))
+        confirmed = bool(getattr(a, "yes", False))
+        if not confirmed and ask is None and sys.stdin is not None and sys.stdin.isatty():
+            ask = input
+        if not confirmed and ask is not None:
+            question = "Send to GitHub? [y/N] " if a.to == "issue" else (
+                "This bug's app isn't one of the daemon's test apps. Write the zip anyway? [y/N] ")
+            try:
+                confirmed = ask(question).strip().lower() in ("y", "yes")
+            except EOFError:
+                confirmed = False
+        raw["confirm"] = confirmed
+    if a.with_picture:
+        raw["with_picture"] = True
+    if daemon:
+        try:
+            bugexport.check(raw)
+        except Refused as e:
+            out(f"Error {e.code}: {e}")
+            return 2
+        return _bug_call({"bug": bug_id, "export": raw}, out, call, app=held.app)
+    log = auditlog.AuditLog(scrub=keep.scrub)
+    if a.to == "issue" and not a.accounts:  # (every export, a refused one too, has its audit line: §29.7)
+        log.write("export", name="bug_report", app=held.app,
+                  detail=f"issue {getattr(a, 'repo', None)}: {bug_id}, refused (no values to check)")
+        out(BUG_ISSUE_NEEDS_VALUES)
+        return 2
+    checked = BUG_VALUES_VAULT if a.accounts else BUG_VALUES_NONE
+    try:
+        spec = bugexport.check(raw)
+        said = bugexport.export(held, spec, keep.bug_gate, lambda detail: log.write(
+            "export", name="bug_report", app=held.app, detail=detail), Path.home(), checked)
+    except Refused as e:
+        text = str(e)
+        if "needs_confirmation" in text:
+            text += " On the command line: answer y, or give --yes."
+        out(f"Error {e.code}: {text}")
+        return 2
+    out(said)
+    return 0
+
+
+def _map_or_none(maps, app: str) -> dict | None:
+    try:
+        return maps.data(None, app)
+    except Exception:  # noqa: BLE001 - no map: no names and no keys from it
+        return None
+
+
 def pull_crash_beside(script: str) -> str | None:
     """The app's newest crash report (the daemon's `crash` with pull), copied to
     `<script dir>/<script name>.diff/<script name>.crash.ips`; its path, or None when there is none to copy."""
@@ -1183,6 +1416,20 @@ def main() -> int:
     p.add_argument("--adopt", action="store_true",
                    help="with --repair apply: when that run passed, replace the script with the repaired one, keeping the "
                         "original as <script>.orig.json (once). Only a person can do this: no tool call can")
+    p = sub.add_parser("bug", help="a one-page bug report from an explore report's finding (no phone needed); bug list, "
+                                   "bug verify, bug export")
+    p.add_argument("what", nargs="+", metavar="WORD",
+                   help="<report folder> <finding id>, or list, or verify <bug id>, or export <bug id>")
+    p.add_argument("--with-picture", action="store_true",
+                   help="a private picture goes into the folder, or into the export (your own request)")
+    p.add_argument("--verify", type=int, metavar="N", help="reproduction runs on the phone, 1 to 10 (bug verify: default 3)")
+    p.add_argument("--app", metavar="ID", help="bug list: one app's bugs only; bug export: the app whose bug it is")
+    p.add_argument("--to", choices=("zip", "issue"), help="bug export: a .zip next to the bug's folder, or a GitHub issue")
+    p.add_argument("--repo", metavar="OWNER/NAME", help="bug export --to issue: the repository")
+    p.add_argument("--public", action="store_true", help="bug export --to issue: the repository may be public")
+    p.add_argument("--yes", action="store_true", help="bug export --to issue: answer Send to GitHub? with yes (no terminal)")
+    p.add_argument("--accounts", metavar="FILE", help="the vault file whose values the bug keeps out (§29.6)")
+    p.add_argument("--maps", metavar="DIR", help="the maps folder (default: the tool's home)")
     p = sub.add_parser("explore", help="search an app for what breaks, with no agent: the same search and report as the explore tool")
     p.add_argument("--minutes", type=float, metavar="N", help="time budget, 1 to 60 (default 10)")
     p.add_argument("--steps", type=int, metavar="N", help="move budget, 1 to 5000 (default 500)")
@@ -1357,6 +1604,8 @@ def main() -> int:
         return replay(a)
     if a.cmd == "explore":
         return explore(a)
+    if a.cmd == "bug":
+        return bug_cmd(a)
     if a.cmd == "skill":
         return skill(a)
     if a.cmd == "starters":

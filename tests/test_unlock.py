@@ -26,6 +26,9 @@ def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.El
     return [*items, *extra]
 
 
+SCREEN = (430.0, 932.0)  # the phone's screen in points (iPhone15,3)
+
+
 class Screen:
     """A fake lock screen. Keys pressed are mapped back to digits; the right passcode unlocks it."""
 
@@ -53,6 +56,9 @@ class Screen:
 
     async def xctest_prompt(self):
         return self.xctest
+
+    def screen_size(self):
+        return SCREEN
 
     async def press_keys(self, points):
         centres = {e.center: (e.label or "")[0] for e in self.items}
@@ -223,3 +229,185 @@ def test_find_entry_needs_springboard_and_the_keypad():
     assert unlock.find_entry(tree, SB) is not None
     assert unlock.find_entry(tree, "com.example.app") is None
     assert unlock.find_entry(ui.Tree(keypad(labels=False)), SB) is not None  # bare digit labels
+
+
+# ---- iOS 26: the keypad listed off the screen (1.8.5) ----
+# SpringBoard's tree on iPhone15,3 iOS 26.5 right after the wake (2026-11-19): the passcode view is on the screen, but
+# under a container whose frame lies outside it, so every key is in the tree's off-screen list. (No notification text
+# was on it; the clock reads a placeholder time.)
+IOS26_ITEMS = [
+    ("other", "Other", "jindo-container-view:1", "", (128, 11, 168, 37)),
+    ("other", "Other", "regular.view", "Swipe up to unlock", (128, 11, 168, 37)),
+    ("other", "Other", "proud-lock", "Swipe up to unlock", (128, 22, 13, 16)),
+    ("window", "Window", "SBCoverSheetWindow", "", (0, 0, 430, 932)),
+    ("text", "StaticText", "", "0:00 AM", (48, 18, 41, 23)),
+    ("other", "Other", "2 of 3 Wi-Fi bars", "", (343, 21, 20, 15)),
+]
+IOS26_OFF = [
+    ("button", "Button", "flashlight-orb-button", "Flashlight", (36, -134, 94, 94)),
+    ("button", "Button", "system-orb-button-com.apple.camera.deeplink.button", "Camera", (300, -134, 94, 94)),
+    ("text", "StaticText", "", "Enter Passcode", (137, 175, 156, 27)),
+    *[("button", "Key", "", d, (47 + 112 * (i % 3), 317 + 108 * (i // 3), 112, 108)) for i, d in enumerate("123456789")],
+    ("button", "Key", "", "0", (159, 641, 112, 108)),
+    ("button", "Button", "", "Emergency", (47, 803, 112, 108)),
+    ("text", "StaticText", "", "Emergency", (57, 846, 92, 22)),
+    ("button", "Button", "", "Cancel", (271, 803, 112, 108)),
+    ("text", "StaticText", "", "Cancel", (299, 846, 56, 22)),
+]
+
+
+def ios26(rows):
+    return [ui.Element(f"e{i}", role, label, ident, rect=tuple(float(v) for v in rect), type=kind, name=ident or label)
+            for i, (role, kind, ident, label, rect) in enumerate(rows)]
+
+
+def ios26_tree(off=None):
+    field = ui.Element("f", "input", "Passcode field", rect=(0, 220, 430, 13), secure=True, type="SecureTextField",
+                       name="Passcode field")
+    return ui.Tree(ios26(IOS26_ITEMS), offscreen=[*ios26(IOS26_OFF if off is None else off), field],
+                   app=(SB, SB))
+
+
+def face(frame):
+    """The key's round face, as the hit test answers on iOS 26: an unnamed Other inside the key's frame."""
+    x, y, w, h = frame
+    return ("", "", (x + 12, y + 10, w - 24, h - 20))
+
+
+class Ios26(Screen):
+    """The iOS 26 lock screen: keys in the off-screen list; the hit test lands on each key's unnamed face."""
+
+    def __init__(self, hits=None, **kw):
+        super().__init__(**kw)
+        self.tree = ios26_tree()
+        self.hits = hits  # (x, y) -> (name, label, rect), or None for the keys' faces
+        self.probed: list[tuple[float, float]] = []
+
+    async def lock_tree(self):
+        self.calls.append("tree")
+        return self.tree, self.front
+
+    def _keys(self):
+        return {e.center: e for e in self.tree.offscreen if e.type == "Key"}
+
+    async def press_keys(self, points):
+        keys = self._keys()
+        typed = "".join(keys[p].label for p in points)
+        self.pressed.append(typed)
+        if typed == self.right:
+            self.is_locked = False
+
+    async def key_at(self, x, y, frames):
+        self.probed.append((x, y))
+        if self.hits is not None:
+            said = self.hits.get((x, y))
+        else:
+            key = self._keys().get((x, y))
+            said = face(key.rect) if key is not None else None
+        return None if said is None else unlock.hit_key(*said, x, y, frames)
+
+
+def test_ios26_keypad_listed_off_screen_is_found_but_marked_for_the_hit_test():
+    entry = unlock.find_entry(ios26_tree(), SB, SCREEN)
+    assert entry is not None and not entry.on_screen and sorted(entry.keys) == sorted(unlock.DIGITS)
+    assert entry.keys["1"] == (103.0, 371.0) and entry.frames["0"] == (159.0, 641.0, 112.0, 108.0)
+    assert unlock.find_entry(ios26_tree(), "com.example.app", SCREEN) is None
+    on = unlock.find_entry(ui.Tree(keypad()), SB)
+    assert on is not None and on.on_screen  # a keypad the tree lists on the screen needs no hit test
+
+
+def test_ios26_unlocks_after_the_hit_test_confirms_the_keys():
+    u, _ = unlocker()
+    screen, audited = Ios26(), []
+    r = run(u.unlock(screen, PASSCODE, audited.append))
+    assert (r.ok, r.code) == (True, "unlocked") and screen.pressed == [PASSCODE]
+    assert "reveal" not in screen.calls  # found after the wake: no swipe that could close it
+    keys = {e.label: e.center for e in screen.tree.offscreen if e.type == "Key"}
+    assert screen.probed == [keys[d] for d in unlock.PROBE_KEYS]  # the same keys every time, never the passcode's
+
+
+@pytest.mark.parametrize("wrong", ["elsewhere", "other-key", "no-answer", "named-other", "raises"])
+def test_ios26_keys_the_hit_test_does_not_confirm_get_nothing_typed(wrong):
+    tree = ios26_tree()
+    keys = {e.label: e for e in tree.offscreen if e.type == "Key"}
+    hits = {e.center: face(e.rect) for e in keys.values()}
+    one = keys["3"].center
+    if wrong == "elsewhere":
+        hits[one] = ("", "", (0, 0, 430, 932))  # a view over the whole screen: not inside one key
+    elif wrong == "other-key":
+        hits[one] = face(keys["2"].rect)  # lands on the face of another key
+    elif wrong == "no-answer":
+        hits[one] = None
+    elif wrong == "named-other":
+        hits[one] = ("Emergency", "Emergency", keys["3"].rect)
+
+    class Wrong(Ios26):
+        async def key_at(self, x, y, frames):
+            if wrong == "raises":
+                raise RuntimeError("hit test failed")
+            return await super().key_at(x, y, frames)
+    u, _ = unlocker()
+    screen = Wrong(hits=hits)
+    r = run(u.unlock(screen, PASSCODE))
+    assert (r.ok, r.code) == (False, "not_proven") and screen.pressed == [] and u.tries_left() == 2
+
+
+@pytest.mark.parametrize("change", ["key-twice", "key-missing", "above-screen", "xctest-words"])
+def test_ios26_off_screen_keypad_still_needs_every_proof(change):
+    off = list(IOS26_OFF)
+    if change == "key-twice":
+        off.append(("button", "Key", "", "5", (5, 5, 20, 20)))
+    elif change == "key-missing":
+        off = [row for row in off if row[3] != "7"]
+    elif change == "above-screen":
+        off = [(r[0], r[1], r[2], r[3], (r[4][0], r[4][1] - 1000, r[4][2], r[4][3])) if r[1] == "Key" else r
+               for r in off]
+    elif change == "xctest-words":
+        off.append(("text", "StaticText", "", "Enter iPhone Passcode for \"XCTest\"", (20, 100, 390, 30)))
+    tree = ios26_tree(off)
+    entry = unlock.find_entry(tree, SB, SCREEN)
+    assert entry is None or not entry.keys  # at most the secure field, which a digit passcode never goes into
+    u, _ = unlocker()
+    screen = Ios26()
+    screen.tree = tree
+    r = run(u.unlock(screen, PASSCODE))
+    assert r.code == "not_proven" and screen.pressed == [] and screen.secrets == [] and screen.probed == []
+
+
+def test_hit_key_reads_a_named_key_or_one_unnamed_face():
+    frames = {"1": (47.0, 317.0, 112.0, 108.0), "2": (159.0, 317.0, 112.0, 108.0)}
+    assert unlock.hit_key("", "", (59.0, 327.0, 88.0, 88.0), 103, 371, frames) == "1"  # seen on the phone
+    assert unlock.hit_key("1", "1", frames["1"], 103, 371, frames) == "1"
+    assert unlock.hit_key("2", "2, ABC", frames["2"], 103, 371, frames) is None  # names a key the point isn't on
+    assert unlock.hit_key("", "", (59.0, 327.0, 88.0, 88.0), 300, 371, frames) is None  # the point isn't on the hit
+    assert unlock.hit_key("", "", (40.0, 317.0, 240.0, 108.0), 103, 371, frames) is None  # spans two keys
+    assert unlock.hit_key("Cancel", "Cancel", (59.0, 327.0, 88.0, 88.0), 103, 371, frames) is None
+
+
+# ---- review R185b L1: an off-screen keypad's keys must lie on the glass, every edge ----
+
+@pytest.mark.parametrize("change", ["past-right", "past-bottom", "no-size"])
+def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothing_typed(change):
+    off = list(IOS26_OFF)
+    if change == "past-right":
+        off = [(r[0], r[1], r[2], r[3], (r[4][0] + 1000, r[4][1], r[4][2], r[4][3])) if r[1] == "Key" else r for r in off]
+    elif change == "past-bottom":
+        off = [(r[0], r[1], r[2], r[3], (r[4][0], r[4][1] + 2000, r[4][2], r[4][3])) if r[1] == "Key" else r for r in off]
+    tree = ios26_tree(off)
+    size = None if change == "no-size" else SCREEN
+    entry = unlock.find_entry(tree, SB, size)
+    assert entry is None or not entry.keys
+
+    class Off(Ios26):
+        async def key_at(self, x, y, frames):  # a runner whose hit test answers the off-screen key itself
+            self.probed.append((x, y))
+            key = self._keys().get((x, y))
+            return key.label if key is not None else None
+
+        def screen_size(self):
+            return size
+    u, _ = unlocker()
+    screen = Off()
+    screen.tree = tree
+    r = run(u.unlock(screen, PASSCODE))
+    assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2

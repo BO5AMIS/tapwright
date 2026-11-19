@@ -206,6 +206,19 @@ SHARED = {
         'it (it never unlocks). '
         'Not a step of `run`; a call can last its `minutes`.'
     ),
+    'bug_report': (
+        'One page for whoever fixes a bug, in a folder (`report.md`, `report.html`, `repro.json`, `finding.json`), '
+        'with nothing private in it. Give exactly one: `finding` (`"f3"`) with `run` (an explore report folder, '
+        'default `"last"`), `from: "failure"` (the last failed check of run or replay), `from: "now"` with `note` '
+        '(one line: what is wrong) and `expected` (what you saw while driving: the last 10 touches become the '
+        "steps), or `bug` (a kept bug's id). The same bug found again is one bug with a count. `verify` (1 to 10 "
+        'runs, `true` for 3; default 3 for `finding` and `from: "failure"`) replays it on the phone, relaunching the '
+        'app, through the skip floor; it stops before any step that needs a person and asks no one. A private picture '
+        'goes in only with `with_picture: true`, and `export` (`{"to": "zip"}`, or `{"to": "issue", "repo": '
+        '"owner/name", "confirm": true}`) only when your user asked; a bug of an app that is not one of the daemon\'s '
+        'test apps (`serve --apps`) keeps no screen text or logs and needs `confirm: true` for a zip too. Answers the '
+        'title, `Reproduced:`, `Seen:` and the folder.'
+    ),
     'session_report': (
         "Where this session's calls and seconds went: calls per tool, failures by code, a `Time:` line (thinking "
         "time and the tool's time, by tool), and waste to cut, each with its call numbers: looks right after an "

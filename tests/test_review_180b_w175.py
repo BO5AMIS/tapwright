@@ -197,7 +197,9 @@ def test_the_thin_call_waits_per_tool_as_the_mcp_server_does():
     from tapwright import mcp_server, server, thin
     cases = [("explore", {}), ("explore", {"minutes": 2}), ("explore", {"minutes": float("nan")}), ("explore", {"minutes": True}),
              ("replay", {"repair": "apply"}), ("replay", {"repair": "suggest"}), ("replay", {}), ("run", {}), ("drive", {}),
-             ("media", {}), ("tap", {}), ("look", {}), ("journey", {"stop": True, "export": {}}), ("journey", {"stop": True})]
+             ("media", {}), ("tap", {}), ("look", {}), ("journey", {"stop": True, "export": {}}), ("journey", {"stop": True}),
+             ("bug_report", {}), ("bug_report", {"verify": True}), ("bug_report", {"verify": 5}), ("bug_report", {"verify": False}),
+             ("bug_report", {"finding": "f1"}), ("bug_report", {"from": "failure", "export": {}}), ("bug_report", {"from": "now"})]
     for tool, args in cases:
         assert thin.default_timeout(tool, args) == mcp_server._timeout(tool, args), (tool, _json.dumps(args))
     assert thin.default_timeout("explore", {}) == 10 * 60 + 60 + 5 * 60

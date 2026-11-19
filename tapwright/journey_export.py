@@ -22,7 +22,8 @@ from pathlib import Path
 
 from .control import Refused
 
-REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+# owner/name as GitHub has them: never `..`, `.` or a leading `-` (an option to gh), review R185 L5
+REPO = re.compile(r"(?!-)[A-Za-z0-9-]{1,39}/(?!\.{1,2}$)(?!-)[A-Za-z0-9_.-]{1,100}")
 BRANCH_NAME = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_./-]*")
 BRANCH = "qa-reports"
 FILES = ("report.md", "report.html", "journey.gif", "filmstrip.jpg")  # and findings/*.jpg

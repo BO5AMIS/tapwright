@@ -24,7 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from . import (__version__, accounts as accountlib, explore, explorefloor, explorereport, findings, grants, journey_report,
-               mapkeeper, store, ui)
+               mapkeeper, reflex, store, ui)
 from .control import AGENT_MAX_WAIT_S, Refused
 from .explore import Check, CrashFacts, Moved, PhoneStop, Watch
 
@@ -45,6 +45,11 @@ READ_TRIES = 5  # a look that hits a dropped line is made again this many times,
 POLICY_WORD = re.compile(r'policy word "([^"]*)"')
 DETAIL = re.compile(r"^[a-z_]{1,40}$")
 SETTLED = re.compile(r"Settled in (\d+(?:\.\d+)?) s")
+# (W177) after a launch, a development build shows "Loading from Metro…" / "Downloading n%" for seconds, and a link opened
+# then is lost: the app's screen is waited for, up to LAUNCH_WAIT, before anything reads or reaches a place
+LAUNCH_WAIT, LAUNCH_POLL = 30.0, 0.5
+LAUNCH_QUIET = 8.0  # a screen with nothing to touch that stays the same this long is the app's own (an empty first screen)
+STILL_LOADING = f"the app was still loading after {LAUNCH_WAIT:g} s"
 AWAY = "came to the front after the touch"  # the daemon's note when another app took the front (NOTE_TAKEN)
 
 
@@ -131,6 +136,8 @@ class DaemonPhone:
         self._waited = 0.0
         self._began = daemon._wall()  # a crash report of the app counts from the run's start
         self.crashes: list = []  # the reports the daemon's own crash checks found while the search ran (daemon._CRASHES)
+        self.still_loading = False  # the last launch wait ended at its deadline with the app still loading (W177)
+        self.picture_system: str | None = None  # the system sheet in front when the last picture was taken (PR #21)
 
     # ---- reading ----
     async def read(self) -> ui.Tree:
@@ -198,7 +205,51 @@ class DaemonPhone:
         return await self._act("scroll", {"to": "start"})
 
     async def open_app(self) -> Moved:
-        return await self._act("open_app", {"app": self.bundle})
+        moved = await self._act("open_app", {"app": self.bundle})
+        if moved.code is None:
+            await self.launched(opened=True)  # (W177: a relaunch that shows a loading screen is waited out)
+        return moved
+
+    async def launched(self, opened: bool = False) -> bool:
+        """After a launch (`opened`), or before a run's first read: wait, up to LAUNCH_WAIT, until the app's screen is one it
+        can be used on, not a loading screen (reflex.starting). A screen with nothing to touch that stays the same for
+        LAUNCH_QUIET is taken as the app's own. True when the screen is ready (or another app is in front and nothing was
+        opened); False at the deadline, and `still_loading` says so. Raises PhoneStop for a pause, a lock or a person."""
+        control = self.d.control
+        began = control.clock()
+        empty: tuple[float, tuple] | None = None
+        while True:
+            await self.gate()
+            try:
+                tree = await self._quiet_tree()
+            except Refused as e:
+                if e.code in ("paused", "busy", "locked"):
+                    raise PhoneStop(e.code) from None
+                tree = None
+            state = reflex.starting(tree, self.bundle)
+            now = control.clock()
+            if state is None or (state == "elsewhere" and not opened):
+                self.still_loading = False
+                return True
+            if state == "empty":
+                shape = tuple((e.role, e.label, e.identifier) for e in (tree.items if tree is not None else []))
+                if empty is None or empty[1] != shape:
+                    empty = (now, shape)
+                elif now - empty[0] >= LAUNCH_QUIET:
+                    self.still_loading = False
+                    return True
+            else:
+                empty = None
+            if now - began >= LAUNCH_WAIT:
+                self.still_loading = state != "elsewhere"  # (an app that never came to the front isn't "loading")
+                return False
+            await control.sleep(LAUNCH_POLL)
+
+    async def _quiet_tree(self) -> ui.Tree | None:
+        """The screen as it is, read with no picture and nothing in the action log (as a run's own read)."""
+        view = self.d.control.client(self.cid)
+        await self.d._read(lambda: self.d._silent_read(view))
+        return getattr(self.d.session, "last_tree", None)
 
     async def open_url(self, link: str) -> Moved:
         return await self._act("open_url", {"url": link})
@@ -259,7 +310,8 @@ class DaemonPhone:
             if ring is not None and ring.added > mark:
                 shown = ring.shown()
                 new = shown[max(0, len(shown) - max(0, ring.added - mark - ring.unvouched)):]
-                errors = tuple(self.d._safe_scrub(e.text) for e in new if e.level == "error")
+                # (PR #21) only the app's own lines: a framework's error in its process is no error of the app (as _bug_logs)
+                errors = tuple(self.d._safe_scrub(e.text) for e in new if e.level == "error" and e.own)
         except Exception:  # noqa: BLE001 - no log is no finding
             errors = ()
         crash = None
@@ -280,29 +332,45 @@ class DaemonPhone:
 
     async def picture(self) -> bytes | None:
         """A picture of the screen, only while the explored app is in front, taken in one turn between two reads of that (§27.2:
-        no picture of an app not given)."""
+        no picture of an app not given). `picture_system` is then the system sheet or prompt in front as it was taken (PR #21:
+        read in the same turn, so a share sheet that came up after the last read makes the picture private); a screen that
+        can't be read then gives no picture."""
         session, d = self.d.session, self.d
+        self.picture_system = None
         if d.unlocking():  # (1.7.8, M1) no picture while the phone is being unlocked
             return None
         asked = d.hub.mono()
 
-        async def capture() -> tuple[str | None, bytes, str | None]:
+        async def capture() -> tuple[str | None, bytes, object, str | None]:
             first = await session.foreground_bundle_id() or None
             shot = await session.screenshot_png()
-            return first, shot, await session.foreground_bundle_id() or None
-        before, png, after = await self.d._read(capture)
-        if before != self.bundle or after != before:
+            try:
+                tree = (await session.snapshot()).tree
+            except Exception:  # noqa: BLE001 - what was in front can't be told: no picture
+                tree = None
+            return first, shot, tree, await session.foreground_bundle_id() or None
+        before, png, tree, after = await self.d._read(capture)
+        if before != self.bundle or after != before or tree is None:
             return None
+        self.picture_system = explorefloor.system_of(tree)
         if d.unlocked_since(asked) or d.center_since(asked):  # an unlock, or Notification Center, may be in it
             return None
         return await asyncio.to_thread(jpeg_of, png)
 
     async def audit(self) -> tuple[str, ...]:
-        answer = await self.d.run_tool(self.cid, "audit", {}, self.scope)
-        return issues_of(answer["text"])
+        return await self._issues("audit")
 
     async def ux(self) -> tuple[str, ...]:
-        answer = await self.d.run_tool(self.cid, "ux_check", {}, self.scope)
+        return await self._issues("ux_check")
+
+    async def _issues(self, tool: str) -> tuple[str, ...]:
+        """A screen's issues for a finding, its field lines with no value in them (PR #21: an input with no label shows its
+        value as its quoted text, which `hide_values` can't tell from a label)."""
+        token = ui.FIELD_VALUES_HIDDEN.set(True)
+        try:
+            answer = await self.d.run_tool(self.cid, tool, {}, self.scope)
+        finally:
+            ui.FIELD_VALUES_HIDDEN.reset(token)
         return issues_of(answer["text"])
 
     # ---- a person first (§25.9) ----
@@ -372,6 +440,11 @@ class ExploreTools:
         """Every text explore puts out goes through the daemon's redactor; when the redactor fails the text is hidden
         (findings.safe_scrub), never shown as it was."""
         return findings.safe_scrub(self.scrub_everywhere)(text)
+
+    def _report_scrub(self, text: str) -> str:
+        """What the report files get: `_safe_scrub`, and every text field's value in an element line hidden (W177: a value
+        typed before the run, quoted by an accessibility issue, was in report.md)."""
+        return findings.hide_values(self._safe_scrub(text))
 
     def _explore_fill(self, parsed: Args, bundle: str) -> explore.Fill:
         """`fill` checked against the vault (§25.6): the fixture it names must be marked `"explore": true`."""
@@ -460,7 +533,15 @@ class ExploreTools:
         tokens = (d._NESTED.set(True), d._EXPLORING.set(True), d._DIALOG.set(None),  # nobody is asked; each move is the tool's own
                   d._CRASHES.set(phone.crashes), d._TOUCH_FLOOR.set(explorer.floor))  # (the one dispatch gate of its moves)
         began = datetime.datetime.now(datetime.timezone.utc)
+        loading = False
         try:
+            try:
+                # (W177) started on a loading screen, the first read found no place: "frontier empty" in 2 s
+                loading = not await phone.launched()
+            except PhoneStop:
+                pass  # (the run's own first move meets it again and stops with its reason)
+            if loading:
+                explorer.notes.append(STILL_LOADING)
             result = await explorer.run()
         finally:
             d._TOUCH_FLOOR.reset(tokens[4])
@@ -470,21 +551,27 @@ class ExploreTools:
             d._NESTED.reset(tokens[0])
             self._explore_active = None
         await self.maps.flush()
-        folder, note = await self._explore_write(result, who, parsed.budget, began)
+        places = self.maps.data(root, bundle).get("places", {})  # (each finding's place's key, for the bug report: §29.5)
+        keys = {name: (place.get("key") or {}).get("signature") for name, place in places.items() if isinstance(place, dict)}
+        folder, note = await self._explore_write(result, who, parsed.budget, began, keys)
         if result.failure is not None:
             raise Refused(result.failure.code, self._safe_scrub(f"{result.failure} {explorereport.done_line(result, folder)}"))
         if result.stopped in explorereport.ERRORS:
             raise Refused(result.stopped, explorereport.error_text(result, folder, self._safe_scrub))
         text = explorereport.answer(result, folder, self._safe_scrub)
-        return {"text": text + (f"\nNote: {note}" if note else ""), "image": None, "image_size": None}
+        notes = [f"Note: {STILL_LOADING} when the run began."] if loading else []
+        if note:
+            notes.append(f"Note: {note}")
+        return {"text": "\n".join([text, *notes]), "image": None, "image_size": None}
 
     async def _explore_write(self, result: explore.Result, who: explore.Identity, budget: explore.Budget,
-                             began: datetime.datetime) -> tuple[Path | None, str | None]:
+                             began: datetime.datetime, place_keys: dict | None = None) -> tuple[Path | None, str | None]:
         """The run's folder (§25.10), or why none could be written; the run is never lost to a disk that refuses."""
         root = self.explore_home if self.explore_home is not None else store.HOME / "explore"
         ended = datetime.datetime.now(datetime.timezone.utc)
         try:
-            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._safe_scrub)
+            folder = await asyncio.to_thread(explorereport.write, root, result, who, budget, began, ended, self._report_scrub,
+                                           place_keys)
         except OSError as e:
             return None, self._safe_scrub(f"the report couldn't be written: {e.strerror or e}")
         return folder, None

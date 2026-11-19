@@ -199,3 +199,15 @@ def test_the_vault_reads_the_explore_marker_and_refuses_a_non_boolean(tmp_path):
     assert load({}).vault["trip"].explore is False
     refused = load({"explore": "yes"})
     assert refused.problem is not None and "explore must be true or false" in refused.problem and "Lisbon" not in refused.problem
+
+
+def test_the_report_keeps_each_findings_place_key_for_the_bug_report(tmp_path):
+    """1.8.5 (§29.5): a bug is told by its place's key, never its name; the report keeps the key it had then, so a place
+    renamed since keeps its bug. Only the findings' places, only the signature."""
+    found = [finding("js_error", 1, place="place_2"), finding("dead_end", 2, place=None, got="stuck")]
+    folder = explorereport.write(tmp_path, result(found), identity(), explore.Budget(), NOW, NOW, lambda s: s,
+                                 {"place_2": "c41f9a07d2aa0011", "place_3": "ffff"})
+    body = json.loads((folder / "report.json").read_text("utf-8"))
+    assert body["place_keys"] == {"place_2": {"signature": "c41f9a07d2aa0011"}}
+    plain = explorereport.write(tmp_path / "b", result(found), identity(), explore.Budget(), NOW, NOW, lambda s: s)
+    assert "place_keys" not in json.loads((plain / "report.json").read_text("utf-8"))

@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, changes, closest, compare,
+from . import (accounts as accountlib, actionlog, aio, audit, batch, brief as briefing, bugtool, changes, closest, compare,
                diagnostics, dialog, driving, explorefloor, exploretool, filmstrip as filmlib, journey, journey_tool, launch as launchlib, links,
                mapfile, mapkeeper, maptool, media as medialib, names as namelib, needs, network, ocr, params, performance,
                places, reflex, report, roads, routes, scriptrepair, scriptrepairrun, store, trace, trip, ui, uxcheck)
@@ -1107,7 +1107,7 @@ async def _first(timeout: float, *events: asyncio.Event) -> None:
             w.cancel()
 
 
-class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
+class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.CenterTools, scriptrepairrun.RepairTools):
     ceiling = None  # the flags `tapwright serve` was started with (a ceiling.Ceiling); `--brief` is read from it
 
     def __init__(self, session, control: Controller | None = None, log=print, heartbeat: float = 5.0,
@@ -1402,6 +1402,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             message["code"] = code
         self.broadcast(message)
         if by == "person":
+            self._bug_person(kind)
             self.actions.write({"source": "tapwright", "by": "person", "tool": kind, "element": label, "ok": ok,
                                 "code": code, "app": self._bundle()})
         else:
@@ -1632,6 +1633,7 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
         for view in self.control.clients.values():
             view.dropped = True  # every agent's list is from before the drop
+        self._thin_place = None  # (PR #21) the place a thin call's read left is from before the drop too
         # A condition is not dropped here: this is also called for a WebDriverAgent hiccup that the supervisor
         # mends without a new tunnel, and the condition lives on the instruments connection, not on WebDriverAgent.
         # The hold reports its own death (Device._hold_died), and a new tunnel ends it (Device.connect).
@@ -2051,6 +2053,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 return await self._run_tool_plain(client_id, name, args, scope, policy, ux_rules)
             return await self._run_tool_in_journey(jr, client_id, name, args, scope, policy, ux_rules)
         finally:
+            if via == "call" and not _NESTED.get():
+                self._keep_thin_place(client_id)
             if vtoken is not None:
                 _VIA.reset(vtoken)
             if mtoken is not None:
@@ -2231,6 +2235,10 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             return await self._journey_tool(client_id, args, scope)
         if name == "explore":  # AGENT-TOOLS §25: its moves go through run_tool too, one at a time, each an ordinary action
             return await self._explore_tool(client_id, args, scope)
+        if name == "bug_report":  # AGENT-TOOLS §29: a page made from a finding, a failed check or the last touches
+            if scope is not None and not scope.apps:
+                raise Refused("not_allowed", NO_APPS)
+            return await self._bug_tool(client_id, args, scope)
         if name == "session_report":  # a read of the log alone: no phone, no app data, and not itself logged
             if scope is not None and not scope.apps:  # personal mode with no app list: nothing runs, this included
                 raise Refused("not_allowed", NO_APPS)
@@ -2243,8 +2251,14 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             aimed = self._aim_for_recording(client_id, name, args)
             # the place the move starts on, for the step a recording saves (§26.6): worked out before the call, which moves it
             ran_on = self._place_before(self.control.client(client_id)) if client_id in self._recording else None
+            # (1.8.5, §29.3, §29.6) for a bug report: the touch as a road names it and the place it ran on; a typed value is
+            # kept out of every bug report from before it is sent
+            trail_from, trail_aim = self._bug_aim(client_id, name, args)
+            self._bug_typed(name, args)
             at_turn: list = []  # (the place as the touch got its turn: another agent may have moved the app meanwhile, PR #20)
-            turn_token = _PLACE_AT_TURN.set(at_turn) if ran_on is not None else None
+            recorded_turn = ran_on is not None
+            # (PR #21) filled for every touch: the bug trail takes the place at turn as well, recording or not
+            turn_token = _PLACE_AT_TURN.set(at_turn)
             typed_secure: list[bool] = []
             secure_token = _TYPED_SECURE.set(typed_secure)
             resolved = _RESOLVED.get()
@@ -2268,11 +2282,16 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
                 _GRANT_CALL.reset(said_token)
                 if own:
                     _RESOLVED.reset(resolved_token)
-                if turn_token is not None:
-                    _PLACE_AT_TURN.reset(turn_token)
-            if at_turn:  # what the touch saw as it went out wins over what was read before it waited for its turn
+                _PLACE_AT_TURN.reset(turn_token)
+            if at_turn and recorded_turn:  # what the touch saw as it went out wins over what was read before its turn
                 ran_on = at_turn[0]
+            if at_turn and at_turn[0] != trail_from:
+                # (PR #21) the bug trail too: the touch ran where it got its turn; a target aimed on the place before isn't
+                # kept (the step is then a point, which a path starts after)
+                trail_aim = trail_aim if trail_from is None else None
+                trail_from = at_turn[0]
             self._log_action(name, args, started, None, client=client_id, answer=result, known_off=known, grants=said)
+            self._bug_touch(name, args, trail_aim, trail_from, after=self._place_before(self.control.client(client_id)))
             self._record_step(client_id, name, args, aimed, secure=any(typed_secure), resolved=resolved,
                               place=ran_on[1] if ran_on is not None else None)
             return result
@@ -2427,13 +2446,15 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         stream of the same process stopped (the phone replays what it logged just before, which the ring has). An
         entry from before the process started is the previous owner of that pid's, and is dropped."""
         floor = None if proc.started is None else int(proc.started * 1000) - LOG_START_SLACK_MS
-        async for at, raw, text, entry_pid in self.session.device.app_log_stream(proc.pid):
+        async for item in self.session.device.app_log_stream(proc.pid):
+            at, raw, text, entry_pid = item[:4]
+            own = bool(item[4]) if len(item) > 4 else True  # (whose code logged it: device.own_line)
             if entry_pid == proc.pid:
                 got[0] += 1
                 text = self.scrub_everywhere(text)  # a test account's value is never kept, so no retention cut can split one
                 if floor is None or at >= floor:
                     # not shown by any answer until the phone's own list has shown the process is the app's (_vouch_logs)
-                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text), after, vouched=False)
+                    ring.add_unseen(diagnostics.LogEntry(at, diagnostics.level_of(raw, text), text, own), after, vouched=False)
 
     async def _settle_life(self, bundle: str, ring: "diagnostics.LogRing", proc: Proc) -> None:
         """After a stream of `proc` ended, once: were the lines no answer has vouched for the app's? When another process
@@ -3329,6 +3350,8 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         done = 0
         marks: dict[str, int | None] = {}
         set_here: int | None = None  # the generation of the condition this script set and hasn't set back to normal
+        i = 0
+        start_place = self._place_before(view)  # (1.8.5: where a failed check's path starts, §29.3)
         for i, step in enumerate(steps, 1):
             # when this step began: a failure shows the log from here. The log's times are the phone's clock, which is
             # not this computer's, so the start is the phone's own clock then (or the ring's newest entry, if later)
@@ -3422,6 +3445,13 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
             answer = await self._learn(view, "run", args, answer, {"from": place_then}, time.monotonic())
         # a failure adds the app's log from the failed step on, after the change block (AGENT-TOOLS §15.4)
         logs = await self._failure_logs(scope, i, marks) if failed else []
+        if not _NESTED.get():  # (1.8.5, §29.3) the agent's own run or replay: a failed check is kept for `from: "failure"`
+            # (W177b) the place the answer's `Place:` line named: the read after the run, which a thin call's new view needs
+            await self._bug_failure_seen(client_id, failed, steps, i, start_place, self._place_before(view), logs,
+                                         steps[i - 1].get("expect") if failed and 0 < i <= len(steps) else None,
+                                         run_id=ident)
+        else:
+            self._bug_batch_aims.pop(ident, None)
         answer["text"] = "\n".join([answer["text"], *logs, *step_notes])
         if failed:
             raise Refused(failed[0], answer["text"], draft=stopped_at_draft)
@@ -4582,10 +4612,28 @@ class Daemon(exploretool.ExploreTools, journey_tool.JourneyTools, center_tool.Ce
         given = _GIVEN.get()
         return given is None or bundle in given
 
+    _thin_place: "tuple[tuple[str, str], int] | None" = None  # (the place, the screen generation) a thin call's read left
+
+    def _keep_thin_place(self, client_id: str) -> None:
+        """After a thin call: the place its read left, with the screen generation then, for the next thin call (W177)."""
+        try:
+            view = self.control.client(client_id)
+            if view.place is not None and view.place_seen == self.control.generation and not view.dropped:
+                self._thin_place = (view.place, view.place_seen)
+        except Exception:  # noqa: BLE001 - a place not kept is a place not known, never a failed call
+            pass
+
     def _place_before(self, view) -> tuple[str, str] | None:
         """The place the app is at as the agent's last read left it, for a move about to be made: only while nothing has
         changed the screen since (a person, a look: false action, a dropped line), and the app is still the one."""
         place = view.place
+        if place is None and view.place_seen == -1 and not view.dropped and _VIA.get() == "call":
+            # (W177) a thin call is a process of its own, often with a client of its own (its parent process): its view has
+            # never read. The place the thin calls' last read left, while nothing has changed the screen since, is its place
+            shared = self._thin_place
+            if shared is not None and shared[1] == self.control.generation:
+                place = shared[0]
+            return place if place is not None and place[0] == (getattr(self.session, "app", None) or (None, None))[1] else None
         if place is None or view.place_seen != self.control.generation or view.dropped:
             return None
         return place if place[0] == (getattr(self.session, "app", None) or (None, None))[1] else None

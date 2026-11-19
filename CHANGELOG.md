@@ -1,5 +1,142 @@
 # Changelog
 
+## 1.8.5 (2026-11-19), "the Bug Report"
+
+- New tool `bug_report` (and `tapwright bug`): one page for whoever fixes a bug, readable in a minute and holding nothing
+  private (AGENT-TOOLS 1.16.2 §29). A folder per bug under `~/.tapwright/bugs/<app id>/<bug id>/` with `report.md`,
+  `report.html` (the same page, one file, no script, every text escaped), `repro.json` (the finding's script, `${typed}`
+  for any typed value), `finding.json` (the finding with its `bug` record) and, only when allowed, `picture.jpg`. The page:
+  title, what happened, how to see it (steps written for a person, the last 15), reproduced, environment, where (the place
+  and its key's signature, the top 8 native frames with the app's own marked `*`, addresses and offsets dropped, and a
+  system sheet that was in front by its kind only), logs (20 lines at most), picture, seen before.
+- Three sources: a finding of an explore report (`finding`, `run` defaulting to the newest report of the app in front),
+  this session's last `run` or `replay` that stopped `expect_failed` (`from: "failure"`), and what you saw while driving
+  (`from: "now"` with a one-line `note` and `expected`: the last 10 touches of the app become the steps; a touch that
+  can't be named, such as a person's in the live view, starts the path after it; `unsupported` with `serve --no-log`).
+  `bug` shows a kept bug again, and `with_picture: true` adds its private picture while its source file still exists.
+- One bug, many sightings: the signature is the first 16 hex of a SHA-256 over the kind, the place's KEY (never its name:
+  a place is `place_<n>` until named, and an explore report now keeps each finding's place key, so a renamed place keeps
+  its bug), the first line of `got` with numbers, times, dates, hex and UUIDs as `#`, and for a crash its exception type
+  and top app frame's symbol. The same signature again adds to `seen` (count once per source, last time, builds) and
+  rewrites only the page's `Seen before` line. A finding with no place key is never merged. The newest 100 bugs of an app
+  are kept. `tapwright bug list [--app ID]` lists them.
+- Redaction at every sink (§29.6): one single-pass redactor over every vault value in every form, the one-time codes and
+  every value typed in this session (registered before it is typed; the explorer's public fake values are not), applied
+  before any cut, to the page, both files, the script, the finding, the title, the answer and the CLI. Paths are cut to
+  file names (no user folder). Before anything is written every text file is grepped for every form of every value and
+  every 12-character piece of each; a hit writes nothing and names the file, never the value. A redactor that fails hides
+  the text. A run folder is read only inside the explore home, and each file it names only inside it.
+- The reproduction check (§29.4): `verify` (1 to 10 runs, `true` for 3; by default 3 for a finding or a failed check)
+  relaunches the app (its data kept), drives to the script's start over the map and runs `repro.json`, counting the runs
+  that end with the same signature: `3 of 3 runs`, `1 of 3 runs (flaky)`, or `0 of 3 runs: not reproduced`, which keeps
+  the bug. Every move is the agent's own call through the ONE dispatch gate of 1.8.0 (the skip floor, judged on the
+  element the touch really goes to after resolution and scroll), with nobody asked: a typed step or a step whose target
+  holds a floor or policy word stops the check before anything is touched (`not checked (step 3 needs a person (a typed
+  value))`), and a word only the actual recipient holds stops it at dispatch with no move of that step. A person, Pause
+  or a locked phone stops it (`stopped (busy)`); no explore starts while it runs. A check that can't run never stops the
+  bug from being made: the page says why (`no reset reached a known place`, `an unreachable place has no steps`, `reset
+  "app"` that Tapwright has no `app_command` for, `no phone connected`). A later check replaces the `Reproduced` line and
+  the reset line. `tapwright bug verify <bug id> [--verify N]` and `tapwright bug <folder> <finding> --verify N` check
+  through the daemon; exit 1 when it didn't reproduce, 2 when a person or a refusal stopped it.
+- Export (§29.7), only when your user asked: `{"to": "zip"}` writes `<bug id>.zip` next to the folder, with no network, a
+  fixed time and no user name or path; `{"to": "issue", "repo": "owner/name", "confirm": true}` opens a GitHub issue with
+  the user's own `gh` (title the page's, body `report.md`), and commits `repro.json` (and the picture when it may go) to
+  `qa-reports` under `.tapwright/bugs/<app folder>/<bug id>/`, so two apps' bugs with one id never share files. Without
+  `confirm`: `not_allowed: needs_confirmation`; a public repository, or one whose visibility can't be read, needs `public:
+  true`. A private picture goes only with the export's own `with_picture: true`. Every text sent is grepped again with the
+  live values and the export is refused if any is found (`export refused: a vault value was found in report.md.`, never
+  the value), nothing sent. A new audit kind `export`: one line per export, a refused one too, its detail the target and
+  the bug id, never content; with no audit line nothing is sent. An export that fails after its line was written (a
+  zip that can't be written, an issue `gh` refuses) adds a second line with that outcome. `tapwright bug export <bug id> --to zip|issue [--repo
+  owner/name] [--public] [--with-picture] [--yes] [--app ID]` asks `Send to GitHub? [y/N]` (`--yes` without a terminal).
+- Privacy (review R185): a link is kept only as the pattern of a place's link it matched, never its query, fragment or a
+  token in it (one that matches none starts the path after it); a row of a list with no id is `the 1st row of the list`,
+  never its text; paths are cut in `got`, `expected` and the note too (`file://` URLs and UNC paths as well, a path ending
+  at a user folder is `~`). A bug of an app that isn't one of the daemon's test apps (`serve --apps`) keeps no screen text
+  and no log lines beyond its own normalized `got`, its picture is private, and any export of it, a zip too, needs
+  `confirm`; its page says why. An explore finding records the system sheet that was in front (`system`), and a picture
+  taken with one in front is private for any app. The issue's body escapes `@` and `#`, so it mentions nobody.
+- Safety of the folder: changes are made under one lock per app (shared with the command line); a check reads the bug again
+  before it writes, so a sighting made meanwhile is kept and a removed bug isn't made again; retention never removes a bug a
+  check holds; an update re-reads the kept bug through the redactor, so a value added to the vault since is hidden. A failed
+  run's steps are kept as replayed (their arguments and `expect`), so its check can reproduce it. While a daemon runs, the
+  command line's make and export go through it (its live values); without one, GitHub needs `--accounts` and the answer
+  says which values were checked.
+
+- Phone checks (W177): `verify` works on a development build. After the relaunch the check waits (up to 30 s) until the
+  app's screen is no loading screen (`Loading from Metro…`, `Downloading n%`, a spinner, a blank screen), then drives to
+  the start, and tries the way once more when the screen isn't the start (a link opened while the app was loading was
+  lost, so every run was `not checked (no reset reached a known place)`); a check that met the deadline says `the app was
+  still loading after 30 s`. `explore` waits the same way before its first read and after each relaunch (started on the
+  loading screen it answered `0 places, frontier empty`).
+- `bug_report from: "failure"` finds the failure a thin `tapwright call run` left: each thin call is a process with a client
+  of its own (its parent process), so the run and the report were two clients. A thin call now also takes the last failed
+  check a thin call left; a failure that can't be kept is said in serve.log instead of being swallowed. A thin call's
+  first touch also knows the place the last thin read left, so `from: "now"` pages start `Start on <place>.`
+- Explore reports no longer keep typed field values: an element line of a text field (an accessibility or usability issue
+  quoting `id=bug-note value="…"`) shows `value=<field value>` in `report.md`, `report.json` and every bug file.
+- Pages: an accessibility or usability bug's title is its rule and target (`Contrast: id bug-note`); `from: "now"` logs
+  are the app's own lines (no XCTest or system framework lines), the same link opened twice in a row is one step, and a
+  bug no check was asked for says `Reproduced: not checked.`. The count of a bug is of sightings (two explore runs: count
+  2), with how often they saw it in all kept as `seen.occurrences`.
+- The phone's lock is seen again: the runner (`tw-16.15.3.8`, version 8; `tapwright setup --force` installs it) reads the
+  lock state from iOS on every check. It kept a flag only iOS's change notices set, so a locked phone could read as not
+  locked (the owner's lock went unseen and `unlock` answered "The phone isn't locked."), and an unlocked one with
+  Notification Center open as locked.
+- `unlock` finds iOS 26's passcode keypad (seen on a Face ID iPhone with iOS 26.5, where it answered that the
+  passcode entry couldn't be found): the keypad is on the screen but under a view whose frame lies outside it, so
+  the tree listed every key as off the screen. Such a keypad (each digit's key once, every key's centre on the screen,
+  every other check as before) is used only after the runner's hit test confirms that touches at four keys (always 1,
+  3, 5 and 0, whatever the passcode is) land on those keys in SpringBoard; iOS 26 answers each key's round face,
+  unnamed, inside the key. Without the hit test (an older runner, the check off, landscape) or the screen's size, the
+  answer is `not_proven`.
+
+- A bug made `from: "failure"` names the place the run's answer named (a thin run's own read; it said "an unnamed
+  screen"), and its Logs are the app's own lines, as `from: "now"` keeps them, not the run's log block with iOS's lines.
+
+- Review (PR #21, CodeRabbit): the bugs folder's lock is a pid lock: a holder that is slow for minutes keeps it (it was
+  taken over after 60 s), and only its holder releases it. A rewrite of a bug (a check's result, a sighting, a picture) is
+  staged whole and swapped in, so its files are always of one version, and a failed write leaves the old one whole; an
+  export reads the bug once, under the lock, so the picture and whether it may go come from that one version. A check's
+  result is never written into a bug removed and made again meanwhile, each check holds the bug on its own (a second check
+  that stops at once no longer ends the first one's hold), and an update whose `repro.json` can't be read again writes
+  nothing. A bug is read only inside the bugs folder (an app folder that is a link is never followed).
+- `serve --phone` no longer makes every app a test app for bug reports: only `--apps` (or `--dedicated`) names them, so
+  another app's bug stays private and its export needs `confirm`.
+- A check's run starts from a fresh process (a refused `close_app` makes no run), counts nothing that shows after its 60 s,
+  reads a dead end's place and its back button from one screen read, and refuses a script with a step that isn't one
+  rather than running a shorter path. A bug check reads the caller's `--policy` words, as explore does.
+- Export: each zip has its own staging file (two exports of one bug no longer move each other's bytes into place); a file
+  that can't be read or a zip that can't be written is a plain refusal; an issue that failed after its files were committed
+  says so, names the branch and folder, and the export again makes the issue without uploading the same files again.
+- `tapwright bug`: `--accounts` while the daemon runs is refused (the daemon uses its own vault; the file was ignored);
+  `--app` reaches the daemon, so a bug id two apps hold exports that app's bug; an export's exit is 0 when it was written
+  (a saved `0 of 3` made it 1); a check that paused exits 2 even when the page keeps an earlier `0 of 3`.
+- A field with no label: its value (shown as its quoted text) is hidden in explore's and the check's accessibility and
+  usability findings, as a labeled field's `value=` was. Explore's JS errors are the app's own lines only. A slider's `50%`
+  is no loading screen. This computer's home folder with a space in its name is cut whole (`/Users/Jane Doe`). A `from:
+  "now"` page names a start only when the first step's place is known, keeps two opens of a link that lost its query, and
+  a source seen again after it left the last 50 is not counted again.
+- Review round 2 (PR #21): a swap a writer left half done is mended under the lock before any bug is looked up (a report
+  of the same finding no longer makes a new bug over it), and a backup that can't be put back is kept, never removed. A
+  check that couldn't run keeps a check another one finished meanwhile (decided under the lock). A picture added to a bug
+  made again meanwhile is refused. Explore's and `from: "now"`'s picture is private when a system sheet was in front as
+  it was taken (a share sheet that came up after the last read).
+- Review round 3 (PR #21): a value typed in the session that is also in what the tool writes itself (a year such as
+  `2026`, the word `place`, the build number, a run of a bug id's hex) no longer refuses every bug and every export until
+  a restart, and a check or sighting no longer turns a kept bug's dates or id into `<typed value>` (which made it sort
+  first for retention, or unreadable). The redactor and the grep gate read only the text that came from the app or the
+  session (got, expected, the note, logs, frames, the component stack, the steps' words, road names, a check's reason);
+  the tool's ids, times, place names, versions, builds and the page's own words are written as they are. A typed value in
+  the app's text is hidden as before, and a version or build that holds a vault value is still refused. An export gates a
+  bug's app text when its files are as the tool built them, and every text whole when they aren't (a page edited by hand).
+- `bug_report`'s wait in `tapwright call` and the MCP server covers each run's two launch waits (up to 30 s each), so a
+  check of a development build that loads slowly no longer times out while the daemon is still checking.
+- A backup of a bug that couldn't be removed whole (Windows, a file held open) is never put back as the bug: a replaced
+  version is renamed before it is removed, and only a whole backup is restored. The daemon's first bug call no longer
+  waits up to 15 s on its event loop while the command line holds an app's bugs: retention then skips that app until the
+  next call.
+
 ## 1.8.0 (2026-11-19), "the Explorer"
 
 - New tool `explore` (and `tapwright explore`): it searches one app by itself, with no model, and reports what breaks. A
