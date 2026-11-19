@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import ui
+from . import links, ui
 
 NAV_TOOLS = ("tap", "back", "open_url")
 NEUTRAL = ("look", "wait", "wait_for", "apps", "logs", "map", "audit", "ux_check", "session_report",
@@ -106,7 +106,7 @@ def step_of(move: dict | None) -> dict | None:
         return {"tool": "back"}
     if tool == "open_url":
         link = move.get("link")
-        return {"tool": "open_url", "url": link} if isinstance(link, str) and link and "{" not in link else None
+        return {"tool": "open_url", "url": link} if isinstance(link, str) and link and not needs_value(link) else None
     if tool != "tap":
         return None
     target = move.get("target")
@@ -134,11 +134,19 @@ def only_navigation(steps: object, strict: bool = False) -> bool:
         tool = step["tool"]
         if tool == "tap" and step_of({"tool": "tap", "target": step.get("target")}) is None:
             return False
-        if tool == "open_url" and (not isinstance(step.get("url"), str) or "{" in step["url"]):
+        if tool == "open_url" and (not isinstance(step.get("url"), str) or needs_value(step["url"])):
             return False
         if tool == "scroll" and scroll_step(step) is None:
             return False
     return True
+
+
+def needs_value(link: object) -> bool:
+    """(review 1.9.0, Opus 2 H1) Does this link need a value the agent must give: a map pattern's `[param]` segment (the
+    form links.py writes and fills), or a route's `${variable}`? The one test every "needs a link's value" check uses."""
+    if not isinstance(link, str):
+        return False
+    return bool(links.variables(link)) or "${" in link or ("{" in link and "}" in link)
 
 
 def given_nothing(route: dict) -> bool:
@@ -147,7 +155,34 @@ def given_nothing(route: dict) -> bool:
         return False
     steps = route.get("steps")
     return isinstance(steps, list) and not any(
-        isinstance(s, dict) and s.get("tool") == "open_url" and "{" in str(s.get("url", "")) for s in steps)
+        isinstance(s, dict) and s.get("tool") == "open_url" and needs_value(s.get("url")) for s in steps)
+
+
+def known_ok(route: dict, held_word=None) -> bool:
+    """(review 1.9.0, Opus 2 H2) May `Known:` (or the known-way hint) offer this route as a screen one call away? Only when
+    it replays with nothing given and its steps are strictly navigation (`only_navigation(strict=True)`: no nested drive,
+    no typing, no vault, account or one-time value, no toggle), it isn't draftsOnly, and no step aims at a word the skip
+    floor holds (`held_word(text)`: Delete, Send, Buy...). A person's route that does more stays drivable by name."""
+    if not given_nothing(route) or route.get("draftsOnly") is True:
+        return False
+    steps = route.get("steps")
+    if not only_navigation(steps, strict=True):
+        return False
+    text = json_text(steps)
+    if any(f"${{{kind}." in text for kind in ("vault", "otp", "account")):
+        return False
+    if held_word is not None:
+        for step in steps:
+            target = step.get("target") if isinstance(step, dict) else None
+            if isinstance(target, dict) and any(held_word(v) for k, v in target.items()
+                                                if k in ("id", "label", "text") and isinstance(v, str)):
+                return False
+    return True
+
+
+def json_text(value: object) -> str:
+    import json
+    return json.dumps(value, ensure_ascii=False)
 
 
 def over_cap(autos: list[dict], keep: int) -> list[str]:
@@ -249,7 +284,7 @@ def decide(held: list[Held], start: str, end: str, way: list[dict], wanted: str,
     return name
 
 
-def known(held: list[dict], here: str | None, reachable) -> list[str]:
+def known(held: list[dict], here: str | None, reachable, held_word=None) -> list[str]:
     """The names for §30.2's `Known:` line: saved routes with an end, that replay in one call with no value to give
     (`variables` empty), whose start `reachable(start)` says the app can get to from `here`, and that don't end where the
     app is; the most used first, else the most recently reached, then by name. `held`: route files as dicts with `name`
@@ -257,7 +292,7 @@ def known(held: list[dict], here: str | None, reachable) -> list[str]:
     out = []
     for route in held:
         end, start = route.get("end"), route.get("start")
-        if not isinstance(end, str) or not isinstance(start, str) or end == here or not given_nothing(route):
+        if not isinstance(end, str) or not isinstance(start, str) or end == here or not known_ok(route, held_word):
             continue
         if not reachable(start):
             continue

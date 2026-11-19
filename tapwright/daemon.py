@@ -3,6 +3,7 @@ rules, the stream, the agent tools, a person's input from the live view, and a s
 that keeps it all connected. server.py only turns HTTP into calls here."""
 import asyncio
 import base64
+import collections
 import contextvars
 import copy
 import itertools
@@ -440,6 +441,9 @@ REFLEX_SCREEN_MIN = 4  # with fewer listed elements, the keyboard reflex can't t
 # (1.7.8, X item 1) every way to close it was tried, or none could be tried without touching a control
 NOTE_KEYBOARD_STAYED = "couldn't close the keyboard first: it is still up."
 NOTE_RETYPED = "the field didn't hold what was typed (keys went missing), so it was cleared and typed once more."
+DONE_SETTLE = 0.5  # (Opus 2 M2) seconds a multiline Done is given to show what it did before the tap goes on
+DONE_CHANGED = ("the keyboard's Done key was pressed to close the keyboard, and the screen changed after it: Done may have "
+                "submitted the form. Nothing else was touched; look before you tap again.")
 DONE_KEYS = ("Done",)  # (1.9.0) exactly Done: never return, Go, Send, Search, Next or Join (they can submit)
 # (1.9.0) the refusal's hint when hints are on: Return's effect is the app's (KEYBOARD_HINT stays 1.8.5's, for --no-hints)
 KEYBOARD_HINT_190 = ("type_text into the field with submit: true presses Return, which closes the keyboard in many forms "
@@ -4856,10 +4860,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             held = self.maps.data(root, bundle)["routes"]
             if name is not None:
                 held[name] = f"routes/{name}.json"
-            for gone in dropped:
-                held.pop(gone, None)
-            if name is not None or dropped:
+                self.maps._forgotten_routes.get(self.maps._key(root, bundle), set()).discard(name)  # (saved again: kept)
                 self.maps.changed(root, bundle)
+            for gone in dropped:  # (Opus 2 M1) a tombstone, so no save under way brings its entry back
+                self.maps.forget_route(root, bundle, gone)
             return name
 
     def _auto_save_io(self, file, data: dict, bundle: str, start: str, end: str,
@@ -4911,19 +4915,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     @staticmethod
     def _drop_route_io(file, name: str) -> bool:
-        """Delete a route's file and its entry in the map's index. True only when neither is left (CodeRabbit, PR #22): a
-        file that couldn't be deleted keeps its entry, so nothing says it is gone while it can still be found."""
+        """Delete a route's file and its entry in the map's index, under the map's lock. True only when neither is left
+        (CodeRabbit, PR #22): a file that couldn't be deleted keeps its entry."""
         try:
-            (file.routes_dir / f"{name}.json").unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return False
-        try:
-            file.update(lambda d: d["routes"].pop(name, None))
+            return file.drop_auto_route(name)
         except (OSError, mapfile.MapError):
             return False
-        return True
 
     async def _auto_counted(self, root: str | None, bundle: str, name: str, worked: bool,
                             stamp: int | None = None) -> str | None:
@@ -4943,38 +4940,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return None
             if not dropped:
                 return None
-            self.maps.data(root, bundle)["routes"].pop(name, None)
-            self.maps.changed(root, bundle)
+            self.maps.forget_route(root, bundle, name)  # (Opus 2 M1) a tombstone, so no save under way brings it back
         called = f"route {name}" if self._plain_name(name) else "the route"  # (review 1.9.0 M1)
         return f"{called} dropped (its replay failed twice); the next way the app is driven there is kept instead."
 
     def _auto_counted_io(self, file, data: dict, name: str, worked: bool, stamp: int | None) -> bool:
-        """The worker's part of _auto_counted: whether the route was dropped."""
-        route = file.read_route(data, name)
-        if route is None or route.get("auto") is not True:
-            return False
-        if stamp is not None and file.route_stamp(data, name) != stamp:
-            return False  # another version than the one that ran
-        used, failed = route.get("used"), route.get("failed")
-        used = used if isinstance(used, int) and not isinstance(used, bool) else 0
-        failed = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
-        if worked:
-            route.update(used=used + 1, failed=0, reached=mapfile.now())
-        elif failed + 1 >= autoroute.FAILS:
-            return self._drop_route_io(file, name)
-        else:
-            route["failed"] = failed + 1
-        path = file.routes_dir / f"{name}.json"
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        try:
-            tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        return False
+        """The worker's part of _auto_counted: whether the route was dropped (all under the map's lock: Opus 2 L1)."""
+        return file.auto_result(name, stamp, worked, autoroute.FAILS, mapfile.now())
 
     def _hints_wanted(self) -> bool:
         """--no-hints is off for this call (the call's and serve's)."""
@@ -5002,21 +4974,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return []
         held, _ = self._held_routes(root, bundle)
         edges = self.maps.file(root, bundle).route_edges(data)
-        needs = {r["name"] for r in held if not autoroute.given_nothing(r)}
+        held_word = self._held_word(bundle)
+        needs = {r["name"] for r in held if not autoroute.known_ok(r, held_word)}
 
         def reachable(start: str) -> bool:
-            # (review 1.9.0 M2) with nothing the agent hasn't given: no link with a value to fill, no route with a variable
+            # (review 1.9.0 M2; Opus 2 H1) with nothing the agent hasn't given: no link with a value to fill (`[id]`), no
+            # route on the way that does more than navigate or needs a value
             if start == here:
                 return True
             way = roads.plan(data, here, start, None, routes=edges)
-            if way.kind == "link" and "{" in (way.link or ""):
+            if way.kind == "link" and autoroute.needs_value(way.link):
                 way = roads.plan(data, here, start, None, by="taps", routes=edges)
             if way.kind == "none":
                 return False
-            return not any(("{" in str(s["move"].get("link", "")) if isinstance(s, dict) else s.name in needs)
+            return not any((autoroute.needs_value(s["move"].get("link")) if isinstance(s, dict) else s.name in needs)
                            for s in way.steps)
         # (review 1.9.0 M1) a name the redaction would change is left out, never shown redacted
-        return [n for n in autoroute.known(held, here, reachable) if self._plain_name(n)]
+        return [n for n in autoroute.known(held, here, reachable, held_word) if self._plain_name(n)]
+
+    @staticmethod
+    def _held_word(bundle: str):
+        """A test of one target's words against the default skip floor (Delete, Send, Buy...): Known never offers a route
+        that touches one (Opus 2 H2)."""
+        floor = explorefloor.Floor(safety.DEFAULT, bundle)
+        return lambda text: floor.named(text) is not None or floor.named(explorefloor.id_words(text)) is not None
 
     def _plain_name(self, name: str) -> bool:
         """Would the redaction (§20.3) leave this name as it is?"""
@@ -5162,8 +5143,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             held, _ = self._held_routes(self._maps_root(), bundle)
         except Exception:  # noqa: BLE001
             return None
-        return next((r["name"] for r in held if r.get("end") == place and not r.get("variables")
-                     and self._plain_name(r["name"])), None)  # (CodeRabbit, PR #22) never a name the redaction changes
+        held_word = self._held_word(bundle)
+        return next((r["name"] for r in held if r.get("end") == place and autoroute.known_ok(r, held_word)
+                     and self._plain_name(r["name"])), None)  # (CodeRabbit, PR #22; Opus 2 L3) as Known: would list it
 
     @staticmethod
     def _is_form(items: list) -> bool:
@@ -6898,10 +6880,24 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if where in self._no_done:
             return None
         self._touch_in_scope()  # (it goes out with no touch hook: checked here)
+        listed = collections.Counter((e.role, e.label, e.identifier) for e in view.items)
         closed = await s.dismiss_keyboard(DONE_KEYS)
         await self._silent_read(view)
         if view.read_keyboard:
             self._no_done.add(where)
+        else:
+            # (Opus 2 M2) Done in a multiline field may have run the form's own submit: the tap that follows would submit
+            # it again. A settle and a read: anything changed beyond the keyboard closing (the screen, the target moved or
+            # gone) stops here, and nothing more is touched
+            await self.control.sleep(DONE_SETTLE)
+            await self._silent_read(view)
+            same = collections.Counter((e.role, e.label, e.identifier) for e in view.items) == listed
+            target = next((e for e in view.items if (e.role, e.label, e.identifier) == (aimed.role, aimed.label,
+                                                                                         aimed.identifier)), None)
+            if not same or target is None or target.rect != aimed.rect or view.read_keyboard:
+                view.moved = True
+                self.control.touched()
+                raise Refused("stale", DONE_CHANGED)
         now = next((e for e in view.items if e.role == "input" and (e.identifier, e.label) == (field.identifier, field.label)), None)
         shown = (now or field).line(ref=False, actions=False)
         if now is not None and isinstance(now.value, str) and now.value != before:

@@ -136,7 +136,7 @@ def test_only_steps_that_replay_and_keep_nothing_private_are_steps():
     assert autoroute.step_of({"tool": "tap", "target": {"row": True}}) is None
     assert autoroute.step_of({"tool": "tap", "target": {"x": 1, "y": 2}}) is None
     assert autoroute.step_of({"tool": "toggle", "target": {"id": "s"}}) is None
-    assert autoroute.step_of({"tool": "open_url", "link": "app://item/{id}"}) is None
+    assert autoroute.step_of({"tool": "open_url", "link": "app://item/[id]"}) is None
     assert autoroute.step_of({"tool": "open_url", "link": "app://settings"}) == {"tool": "open_url", "url": "app://settings"}
     assert autoroute.scroll_step({"to": "target", "target": ui.Target(id="dest-card-kyoto")}) == {
         "tool": "scroll", "to": "target", "target": {"id": "dest-card-kyoto"}}

@@ -180,7 +180,7 @@ def test_m2_a_route_whose_way_needs_a_links_value_is_left_out(tmp_path):
 
         def link(value):  # (through the map's own edit: the map in memory is replaced by its background saves)
             d.maps.edit(str(tmp_path), BUNDLE, lambda m: m["places"][start].__setitem__("link", value))
-        link("app://home/{id}")  # a way only by a link with a value to fill
+        link("app://home/[id]")  # a way only by a link with a value to fill (the map's own form)
         r = await d.run_tool("c", "look", {"screenshot": False})
         assert "Known:" not in r["text"]
         link("app://home")  # a link with nothing to fill reaches it
@@ -194,7 +194,7 @@ def test_m2_a_route_whose_way_needs_a_links_value_is_left_out(tmp_path):
 
 def test_m2_a_route_with_a_link_to_fill_or_a_variable_is_never_known():
     assert not autoroute.given_nothing({"variables": ["account"], "steps": []})
-    assert not autoroute.given_nothing({"variables": [], "steps": [{"tool": "open_url", "url": "app://trip/{id}"}]})
+    assert not autoroute.given_nothing({"variables": [], "steps": [{"tool": "open_url", "url": "app://trip/[id]"}]})
     assert autoroute.given_nothing({"variables": [], "steps": [{"tool": "open_url", "url": "app://trips"}]})
 
 

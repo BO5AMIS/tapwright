@@ -451,6 +451,69 @@ class MapFile:
         """A saved route's file as a dict, or None when the map has no such route or its file can't be read."""
         return self._route_file(data.get("routes", {}).get(name))
 
+    def auto_result(self, name: str, stamp: int | None, worked: bool, fails: int, now: str) -> bool:
+        """(1.9.0; Opus 2 L1) A drive's result for a route that saved itself, under the map's lock as every route writer:
+        re-read, the version checked (`stamp`, its modification time as the drive read it), then counted (used and
+        failures) or, at `fails` failures in a row, dropped (its file and index entry). Whether it was dropped."""
+        rel = f"routes/{name}.json"
+        path = self.routes_dir / f"{name}.json"
+        dropped = [False]
+
+        def change(d: dict) -> None:
+            route = self._route_file(rel, hide=False)
+            if route is None or route.get("auto") is not True:
+                return
+            try:
+                if stamp is not None and path.stat().st_mtime_ns != stamp:
+                    return  # another version than the one that ran
+            except OSError:
+                return
+            used, failed = route.get("used"), route.get("failed")
+            used = used if isinstance(used, int) and not isinstance(used, bool) else 0
+            failed = failed if isinstance(failed, int) and not isinstance(failed, bool) else 0
+            if worked:
+                route.update(used=used + 1, failed=0, reached=now)
+            elif failed + 1 >= fails:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    return
+                d["routes"].pop(name, None)
+                dropped[0] = True
+                return
+            else:
+                route["failed"] = failed + 1
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                tmp.write_text(json.dumps(route, indent=2, ensure_ascii=False) + "\n", "utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        self.update(change)
+        return dropped[0]
+
+    def drop_auto_route(self, name: str) -> bool:
+        """Delete a route of the tool's own, file and index entry, under the map's lock; True only when neither is left."""
+        path = self.routes_dir / f"{name}.json"
+        done = [False]
+
+        def change(d: dict) -> None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return
+            d["routes"].pop(name, None)
+            done[0] = True
+        self.update(change)
+        return done[0]
+
     def visible(self, data: dict) -> list[str]:
         """The map's route names, without those that saved themselves while HIDE_AUTO holds."""
         names = list(data.get("routes", {}))

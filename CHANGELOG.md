@@ -10,12 +10,15 @@ works, and `--no-hints` gives 1.8.5's behaviour back.
   `drive {"route": "<name>"}` replays it in one call. A route is named by the name given with `map {"name"}`, else by
   the id of the move that reaches the place, else `place_<n>`: never by a label or a title. Navigation only: any typing
   (in a `run` too), a toggle, a tap that stays, a touch the policy held, and a tap that leaves a form by a control that
-  may submit it break the way from there; a person's route carries it on only when all its steps are navigation. One
+  may submit it break the way from there; only a route the tool saved itself carries it on after a drive, a person's
+  route never. One
   route per place: a shorter way replaces it, one whose own steps fail twice is dropped (not reaching its start never
   counts), and at most 50 per app. A person's route is never replaced.
 - The first answer of a session that shows an app says what it can reach in one call with nothing to give, the most
   used first, else the most recently reached: `Known: plan_trip, dest_card_kyoto (one call each: drive {"route":
-  "<name>"})`. A name the redaction would change is left out; none in a user's-eyes journey.
+  "<name>"})`. Only routes that are strictly navigation are offered (no nested drive, typing, vault value, floor word
+  or link value such as `[id]`); a person's route that does more stays drivable by name. A name the redaction would
+  change is left out; none in a user's-eyes journey.
 - The MCP instructions begin with the shared token rules: known steps in one `run` with an `expect`, target by id, a
   screenshot only to judge looks (`screenshot: false` on a `look` that only reads), use `Known:`, hand a long task's
   driving to one small agent, a bug report is `bug_report`.
@@ -29,8 +32,11 @@ works, and `--no-hints` gives 1.8.5's behaviour back.
   input accessory Done (in the keyboard's window, its bar on the keys' edge) for any covered target; the keyboard's Done
   key only for a `tap` on a submit button the floor doesn't hold (Save trip after Notes) while the focused field is
   multiline and holds a readable value. Never return, Go, Send, Search, Next or Join. A line break the Done key adds at
-  the end is taken back with one backspace; any other change is left alone; the answer says either. The dismiss key is
-  still tried; if nothing closes the keyboard the tap is refused as in 1.8.5, with a hint that Return can submit.
+  the end is taken back with one backspace while the keyboard is still up and the field focused; if the keyboard closed
+  with it, or the value changed otherwise, it is left alone; the answer says either. If the screen changed after the
+  Done key closed the keyboard (it may have submitted the form), the call is refused `stale` and the tap never goes
+  through. The dismiss key is still tried; if nothing closes the keyboard the tap is refused as in 1.8.5, with a hint
+  that Return can submit.
 - `--no-hints` (on `tapwright mcp`, `serve` and `call`, or `TAPWRIGHT_NO_HINTS=1`): no `Known:` or `Hint:` lines, no
   route saved by itself and none shown, no Done press; `mcp --no-hints` also gives 1.8.5's instructions.
 - Tests keep the tool's home in a folder of their own: a daemon test no longer writes maps or reports to

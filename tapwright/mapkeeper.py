@@ -38,6 +38,9 @@ class Maps:
         self._dropped: dict[Key, list[tuple[str, str, str]]] = {}  # roads dropped in memory, to be dropped from the file too
         self._forgotten: dict[Key, set[str | None]] = {}  # reflexes forgotten by an edit, to be dropped from a save under way
         self._forgotten_places: dict[Key, dict[str, str]] = {}  # places forgotten by an edit (name: key id), likewise
+        # (1.9.0, Opus 2 M1) routes dropped or evicted: a save under way would bring their index entries back from its
+        # snapshot, as it would a dropped road
+        self._forgotten_routes: dict[Key, set[str]] = {}
         self._tasks: dict[Key, asyncio.Task] = {}
         self._told: set[Key] = set()
 
@@ -190,7 +193,8 @@ class Maps:
             # batch was taken) is taken out of the file; the batch is taken again until an edit has added none, and only
             # then does memory take the result, so a place an edit forgot is never put back (Codex, PR #9 cycle 2).
             while (batch := (self._dropped.pop(key, []), self._forgotten.pop(key, set()),
-                             self._forgotten_places.pop(key, {})))[0] or batch[1] or batch[2]:
+                             self._forgotten_places.pop(key, {}), self._forgotten_routes.pop(key, set())))[0] \
+                    or batch[1] or batch[2] or batch[3]:
                 try:
                     merged = await asyncio.to_thread(file.update, self._undo(*batch))
                 except (mapfile.MapError, OSError) as e:
@@ -203,8 +207,17 @@ class Maps:
             if file.problem is None:
                 self._memory[key] = mapfile.merge(merged, self._memory[key])  # what changed meanwhile stays
 
+    def forget_route(self, root: str | None, app: str, name: str) -> None:
+        """A route dropped or evicted (its file and its entry in the file's index are gone): out of memory now, and out of
+        whatever a save under way writes back from its snapshot (Opus 2 M1)."""
+        key = self._key(root, app)
+        self.data(root, app)["routes"].pop(name, None)
+        self._forgotten_routes.setdefault(key, set()).add(name)
+        self._changed(root, app)
+
     @staticmethod
-    def _undo(gone: list[tuple[str, str, str]], forgotten: set[str | None], lost: dict[str, str]) -> Callable[[dict], None]:
+    def _undo(gone: list[tuple[str, str, str]], forgotten: set[str | None], lost: dict[str, str],
+              routes_gone: frozenset[str] | set[str] = frozenset()) -> Callable[[dict], None]:
         """The change that takes dropped roads, forgotten reflexes and forgotten places (with the roads and reflexes that
         touched them) out of a map the merge brought them back into."""
         def undo(d: dict) -> None:
@@ -213,6 +226,8 @@ class Maps:
                      roads=[r for r in d["roads"] if roads.identity(r) not in gone
                             and not ({r.get("from"), r.get("to")} & out)],
                      reflexes=[r for r in d["reflexes"] if r.get("name") not in forgotten and r.get("at") not in out])
+            for name in routes_gone:
+                d.get("routes", {}).pop(name, None)
         return undo
 
     async def flush(self) -> None:

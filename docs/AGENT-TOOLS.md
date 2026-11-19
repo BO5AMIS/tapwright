@@ -1417,7 +1417,8 @@ small, fast agent; a bug report is `bug_report`.
   a tap that stays on its screen (with or without a visible change); a list row with no id or a point; and a tap that
   leaves a form by a control that may submit it: the skip floor's words (Delete, Send, Buy...), its submit words on a
   screen with an input (Save, Submit, Continue, Confirm, Sign in...), or any tap that leaves a form (2 or more inputs and
-  a button). A `drive` of a person's route carries the way on only when every step of that route is plain navigation.
+  a button). After a `drive`, only a route the tool saved itself carries the way on (its taps were judged navigation as
+  they were made); a person's route never does.
 - A place keeps one route of the tool's own, whatever start it was reached from: a shorter way replaces it, and so does
   a working way when it has failed since. A replay (`drive {"route": ...}`) whose own steps fail twice in a row drops it
   (`Note: route <name> dropped ...`); not reaching the route's start never counts. At most 50 such routes per app: past
@@ -1428,10 +1429,14 @@ small, fast agent; a bug report is `bug_report`.
   title: they are the screen's words and can be private. `Known:` shows the route's name, since that is what
   `drive {"route": ...}` takes (the leads' reading of the frozen §30.2).
 - The first answer of a session that shows the app, once where the app is is known, has after its header
-  `Known: <name>, ... (one call each: drive {"route": "<name>"})`: the saved routes that replay with nothing the agent
-  hasn't given (no variable, no account, no link value), whose start can be reached from where the app is without a
-  link's value, the most used first, else the most recently reached, at most 8 and then `+N more`. A name the redaction
-  would change is left out. Nothing known: no line. None in a user's-eyes journey.
+  `Known: <name>, ... (one call each: drive {"route": "<name>"})`: the saved routes whose steps are strictly navigation
+  (taps, back, links and scrolls; no nested `drive`, no typing, no vault, account or one-time value, no toggle, not
+  draftsOnly, no target with a word the skip floor holds such as Delete or Send) and replay with nothing the agent
+  hasn't given (no variable, no account, no link value: a map link's `[id]` or a `${...}`), whose start can be reached
+  from where the app is the same way, the most used first, else the most recently reached, at most 8 and then
+  `+N more`. A person's route that does more stays drivable by name; it just isn't offered. A name the redaction would
+  change is left out. Nothing known: no line. None in a user's-eyes journey. The known-way hint names a route only on
+  the same terms.
 
 ### 30.3 Hints
 After the `Note:` lines, at most one `Hint:` per answer, each kind once per session. None on a safety refusal
@@ -1480,8 +1485,11 @@ If the keyboard's Done key added exactly a line break at the end and the keyboar
 (the value read just before and after), it is taken back with one backspace, and the answer's `Note:` says so. If the
 keyboard closed with the line break in it, or the value changed any other way, the field isn't touched again and the
 `Note:` says a line break may have been added: check the field. Whatever Done did, WebDriverAgent's plain dismissal is
-still tried once where it hasn't failed. The answer says `Note: closed the keyboard first.`; otherwise the tap is refused
-`covered` as in 1.8.5, whose hint now says that Return can submit, send or add a line.
+still tried once where it hasn't failed. When the keyboard's Done key closed the keyboard, the screen is read again
+after a short settle: if anything changed beyond the keyboard closing (the screen, or the target moved or gone), Done
+may have submitted the form, so the call is refused `stale`, saying Done was pressed, and the tap never goes through.
+Otherwise the answer says `Note: closed the keyboard first.`; if nothing closed the keyboard the tap is refused `covered`
+as in 1.8.5, whose hint now says that Return can submit, send or add a line.
 
 ### 30.5 `--no-hints`
 `--no-hints` restores 1.8.5's behaviour entirely: no `Known:` and no `Hint:` line, no route saved by itself and none of
