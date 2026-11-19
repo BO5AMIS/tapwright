@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.9.1
+## 1.9.1 (2026-11-20)
 
 - The phone reconnects over USB again after it drops off USB and comes back. Once Tapwright had reached the phone
   over the network, 1.9.0 failed every later USB connect with "couldn't open the developer tunnel over USB: 'tuple'
