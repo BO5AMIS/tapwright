@@ -1,4 +1,4 @@
-"""CodeRabbit's first cycle on PR #23 (1.9.2) and the lead's phone check of `service install`. Fakes only: no phone, no
+"""CodeRabbit's first cycle on PR #23 (1.10.0) and the lead's phone check of `service install`. Fakes only: no phone, no
 daemon, no Task Scheduler."""
 import asyncio
 import time
@@ -67,10 +67,10 @@ def test_the_update_screens_title_still_refuses():
     assert unlock.foreign_kind(ui.Tree(keypad(extra=(text,)))) == "text"
 
 
-# ---- 4636616243: the hints-on `unlock` description is the 1.9.2 one ----
+# ---- 4636616243: the hints-on `unlock` description is the 1.10.0 one ----
 def test_unlock_gives_the_new_words_with_hints_and_the_old_without():
     on, off = descriptions.describe("unlock", True), descriptions.describe("unlock", False)
-    assert on == descriptions.SHARED_192["unlock"]
+    assert on == descriptions.SHARED_1100["unlock"]
     assert "An unlock that works isn't limited" in on and "Enter Passcode to Update Tonight" in on
     assert off == descriptions.EXTRA_185.get("unlock", descriptions.EXTRA["unlock"])
     assert "An unlock that works isn't limited" not in off

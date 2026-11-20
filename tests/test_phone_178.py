@@ -327,7 +327,7 @@ def test_a_refused_passcode_is_typed_once_through_the_tool(tmp_path):
 
 
 def test_unlocks_that_work_are_not_limited_through_the_tool(tmp_path):
-    """(1.9.2, the owner's decision) Only attempts that don't unlock count toward the hourly limit (test_unlock.py has
+    """(1.10.0, the owner's decision) Only attempts that don't unlock count toward the hourly limit (test_unlock.py has
     the limit itself): a phone that keeps locking is unlocked every time."""
     async def go():
         d, s = locked_daemon(tmp_path, phone=False)

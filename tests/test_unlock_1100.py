@@ -1,4 +1,4 @@
-"""1.9.2: the daemon's unlock paths never type on SpringBoard's other passcode keypad ("Enter Passcode to Update Tonight",
+"""1.10.0: the daemon's unlock paths never type on SpringBoard's other passcode keypad ("Enter Passcode to Update Tonight",
 the lead's note of 2026-11-19 ~19:45). The tool call and the start of a `serve --phone` call both go through the
 Unlocker; here the locked phone shows that screen instead of the lock screen."""
 import pytest

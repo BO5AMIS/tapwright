@@ -515,7 +515,7 @@ class Device:
         return self.runner is not None and not self.runner.done()
 
     async def _still_answers(self) -> bool:
-        """(1.9.2) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
+        """(1.10.0) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
         a runner busy with one long request (an audit's read of a big screen) can miss one /status, and replacing it costs
         iOS's passcode prompt once its consent is about 8 h old. A runner whose task ended isn't asked (see runner_alive)."""
         for ask in range(REUSE_ASKS):

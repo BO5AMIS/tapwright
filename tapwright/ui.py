@@ -173,7 +173,7 @@ class Element:
     raw_rect: tuple[float, float, float, float] | None = None
     # (1.9.0) in the keyboard's window but not one of its keys: an input accessory or toolbar the keyboard brings
     by_keyboard: bool = False
-    # (1.9.2) the name of the Window the element lies in, from the raw tree, whether or not that window is listed ("" for
+    # (1.10.0) the name of the Window the element lies in, from the raw tree, whether or not that window is listed ("" for
     # an unnamed one); None: in no window, or not known (an element not read from a tree). The passcode unlock types only
     # on keys inside the lock screen's own window (unlock.find_entry; review R192 M1)
     window: str | None = None
@@ -1352,7 +1352,7 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
     return Structure(tuple(kinds), tuple(sorted(ids)), title, tuple(sorted(lists)), tuple(sorted(scrolled)))
 
 
-WINDOW_ATTR = "tw-window"  # (1.9.2) set on each node of a read's raw tree: the name of the Window it lies in (_tag_windows)
+WINDOW_ATTR = "tw-window"  # (1.10.0) set on each node of a read's raw tree: the name of the Window it lies in (_tag_windows)
 
 
 def _tag_windows(root: ET.Element) -> None:

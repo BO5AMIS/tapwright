@@ -1,6 +1,6 @@
 """The passcode unlock (AGENT-TOOLS §18.6, §11.5, §24.5; unlock.py). With fakes: no phone. The passcode is typed only
 when the lock screen's passcode entry is proven in SpringBoard's tree, never into an app or the XCTest prompt, at most
-twice an hour when it doesn't unlock (1.9.2: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
+twice an hour when it doesn't unlock (1.10.0: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
 import asyncio
 
 import pytest
@@ -21,7 +21,7 @@ COVER = "SBCoverSheetWindow"
 
 def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True, keys_in: str | None = COVER) -> list[ui.Element]:
     """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels, in the cover sheet's
-    window (1.9.2: find_entry requires it; cover=False leaves the window element out). `keys_in`: the raw window the keys
+    window (1.10.0: find_entry requires it; cover=False leaves the window element out). `keys_in`: the raw window the keys
     lie in, as ui.read marks it (Element.window; None: not known)."""
     letters = {"2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"}
     items = []
@@ -190,7 +190,7 @@ def test_a_changed_passcode_in_the_file_may_be_tried_after_a_refusal():
 
 
 def test_an_unlock_that_works_is_never_limited():
-    """(1.9.2, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
+    """(1.10.0, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
     unlocked as often as it likes. The wakes that type are not counted either."""
     u, clock = unlocker()
     screen = Screen()
@@ -462,7 +462,7 @@ def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothi
     assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2
 
 
-# ---- 1.9.2: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
+# ---- 1.10.0: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
 # After Software Update > Later, iOS showed "Enter Passcode to Update Tonight": window SBTransientOverlayWindow, a
 # "Passcode field", all ten digit keys and "Remind Me Later". Typing the passcode there schedules an iOS update. The tree
 # below is that screen's, ids and labels only (frames are placeholders in the keypad's usual places).

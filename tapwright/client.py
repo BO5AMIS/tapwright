@@ -200,7 +200,7 @@ def set_serve_args(args: list[str]) -> None:
 
 def daemon_args() -> list[str]:
     """What an automatic start runs after `tapwright`: the serve command rebuilt from the flags `tapwright service install`
-    saved, checked again each time (1.9.2, review R191 M4 and R192 M2: a daemon an agent starts after `serve --stop`, or
+    saved, checked again each time (1.10.0, review R191 M4 and R192 M2: a daemon an agent starts after `serve --stop`, or
     before the logon task ran, keeps --keep-alive and the vault), else `serve` with this process's own flags (a scheduled
     run's --accounts). Saved flags that can't be used any more (a vault or policy file gone, a flag serve doesn't take)
     are said in one serve.log line, and a plain `serve` starts instead. A scheduled run's own vault is kept when the

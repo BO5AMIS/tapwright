@@ -1389,7 +1389,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             queue.put_nowait(message)
 
     def phone_last_seen(self) -> float | None:
-        """(1.9.2, review R191 L4) When (monotonic) a phone was last known to be there: now while it is live or locked,
+        """(1.10.0, review R191 L4) When (monotonic) a phone was last known to be there: now while it is live or locked,
         or stuck on a lock or the passcode prompt; else when that last ended; None: never. The idle stop waits for this to
         be older than its limit, whatever the state's name (a `--address` phone that is away reads `reconnecting`)."""
         if self.state in ("live", "locked") or isinstance(self.stuck, PhoneLocked):
@@ -1758,7 +1758,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def _session_again_on_runner(self, s, error: Exception) -> bool:
-        """(1.9.2, plug and forget) A new session timed out on a runner that is still running and still answers /status
+        """(1.10.0, plug and forget) A new session timed out on a runner that is still running and still answers /status
         (11-19 05:48 and 05:51: an audit kept WebDriverAgent busy, POST /session got no answer in 30 s, and the reset
         that followed replaced the runner). Ask for the session once more on the same runner before anything is torn
         down: a new runner costs iOS's passcode prompt once its consent is about 8 h old. True when that worked; False
@@ -1916,7 +1916,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
             many = getattr(self.unlocker, "unlocks_last_hour", None)
             count = many() if many is not None else 0
-            if count > UNLOCKS_NOTED:  # never limited (1.9.2), but a phone that keeps locking is said (review R191 L3)
+            if count > UNLOCKS_NOTED:  # never limited (1.10.0), but a phone that keeps locking is said (review R191 L3)
                 self.log(f"passcode unlock: {count} unlocks in the last hour: the phone keeps locking (Auto-Lock, or "
                          "SpringBoard restarting)")
             if self.state == "locked":

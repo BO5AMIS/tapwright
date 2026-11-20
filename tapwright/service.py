@@ -1,4 +1,4 @@
-"""`tapwright service install|uninstall|status` (1.9.2, plug and forget): Tapwright always on.
+"""`tapwright service install|uninstall|status` (1.10.0, plug and forget): Tapwright always on.
 
 iOS asks for the passcode ("Enter iPhone Passcode for XCTest") only when a new test runner starts, and only once its last
 consent is about 8 hours old; a runner kept running is never asked (serve.log 11-13 to 11-19). Every start of the daemon
@@ -98,7 +98,7 @@ def flags_from(values: dict[str, object]) -> dict[str, object]:
 
 
 def _legacy_flags(args: list[str]) -> dict[str, object]:
-    """A service.json written before the flags were saved (`{"args": [...]}`, 1.9.2's first builds), read back into
+    """A service.json written before the flags were saved (`{"args": [...]}`, 1.10.0's first builds), read back into
     flags by SERVE_FLAGS: never run as it is (review R192 M2). Anything serve doesn't take is a ServiceError."""
     if args[:2] != ["serve", "--keep-alive"]:
         raise ServiceError("the saved command doesn't start with serve --keep-alive")

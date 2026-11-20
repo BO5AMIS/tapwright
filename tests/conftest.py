@@ -95,7 +95,7 @@ def _tool_home_in_tmp(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _no_reuse_pause(monkeypatch):
-    """(1.9.2) A running runner's /status is asked a few times before it is replaced (device.REUSE_ASKS); the pause
+    """(1.10.0) A running runner's /status is asked a few times before it is replaced (device.REUSE_ASKS); the pause
     between asks is a real second on the phone and none in a test."""
     from tapwright import device
     monkeypatch.setattr(device, "REUSE_GAP", 0.0)

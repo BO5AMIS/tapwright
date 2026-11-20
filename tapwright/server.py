@@ -685,7 +685,7 @@ def _bind(port: int) -> socket.socket | None:
 
 
 def phone_seen_ago(daemon, now: float | None = None) -> float | None:
-    """(1.9.2, plug and forget) Seconds since a phone was last known to be there (0 while it is: live, locked, or stuck
+    """(1.10.0, plug and forget) Seconds since a phone was last known to be there (0 while it is: live, locked, or stuck
     on a lock or the passcode prompt); None: never. The daemon doesn't stop for idleness until this is older than the
     idle limit: stopping ends the test runner, and iOS asks for the passcode at a new runner's start once its consent is
     about 8 h old (serve.log 11-13 to 11-19), while a runner kept running is never asked. Read from the daemon's
@@ -806,7 +806,7 @@ async def serve(port: int = DEFAULT_PORT, keep_alive: bool = False, new_token: b
             app = create_app(daemon, token, LOCAL_HOSTS, on_stop=stop.set, ceiling=ceiling)
             server = uvicorn.Server(uvicorn.Config(app, ws="wsproto", lifespan="off", log_config=None,
                                                    access_log=False, timeout_graceful_shutdown=3))
-            # (1.9.2) keep_alive and accounts: what `service status` compares with the service's flags (R191 M4)
+            # (1.10.0) keep_alive and accounts: what `service status` compares with the service's flags (R191 M4)
             store.write_serve_info({"pid": os.getpid(), "port": actual, "token": token,
                                     "started": int(time.time()), "keep_alive": bool(keep_alive),
                                     "accounts": getattr(ceiling, "accounts", None) if ceiling is not None else None})

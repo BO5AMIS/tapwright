@@ -16,7 +16,7 @@ with its passcode entry showing, types the passcode there, and checks that the p
     file that a request or a call names.
   - **Only on the lock screen.** Before a key goes out, all of these hold: WebDriverAgent says the phone is locked; the
     app in front is SpringBoard; its tree shows the passcode entry (all ten digit keys of the keypad, each found once,
-    or a secure passcode field); nothing on it mentions XCTest; (1.9.2) the tree holds the lock screen's own window (the
+    or a secure passcode field); nothing on it mentions XCTest; (1.10.0) the tree holds the lock screen's own window (the
     cover sheet) and no other SpringBoard keypad's (no transient overlay window, nothing about an update or "Remind Me
     Later": iOS's "Enter Passcode to Update Tonight" schedules an update with the passcode), checked again right before
     the first key; and iOS's XCTest prompt (LocalAuthenticationUIService,
@@ -34,7 +34,7 @@ with its passcode entry showing, types the passcode there, and checks that the p
     It is not in the text redactor either: a 4 to 6 digit passcode replaced in answers would turn every date and price
     into a test of it, and it is never typed anywhere text can show it (the lock screen shows dots).
   - **At most 2 failed attempts an hour and 3 a day, across processes, and none after a refusal.** An attempt is a
-    passcode typed; one that unlocks the phone is taken off the counts when it ends (1.9.2, the owner's decision: iOS's
+    passcode typed; one that unlocks the phone is taken off the counts when it ends (1.10.0, the owner's decision: iOS's
     lockout counts only wrong passcodes, so an unattended phone can be unlocked as often as it locks). One whose end
     isn't known (the process died while typing) stays counted. The attempts and the refusal are kept on disk
     (`~/.tapwright/unlock-state.json`, written whole and changed under a lock), so a new daemon (the last one stopped when idle, or was shut down) knows them. After an attempt that
@@ -108,7 +108,7 @@ NOT_RUN = ("the unlock couldn't run (the connection to the phone changed); nothi
            "seconds, or ask the user to unlock the phone")
 LETTERS_ON_KEYPAD = ("the phone is locked, and its lock screen shows a number keypad, but the passcode in the file has "
                      "other characters; nothing was typed. Ask the user to unlock it")
-# (1.9.2, review R191 M1, L8) what a refusal on another SpringBoard keypad says: an agent can't tap on a locked phone,
+# (1.10.0, review R191 M1, L8) what a refusal on another SpringBoard keypad says: an agent can't tap on a locked phone,
 # so it is always the user's, and a button is named only when the tree shows it
 UPDATE_PROMPT = ("the phone shows iOS's \"Enter Passcode to Update Tonight\" screen, not the lock screen: the tool never "
                  "types the passcode there (it would schedule an iOS update), and nothing was typed. Ask the user to tap "
@@ -370,7 +370,7 @@ class Ledger:
             if data is None or data.get("attempt") != attempt:
                 return None, None
             if unlocked:
-                # (1.9.2, the owner's decision) an attempt that unlocked the phone is taken off the counts: iOS's lockout
+                # (1.10.0, the owner's decision) an attempt that unlocked the phone is taken off the counts: iOS's lockout
                 # counts only wrong passcodes, so only those (and attempts whose end isn't known) are limited
                 tries = list(data["tries"])
                 if data.get("pending") in tries:
@@ -499,7 +499,7 @@ def _on_glass(keys, screen: tuple[float, float] | None) -> bool:
     return w > 0 and h > 0 and all(0 <= e.center[0] < w and 0 <= e.center[1] < h for e in keys)
 
 
-# (1.9.2) SpringBoard draws other passcode keypads than the lock screen's. Seen on the phone 2026-11-19 ~19:45: after
+# (1.10.0) SpringBoard draws other passcode keypads than the lock screen's. Seen on the phone 2026-11-19 ~19:45: after
 # Software Update > Later, "Enter Passcode to Update Tonight" (window SBTransientOverlayWindow, a "Passcode field", all
 # ten digit keys, "Remind Me Later"); typing the passcode there schedules an iOS update. The lock screen's passcode view
 # lives in the cover sheet: every lock-screen and keypad tree read on the phone (serve.log, phone checks 1.7.8 to 1.8.5)
@@ -557,7 +557,7 @@ def lock_window(tree: ui.Tree) -> bool:
 def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | None = None) -> Entry | None:
     """The passcode entry iOS's lock screen shows, or None when this screen isn't proven to be it: SpringBoard in front,
     no alert, nothing about XCTest, the lock screen's own window (the cover sheet) and no other keypad's (no transient
-    overlay, nothing about an update or "Remind Me Later": 1.9.2), and the keypad's ten keys (each once) or a secure
+    overlay, nothing about an update or "Remind Me Later": 1.10.0), and the keypad's ten keys (each once) or a secure
     passcode field.
 
     iOS 26 (seen on the phone 2026-11-19, iPhone15,3 iOS 26.5) shows the keypad on the screen but under a container
@@ -566,7 +566,7 @@ def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | N
     R185b L1; unknown, no such keypad), and the Entry says so (`on_screen` False): the Unlocker types on them only after
     the hit test confirmed where they are.
 
-    (1.9.2, review R192 M1) Structural and in any language: every key used, and the secure field when it is used, must
+    (1.10.0, review R192 M1) Structural and in any language: every key used, and the secure field when it is used, must
     lie inside the lock screen's own window in the raw tree (Element.window, from ui.read: also a window the tree doesn't
     list, an unnamed one included). An element whose window isn't known (not read from a raw tree) is never typed on.
     The English signs (foreign_kind) stay as a further layer."""
@@ -651,7 +651,7 @@ class Unlocker:
         digits = passcode.isascii() and passcode.isdigit()
         if (why := await self._usable(phone, entry, digits)) is not None:
             return why
-        # the last checks, right before the keys: still locked, still no XCTest prompt, and (1.9.2) still the lock
+        # the last checks, right before the keys: still locked, still no XCTest prompt, and (1.10.0) still the lock
         # screen's own passcode view, with no other keypad come up over it since. The keys typed are the final read's
         # (CodeRabbit, PR #23 cycle 1): a keypad that moved meanwhile is proven again where it is now, never typed on
         # where it was.
@@ -734,7 +734,7 @@ class Unlocker:
         return Result(False, "not_proven", NOT_PROVEN)
 
     def unlocks_last_hour(self) -> int:
-        """How many unlocks this process made in the last hour. Unlocks that work aren't limited (1.9.2); this count is
+        """How many unlocks this process made in the last hour. Unlocks that work aren't limited (1.10.0); this count is
         only logged, so a phone that keeps locking (Auto-Lock, or SpringBoard restarting: 11-19 18:08-18:24) is noticed
         (review R191 L3)."""
         now = self.clock()

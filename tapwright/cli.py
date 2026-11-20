@@ -1357,7 +1357,7 @@ def main() -> int:
     p.add_argument("--port", type=int, help="default 8417; a free port if that one is taken")
     p.add_argument("--address", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
     p.add_argument("--restart-gate", choices=("on", "off"), default=None,
-                   help="(1.9.2) on: start no runner on a phone that restarted and hasn't been unlocked since, when it "
+                   help="(1.10.0) on: start no runner on a phone that restarted and hasn't been unlocked since, when it "
                         "needs a passcode (the default); off: start one anyway. Overrides TAPWRIGHT_RESTART_GATE")
     p.add_argument("--keep-alive", action="store_true", help="never stop by itself (without it: after 30 minutes without use and with no phone connected)")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")

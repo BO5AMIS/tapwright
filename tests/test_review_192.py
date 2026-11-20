@@ -1,4 +1,4 @@
-"""Review R192 (REVIEW-1.9.2-OPUS2.md), plug and forget 1.9.2: M1 the keys typed must lie inside the lock screen's own
+"""Review R192 (REVIEW-1.10.0-OPUS2.md), plug and forget 1.10.0: M1 the keys typed must lie inside the lock screen's own
 window in the raw tree (any language, a window the tree doesn't list included), M2 the service saves flags that are
 checked again at each automatic start, L3 one /status probe chain per reuse, L4 `--restart-gate`, L5 nothing saved
 where no service is installed. Trees are WDA-shaped XML read through ui.read, as on the phone. Fakes only."""

@@ -1,4 +1,4 @@
-"""Review R191 (REVIEW-1.9.1-OPUS1.md) of plug and forget, now 1.9.2: M1 the update rule narrowed to the update screen
+"""Review R191 (REVIEW-1.9.1-OPUS1.md) of plug and forget, now 1.10.0: M1 the update rule narrowed to the update screen
 itself, M2 the lock-state read capped as a whole, M3 the restart gate only with a passcode and with an off switch, L1 the
 log says whether the runner was kept, L3 many unlocks are noted. Each test failed on 078fad4."""
 import asyncio

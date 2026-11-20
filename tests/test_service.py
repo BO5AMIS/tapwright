@@ -1,4 +1,4 @@
-"""1.9.2, plug and forget: the daemon is always on. `tapwright service` starts it at logon (service.py), an automatic start
+"""1.10.0, plug and forget: the daemon is always on. `tapwright service` starts it at logon (service.py), an automatic start
 uses the service's flags (client.daemon_args), and it doesn't stop for idleness while a phone has been there within the
 idle limit (server._idle_watch). No real Task Scheduler call: the runner is faked."""
 import asyncio
