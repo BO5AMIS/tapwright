@@ -149,6 +149,7 @@ GRANT_FILE: Path | None = None  # when iOS last gave its consent; None: ~/.tapwr
 LOCK_STATE_WAIT = 5.0  # seconds the lock state may take to come back; then it is not known
 REUSE_ASKS = 3  # times a running runner's /status is asked before it is replaced (each wda_alive waits up to 3 s) ...
 REUSE_GAP = 1.0  # ... this many seconds apart
+ANSWERED_FRESH = 1.0  # seconds a runner's answer to _still_answers stands for the start right after it
 
 
 def _grant_file() -> Path:
@@ -336,6 +337,7 @@ class Device:
         self._prompt_rounds = 0  # starts in a row that stopped at the passcode screen
         self._gone_at: float | None = None  # when that screen was first seen gone, for the pause before the next start
         self._hurry = False  # see hurry()
+        self._answered_at: float | None = None  # when the running runner last answered _still_answers (monotonic)
 
     # ---- the tunnel ----
     async def connect(self) -> None:
@@ -433,7 +435,7 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
-        if self.runner and not self.runner.done() and await self._still_answers():
+        if self.runner and not self.runner.done() and (self._answered_recently() or await self._still_answers()):
             if self.awaiting_passcode or self._prompt_rounds:
                 record_grant()  # the start that waited at the prompt went on: the passcode was entered just now
             self.awaiting_passcode, self._prompt_rounds = False, 0
@@ -522,8 +524,15 @@ class Device:
                 if not self.runner_alive():
                     return False
             if await self.wda_alive():
+                self._answered_at = time.monotonic()
                 return True
         return False
+
+    def _answered_recently(self) -> bool:
+        """Did the running runner answer _still_answers within ANSWERED_FRESH? Then a start doesn't ask again: one probe
+        chain per reuse (the daemon's _session_again_on_runner has just asked; review R192 L3). Spent once used."""
+        at, self._answered_at = self._answered_at, None
+        return at is not None and time.monotonic() - at < ANSWERED_FRESH
 
     async def lock_state(self) -> LockState | None:
         """The phone's lock state from CoreDevice (iOS 17+), without WebDriverAgent: answers before any runner is

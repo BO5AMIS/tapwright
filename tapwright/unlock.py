@@ -544,6 +544,11 @@ def foreign_keypad(tree: ui.Tree) -> bool:
     return foreign_kind(tree) is not None
 
 
+def _in_lock_window(e: ui.Element) -> bool:
+    """Does the element lie inside the lock screen's own window in the raw tree? Not known (None): no."""
+    return e.window is not None and e.window.casefold() in LOCK_WINDOWS
+
+
 def lock_window(tree: ui.Tree) -> bool:
     """Does the tree hold the lock screen's own window (the cover sheet)?"""
     return any(w in LOCK_WINDOWS for w in _window_ids([*tree.items, *tree.offscreen]))
@@ -559,7 +564,12 @@ def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | N
     whose frame lies outside it, so the tree lists every key as off the screen. Then the keys are taken from the whole
     tree, on screen and off, each digit once, every key's centre on the screen (`screen`, its size in points: review
     R185b L1; unknown, no such keypad), and the Entry says so (`on_screen` False): the Unlocker types on them only after
-    the hit test confirmed where they are."""
+    the hit test confirmed where they are.
+
+    (1.9.2, review R192 M1) Structural and in any language: every key used, and the secure field when it is used, must
+    lie inside the lock screen's own window in the raw tree (Element.window, from ui.read: also a window the tree doesn't
+    list, an unnamed one included). An element whose window isn't known (not read from a raw tree) is never typed on.
+    The English signs (foreign_kind) stay as a further layer."""
     if front != SPRINGBOARD:
         return None
     if tree.alert is not None:
@@ -574,8 +584,10 @@ def find_entry(tree: ui.Tree, front: str | None, screen: tuple[float, float] | N
         keypad, on_screen = _keypad(items), False
         if not _on_glass(keypad.values(), screen):
             keypad = {}
+    if keypad and not all(_in_lock_window(e) for e in keypad.values()):
+        keypad = {}
     fields = [e for e in tree.items if _passcode_field(e) and not e.in_alert]
-    secure = fields[0] if len(fields) == 1 else None
+    secure = fields[0] if len(fields) == 1 and _in_lock_window(fields[0]) else None
     if not keypad and secure is None:
         return None
     return Entry({d: e.center for d, e in keypad.items()}, secure, on_screen or not keypad,

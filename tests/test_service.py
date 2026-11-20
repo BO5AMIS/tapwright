@@ -161,7 +161,8 @@ def test_install_creates_a_hidden_normal_priority_logon_task_with_no_time_limit_
     expected = subprocess.list2cmdline(["-m", "tapwright", *args])
     assert f"<Arguments>{expected}</Arguments>" in x and '"C:\\Users\\Someone\\My Vault\\v.json"' in x
     assert "the daemon answers" in text and "After the phone restarts" in text
-    assert json.loads(service.service_file().read_text())["args"] == args  # saved for automatic starts
+    # the flags are saved for automatic starts, not the command line (review R192 M2)
+    assert json.loads(service.service_file().read_text()) == {"flags": {"accounts": r"C:\Users\Someone\My Vault\v.json"}}
 
 
 def test_install_says_so_when_the_started_daemon_never_answers():
@@ -182,7 +183,7 @@ def test_a_refused_task_is_an_error_and_saves_nothing():
 
 def test_uninstall_removes_the_task_its_flags_and_the_empty_folder():
     tasks = Tasks()
-    service._save(["serve", "--keep-alive"])
+    service._save({})
     text, code = _svc(tasks).uninstall()
     assert code == 0 and "Removed" in text and tasks.calls[0][:2] == ["schtasks", "/Delete"]
     assert tasks.calls[1][0] == "powershell" and "DeleteFolder('Tapwright'" in tasks.calls[1][-1]
@@ -193,8 +194,9 @@ def test_uninstall_removes_the_task_its_flags_and_the_empty_folder():
 
 
 def test_status_says_when_the_running_daemon_lacks_the_services_flags(tmp_path):
-    vault = str(tmp_path / "v.json")
-    service._save(["serve", "--keep-alive", "--accounts", vault])
+    vault = str((tmp_path / "v.json").resolve())
+    (tmp_path / "v.json").write_text("{}")
+    service._save({"accounts": vault})
     text, _ = _svc(Tasks(), running={"port": 1, "keep_alive": True, "accounts": vault}).status()
     assert "is installed" in text and "daemon is running" in text and "wasn't started" not in text
     text, _ = _svc(Tasks(), running={"port": 1, "keep_alive": False, "accounts": None}).status()
@@ -204,11 +206,13 @@ def test_status_says_when_the_running_daemon_lacks_the_services_flags(tmp_path):
 
 
 # ---- an automatic start uses the service's flags (review R191 M4) ----
-def test_an_automatic_start_uses_the_saved_service_flags(monkeypatch):
+def test_an_automatic_start_uses_the_saved_service_flags(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "_SERVE_ARGS", ["--accounts", "schedule-vault.json"])
     assert client.daemon_args() == ["serve", "--accounts", "schedule-vault.json"]  # no service: as before
-    service._save(["serve", "--keep-alive", "--accounts", "/v.json"])
-    assert client.daemon_args() == ["serve", "--keep-alive", "--accounts", "/v.json"]
+    vault = tmp_path / "v.json"
+    vault.write_text("{}")
+    service._save({"accounts": str(vault.resolve())})
+    assert client.daemon_args() == ["serve", "--keep-alive", "--accounts", str(vault.resolve())]
     seen = {}
 
     class Proc:
@@ -219,16 +223,19 @@ def test_an_automatic_start_uses_the_saved_service_flags(monkeypatch):
         return Proc()
     monkeypatch.setattr(client.subprocess, "Popen", popen)
     client.start_daemon()
-    assert seen["cmd"][-4:] == ["serve", "--keep-alive", "--accounts", "/v.json"]
+    assert seen["cmd"][-4:] == ["serve", "--keep-alive", "--accounts", str(vault.resolve())]
 
 
-def test_a_broken_service_file_is_not_used():
+@pytest.mark.parametrize("text", ["not json", "[]", json.dumps({"args": []}), json.dumps({"args": ["--keep-alive"]}),
+                                  json.dumps({"args": ["serve", 3]}), json.dumps({"flags": {"new_token": True}}),
+                                  json.dumps({"flags": {"apps": ["x"]}}), json.dumps({"flags": {"no_log": False}}),
+                                  json.dumps({"args": ["serve", "--keep-alive", "--new-token"]}), json.dumps({})])
+def test_a_broken_service_file_is_never_run(text):
     path = service.service_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    for text in ("not json", "[]", json.dumps({"args": []}), json.dumps({"args": ["--keep-alive"]}),
-                 json.dumps({"args": ["serve", 3]})):
-        path.write_text(text)
-        assert service.saved_args() is None
+    path.write_text(text)
+    with pytest.raises(service.ServiceError):
+        service.saved_args()
 
 
 def test_the_serve_info_carries_the_flags_status_compares():
@@ -262,7 +269,7 @@ def test_the_cli_passes_serve_flags_to_the_service(monkeypatch, capsys):
     seen = {}
 
     class Fake:
-        def install(self, args):
+        def install(self, args, flags=None):
             seen["args"] = args
             return "done", 0
     monkeypatch.setattr(service, "Service", Fake)

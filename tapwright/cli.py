@@ -1356,6 +1356,9 @@ def main() -> int:
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, help="default 8417; a free port if that one is taken")
     p.add_argument("--address", help="reach the phone at this address (e.g. its Tailscale IP) instead of USB or Wi-Fi")
+    p.add_argument("--restart-gate", choices=("on", "off"), default=None,
+                   help="(1.9.2) on: start no runner on a phone that restarted and hasn't been unlocked since, when it "
+                        "needs a passcode (the default); off: start one anyway. Overrides TAPWRIGHT_RESTART_GATE")
     p.add_argument("--keep-alive", action="store_true", help="never stop by itself (without it: after 30 minutes without use and with no phone connected)")
     p.add_argument("--new-token", action="store_true", help="replace the live view's access token")
     p.add_argument("--stop", action="store_true", help="stop the running daemon")
@@ -1410,6 +1413,8 @@ def main() -> int:
     q.add_argument("--no-dialog", action="store_true")
     q.add_argument("--video", action="store_true")
     q.add_argument("--settle-on-video", action="store_true")
+    q.add_argument("--restart-gate", choices=("on", "off"),
+                   help="the check that starts no runner on a phone not unlocked since its restart (default on)")
     sv.add_parser("uninstall", help="remove the logon task (a running daemon keeps running until serve --stop)")
     sv.add_parser("status", help="whether the logon task is there and the daemon runs")
     sub.add_parser("view")
@@ -1603,11 +1608,12 @@ def main() -> int:
         svc = servicelib.Service()
         if a.service_cmd == "install":
             try:
-                args = servicelib.serve_args(vars(a))
+                flags = servicelib.flags_from(vars(a))
+                args = servicelib.serve_args(flags)
             except servicelib.ServiceError as e:
                 print(f"Error: {e}")
                 return 2
-            text, code = svc.install(args)
+            text, code = svc.install(args, flags)
         elif a.service_cmd == "uninstall":
             text, code = svc.uninstall()
         else:
@@ -1674,6 +1680,8 @@ def main() -> int:
         from . import server
         if a.no_log:
             os.environ["TAPWRIGHT_NO_LOG"] = "1"
+        if a.restart_gate is not None:  # (the daemon's own environment: device.restart_gate_on reads it)
+            os.environ["TAPWRIGHT_RESTART_GATE"] = "1" if a.restart_gate == "on" else "0"
         port = a.port if a.port is not None else server.DEFAULT_PORT
         from . import policy as policies
         from .ceiling import Ceiling

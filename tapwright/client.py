@@ -199,12 +199,25 @@ def set_serve_args(args: list[str]) -> None:
 
 
 def daemon_args() -> list[str]:
-    """What an automatic start runs after `tapwright`: the flags `tapwright service install` saved when there are some
-    (1.9.2, review R191 M4: a daemon an agent starts after `serve --stop`, or before the logon task ran, keeps
-    --keep-alive and the vault), else `serve` with this process's own (a scheduled run's --accounts)."""
+    """What an automatic start runs after `tapwright`: the serve command rebuilt from the flags `tapwright service install`
+    saved, checked again each time (1.9.2, review R191 M4 and R192 M2: a daemon an agent starts after `serve --stop`, or
+    before the logon task ran, keeps --keep-alive and the vault), else `serve` with this process's own flags (a scheduled
+    run's --accounts). Saved flags that can't be used any more (a vault or policy file gone, a flag serve doesn't take)
+    are said in one serve.log line, and a plain `serve` starts instead. A scheduled run's own vault is kept when the
+    service has none."""
     from . import service
-    saved = service.saved_args()
-    return saved if saved is not None else ["serve", *_SERVE_ARGS]
+    try:
+        saved = service.saved_args()
+    except service.ServiceError as e:
+        service.note(f"automatic start: the service's saved flags can't be used ({e}); starting a plain serve "
+                     "(`tapwright service status`)")
+        saved = None
+    if saved is None:
+        return ["serve", *_SERVE_ARGS]
+    if "--accounts" not in saved and "--accounts" in _SERVE_ARGS[:-1]:
+        i = _SERVE_ARGS.index("--accounts")
+        saved = [*saved, "--accounts", _SERVE_ARGS[i + 1]]
+    return saved
 
 
 def start_daemon() -> subprocess.Popen:
@@ -237,7 +250,10 @@ def find_or_start(wait: float = 60.0) -> dict:
             info = store.read_serve_info()  # exit code 0 means "already running"
             if healthy(info):
                 return info
-            raise DaemonError("reconnecting", "tapwright serve exited at start; see ~/.tapwright/serve.log")
+            from . import service
+            where = "; see ~/.tapwright/serve.log" + (" and `tapwright service status`" if service.service_file().exists()
+                                                     else "")
+            raise DaemonError("reconnecting", "tapwright serve exited at start" + where)
     raise DaemonError("reconnecting", "tapwright serve didn't start; see ~/.tapwright/serve.log")
 
 

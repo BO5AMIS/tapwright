@@ -21,7 +21,8 @@ class Moving(Screen):
         super().__init__(**kw)
         self.reads = 0
         self.moved = [ui.Element(e.ref, e.role, e.label, e.identifier, rect=(e.rect[0], e.rect[1] + 50, e.rect[2],
-                                 e.rect[3]), actions=e.actions, type=e.type, name=e.name) for e in self.items]
+                                 e.rect[3]), actions=e.actions, type=e.type, name=e.name, window=e.window)
+                      for e in self.items]
 
     async def lock_tree(self):
         self.calls.append("tree")

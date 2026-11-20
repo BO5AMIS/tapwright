@@ -39,7 +39,7 @@ def run_unlock(u, screen):
     return asyncio.run(u.unlock(screen, PASSCODE))
 
 
-@pytest.mark.parametrize("name", ["SBTransientOverlayWindow", "SBSomeNewOverlayWindow", ""])
+@pytest.mark.parametrize("name", ["SBTransientOverlayWindow", "SBSomeNewOverlayWindow"])  # (unnamed: test_review_192, from XML)
 def test_any_window_but_the_lock_screens_refuses_and_names_no_button(name):
     tree = ui.Tree(keypad(extra=(window(name),)))
     assert unlock.foreign_kind(tree) == "window" and unlock.find_entry(tree, SB) is None

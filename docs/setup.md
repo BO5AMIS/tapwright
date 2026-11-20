@@ -235,15 +235,25 @@ tapwright service install --accounts ~/tapwright-vault.json
 ```
 
 creates a Windows logon task (hidden) that runs `tapwright serve --keep-alive` with the flags
-you give (`--apps`, `--accounts`, `--maps`, ...); `tapwright service status` and
-`tapwright service uninstall` check and remove it. On macOS and Linux the command prints the
-launchd agent or systemd user unit to add. A daemon an agent starts (after `tapwright serve
---stop`, say) uses the same flags. After the phone restarts, unlock it once with its passcode and
-enter the passcode once more when it asks to allow UI automation. A daemon restart (`serve
---stop`, an upgrade) more than about 8 hours after you last entered it asks once too, and a phone
-that locks by itself needs the passcode in the vault (`--accounts`) to be unlocked. Otherwise it
-needs no one. `TAPWRIGHT_RESTART_GATE=0` turns off the check that holds the runner after a phone
-restart until its first unlock.
+you give (`--apps`, `--accounts`, `--maps`, `--restart-gate`, ...); `tapwright service status`
+and `tapwright service uninstall` check and remove it. The flags are also saved in
+`~/.tapwright/service.json`: until `service uninstall`, every daemon started automatically (an
+agent's call after `tapwright serve --stop`, say) uses them, checked again each time; if a file
+they name has moved, serve.log says so, a plain `serve` starts, and `service status` says why. A
+scheduled run's own vault is kept when the service names none. After `serve --stop` for an
+upgrade, `schtasks /Run /TN Tapwright\serve` starts the service's daemon at once. On macOS and
+Linux the command prints the launchd agent or systemd user unit to add, and saves nothing.
+
+After the phone restarts, unlock it once with its passcode and enter the passcode once more when
+it asks to allow UI automation. A daemon restart (`serve --stop`, an upgrade) more than about 8
+hours after you last entered it asks once too, and a phone that locks by itself needs the
+passcode in the vault (`--accounts`) to be unlocked. Otherwise it needs no one.
+
+After a phone restart, the daemon starts no runner until the phone has been unlocked once (when
+the phone says a passcode is needed). To turn that check off, start the daemon
+with `--restart-gate off` (`tapwright service install --restart-gate off` carries it), or set
+`TAPWRIGHT_RESTART_GATE=0` in the environment the daemon starts in (on Windows `setx
+TAPWRIGHT_RESTART_GATE 0`, then `tapwright serve --stop` and `schtasks /Run /TN Tapwright\serve`).
 
 ### The live view as video
 

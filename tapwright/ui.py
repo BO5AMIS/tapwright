@@ -173,6 +173,10 @@ class Element:
     raw_rect: tuple[float, float, float, float] | None = None
     # (1.9.0) in the keyboard's window but not one of its keys: an input accessory or toolbar the keyboard brings
     by_keyboard: bool = False
+    # (1.9.2) the name of the Window the element lies in, from the raw tree, whether or not that window is listed ("" for
+    # an unnamed one); None: in no window, or not known (an element not read from a tree). The passcode unlock types only
+    # on keys inside the lock screen's own window (unlock.find_entry; review R192 M1)
+    window: str | None = None
 
     @property
     def x(self) -> float:
@@ -1113,6 +1117,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
                                 no_trait=loose is not None)
             candidate.placed, candidate.raw_rect = _placed(node)
             candidate.by_keyboard = keys_top is not None and not in_keyboard and _accessory_bar(node, keys_top)
+            candidate.window = node.get(WINDOW_ATTR)
             if parent and _duplicate(parent, candidate):
                 # the same thing as its parent, exposed twice (React Native does): list it once, the one
                 # that takes an action; both or neither, the ancestor. The one listed has the focus either had
@@ -1151,6 +1156,7 @@ def read(source: str, screen: tuple[float, float] | None = None, keyboard: bool 
     inf = math.inf
     root = _parse(source, screen)
     parents = {child: up for up in root.iter() for child in up}
+    _tag_windows(root)
     # On the phone the keyboard has a window of its own: Window > a full-screen view > [an empty view, the strip
     # with the globe key, the views holding the Keyboard node].
     keyboard_holders: set[ET.Element] = set()  # the views a keyboard sits in, below its window
@@ -1346,6 +1352,23 @@ def _structure(root: ET.Element, screen: tuple[float, float, float, float] | Non
     return Structure(tuple(kinds), tuple(sorted(ids)), title, tuple(sorted(lists)), tuple(sorted(scrolled)))
 
 
+WINDOW_ATTR = "tw-window"  # (1.9.2) set on each node of a read's raw tree: the name of the Window it lies in (_tag_windows)
+
+
+def _tag_windows(root: ET.Element) -> None:
+    """Mark every node with the raw name of the nearest Window above it (itself, for a window): "" for a window with no
+    name, no mark outside any window. From the raw XML, so a window that isn't listed (no identifier, or a name that
+    only repeats its label) still counts (review R192 M1). Iterative: a deep tree doesn't reach the recursion limit."""
+    stack: list[tuple[ET.Element, str | None]] = [(root, None)]
+    while stack:
+        node, window = stack.pop()
+        if _kind(node) == "Window":
+            window = _text(node.get("name"))
+        if window is not None:
+            node.set(WINDOW_ATTR, window)
+        stack.extend((child, window) for child in node)
+
+
 def _plain(node: ET.Element) -> Element | None:
     """The element a node would be listed as, without what only a visible one gets (covers, duplicate folding):
     for the off-screen list. None when it wouldn't be listed."""
@@ -1369,7 +1392,8 @@ def _plain(node: ET.Element) -> Element | None:
                    loose.checked if loose else (value == "1") if role == "switch" else None,
                    ("tap",) if loose else ROLE_ACTIONS.get(role, ()), kind, False, _has_focus(node, role), name,
                    kind == "SecureTextField", placeholder=_text(node.get("placeholderValue")),
-                   no_trait=loose is not None, placed=placed, raw_rect=raw)  # (a hosted one keeps its mark: CodeRabbit, PR #18)
+                   no_trait=loose is not None, placed=placed, raw_rect=raw,  # (a hosted one keeps its mark: CodeRabbit, PR #18)
+                   window=node.get(WINDOW_ATTR))
 
 
 def _offscreen(node: ET.Element, out: list[Element], over: Element | None = None) -> None:

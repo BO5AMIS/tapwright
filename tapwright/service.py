@@ -37,7 +37,9 @@ SERVE_FLAGS = (("--apps", True, False), ("--dedicated", False, False), ("--phone
                ("--accounts", True, True), ("--maps", True, True), ("--policy", True, True), ("--port", True, False),
                ("--address", True, False), ("--no-log", False, False), ("--brief", False, False),
                ("--no-hints", False, False), ("--no-dialog", False, False), ("--video", False, False),
-               ("--settle-on-video", False, False))
+               ("--settle-on-video", False, False), ("--restart-gate", True, False))
+FLAG_NAMES = frozenset(flag[2:].replace("-", "_") for flag, _, _ in SERVE_FLAGS)  # the dest names a saved service may hold
+GATE_VALUES = ("on", "off")  # --restart-gate
 
 
 class ServiceError(ValueError):
@@ -59,6 +61,8 @@ def serve_args(values: dict[str, object]) -> list[str]:
                            "--dedicated, --phone)")
     if values.get("settle_on_video") and not values.get("video"):
         raise ServiceError("--settle-on-video needs --video")
+    if values.get("restart_gate") is not None and values.get("restart_gate") not in GATE_VALUES:
+        raise ServiceError(f"--restart-gate takes on or off, not {values.get('restart_gate')!r}")
     args = ["serve", "--keep-alive"]
     for flag, takes, path in SERVE_FLAGS:
         value = values.get(flag[2:].replace("-", "_"))
@@ -80,25 +84,91 @@ def serve_args(values: dict[str, object]) -> list[str]:
     return args
 
 
+def flags_from(values: dict[str, object]) -> dict[str, object]:
+    """The serve flags among `values` (argparse's dest names), as `service install` saves them: only names serve takes
+    (FLAG_NAMES), only the ones given, paths made absolute."""
+    flags: dict[str, object] = {}
+    for flag, takes, path in SERVE_FLAGS:
+        name = flag[2:].replace("-", "_")
+        value = values.get(name)
+        if value is None or value is False:
+            continue
+        flags[name] = str(Path(str(value)).expanduser().resolve()) if path else (value if takes else True)
+    return flags
+
+
+def _legacy_flags(args: list[str]) -> dict[str, object]:
+    """A service.json written before the flags were saved (`{"args": [...]}`, 1.9.2's first builds), read back into
+    flags by SERVE_FLAGS: never run as it is (review R192 M2). Anything serve doesn't take is a ServiceError."""
+    if args[:2] != ["serve", "--keep-alive"]:
+        raise ServiceError("the saved command doesn't start with serve --keep-alive")
+    table = {flag: takes for flag, takes, _ in SERVE_FLAGS}
+    flags: dict[str, object] = {}
+    rest = list(args[2:])
+    while rest:
+        flag = rest.pop(0)
+        if flag not in table:
+            raise ServiceError(f"{flag} is not a flag a service carries")
+        if table[flag]:
+            if not rest:
+                raise ServiceError(f"{flag} has no value")
+            flags[flag[2:].replace("-", "_")] = rest.pop(0)
+        else:
+            flags[flag[2:].replace("-", "_")] = True
+    return flags
+
+
 def saved_args() -> list[str] | None:
-    """The serve flags `service install` saved (["serve", "--keep-alive", ...]); None: no service installed, or a file
-    that can't be read."""
+    """The serve command `service install` saved, rebuilt from its flags with serve_args (so every flag is one serve takes,
+    and the vault and policy files are checked again): ["serve", "--keep-alive", ...]. None: no service file. Raises
+    ServiceError when the file can't be used (unreadable, a flag serve doesn't take, a file that is gone): the caller
+    says so in one line and starts a plain `serve` (review R192 M2)."""
+    path = service_file()
     try:
-        data = json.loads(service_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    args = data.get("args") if isinstance(data, dict) else None
-    if not isinstance(args, list) or not args or args[0] != "serve" or not all(isinstance(a, str) for a in args):
-        return None
-    return args
+    except OSError as e:
+        raise ServiceError(f"{path} can't be read ({e.strerror or e})") from None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ServiceError(f"{path} isn't JSON") from None
+    if not isinstance(data, dict):
+        raise ServiceError(f"{path} isn't a service file")
+    if isinstance(data.get("flags"), dict):
+        flags = data["flags"]
+    elif isinstance(data.get("args"), list) and all(isinstance(a, str) for a in data["args"]):
+        flags = _legacy_flags(data["args"])
+    else:
+        raise ServiceError(f"{path} holds no flags")
+    for name, value in flags.items():
+        if name not in FLAG_NAMES:
+            raise ServiceError(f"{name} is not a flag a service carries")
+        if not isinstance(value, (str, bool, int)) or (isinstance(value, bool) and value is not True):
+            raise ServiceError(f"{name}: {value!r} is not a flag's value")
+    return serve_args(flags)
 
 
-def _save(args: list[str]) -> None:
+def _save(flags: dict[str, object]) -> None:
     path = service_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"args": args}), encoding="utf-8")
+    tmp.write_text(json.dumps({"flags": flags}), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def note(text: str) -> None:
+    """One line in serve.log from outside the daemon (an automatic start that couldn't use the service's flags): the
+    log the agent is pointed to. Best effort."""
+    import datetime
+    try:
+        store.HOME.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+        with open(store.HOME / "serve.log", "a", encoding="utf-8") as f:
+            f.write(f"{stamp} WARNING tapwright: {text}\n")
+    except OSError:
+        pass
 
 
 def _forget() -> None:
@@ -159,9 +229,10 @@ class Service:
             f'<Actions Context="Author"><Exec><Command>{escape(exe)}</Command>'
             f"<Arguments>{escape(subprocess.list2cmdline([*lead, *args]))}</Arguments></Exec></Actions></Task>")
 
-    def install(self, args: list[str]) -> tuple[str, int]:
+    def install(self, args: list[str], flags: dict[str, object] | None = None) -> tuple[str, int]:
+        """Create the logon task for `args` (serve_args of `flags`) and save `flags` for automatic starts. Elsewhere only
+        the launchd or systemd text is printed and nothing is saved: no service is installed (review R192 L5)."""
         if not self.windows:
-            _save(args)
             return self.instructions(args), 0
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "serve.xml"
@@ -169,7 +240,7 @@ class Service:
             code, out = self.runner(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(path), "/F"])
         if code != 0:
             return f"Error: Task Scheduler refused the task ({out or f'schtasks exit {code}'})", 1
-        _save(args)
+        _save(flags if flags is not None else _legacy_flags(args))
         said = [f'Task Scheduler task "{TASK_NAME}" created: `tapwright {subprocess.list2cmdline(args)}` starts at each '
                 "logon, without a window, and keeps running. A daemon an agent starts uses the same flags."]
         if self.running() is not None:
@@ -201,7 +272,7 @@ class Service:
 
     def uninstall(self) -> tuple[str, int]:
         if not self.windows:
-            _forget()
+            _forget()  # (a file an earlier build saved here)
             return self.removal(), 0
         code, out = self.runner(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
         if code == 0:
@@ -234,13 +305,20 @@ class Service:
     def status(self) -> tuple[str, int]:
         task = self.exists()
         info = self.running()
-        saved = saved_args()
+        unusable = None
+        try:
+            saved = saved_args()
+        except ServiceError as e:
+            saved, unusable = None, str(e)
         if task is None:
-            where = ("this system has no Task Scheduler: the launchd or systemd entry from `tapwright service install` "
-                     "starts it" + ("" if saved else " (none saved)"))
+            where = ("this system has no Task Scheduler: the launchd or systemd entry `tapwright service install` prints "
+                     "starts it")
         else:
             where = f'the logon task "{TASK_NAME}" is {"installed" if task else "not installed"}'
         lines = [f"Service: {where}; the daemon is {'running' if info is not None else 'not running'}."]
+        if unusable is not None:
+            lines.append(f"The service's saved flags can't be used ({unusable}): automatic starts run a plain serve. Run "
+                         "`tapwright service install` again with flags that work.")
         if info is not None and saved is not None:
             want, have = flags_of(saved), {"keep_alive": info.get("keep_alive"), "accounts": info.get("accounts")}
             if want != have:

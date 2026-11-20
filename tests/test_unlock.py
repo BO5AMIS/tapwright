@@ -16,9 +16,13 @@ def window(name: str = "SBCoverSheetWindow") -> ui.Element:
     return ui.Element(f"w-{name}", "window", "", name, rect=(0.0, 0.0, 430.0, 932.0), type="Window", name=name)
 
 
-def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True) -> list[ui.Element]:
+COVER = "SBCoverSheetWindow"
+
+
+def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True, keys_in: str | None = COVER) -> list[ui.Element]:
     """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels, in the cover sheet's
-    window (1.9.2: find_entry requires it; cover=False leaves it out)."""
+    window (1.9.2: find_entry requires it; cover=False leaves the window element out). `keys_in`: the raw window the keys
+    lie in, as ui.read marks it (Element.window; None: not known)."""
     letters = {"2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"}
     items = []
     for i, d in enumerate("1234567890"):
@@ -26,9 +30,10 @@ def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True) -
             continue
         label = f"{d}, {letters[d]}" if labels and d in letters else d
         rect = (40.0 + (i % 3) * 110, 300.0 + (i // 3) * 90, 80.0, 80.0)
-        items.append(ui.Element(f"e{i + 1}", "button", label, rect=rect, actions=("tap",), type="Button"))
+        items.append(ui.Element(f"e{i + 1}", "button", label, rect=rect, actions=("tap",), type="Button", window=keys_in))
         if d in twice:
-            items.append(ui.Element(f"x{i + 1}", "button", label, rect=(5, 5, 20, 20), actions=("tap",), type="Button"))
+            items.append(ui.Element(f"x{i + 1}", "button", label, rect=(5, 5, 20, 20), actions=("tap",), type="Button",
+                                    window=keys_in))
     return [*([window()] if cover else []), *items, *extra]
 
 
@@ -247,7 +252,8 @@ def test_a_typing_error_counts_as_a_refusal_and_never_echoes_what_was_sent():
 
 
 def test_a_passcode_with_letters_goes_only_into_the_secure_passcode_field():
-    field = ui.Element("p1", "input", "Passcode field", rect=(20, 200, 300, 40), secure=True, type="SecureTextField")
+    field = ui.Element("p1", "input", "Passcode field", rect=(20, 200, 300, 40), secure=True, type="SecureTextField",
+                       window=COVER)
     u, _ = unlocker()
     screen = Screen(items=[window(), field], right="abc-123x")
     r = run(u.unlock(screen, "abc-123x"))
@@ -300,13 +306,13 @@ IOS26_OFF = [
 
 
 def ios26(rows):
-    return [ui.Element(f"e{i}", role, label, ident, rect=tuple(float(v) for v in rect), type=kind, name=ident or label)
-            for i, (role, kind, ident, label, rect) in enumerate(rows)]
+    return [ui.Element(f"e{i}", role, label, ident, rect=tuple(float(v) for v in rect), type=kind, name=ident or label,
+                       window=COVER) for i, (role, kind, ident, label, rect) in enumerate(rows)]
 
 
 def ios26_tree(off=None):
     field = ui.Element("f", "input", "Passcode field", rect=(0, 220, 430, 13), secure=True, type="SecureTextField",
-                       name="Passcode field")
+                       name="Passcode field", window=COVER)
     return ui.Tree(ios26(IOS26_ITEMS), offscreen=[*ios26(IOS26_OFF if off is None else off), field],
                    app=(SB, SB))
 
@@ -468,7 +474,7 @@ def update_tonight_tree(cover: bool = False) -> ui.Tree:
     later = ui.Element("l", "button", "Remind Me Later", rect=(120.0, 820.0, 190.0, 44.0), actions=("tap",),
                        type="Button", name="Remind Me Later")
     items = [*([window()] if cover else []), window("SBTransientOverlayWindow"), title, field,
-             *keypad(cover=False), later]
+             *keypad(cover=False, keys_in="SBTransientOverlayWindow"), later]
     return ui.Tree(items, app=(SB, SB))
 
 
