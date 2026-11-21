@@ -101,13 +101,15 @@ def test_a_refused_passcode_is_not_typed_again_by_the_next_daemon(tmp_path):
     assert pressed_by_each == [[PASSCODE], [], []]
 
 
-def test_at_most_three_attempts_a_day_whichever_process_types_them(tmp_path):
+def test_at_most_three_failed_attempts_a_day_whichever_process_types_them(tmp_path):
+    """(1.10.0) Counted: attempts that don't unlock (here refused, then cleared by a person's unlock-reset); an unlock that
+    works is never counted (test_unlock.py)."""
     clock = Clock()
     for n in range(3):
-        u = unlock.Unlocker(clock=clock, sleep=clock.sleep, confirm_wait=1.0, poll=0.2,
-                            ledger=unlock.Ledger(wall=clock))  # a new process each time
-        screen = Screen()
-        assert asyncio.run(u.unlock(screen, PASSCODE)).code == "unlocked"
+        ledger = unlock.Ledger(wall=clock)
+        u = unlock.Unlocker(clock=clock, sleep=clock.sleep, confirm_wait=1.0, poll=0.2, ledger=ledger)  # a new process
+        assert asyncio.run(u.unlock(Screen(right="000000"), PASSCODE)).code == "refused"
+        assert asyncio.run(ledger.reset())[0]
         clock.t += 2 * 3600
     u = unlock.Unlocker(clock=clock, sleep=clock.sleep, confirm_wait=1.0, poll=0.2, ledger=unlock.Ledger(wall=clock))
     screen = Screen()

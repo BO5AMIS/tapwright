@@ -103,7 +103,7 @@ ones as the daemon's own settings.
   itself at the start of a scheduled run and, with `tapwright serve --phone --accounts FILE`, at the start of a new
   call; and in every mode when an agent calls `unlock` (1.7.8). The passcode comes only from the file `tapwright serve --accounts`
   names. A lock in the middle of a run stops it (`locked`); the agent may then call `unlock`. At most 2
-  attempts an hour and 3 a day, kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
+  failed attempts an hour and 3 a day (an unlock that works isn't limited, from 1.10.0), kept across restarts in `~/.tapwright/unlock-state.json`; after the phone refuses the
   passcode nothing more is typed until you check the file and run `tapwright unlock-reset`.
   To save the passcode, add the `phone` entry to the same file, next to the accounts (`tapwright vault protect FILE`
   encrypts the file):
@@ -220,9 +220,40 @@ opens the phone's screen in your browser, live, in a drawn iPhone, and lets you 
 step is captioned under the phone; the bar has Pause agent, Steps and More (Home, volume, the
 picture quality, Details). It starts
 `tapwright serve` (the background process that owns the phone) if it isn't running; agent
-tools start it too. It stops by itself after 30 minutes without viewers or requests
-(`tapwright serve --keep-alive` keeps it running), or with `tapwright serve --stop`. Its log
-is `~/.tapwright/serve.log`.
+tools start it too. With no phone connected it stops by itself after 30 minutes without viewers
+or requests; while a phone is connected it keeps running (`tapwright serve --keep-alive` keeps it
+running in any case), until `tapwright serve --stop`. Its log is `~/.tapwright/serve.log`.
+
+### Plug and forget: always on
+
+iOS asks for the passcode ("Enter iPhone Passcode for XCTest") when Tapwright starts its test
+runner on the phone and the last time you entered it is about 8 hours ago or more. A runner that
+keeps running is never asked. So keep the phone plugged in and let Tapwright start once:
+
+```sh
+tapwright service install --accounts ~/tapwright-vault.json
+```
+
+creates a Windows logon task (hidden) that runs `tapwright serve --keep-alive` with the flags
+you give (`--apps`, `--accounts`, `--maps`, `--restart-gate`, ...); `tapwright service status`
+and `tapwright service uninstall` check and remove it. The flags are also saved in
+`~/.tapwright/service.json`: until `service uninstall`, every daemon started automatically (an
+agent's call after `tapwright serve --stop`, say) uses them, checked again each time; if a file
+they name has moved, serve.log says so, a plain `serve` starts, and `service status` says why. A
+scheduled run's own vault is kept when the service names none. After `serve --stop` for an
+upgrade, `schtasks /Run /TN Tapwright\serve` starts the service's daemon at once. On macOS and
+Linux the command prints the launchd agent or systemd user unit to add, and saves nothing.
+
+After the phone restarts, unlock it once with its passcode and enter the passcode once more when
+it asks to allow UI automation. A daemon restart (`serve --stop`, an upgrade) more than about 8
+hours after you last entered it asks once too, and a phone that locks by itself needs the
+passcode in the vault (`--accounts`) to be unlocked. Otherwise it needs no one.
+
+After a phone restart, the daemon starts no runner until the phone has been unlocked once (when
+the phone says a passcode is needed). To turn that check off, start the daemon
+with `--restart-gate off` (`tapwright service install --restart-gate off` carries it), or set
+`TAPWRIGHT_RESTART_GATE=0` in the environment the daemon starts in (on Windows `setx
+TAPWRIGHT_RESTART_GATE 0`, then `tapwright serve --stop` and `schtasks /Run /TN Tapwright\serve`).
 
 ### The live view as video
 

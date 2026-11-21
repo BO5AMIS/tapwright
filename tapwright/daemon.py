@@ -41,8 +41,8 @@ from . import session as session_module
 from . import shot as shotlib
 from .control import STILL_WANTED, TAP_MS, Controller, Refused, classify
 from .errors import PHONE_LOCKED
-from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Proc,
-                     Unanswered, PhoneNotFound, PASSCODE_WORDS)
+from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, LockedBeforeStart, NotSetUp,
+                     NotUnlockedSinceRestart, PasscodeNeeded, PhoneLocked, Proc, Unanswered, PhoneNotFound, PASSCODE_WORDS)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -69,6 +69,9 @@ LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back"
 READ_LOGGED = frozenset({"look", "wait_for", "audit", "ux_check", "apps", "map", "notifications"})  # (compare_screen writes its own line: _log_compare)
 READ_KINDS = READ_LOGGED | {"compare_screen", "performance", "logs", "crash"}
 BATCH_TOOLS = ("run", "record", "replay", "drive")  # AGENT-TOOLS §9, §18.4: they call the other tools
+UNLOCKS_NOTED = 10  # unlocks in an hour above which each one is noted in the log (they are never limited)
+# (W185) a connect that launched no runner because of the phone's lock state: a person is needed, and `unlock` can't help
+HELD_BEFORE_START = (NotUnlockedSinceRestart, LockedBeforeStart)
 UNLOCK_AT_START = ("run", "replay", "drive")  # with serve --phone, these unlock a locked phone before their first step
 # `unlock` (1.7.8): the agent's own call; its refusals in fixed words (never a value)
 UNLOCK_TOP_ONLY = ("unlock is a call of its own: it can't be a step of run, replay, a route, drive or a journey (a lock "
@@ -1213,6 +1216,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._turned: tuple | None = None  # ((frame seq, degrees), the turned JPEG): see turned()
         self.heartbeat, self.backoff, self.ready_wait = heartbeat, backoff, ready_wait
         self.state, self.detail = "connecting", None
+        self._phone_seen_at: float | None = None  # see phone_last_seen
         self.preset = os.environ.get("TAPWRIGHT_PRESET", "balanced")  # (a trial switch: the stream's preset at start)
         if self.preset not in PRESETS:
             self.preset = "balanced"
@@ -1384,8 +1388,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 queue.get_nowait()
             queue.put_nowait(message)
 
+    def phone_last_seen(self) -> float | None:
+        """(1.10.0, review R191 L4) When (monotonic) a phone was last known to be there: now while it is live or locked,
+        or stuck on a lock or the passcode prompt; else when that last ended; None: never. The idle stop waits for this to
+        be older than its limit, whatever the state's name (a `--address` phone that is away reads `reconnecting`)."""
+        if self.state in ("live", "locked") or isinstance(self.stuck, PhoneLocked):
+            return time.monotonic()
+        return self._phone_seen_at
+
     def _set_state(self, state: str, detail: str | None = None) -> None:
         changed = (state, detail) != (self.state, self.detail)
+        if self.state in ("live", "locked") or isinstance(getattr(self, "stuck", None), PhoneLocked):
+            self._phone_seen_at = time.monotonic()  # the phone was there until this change
         self.state, self.detail = state, detail
         watch = getattr(self, "watchdog", None)
         if watch is not None:
@@ -1668,6 +1682,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(self.stuck, PasscodeNeeded):
             return Refused("locked", "the phone is asking for its passcode to allow UI automation; ask the user "
                                      "to enter it on the phone")
+        if isinstance(self.stuck, HELD_BEFORE_START):  # no runner was launched: `unlock` has nothing to type through
+            return Refused("locked", f"{self.stuck}; ask the user")
         if isinstance(self.stuck, PhoneLocked):
             return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
@@ -1729,9 +1745,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 except (NotSetUp, PhoneLocked, AppNotAnswering):  # the tunnel is fine: rebuilding it won't help
                     raise
                 except Exception as e:
-                    self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
-                    await s.reset()
-                    await s.ensure()
+                    if not await self._session_again_on_runner(s, e):
+                        self.log(f"restarting WebDriverAgent didn't work ({e}); reconnecting")
+                        await s.reset()
+                        await s.ensure()
             else:
                 await s.ensure()
             s.session_settings = {**PRESETS[self.preset], **NO_IDLE_WAIT}  # (a session re-created later gets them in ensure)
@@ -1739,6 +1756,38 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._fps = self._preset_fps()
             await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
+
+    async def _session_again_on_runner(self, s, error: Exception) -> bool:
+        """(1.10.0, plug and forget) A new session timed out on a runner that is still running and still answers /status
+        (11-19 05:48 and 05:51: an audit kept WebDriverAgent busy, POST /session got no answer in 30 s, and the reset
+        that followed replaced the runner). Ask for the session once more on the same runner before anything is torn
+        down: a new runner costs iOS's passcode prompt once its consent is about 8 h old. True when that worked; False
+        (nothing changed) when it doesn't apply or didn't work, and the caller resets as before."""
+        device = s.device
+        alive = getattr(device, "runner_alive", None)
+        if not isinstance(error, ConnectionLost) or alive is None or not alive():
+            return False
+        # its /status asked a few times, as before a runner is replaced (device.REUSE_ASKS; CodeRabbit, PR #23 cycle 1):
+        # one missed answer from a busy runner must not cost the runner
+        probe = getattr(device, "_still_answers", None) or device.wda_alive
+        try:
+            if not await probe():
+                return False
+        except Exception:
+            return False
+        self.log(f"WebDriverAgent didn't answer ({error}), but its runner still answers: asking it for a session again")
+        s.sid = None
+        before = getattr(device, "runner", None)
+        try:
+            await s.ensure()
+        except (NotSetUp, PhoneLocked, AppNotAnswering):
+            raise
+        except Exception as again:
+            self.log(f"the runner didn't give a session again ({again})")
+            return False
+        # (review R191 L1) the second try can still replace the runner (its /status stopped answering meanwhile)
+        self.log("kept the running runner" if getattr(device, "runner", None) is before else "replaced the runner")
+        return True
 
     async def supervise(self, stop: asyncio.Event) -> None:
         """Connect, then keep checking; reconnect whenever the line drops. Runs until `stop`."""
@@ -1865,6 +1914,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             self._unlock_end(span)
         if result.code == "unlocked":
             self.log("passcode unlock: unlocked the phone with the vault's phone.passcode")
+            many = getattr(self.unlocker, "unlocks_last_hour", None)
+            count = many() if many is not None else 0
+            if count > UNLOCKS_NOTED:  # never limited (1.10.0), but a phone that keeps locking is said (review R191 L3)
+                self.log(f"passcode unlock: {count} unlocks in the last hour: the phone keeps locking (Auto-Lock, or "
+                         "SpringBoard restarting)")
             if self.state == "locked":
                 self._set_state("live")
         elif result.code == "not_locked":
@@ -1956,8 +2010,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         self._attempts += 1
                 except NotSetUp as e:
                     self._set_state("no-device", f"needs setup: {e}")
+                    self.stuck = None  # (as for PhoneNotFound below)
                 except PhoneNotFound:
                     self._set_state("no-device", "phone not found: plug it in and unlock it")
+                    # (CodeRabbit, PR #23 cycle 1) a lock found before is not a phone that's there: phone_last_seen keeps
+                    # the time it was last there (set just now from the old lock), and the idle stop can come
+                    self.stuck = None
                 except (PhoneLocked, AppNotAnswering) as e:
                     if self.stuck is None:
                         self.log(f"connected, but {e}")
@@ -5753,8 +5811,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with
         the passcode saved in serve's own vault (`--accounts FILE`, `phone.passcode`), in every mode: personal,
         dedicated and `--phone` alike. The agent never sees or sends the passcode; every rule of unlock.py holds (only
-        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 attempts an hour and 3 a day, none after a
-        refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
+        iOS's lock screen with its keypad proven, never the XCTest prompt, 2 failed attempts an hour and 3 a day, none
+        after a refusal, the audit line with the name only). A call of its own only: as a step of `run`, `replay`, a route,
         `drive` or a journey it is refused, and a lock there still ends them (§19.5). Paused: `paused`; a person at
         the phone: `busy`. No passcode saved: `locked`, asking the user."""
         if not self._top_level() or client_id in self._journeys:
@@ -5766,6 +5824,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if PASSCODE_WORDS in (self.detail or "") or isinstance(self.stuck, PasscodeNeeded):
             raise Refused("locked", unlocklib.XCTEST)  # a person enters it there, never the tool
         if self.state not in ("live", "locked"):
+            if isinstance(self.stuck, HELD_BEFORE_START):  # (W185) a person unlocks it; then the runner starts
+                raise Refused("locked", f"{self.stuck}; ask the user")
             if isinstance(self.stuck, PhoneLocked):  # the connect found it locked: no session to type through yet
                 raise Refused("locked", UNLOCK_NOT_YET)
             await self.wait_connected()

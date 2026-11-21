@@ -326,19 +326,18 @@ def test_a_refused_passcode_is_typed_once_through_the_tool(tmp_path):
     run(go)
 
 
-def test_the_hourly_limit_holds_through_the_tool(tmp_path):
+def test_unlocks_that_work_are_not_limited_through_the_tool(tmp_path):
+    """(1.10.0, the owner's decision) Only attempts that don't unlock count toward the hourly limit (test_unlock.py has
+    the limit itself): a phone that keeps locking is unlocked every time."""
     async def go():
         d, s = locked_daemon(tmp_path, phone=False)
         stop, task = await started(d, until=("locked",))
-        for _ in range(unlock.LIMIT):
+        for _ in range(unlock.LIMIT + 3):
             r = await d.run_tool("a", "unlock", {})
             assert r["text"].startswith("Unlocked the phone")
             s.is_locked = True  # (locked again with the side button)
             d._set_state("locked", "unlock the phone")
-        with pytest.raises(Refused) as e:
-            await d.run_tool("a", "unlock", {})
-        assert e.value.code == "locked" and str(e.value) == unlock.LIMITED
-        assert d.lock_screen.pressed == [PASSCODE] * unlock.LIMIT
+        assert d.lock_screen.pressed == [PASSCODE] * (unlock.LIMIT + 3)
         await finish(stop, task)
     run(go)
 

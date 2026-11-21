@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.10.0 (2026-11-21), "the Always-On Update"
+
+Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter
+iPhone Passcode for XCTest") only when a new test runner starts, and only once its last consent is about 8 hours old; a
+runner that keeps running is never asked (serve.log, 11-13 to 11-19). So Tapwright now keeps its runner.
+
+- `tapwright service install [serve's flags]`: a Windows logon task (hidden, normal priority, no time limit, least
+  privilege) runs `tapwright serve --keep-alive` with the flags given, `--accounts` included as an absolute path (the
+  passcode stays in the vault file). Flags serve would refuse are refused at install (two of `--apps`, `--dedicated`,
+  `--phone`; a missing vault or policy file; a `%` in a value). `service install` waits up to 30 s for the daemon to
+  answer, and says "still starting" past that. `service status` says whether the task is there, whether the daemon
+  runs, and when it runs without the service's `--keep-alive` or vault. `service uninstall` removes the task (and the
+  empty `\Tapwright` task folder). On macOS and Linux it prints the launchd agent (started again only after a failure)
+  or the systemd user unit to add, and saves nothing.
+- On Windows the flags are saved in `~/.tapwright/service.json`, and until `service uninstall` every daemon started
+  automatically (an agent's call after `serve --stop`, or before the logon task ran) uses them, checked again at each
+  start: when they can't be used any more (a vault or policy file moved), serve.log says so in one line, a plain
+  `serve` starts, and `service status` says why. A scheduled run's own vault is kept when the service has none.
+- The daemon no longer stops after 30 minutes unused while a phone has been there within those 30 minutes (live, locked,
+  or waiting at a lock or the passcode prompt); a short USB drop doesn't stop it, and a phone that stays away does.
+- The passcode unlock: an attempt that unlocks the phone is no longer counted. The limits (2 an hour, 3 a day) apply
+  only to attempts that may not have unlocked it; the stop after a refused passcode and `tapwright unlock-reset` are
+  unchanged. Attempts recorded by 1.9.0 (successes included) still count for up to a day after the upgrade. More than
+  10 unlocks in an hour are noted in serve.log (a phone that keeps locking).
+- A reconnect keeps the running runner when only a request timed out: a new session is asked for once more on the same
+  runner (its `/status` asked up to 3 times, once per reconnect) before the connection is rebuilt and the runner
+  replaced, as before. The log says whether the runner was kept or replaced.
+- No runner is started on a phone that restarted and hasn't been unlocked since, when it also says its passcode is
+  needed (CoreDevice's lock state, read without WebDriverAgent, the whole read capped at 5 s): calls answer `locked`,
+  "unlock it once with its passcode". `serve --restart-gate off` (which `service install` carries) or
+  `TAPWRIGHT_RESTART_GATE=0` turns this off. With `TAPWRIGHT_LOCK_GATE=1`, no runner is started either on a locked
+  phone whose consent is older than 7.5 h, so the prompt comes up when a person unlocks it. A start that went on after
+  the prompt records when (`~/.tapwright/automation.json`).
+- The passcode unlock types only on the lock screen's own passcode view: every key it types on, and the passcode field
+  when it uses one, must lie inside the cover sheet's window in the raw tree (in any language, and whether or not that
+  window or another one is listed). On top of that, any other listed window, a "Remind Me Later" button or the update
+  screen's title ("Enter Passcode to Update ...") refuses it (`locked`, asking the user to close that screen; nothing
+  is typed). iOS's "Enter Passcode to Update Tonight" is such a screen, and the passcode typed there schedules an iOS
+  update. The words of notifications and Live Activities ("Order update") never refuse. The screen is read again right
+  before the first key, and the keys typed are where that last read found them.
+- The `unlock` tool's description says the new rules with hints on; `--no-hints` keeps 1.8.5's words.
+
 ## 1.9.1 (2026-11-20)
 
 - The phone reconnects over USB again after it drops off USB and comes back. Once Tapwright had reached the phone

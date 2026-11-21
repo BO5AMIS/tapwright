@@ -401,11 +401,31 @@ EXTRA_185 = {
 }
 
 
+# (1.10.0) Paragraphs whose rules changed after 1.8.5 (a shared tool's, or one only Tapwright has), given only with hints on: `--no-hints` and lazy tools keep
+# 1.8.5's words byte for byte (tests/data/tools_185.json). The unlock: an unlock that works isn't limited, and never on
+# another SpringBoard keypad (review R191 item 7, L9).
+SHARED_1100 = {
+    'unlock': (
+        'Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, '
+        '`phone.passcode`). You never see or send the passcode: the tool types it on iOS\'s own lock screen, never on '
+        'the XCTest prompt or another SpringBoard passcode screen (iOS\'s "Enter Passcode to Update Tonight": ask the '
+        'user to close it). An unlock that works isn\'t limited; one that may not have worked at most twice an hour and '
+        '3 times a day, and never again after the phone refused it. Answers with the screen once unlocked, or `The '
+        'phone isn\'t locked.`; `locked` when no passcode is saved (ask the user to unlock it) or the unlock couldn\'t '
+        'be done (its reason). A call of its own: not a step of `run`, `replay`, `drive` or a journey. The owner stops '
+        'you by pausing in the live view.'
+    ),
+}
+
+
 def describe(name: str, hints: bool = True) -> str:
     """A tool's description: the shared paragraph, then on the next line Tapwright's own line, labelled as in
     the shared text. A tool only Tapwright has is just its paragraph; one with no Tapwright line, the shared one.
     `hints=False`: 1.8.5's words (`--lazy-tools`, `--no-hints`)."""
     extra = EXTRA_185 if not hints and name in EXTRA_185 else EXTRA
     if name not in SHARED:
-        return extra[name]
-    return SHARED[name] + ("\n" + "Tapwright: " + extra[name] if name in extra else "")
+        # (CodeRabbit, PR #23 cycle 1) `unlock` is Tapwright's own tool (EXTRA): its 1.10.0 words are given here, with
+        # hints on only
+        return SHARED_1100[name] if hints and name in SHARED_1100 else extra[name]
+    base = SHARED_1100.get(name, SHARED[name]) if hints else SHARED[name]
+    return base + ("\n" + "Tapwright: " + extra[name] if name in extra else "")

@@ -1,6 +1,6 @@
 """The passcode unlock (AGENT-TOOLS §18.6, §11.5, §24.5; unlock.py). With fakes: no phone. The passcode is typed only
 when the lock screen's passcode entry is proven in SpringBoard's tree, never into an app or the XCTest prompt, at most
-twice an hour, never again after a refusal, and it never appears in what comes back. All values are synthetic."""
+twice an hour when it doesn't unlock (1.10.0: one that unlocks isn't limited), never again after a refusal, and it never appears in what comes back. All values are synthetic."""
 import asyncio
 
 import pytest
@@ -11,8 +11,18 @@ PASSCODE = "482913"  # synthetic
 SB = unlock.SPRINGBOARD
 
 
-def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.Element]:
-    """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels."""
+def window(name: str = "SBCoverSheetWindow") -> ui.Element:
+    """A window of SpringBoard's tree, as the runner lists it (the lock screen's is the cover sheet)."""
+    return ui.Element(f"w-{name}", "window", "", name, rect=(0.0, 0.0, 430.0, 932.0), type="Window", name=name)
+
+
+COVER = "SBCoverSheetWindow"
+
+
+def keypad(labels=True, skip: str = "", twice: str = "", extra=(), cover=True, keys_in: str | None = COVER) -> list[ui.Element]:
+    """The lock screen's keypad as SpringBoard's tree shows it: ten buttons, `2, ABC` style labels, in the cover sheet's
+    window (1.10.0: find_entry requires it; cover=False leaves the window element out). `keys_in`: the raw window the keys
+    lie in, as ui.read marks it (Element.window; None: not known)."""
     letters = {"2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL", "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"}
     items = []
     for i, d in enumerate("1234567890"):
@@ -20,10 +30,11 @@ def keypad(labels=True, skip: str = "", twice: str = "", extra=()) -> list[ui.El
             continue
         label = f"{d}, {letters[d]}" if labels and d in letters else d
         rect = (40.0 + (i % 3) * 110, 300.0 + (i // 3) * 90, 80.0, 80.0)
-        items.append(ui.Element(f"e{i + 1}", "button", label, rect=rect, actions=("tap",), type="Button"))
+        items.append(ui.Element(f"e{i + 1}", "button", label, rect=rect, actions=("tap",), type="Button", window=keys_in))
         if d in twice:
-            items.append(ui.Element(f"x{i + 1}", "button", label, rect=(5, 5, 20, 20), actions=("tap",), type="Button"))
-    return [*items, *extra]
+            items.append(ui.Element(f"x{i + 1}", "button", label, rect=(5, 5, 20, 20), actions=("tap",), type="Button",
+                                    window=keys_in))
+    return [*([window()] if cover else []), *items, *extra]
 
 
 SCREEN = (430.0, 932.0)  # the phone's screen in points (iPhone15,3)
@@ -61,7 +72,7 @@ class Screen:
         return SCREEN
 
     async def press_keys(self, points):
-        centres = {e.center: (e.label or "")[0] for e in self.items}
+        centres = {e.center: e.label[0] for e in self.items if e.label}
         typed = "".join(centres[p] for p in points)
         self.pressed.append(typed)
         if typed == self.right:
@@ -178,18 +189,55 @@ def test_a_changed_passcode_in_the_file_may_be_tried_after_a_refusal():
     assert run(u.unlock(screen, "135790", source=unlock.Source("v.json", 2, 10))).code == "unlocked"
 
 
-def test_at_most_two_attempts_an_hour():
+def test_an_unlock_that_works_is_never_limited():
+    """(1.10.0, the owner's decision) iOS's lockout counts only wrong passcodes: a phone left plugged in may lock and be
+    unlocked as often as it likes. The wakes that type are not counted either."""
     u, clock = unlocker()
     screen = Screen()
-    for _ in range(2):
+    for _ in range(20):
         screen.is_locked = True
         assert run(u.unlock(screen, PASSCODE)).code == "unlocked"
         clock.t += 60
-    screen.is_locked = True
+    assert len(screen.pressed) == 20 and u.tries_left() == 2
+
+
+def _refused_then_reset(u, clock, screen) -> None:
+    assert run(u.unlock(screen, PASSCODE)).code == "refused"
+    assert run(u.ledger.reset())[0]  # a person checked the vault and cleared the refusal
+    clock.t += 60
+
+
+def test_at_most_two_failed_attempts_an_hour_even_after_a_reset():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    _refused_then_reset(u, clock, screen)
+    _refused_then_reset(u, clock, screen)
     r = run(u.unlock(screen, PASSCODE))
-    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and "twice this hour" in r.message
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 2 and r.message == unlock.LIMITED and "2 attempts this hour" in r.message
     clock.t += 3600
+    screen.right = PASSCODE  # the phone's passcode is the file's again
     assert run(u.unlock(screen, PASSCODE)).code == "unlocked" and len(screen.pressed) == 3
+
+
+def test_at_most_three_failed_attempts_a_day():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    for _ in range(3):
+        _refused_then_reset(u, clock, screen)
+        clock.t += 3600
+    r = run(u.unlock(screen, PASSCODE))
+    assert (r.ok, r.code) == (False, "limit") and len(screen.pressed) == 3 and r.message == unlock.LIMITED_DAY
+
+
+def test_successes_between_failures_do_not_count():
+    u, clock = unlocker()
+    screen = Screen(right="000000")
+    _refused_then_reset(u, clock, screen)
+    screen.right = PASSCODE
+    for _ in range(5):
+        screen.is_locked = True
+        assert run(u.unlock(screen, PASSCODE)).code == "unlocked"
+    assert u.tries_left() == 1  # only the refused one counts
 
 
 def test_a_typing_error_counts_as_a_refusal_and_never_echoes_what_was_sent():
@@ -204,9 +252,10 @@ def test_a_typing_error_counts_as_a_refusal_and_never_echoes_what_was_sent():
 
 
 def test_a_passcode_with_letters_goes_only_into_the_secure_passcode_field():
-    field = ui.Element("p1", "input", "Passcode field", rect=(20, 200, 300, 40), secure=True, type="SecureTextField")
+    field = ui.Element("p1", "input", "Passcode field", rect=(20, 200, 300, 40), secure=True, type="SecureTextField",
+                       window=COVER)
     u, _ = unlocker()
-    screen = Screen(items=[field], right="abc-123x")
+    screen = Screen(items=[window(), field], right="abc-123x")
     r = run(u.unlock(screen, "abc-123x"))
     assert r.code == "unlocked" and screen.secrets == ["abc-123x"] and screen.pressed == []
     u2, _ = unlocker()
@@ -257,13 +306,13 @@ IOS26_OFF = [
 
 
 def ios26(rows):
-    return [ui.Element(f"e{i}", role, label, ident, rect=tuple(float(v) for v in rect), type=kind, name=ident or label)
-            for i, (role, kind, ident, label, rect) in enumerate(rows)]
+    return [ui.Element(f"e{i}", role, label, ident, rect=tuple(float(v) for v in rect), type=kind, name=ident or label,
+                       window=COVER) for i, (role, kind, ident, label, rect) in enumerate(rows)]
 
 
 def ios26_tree(off=None):
     field = ui.Element("f", "input", "Passcode field", rect=(0, 220, 430, 13), secure=True, type="SecureTextField",
-                       name="Passcode field")
+                       name="Passcode field", window=COVER)
     return ui.Tree(ios26(IOS26_ITEMS), offscreen=[*ios26(IOS26_OFF if off is None else off), field],
                    app=(SB, SB))
 
@@ -411,3 +460,76 @@ def test_ios26_keys_past_the_right_or_bottom_edge_or_an_unknown_screen_get_nothi
     screen.tree = tree
     r = run(u.unlock(screen, PASSCODE))
     assert r.code == "not_proven" and screen.pressed == [] and screen.probed == [] and u.tries_left() == 2
+
+
+# ---- 1.10.0: SpringBoard's other passcode keypad (the lead's note, 2026-11-19 ~19:45) ----
+# After Software Update > Later, iOS showed "Enter Passcode to Update Tonight": window SBTransientOverlayWindow, a
+# "Passcode field", all ten digit keys and "Remind Me Later". Typing the passcode there schedules an iOS update. The tree
+# below is that screen's, ids and labels only (frames are placeholders in the keypad's usual places).
+def update_tonight_tree(cover: bool = False) -> ui.Tree:
+    field = ui.Element("f", "input", "Passcode field", rect=(0.0, 220.0, 430.0, 13.0), secure=True,
+                       type="SecureTextField", name="Passcode field")
+    title = ui.Element("t", "text", "Enter Passcode to Update Tonight", rect=(40.0, 150.0, 350.0, 27.0),
+                       type="StaticText", name="Enter Passcode to Update Tonight")
+    later = ui.Element("l", "button", "Remind Me Later", rect=(120.0, 820.0, 190.0, 44.0), actions=("tap",),
+                       type="Button", name="Remind Me Later")
+    items = [*([window()] if cover else []), window("SBTransientOverlayWindow"), title, field,
+             *keypad(cover=False, keys_in="SBTransientOverlayWindow"), later]
+    return ui.Tree(items, app=(SB, SB))
+
+
+def test_the_update_tonight_keypad_is_never_the_lock_screen():
+    assert unlock.find_entry(update_tonight_tree(), SB, SCREEN) is None
+    assert unlock.find_entry(update_tonight_tree(cover=True), SB, SCREEN) is None  # even over the cover sheet
+    assert unlock.foreign_keypad(update_tonight_tree())
+
+
+@pytest.mark.parametrize("what", ["overlay-window", "update-words", "remind-me-later"])
+def test_each_sign_of_another_keypad_alone_refuses(what):
+    extra = {"overlay-window": [window("SBTransientOverlayWindow")],
+             "update-words": [ui.Element("t", "text", "Enter Passcode to Update Tonight", type="StaticText")],
+             "remind-me-later": [ui.Element("b", "button", "Remind Me Later", type="Button")]}[what]
+    assert unlock.find_entry(ui.Tree(keypad(extra=extra)), SB) is None
+
+
+def test_a_keypad_without_the_lock_screen_window_is_not_the_lock_screen():
+    assert unlock.find_entry(ui.Tree(keypad(cover=False)), SB) is None
+    assert unlock.find_entry(ui.Tree(keypad()), SB) is not None
+
+
+class UpdateTonight(Screen):
+    def __init__(self, cover=False, **kw):
+        super().__init__(**kw)
+        self.tree = update_tonight_tree(cover)
+
+    async def lock_tree(self):
+        self.calls.append("tree")
+        return self.tree, self.front
+
+
+@pytest.mark.parametrize("cover", [False, True])
+def test_unlock_never_types_on_the_update_tonight_screen(cover):
+    u, _ = unlocker()
+    screen, audited = UpdateTonight(cover=cover), []
+    r = run(u.unlock(screen, PASSCODE, audited.append))
+    assert (r.ok, r.code) == (False, "update_prompt") and "Remind Me Later" in r.message
+    assert screen.pressed == [] and screen.secrets == [] and audited == [] and u.tries_left() == 2
+    assert PASSCODE not in r.message
+
+
+def test_an_update_keypad_that_comes_up_before_the_keys_stops_the_unlock():
+    """The last check before the first key reads the screen again: the lock screen was proven, then the update keypad
+    came up over it."""
+    class Switching(Screen):
+        reads = 0
+
+        async def lock_tree(self):
+            self.calls.append("tree")
+            self.reads += 1
+            if self.reads == 1:
+                return ui.Tree(list(self.items)), self.front
+            return update_tonight_tree(cover=True), self.front
+    u, _ = unlocker()
+    screen = Switching()
+    r = run(u.unlock(screen, PASSCODE))
+    assert r.code == "update_prompt" and screen.pressed == [] and u.tries_left() == 2

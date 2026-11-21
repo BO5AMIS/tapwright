@@ -181,8 +181,8 @@ def unattended_ready(f: Facts) -> list[str]:
     if f.passcode_given and f.vault_problem is None:
         ready.append("The vault gives phone.passcode (never shown): the tool unlocks a locked phone on its lock screen "
                      "at a scheduled run's start, and with tapwright serve --phone --accounts FILE at a new call (never "
-                     "in the middle of a run: a lock stops it); at most twice an hour and 3 times a day, and it stops "
-                     "after a refusal.")
+                     "in the middle of a run: a lock stops it); an unlock that works isn't limited, one that doesn't "
+                     "at most twice an hour and 3 times a day, and it stops after a refusal.")
     if f.battery is not None and f.battery >= LOW_BATTERY:
         ready.append(f"The battery is at {f.battery}%.")
     if f.wake_timers is True:

@@ -102,6 +102,98 @@ class PasscodeNeeded(PhoneLocked):
                          "(Settings > Developer > Enable UI Automation stops it asking)")
 
 
+class NotUnlockedSinceRestart(PhoneLocked):
+    """The phone restarted and nobody has unlocked it since (CoreDevice's lock state: unlockedSinceBoot false). UI
+    automation can't start before the first unlock, and its first start after a restart asks for the passcode too, so
+    nothing is launched: a launch now would only put iOS's XCTest prompt over a lock screen (plug and forget, W185)."""
+
+    def __init__(self):
+        super().__init__("the phone restarted and hasn't been unlocked since: unlock it once with its passcode, and "
+                         "enter the passcode again if it then asks to allow UI automation (once after each restart)")
+
+
+class LockedBeforeStart(PhoneLocked):
+    """The phone is locked and iOS's consent to UI automation is old enough that a new start would ask for the
+    passcode (GRANT_HORIZON): nothing is launched until a person unlocks it, so the prompt comes up in front of them,
+    not over a lock screen nobody is looking at. Only with TAPWRIGHT_LOCK_GATE=1 until proven on the phone (W185)."""
+
+    def __init__(self):
+        super().__init__("the phone is locked, and starting UI automation now would ask for its passcode: unlock the "
+                         "phone and it starts by itself (then enter the passcode once if it asks)")
+
+
+@dataclasses.dataclass(frozen=True)
+class LockState:
+    """CoreDevice's answer to getlockstate (`devicectl device info lockState`), read without WebDriverAgent."""
+    passcode_required: bool  # the phone asks for its passcode to be unlocked now (to be proven: W185 design, P2)
+    unlocked_since_boot: bool  # False: restarted and not unlocked since (BFU)
+
+    @classmethod
+    def of(cls, answer: object) -> "LockState | None":
+        """Only the known shape, both fields booleans; anything else is not known (None), never a guess."""
+        if not isinstance(answer, dict):
+            return None
+        required, since = answer.get("passcodeRequired"), answer.get("unlockedSinceBoot")
+        if not isinstance(required, bool) or not isinstance(since, bool):
+            return None
+        return cls(required, since)
+
+
+# iOS's consent to UI automation (the XCTest passcode prompt) is asked for only when a test runner starts, never while
+# one runs: in serve.log (2026-11-13 to 11-19) a runner kept running served actions 10.2 h after the consent, and the
+# next start asked; starts up to 7.7 h after a consent never asked, and from 8.1 h on they did (one start at 21.9 h
+# didn't: another tool's prompt may have been answered in between). Typing the passcode on the lock screen doesn't
+# renew it (an unlock at 11:23 on 11-19, a prompt at 14:00). So a consent older than this is taken as spent.
+GRANT_HORIZON = 7.5 * 3600
+GRANT_FILE: Path | None = None  # when iOS last gave its consent; None: ~/.tapwright/automation.json (tests set their own)
+LOCK_STATE_WAIT = 5.0  # seconds the lock state may take to come back; then it is not known
+REUSE_ASKS = 3  # times a running runner's /status is asked before it is replaced (each wda_alive waits up to 3 s) ...
+REUSE_GAP = 1.0  # ... this many seconds apart
+ANSWERED_FRESH = 1.0  # seconds a runner's answer to _still_answers stands for the start right after it
+
+
+def _grant_file() -> Path:
+    return GRANT_FILE if GRANT_FILE is not None else store.HOME / "automation.json"
+
+
+def read_grant() -> float | None:
+    """When (epoch seconds) a start last went on after iOS's XCTest passcode prompt was answered; None: not known."""
+    try:
+        value = json.loads(_grant_file().read_text()).get("granted_at")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def record_grant(at: float | None = None) -> None:
+    path = _grant_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"granted_at": time.time() if at is None else at}))
+        os.replace(tmp, path)
+    except OSError:
+        pass  # (only a hint for the next start: never a reason for this one to fail)
+
+
+def grant_stale(now: float | None = None) -> bool | None:
+    """Would a new runner start probably ask for the passcode? None: no consent on record."""
+    granted = read_grant()
+    if granted is None:
+        return None
+    return (time.time() if now is None else now) - granted > GRANT_HORIZON
+
+
+def lock_gate_on() -> bool:
+    return os.environ.get("TAPWRIGHT_LOCK_GATE") == "1"
+
+
+def restart_gate_on() -> bool:
+    """The restart check (NotUnlockedSinceRestart): on unless TAPWRIGHT_RESTART_GATE=0 (review R191 M3: the way out if
+    a phone reports its lock state otherwise than the phone check P2 found)."""
+    return os.environ.get("TAPWRIGHT_RESTART_GATE") != "0"
+
+
 class AppNotAnswering(ConnectionLost):
     """WebDriverAgent runs, but the app in front never answers it, so every read of the screen hangs behind
     that app (2026-11-10: a development build froze mid-reload and stayed in front for hours)."""
@@ -245,6 +337,7 @@ class Device:
         self._prompt_rounds = 0  # starts in a row that stopped at the passcode screen
         self._gone_at: float | None = None  # when that screen was first seen gone, for the pause before the next start
         self._hurry = False  # see hurry()
+        self._answered_at: float | None = None  # when the running runner last answered _still_answers (monotonic)
 
     # ---- the tunnel ----
     async def connect(self) -> None:
@@ -342,7 +435,9 @@ class Device:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
-        if self.runner and not self.runner.done() and await self.wda_alive():
+        if self.runner and not self.runner.done() and (self._answered_recently() or await self._still_answers()):
+            if self.awaiting_passcode or self._prompt_rounds:
+                record_grant()  # the start that waited at the prompt went on: the passcode was entered just now
             self.awaiting_passcode, self._prompt_rounds = False, 0
             return
         up = await self.passcode_prompt_up() if self.awaiting_passcode else False
@@ -362,6 +457,9 @@ class Device:
             # every PROMPT_RETRY seconds one start is tried regardless: the process list is the only witness.)
             raise PasscodeNeeded()
         self.awaiting_passcode = False
+        held = await self._lock_gate()
+        if held is not None:
+            raise held  # nothing launched: the runner already running (if any) is left as it is
         await self._stop_runner()  # iOS may have killed it before its task noticed (measured)
         async with DvtProvider(self.rsd) as dvt, DeviceInfo(dvt) as info, ProcessControl(dvt) as control:
             for p in await info.proclist():
@@ -393,6 +491,8 @@ class Device:
                 raise await self._or_passcode(DeviceError(f"WebDriverAgent stopped while starting: {exc}"))
             if await self.wda_alive():
                 self.log("WebDriverAgent is running")
+                if self._prompt_rounds:
+                    record_grant()  # a start after the prompt went through: the consent is new
                 self._prompt_rounds = 0
                 return
             if time.monotonic() >= ask_at:
@@ -409,6 +509,64 @@ class Device:
                 pass
         raise await self._or_passcode(
             DeviceError("WebDriverAgent didn't answer within a minute (is it installed? `tapwright doctor`)"))
+
+    def runner_alive(self) -> bool:
+        """Is the task that keeps this process's test runner alive still running (its test session not ended)?"""
+        return self.runner is not None and not self.runner.done()
+
+    async def _still_answers(self) -> bool:
+        """(1.10.0) Does the running runner's WebDriverAgent answer /status? Asked up to REUSE_ASKS times, REUSE_GAP apart:
+        a runner busy with one long request (an audit's read of a big screen) can miss one /status, and replacing it costs
+        iOS's passcode prompt once its consent is about 8 h old. A runner whose task ended isn't asked (see runner_alive)."""
+        for ask in range(REUSE_ASKS):
+            if ask:
+                await asyncio.sleep(REUSE_GAP)
+                if not self.runner_alive():
+                    return False
+            if await self.wda_alive():
+                self._answered_at = time.monotonic()
+                return True
+        return False
+
+    def _answered_recently(self) -> bool:
+        """Did the running runner answer _still_answers within ANSWERED_FRESH? Then a start doesn't ask again: one probe
+        chain per reuse (the daemon's _session_again_on_runner has just asked; review R192 L3). Spent once used."""
+        at, self._answered_at = self._answered_at, None
+        return at is not None and time.monotonic() - at < ANSWERED_FRESH
+
+    async def lock_state(self) -> LockState | None:
+        """The phone's lock state from CoreDevice (iOS 17+), without WebDriverAgent: answers before any runner is
+        launched. None when the phone couldn't say (an older iOS, no tunnel, another shape of answer)."""
+        if self.rsd is None:
+            return None
+        rsd = self.rsd
+
+        async def read() -> object:
+            from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
+            async with DeviceInfoService(rsd) as service:
+                return await service.get_lockstate()
+        try:
+            # the whole read, the service's connect included, under the cap (review R191 M2: a phone whose services
+            # stall hung the connect, and with it the reconnect that holds the daemon's exclusive control)
+            answer = await asyncio.wait_for(read(), LOCK_STATE_WAIT)
+        except Exception:
+            return None
+        return LockState.of(answer)
+
+    async def _lock_gate(self) -> "PhoneLocked | None":
+        """Why no runner may be launched now, or None. Not after a restart before the first unlock, when the phone also
+        says its passcode is needed (a phone without a passcode reads "not unlocked since boot" until its first swipe:
+        review R191 M3), unless TAPWRIGHT_RESTART_GATE=0; with TAPWRIGHT_LOCK_GATE=1, also not on a locked phone whose
+        consent to UI automation is spent or not on record (a launch would put the passcode prompt over the lock
+        screen). A phone that can't say is never held."""
+        state = await self.lock_state()
+        if state is None:
+            return None
+        if not state.unlocked_since_boot and state.passcode_required and restart_gate_on():
+            return NotUnlockedSinceRestart()
+        if state.passcode_required and lock_gate_on() and grant_stale() is not False:
+            return LockedBeforeStart()
+        return None
 
     async def passcode_prompt_up(self) -> bool | None:
         """Is iOS's passcode screen in front (from the process list, which answers without WebDriverAgent)?

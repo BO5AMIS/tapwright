@@ -1,2 +1,2 @@
 """tapwright: let LLM agents test apps on your real iPhone."""
-__version__ = "1.9.1"
+__version__ = "1.10.0"
