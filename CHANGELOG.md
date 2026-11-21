@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.10.0, "the Always-On Update"
+## 1.10.0 (2026-11-21), "the Always-On Update"
 
 Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter
 iPhone Passcode for XCTest") only when a new test runner starts, and only once its last consent is about 8 hours old; a
