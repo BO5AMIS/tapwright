@@ -287,3 +287,129 @@ def test_the_refusal_of_other_calls_names_what_still_works():
     got = _call(d, "scroll", {"direction": "down"})
     assert isinstance(got, Refused) and got.code == "not_answering"
     assert "tap and long_press at {x, y} or an OCR ref" in str(got) and "close_app can still close it" in str(got)
+
+
+# ---- review R1101 (Opus 1) ----
+
+def test_m1_the_runners_own_timeout_after_the_touch_is_a_timeout_that_may_have_happened():
+    from tapwright.device import RunnerTimedOut
+    phone = Phone()
+    phone.fail["/wda/tw/tap"] = RunnerTimedOut("WebDriverAgent: timeout: the touch was not played in time")
+    d, _ = _blind(phone)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "timeout" and "may still have happened" in str(got)
+
+
+def test_m1_a_runner_without_the_sessionless_version_route_gets_the_setup_refusal():
+    from tapwright.device import DeviceError
+    phone = Phone()
+    phone.fail["/wda/tw/version"] = DeviceError("WebDriverAgent: unknown command: Unhandled endpoint")
+    d, _ = _blind(phone)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "tapwright setup" in str(got)
+    assert phone.touches() == []
+
+
+def test_m1_a_session_the_runner_no_longer_knows_is_dropped_and_said_to_be_reconnecting():
+    from tapwright.device import DeviceError
+    phone = Phone()
+    phone.fail["/wda/tw/tap"] = DeviceError("WebDriverAgent: invalid session id: Session does not exist")
+    d, _ = _blind(phone)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "reconnecting" and "nothing was touched" in str(got)
+    assert d.session.blind_sid is None
+
+
+def test_m1_a_refused_keys_request_is_coded():
+    from tapwright.device import DeviceError
+    phone = Phone()
+    phone.fail["/wda/keys"] = DeviceError("WebDriverAgent: unknown error: Keyboard is not present")
+    d, _ = _blind(phone)
+    got = _call(d, "type_text", {"text": "hi"})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "refused the type_text" in str(got)
+
+
+def test_m1_a_look_whose_picture_fails_is_coded():
+    phone = Phone()
+    phone.fail["/screenshot"] = ConnectionLost("WebDriverAgent didn't answer GET /screenshot within 15 s")
+    d, _ = _blind(phone)
+    got = _call(d, "look", {})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "picture couldn't be taken" in str(got)
+
+
+def test_m2_two_apps_in_front_touch_nothing():
+    phone = Phone()
+
+    async def two():
+        return [TIKTOK, "com.apple.mobilesafari"]
+    d, _ = _blind(phone)
+    d.session.device.foreground_apps = two
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "reconnecting" and phone.touches() == []
+
+
+def test_m2_the_safety_checks_come_right_before_the_touch():
+    d, phone = _blind()
+    _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    paths = [p for _, p, _ in phone.sent]
+    tap = next(i for i, p in enumerate(paths) if p.endswith("/wda/tw/tap"))
+    assert paths[tap - 1] == "/wda/locked"  # (the process list is asked after it, outside http)
+    assert paths.index("/screenshot") < paths.index("/wda/tw/version") < tap - 1
+
+
+def test_m3_the_reconnect_question_waits_as_long_as_a_first_read(phone):
+    seen = []
+    original = phone.http
+
+    async def http(method, path, payload=None, timeout=30.0):
+        if path == "/session/B1/window/size":
+            seen.append(timeout)
+        return await original(method, path, payload, timeout)
+    phone.http = http
+    phone.locked = False
+    asyncio.run(_kept(phone).ensure())
+    assert seen == [session_module.FIRST_READ_WAIT]
+
+
+def test_l1_tapline_hears_a_blind_touch_is_the_agents():
+    d, _ = _blind()
+    heard = []
+
+    async def notify(ms):
+        heard.append(ms)
+    d._agent_touches.notify = notify
+    _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert len(heard) == 1 and d.session.touch_hook is None
+
+
+def test_l2_no_answer_before_the_touch_says_nothing_was_touched():
+    phone = Phone()
+    phone.fail["/wda/tw/version"] = ConnectionLost("WebDriverAgent didn't answer GET /wda/tw/version within 5 s")
+    d, _ = _blind(phone)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "nothing was touched" in str(got)
+    assert "may still have happened" not in str(got)
+
+
+def test_l3_a_blind_look_works_while_paused():
+    d, _ = _blind()
+    d.control.paused = True
+    got = _call(d, "look", {})
+    assert not isinstance(got, Refused), got
+    assert isinstance(_call(d, "tap", {"target": {"x": 215, "y": 893}}), Refused)
+
+
+def test_l4_a_setting_that_hangs_is_named_as_the_read_is(phone):
+    phone.locked, phone.in_front = False, [TIKTOK]
+    phone.fail["/appium/settings"] = ConnectionLost("WebDriverAgent didn't answer within 10 s")
+    s = Session(phone)
+    with pytest.raises(AppNotAnswering):
+        asyncio.run(s.ensure())
+    assert s.blind_sid == "S"
+
+
+def test_l6_an_empty_text_clears_nothing_blind():
+    d, phone = _blind()
+    got = _call(d, "type_text", {"text": ""})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "cleared" in str(got)
+    assert phone.touches() == []

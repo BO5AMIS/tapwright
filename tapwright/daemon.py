@@ -42,7 +42,8 @@ from . import shot as shotlib
 from .control import STILL_WANTED, TAP_MS, Controller, Refused, classify
 from .errors import PHONE_LOCKED
 from .device import (AppNotAnswering, ConnectionLost, CrashTooBig, DeviceError, LockedBeforeStart, NotSetUp,
-                     NotUnlockedSinceRestart, PasscodeNeeded, PhoneLocked, Proc, Unanswered, PhoneNotFound, PASSCODE_WORDS)
+                     NotUnlockedSinceRestart, PasscodeNeeded, PhoneLocked, Proc, RunnerTimedOut, Unanswered, PhoneNotFound,
+                     PASSCODE_WORDS)
 from .session import Snapshot
 from .tapline import AgentTouches
 from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, PictureFeeder, PictureGone, StreamPump,
@@ -5835,7 +5836,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise self._not_connected()  # (no element to judge: explore and a repair touch nothing blind)
         if args.get("dry_run"):
             raise Refused("not_answering", f"{stuck}; a dry run judges elements, and it gives none. Nothing was done.")
-        if self.control.paused:
+        if self.control.paused and name != "look":  # (review R1101 L3: a look is never refused for a pause, as a read)
             raise Refused("paused", "paused by the user in the live view; ask them to resume")
         device = self.session.device
         if device.rsd is None:
@@ -5846,10 +5847,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view = self.control.client(client_id)
 
         async def guard():
-            if self.control.paused:
-                raise Refused("paused", "the phone is paused; ask the user to resume it")
-            if self.control.person_generation != generation or self.control.person_active():
-                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if name != "look":  # (L3: a person driving or a pause stops actions, not a look at what they do)
+                if self.control.paused:
+                    raise Refused("paused", "the phone is paused; ask the user to resume it")
+                if self.control.person_generation != generation or self.control.person_active():
+                    raise Refused("busy", "a person used the phone before delivery; look again before acting")
             if not self._same_stuck(stuck) or self.session.device is not device or self.session.blind_sid is None:
                 raise Refused("reconnecting", "the phone connection changed; look before acting")
 
@@ -5868,7 +5870,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             except Exception:  # noqa: BLE001 - whatever stopped the question, nothing is done on doubt
                 raise Refused("not_answering", f"{stuck}, and the phone didn't say which app is in front; nothing was "
                                                f"{verb}.") from None
-            if not in_front or in_front[0] != stuck.bundle_id:
+            # exactly that one app (review R1101 M2): the process list is in pid order, not front-most first, so while
+            # another app comes forward both are listed and the stuck one may come first
+            if list(in_front or ()) != [stuck.bundle_id]:
                 self._wake.set()  # another app is in front: the supervisor's next connect may simply work
                 raise Refused("reconnecting", f"{stuck.name} isn't in front any more; nothing was {verb}. Wait a few "
                                               "seconds, then look.")
@@ -5889,7 +5893,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 await guard()
                 await checked()
                 return await picture(width)
-            png, screen, jpeg = await self.control.read(look)
+            try:
+                png, screen, jpeg = await self.control.read(look)
+            except (ConnectionLost, DeviceError) as e:  # (review R1101 M1: coded, never `internal`)
+                self._blind_failed(e)
+                raise Refused("not_answering", f"{stuck}, and the screen's picture couldn't be taken ("
+                                               f"{self._redact(str(e))[:120]}); close_app can still close it.") from None
             lines = [head, blind, f"Screen {round(screen[0])}x{round(screen[1])} pt."]
             view.ocr = {}
             if ocr.available() and args.get("ocr", True) is not False:
@@ -5923,10 +5932,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 # to check: the app gives no elements
                 raise Refused("not_answering", f"{stuck}: a saved account's value is typed only into a field Tapwright "
                                                "can read, and this app gives none. Nothing was typed.")
+            if not str(args["text"]) and not args.get("submit"):
+                # (review R1101 L6) an empty text clears the field: nothing can be cleared without reading the app
+                raise Refused("not_answering", f"{stuck}: a field can't be cleared without reading the app. Nothing "
+                                               "was typed.")
             points = []
+        sent = [False]  # whether the touch or the keys went out (a failure before that did nothing: review R1101 L2)
+
         async def act() -> tuple[str, tuple[float, float]]:
             await guard()
-            await checked()
+            # the slow questions first, the safety checks last (review R1101 M2: checked right before the touch, so an
+            # app that came forward meanwhile is caught)
             _, screen, _ = await picture(shotlib.MIN_WIDTH)  # the screen's size now, in points
             if screen[0] > screen[1]:
                 raise Refused("not_answering", f"{stuck}, and the phone is turned sideways: touches without reading "
@@ -5938,7 +5954,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if points and await self.session.blind_version() < (2 if name == "swipe" else 1):
                 raise Refused("not_answering", f"{stuck}, and this phone's runner has no touch route that skips reading "
                                                "the app (tapwright setup installs one). Nothing was touched.")
+            await guard()
+            await checked()
+
+            async def touching(ms: float) -> None:
+                sent[0] = True
+                await self._agent_touches.notify(ms)  # (review R1101 L1: Tapline hears the touch is the agent's)
             token = device_module.BEFORE_SEND.set(guard)
+            self.session.touch_hook = touching
             try:
                 if name == "tap":
                     x, y = points[0]
@@ -5960,17 +5983,28 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                                                              else "") + " into the focused field")
             finally:
                 device_module.BEFORE_SEND.reset(token)
+                self.session.touch_hook = None
             return said, screen
 
         try:
             said, _ = await self.control.agent(act)
-        except ConnectionLost:
-            # no answer in time: the runner may still play it (the `timeout` contract)
-            self._wake.set()
-            raise Refused("timeout", f"{stuck}, and the phone didn't answer the {name} in time; it may still have "
-                                     "happened: look before acting again.") from None
+        except (ConnectionLost, DeviceError) as e:
+            # review R1101 M1: every failure is coded, never `internal`. A touch or keys that went out and got no answer,
+            # or the runner's own "not played in time", may still happen: `timeout`, as the contract says
+            self._blind_failed(e)
+            said = self._redact(str(e))[:160]
+            if sent[0] and (isinstance(e, (ConnectionLost, RunnerTimedOut)) or "timeout" in said.lower()):
+                raise Refused("timeout", f"{stuck}, and the phone didn't answer the {name} in time; it may still have "
+                                         "happened: look before acting again.") from None
+            if "invalid session" in said.lower():
+                raise Refused("reconnecting", f"the runner started again; nothing was {verb}. Wait a few seconds, then "
+                                              "look.") from None
+            if sent[0]:
+                raise Refused("not_answering", f"{stuck}, and the phone refused the {name} ({said}); look before "
+                                               "acting again.") from None
+            raise Refused("not_answering", f"{stuck}, and the phone didn't answer before the {name} ({said}); nothing "
+                                           f"was {verb}.") from None
         self.log(f"{name} without reading {stuck.bundle_id}, which wasn't answering")
-        self._wake.set()  # the app may be on a screen that answers now: the supervisor connects as usual then
         self._announce("agent", name, label=stuck.name)
         view.ocr = {}  # (the last reading's refs are of the screen before)
         if name == "type_text" and args.get("replace", True) and args.get("text"):
@@ -5980,9 +6014,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             _, _, jpeg = await self.control.read(lambda: picture(width))
         except (ConnectionLost, DeviceError):
             jpeg, notes = None, [*notes, "the picture after it couldn't be taken; look."]
+        # (review R1101 L5) woken after the picture, so the reconnect's question doesn't hold the picture up: the app may
+        # be on a screen that answers now, and the supervisor connects as usual then
+        self._wake.set()
         lines = [f"{said} in {what} without reading it (it doesn't answer accessibility reads); the picture shows the "
                  "screen after. look (with OCR) reads its text."]
         return _answer(lines, notes, jpeg)
+
+    def _blind_failed(self, error: Exception) -> None:
+        """A blind request failed: a session the runner no longer knows is dropped (the next blind call is refused
+        until the supervisor has a new one), and the supervisor is woken to find out what changed."""
+        if "invalid session" in str(error).lower():
+            self.session.blind_sid = None
+        self._wake.set()
 
     async def _unlock_tool(self, client_id: str) -> dict:
         """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with

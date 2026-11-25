@@ -43,7 +43,8 @@ SNAPSHOT_DEPTH = os.environ.get("TAPWRIGHT_SNAPSHOT_DEPTH", "")
 BLIND_TOUCH_WAIT = 10.0  # seconds beyond the touch itself that a blind touch's answer is waited for
 BLIND_KEYS_WAIT = 15.0  # seconds a blind typing's answer is waited for (its keys may wait on the app: then a timeout)
 BLIND_SHOT_WAIT = 15.0  # seconds a blind screenshot is waited for (it is taken of the screen, not read from the app)
-BLIND_PROBE_WAIT = 3.0  # seconds a reconnect waits for the blind session's window size: does the app in front read again?
+BLIND_PROBE_WAIT = FIRST_READ_WAIT  # a reconnect asks the blind session as long as a first read is waited for (review R1101
+# M3: a slow app that answers in 3-10 s recovers as it did with a new session)
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
                 "landscape_right": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"}  # WebDriverAgent's names
 ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
@@ -277,9 +278,10 @@ class Session:
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
         # (1.10.1) the settings before the first read of the app (they were sent after it): a depth limit
         # (SNAPSHOT_DEPTH) has to be in force for that read too. Before sid is committed: no read runs without them.
-        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": self._settings_wanted()},
-                               timeout=READ_CUT)
         try:
+            # (inside the try, review R1101 L4: should a setting ever wait on the app, its hang is named as the read's is)
+            await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": self._settings_wanted()},
+                                   timeout=READ_CUT)
             size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
         except ConnectionLost as e:
             why = await self._why_stuck(bool(locked), e)
@@ -1363,7 +1365,15 @@ class Session:
 
     async def blind_version(self) -> int:
         """The fork's route version, asked without a session (0: not the fork, or it can't be told)."""
-        answer = await self.device.http("GET", "/wda/tw/version", None, LOCK_WAIT)
+        try:
+            answer = await self.device.http("GET", "/wda/tw/version", None, LOCK_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" in said or "unknown method" in said:
+                return 0  # (review R1101 M1: Appium's build, or a fork older than its session-less route)
+            raise
         value = answer.get("value") if isinstance(answer, dict) else None
         version = value.get("tapwright") if isinstance(value, dict) else None
         return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else 0
