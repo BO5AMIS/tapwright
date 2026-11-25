@@ -743,7 +743,8 @@ class Session:
         left to W3C actions: no route, not portrait (the route's points are portrait screen points), or an error
         that says nothing was played. An error that may come after the touch was played is raised, never retried.
         Hands (HID) go first when they can be used: they need no runner route and work in landscape too."""
-        if await self._hands_tap(x, y, hold_ms):
+        # (getattr: a session without hands, a test's fake among them, runs only the code below, as before 2.0)
+        if getattr(self, "hands", None) is not None and await self._hands_tap(x, y, hold_ms):
             return True
         if FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
@@ -1042,7 +1043,7 @@ class Session:
         """False when the drag is left to W3C actions: no route, not portrait, or an error that says nothing was
         played. An error that may come after the drag was played is raised, never retried: it would scroll twice.
         Hands (HID) go first when they can be used."""
-        hands = self.hands
+        hands = getattr(self, "hands", None)  # (as in _fast_tap: no hands, the code as before 2.0)
         if hands is not None:
             path = shaped or points
             if await self._by_hands("drag", lambda before: hands.path(path, screen=self.screen, turn=self.turn,
@@ -1364,7 +1365,8 @@ class Session:
         await self._touching(duration_ms + hold_ms, (x0, y0))
         # a free swipe through the hands moves as a person's finger does (motion.swipe); one that rests at its end
         # (hold_ms) keeps the straight shape, as scroll drags keep theirs
-        shaped = motion.swipe(x0, y0, x1, y1, duration_ms, self.motion_rng) if motion.HUMAN and not hold_ms else None
+        shaped = (motion.swipe(x0, y0, x1, y1, duration_ms, self.motion_rng)
+                  if getattr(self, "hands", None) is not None and motion.HUMAN and not hold_ms else None)
         await self._drag(ui.swipe_points(x0, y0, x1, y1, duration_ms, hold_ms),
                          ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms), shaped)
         self.last_point = (x0, y0)
@@ -1390,7 +1392,7 @@ class Session:
         """A hardware button: through the hands when they can be used (lock only there: XCTest can't press it), else
         the runner (home by its home-screen route, which waits for the home screen)."""
         self.typed_into = None
-        hands, hand = self.hands, HAND_BUTTONS.get(name)
+        hands, hand = getattr(self, "hands", None), HAND_BUTTONS.get(name)
         if hands is not None and hand is not None and await self._by_hands(
                 "button", lambda before: hands.button(hand, before=before), input_=False):
             return f"pressed {name}"
