@@ -19,10 +19,11 @@
 - Screens that never answer accessibility reads in time (TikTok's For You feed, games, canvases, some web views) no
   longer stop Tapwright. With the new runner (route version 9) every read is bounded: a tree read answers within its
   budget (3 s; `TAPWRIGHT_TREE_BUDGET` in ms) with what it could read, and every other accessibility read stops after
-  3 s (`TAPWRIGHT_AX_TIMEOUT`). An app whose read was cut short gets a 0.6 s budget for the next 20 s, so a look there
-  doesn't cost 3 s each time; once it answers whole again, the normal budget comes back.
-- A look at such a screen still answers: its header says `Elements: none (this screen doesn't answer accessibility
-  reads)` or `Elements: partly read`, lists what it could read, and the text in the picture follows as `o1`, `o2`…
+  3 s (`TAPWRIGHT_AX_TIMEOUT`). An app whose read was cut short gets a 1.5 s budget for the next 20 s, so a look there
+  doesn't cost 3 s each time, unless the screen is still (a profile, not a playing feed); once it answers whole again,
+  the normal budget comes back.
+- A look at such a screen still answers: its header says `Elements: none (the screen's elements weren't read within
+  the time given)` or `Elements: partly read`, lists what it could read, and the text in the picture follows as `o1`, `o2`…
   refs without asking (`ocr: false` leaves it out), with the picture.
 - Text from the picture is read on the phone by Apple's Vision when the runner has it (faster than this computer's CPU),
   also for `look {ocr: true}`; RapidOCR on this computer (`pip install "tapwright[ocr]"`) is the fallback, and a failed
@@ -32,7 +33,8 @@
   point), `press_button`, and `type_text` without a target (into the focused field; it isn't cleared first, and a saved
   account's value isn't typed there). The answer says what was done and `Elements: none…`, with the picture after it
   unless `screenshot: false`. A target by id, label, text or `e` ref there answers `not_found` with how to reach the
-  screen instead. `wait_for` a text also looks for it in the picture's text there.
+  screen instead. `wait_for` a text also looks for it in the picture's text there; an id or label there can't be
+  checked, so `wait_for` and `expect` answer `timeout` saying so (never `Done`, never a failed check).
 - A new session reads the screen's size without reading the app in front, so a screen that never answers no longer
   holds up the connection. `not_answering` is now only for an app that blocks even these bounded reads.
 - MCP: an action's `screenshot` and look's `ocr` are unset by default (the daemon decides, as above); `false` still

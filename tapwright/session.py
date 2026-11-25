@@ -139,7 +139,11 @@ def _env_float(name: str, default: float) -> float:
 
 AX_TIMEOUT = _env_float("TAPWRIGHT_AX_TIMEOUT", 3.0)  # seconds: the runner's ceiling for any one accessibility read
 TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree read may take on the runner
-SHORT_BUDGET_MS = 600  # ms for an app whose last read was cut short (TikTok's profile answers in 0.2 s)
+# ms for an app whose last read was cut short. (Review R200v H1) The runner gives `full` 60 % of the budget, after
+# finding the app and an idle wait of up to a quarter of it, and tries `shallow` only with 0.25 s left past a reserve
+# for `root`: at 600 ms nearly every read came back `root`, even of a screen that reads whole in 0.4 s (the home screen's
+# tree took 0.4 s in Phase 0). 1500 ms leaves `full` about 0.9 s and room for `shallow`.
+SHORT_BUDGET_MS = 1500
 BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
 
 
@@ -149,19 +153,25 @@ class ReadBudget:
     look and every action. So, per bundle id: when a read with the normal budget came back truncated, that app's reads
     use the short budget for BUDGET_MEMORY seconds; a read that comes back full gives it the normal budget again at
     once. A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
-    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds)."""
+    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds).
+    A screen that is still (the caller's `still`: the stream's pictures show nothing moving) gets the normal budget even
+    then: a playing feed is never still, and a still screen of the same app (a profile, a settings page) is usually one
+    that reads whole (review R200v H1)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
                  memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
 
-    def budget(self, bundle: str | None) -> int:
-        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget)."""
+    def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
+        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
+        when the short budget would apply: True gives the normal one."""
         if bundle is None or bundle not in self._cut:
             return self.normal_ms
         if self.clock() - self._cut[bundle] >= self.memory:
             del self._cut[bundle]
+            return self.normal_ms
+        if still is not None and still():
             return self.normal_ms
         return self.short_ms
 
@@ -352,6 +362,10 @@ class Session:
         self.last_tier = "full"
         self.last_why = ""
         self.budgets = ReadBudget()
+        # Set by the daemon: does the stream show the screen still right now (Daemon._proven_still)? A still screen's
+        # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
+        self.screen_still: Callable[[], bool] | None = None
+        self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
 
     async def ensure(self) -> None:
@@ -400,6 +414,7 @@ class Session:
         self.fast_read, self.last_compact = None, None
         self.bounded, self.last_tier, self.last_why = bounded, "full", ""
         self.budgets.forget()
+        self.budget_app = None
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
     async def _probe_version(self) -> int | None:
@@ -640,20 +655,29 @@ class Session:
         """(route version 9) The compact read with a budget: the app's own (ReadBudget), by the app the newest read
         found in front. A read cut short on the short budget whose answer names another app than the one the budget
         was for is read again with the normal budget: the short budget was that app's, not this one's."""
-        bundle = self.read_app[1] if isinstance(self.read_app, tuple) else None
-        budget = self.budgets.budget(bundle)
-        source = await self._compact_tree(timeout, budget_ms=budget)
+        # (review R200v L2) a root the runner couldn't name an app for (RUNNER-V9-PROTOCOL §1: `b` left out) is kept
+        # under the app the read was budgeted for, so the short budget still applies to it; and such a root is never
+        # taken for another app's
+        bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
+        budget = self.budgets.budget(bundle, still=self.screen_still)
+        source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle)
+        named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < self.budgets.normal_ms
-                and _root_bundle(source) != bundle):
-            source = await self._compact_tree(timeout, budget_ms=self.budgets.normal_ms)
+                and named is not None and named != bundle):
+            source = await self._compact_tree(timeout, budget_ms=self.budgets.normal_ms, budget_for=named)
+            named = _root_bundle(source)
+        if source is not None:
+            self.budget_app = named or bundle
         return source
 
-    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None) -> str | None:
+    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
+                            budget_for: str | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
         `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
         `budget_ms` (route version 9): the runner answers within about that long with what it could read, and says
-        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses."""
+        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses.
+        `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none."""
         last = self.last_compact if since else None
         query = [*([f"budget={budget_ms}"] if budget_ms is not None else []), *([f"since={last[0]}"] if last else [])]
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
@@ -675,7 +699,8 @@ class Session:
             if last is not None and last[0] == token:
                 return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
-            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms) if since else None
+            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms,
+                                            budget_for=budget_for) if since else None
         try:
             source = ui.xml_of_tree(value.get("tree"))
         except ValueError as e:
@@ -690,7 +715,7 @@ class Session:
         why = value.get("why")
         self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
         if budget_ms is not None:
-            self.budgets.answered(_root_bundle(source), tier != "full", budget_ms)
+            self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")

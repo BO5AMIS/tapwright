@@ -244,12 +244,15 @@ def has_text(element: ui.Element, want: str) -> bool:
     return any(t == want or ui.shown(t) == want for t in shown) or any(want in t for t in shown)
 
 
-def optional_wait_skipped(step: dict) -> str:
-    """(1.9.0 round 2) The skip line of an optional wait_for whose element didn't come (or go)."""
+def optional_wait_skipped(step: dict, unread: bool = False) -> str:
+    """(1.9.0 round 2) The skip line of an optional wait_for whose element didn't come (or go). `unread` (2.0): the
+    screen's elements couldn't be read until its timeout, so neither is known."""
     kind = next((k for k in EXPECT_KINDS if step.get(k) is not None), None)
     aim = aim_name(kind, step[kind]) if kind else "it"
     timeout = step.get("timeout", 10.0)
     seconds = f"{float(timeout):g}" if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else "10"
+    if unread:
+        return f"optional: {aim} couldn't be checked within {seconds} s (the screen's elements couldn't be read)"
     return f"optional: {aim} didn't {'disappear' if step.get('gone') else 'appear'} within {seconds} s"
 
 

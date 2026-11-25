@@ -154,12 +154,12 @@ def test_a_screen_that_doesnt_answer_comes_back_as_root_and_its_app_gets_the_sho
     assert tree.app == ("TikTok", TIKTOK)  # the root still names the app (personal mode's scope needs it)
     assert s.last_compact is None  # a cut-short tree is no baseline for "unchanged"
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000", "/wda/tw/tree?budget=600"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000", "/wda/tw/tree?budget=1500"]
     # the app answers whole again (its profile reads in 0.2 s): the normal budget comes back at once
     runner.trees = [{"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}]
     asyncio.run(s.refresh())
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=600", "/wda/tw/tree?budget=3000&since=f1"]
+    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=1500", "/wda/tw/tree?budget=3000&since=f1"]
 
 
 def test_a_short_budget_meant_for_another_app_is_read_again_with_the_normal_one(state):
@@ -174,7 +174,7 @@ def test_a_short_budget_meant_for_another_app_is_read_again_with_the_normal_one(
                     {"token": "s2", "tree": _app("com.apple.Preferences", "Settings", [BUTTON]), "tier": "full",
                      "truncated": False}]
     tree = asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=600", "/wda/tw/tree?budget=3000"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=1500", "/wda/tw/tree?budget=3000"]
     assert tree.tier == "full" and not s.budgets.short("com.apple.Preferences")
 
 

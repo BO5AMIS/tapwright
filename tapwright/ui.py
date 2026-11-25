@@ -303,8 +303,8 @@ class Tree:
     structure: Structure = field(default_factory=Structure)  # what the screen is made of, for places.py
     back: "Back | None" = None  # what `back` would do on this screen (back_button), when the screen's size is known
     # (2.0, runner route version 9) how much of the tree the read got: "full"; "shallow" (the runner's budget ran out
-    # part way: what it read is here, more may be missing); "root" (the application node alone: the screen doesn't
-    # answer accessibility reads, as TikTok's For You feed)
+    # part way: what it read is here, more may be missing); "root" (the application node alone: none of the screen's
+    # elements were read in the time given, as on TikTok's For You feed)
     tier: str = "full"
 
     @property
@@ -1573,8 +1573,10 @@ def on_glass(items: list[Element]) -> list[Element]:
                        and b.rect[1] <= e.center[1] < b.rect[1] + b.rect[3] for b in e.covered_by)]
 
 
-ELEMENTS_NONE = "Elements: none (this screen doesn't answer accessibility reads)"
-ELEMENTS_PART = "Elements: partly read (this screen didn't answer the whole accessibility read in time; more may be missing)"
+# (review R200v H1) said as known: the read ran out of the time it was given (a short budget may be why), not that the
+# screen never answers
+ELEMENTS_NONE = "Elements: none (the screen's elements weren't read within the time given)"
+ELEMENTS_PART = "Elements: partly read (not all of the screen's elements were read within the time given; more may be missing)"
 
 
 def tier_line(tier: str) -> str | None:
