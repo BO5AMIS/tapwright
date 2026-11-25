@@ -293,7 +293,10 @@ EXTRA = {
     ),
     'look': (
         'reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture '
-        'that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note.'
+        'that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. '
+        "A screen that doesn't answer accessibility reads in time (a video feed, a game) says `Elements: none` or "
+        '`Elements: partly read` in the header and lists the text in its picture that way by itself (`ocr: false` '
+        'leaves it out); touch an `o` ref or a point there, and actions on it answer with the picture after them.'
     ),
     'tap': (
         "makes a real touch at the element's centre, or at the centre of its visible part when a bar covers the "

@@ -93,6 +93,11 @@ NOTE_FEW = ("this screen has few elements (a game, a canvas or a web view?); loo
 OCR_REF = re.compile(r"o[1-9][0-9]*")
 OCR_HEAD = "Text in the picture (OCR; not elements; touch one by its ref, at its centre):"
 OCR_NONE = "Text in the picture (OCR): nothing beyond what the elements say."
+# (2.0) the calls that need no read of the app: while one blocks even the runner's bounded routes (not-answering),
+# Daemon._frozen_tool is where they are answered once hands exist (it answers none yet: refused as in 1.10.0)
+FROZEN_TOOLS = frozenset({"look", "tap", "long_press", "swipe", "press_button"})
+# (2.0) TAPWRIGHT_RUNNER_OCR=0: text is read from the picture on this computer only (RapidOCR), never by the runner
+RUNNER_OCR = os.environ.get("TAPWRIGHT_RUNNER_OCR", "1")
 SWIPE_IS_TAP = 10.0  # points: a swipe moving less than this is a touch where it starts
 FULL_SWIPE_SHARE = 0.4  # a mostly-across swipe on a list row longer than this share of its width runs its first action
 IN_USE_S = 90.0  # for a schedule's busy test only: a client's call, or a person's input, this recent means the phone is in use
@@ -602,6 +607,28 @@ def _said(text: str, known: list[str]) -> bool:
     as a letter: "Q Search destinations")?"""
     t = text.casefold().strip()
     return any(t == k or (len(t) >= 3 and t in k) or (len(k) >= 3 and k in t and len(k) >= 0.6 * len(t)) for k in known)
+
+
+def _cut_short(tree: object) -> bool:
+    """Was this tree read only in part (runner route version 9: tier shallow or root)?"""
+    return getattr(tree, "tier", "full") in ("shallow", "root")
+
+
+def _seen_text(want: str, seen: "list[ocr.Seen]") -> bool:
+    """Does a line read from the picture show this text (the same words, or them inside a longer line)? wait_for's
+    fallback on a screen that doesn't answer accessibility reads."""
+    w = " ".join(want.casefold().split())
+    return bool(w) and any(w in " ".join(s.text.casefold().split()) for s in seen)
+
+
+# (2.0) after an action on a screen whose tree was cut short: no list of what changed can be read
+AFTER_CUT = "The picture shows the screen after it; look reads its text again (as o refs)."
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements
+HINT_NO_ELEMENTS = ("This screen doesn't answer accessibility reads, so it has no elements to find: look shows the text "
+                    "read from its picture as o refs; touch one of them, or a point {x, y}.")
+HINT_PART_ELEMENTS = ("This screen answered only part of the accessibility read, so the element may be among what it "
+                      "left out: look shows the text read from its picture as o refs; touch one of them, or a point "
+                      "{x, y}.")
 
 
 def settled_line(seconds: float) -> str:
@@ -4063,6 +4090,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return await self._close_stuck(self.stuck, args["app"], notes)
         if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
             return await self._home_stuck(self.stuck, notes)
+        if (name in FROZEN_TOOLS and isinstance(self.stuck, AppNotAnswering)
+                and (frozen := await self._frozen_tool(client_id, name, args, notes, shot)) is not None):
+            return frozen
         await self.wait_connected()
         if (taken := self._taken_notes.pop(client_id, None)) is not None:
             notes = [*notes, taken]
@@ -4092,11 +4122,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return await self._compare_screen(view, args, notes, client_id)
         if name == "look":
             await self._settle_pending()
-            no_ocr = bool(args.get("ocr")) and not ocr.available()
+            no_ocr = bool(args.get("ocr")) and not self._ocr_possible()
             if no_ocr and not self._hints_wanted():
                 raise Refused("unsupported", ocr.INSTALL)  # (--no-hints: 1.8.5's refusal)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
             answer = await self._look(view, shot, [], notes)
+            # (2.0) the runner learns its routes with the look's read: now the runner's OCR may be known to be there
+            no_ocr = no_ocr and not self._ocr_possible()
+            if (tier := self._tier_now()) != "full" and args.get("ocr") is not False:
+                # a screen that didn't answer the whole read: its text, read from the picture, comes without asking
+                return await self._with_ocr(view, answer, tier=tier)
             if no_ocr:
                 # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
@@ -4336,6 +4371,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if (taken := view.done_taken_back) is not None:  # (1.9.0) what a Done did is said with this refusal, never later
                 view.done_taken_back = None
                 e.args = (f"{e}\nNote: {taken}",)
+            if (e.code == "not_found" and target is not None and target.point is None
+                    and (tier := self._tier_now()) != "full"):
+                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows
+                raise Refused("not_found", f"{e}\n{HINT_NO_ELEMENTS if tier == 'root' else HINT_PART_ELEMENTS}") from None
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
             if e.code == "ambiguous" and self._other_app_shown():
@@ -4443,7 +4482,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 view.aimed_app = view.app  # where the link went: the app its answer shows (last Opus review, L)
             self._auto_stayed(view, name)
             return await self._add_shot(_answer([str(result), changes.SAME_SCREEN, changes.NO_CHANGE,
-                                                 settled_line(done.seconds)], notes), view, shot, at_read=False)
+                                                 settled_line(done.seconds)], notes), view,
+                                        self._cut_shot(args, shot, self._tier_now()), at_read=False)
         to_target = name == "scroll" and args.get("to") == "target"
         # (a scroll to a target read the list after each of its drags, with the refs carried: its last read is no
         # move for the refs, though the content did move since the agent's last answer)
@@ -4481,7 +4521,15 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if taken:  # the screen the agent is shown is the app's, back in front, not the other app's
             return await self._look(view, shot, [str(result)], [*notes, taken])
         answer = await self._learn(view, name, args, answer, box, began)
-        return await self._add_shot(answer, view, shot)
+        return await self._add_shot(answer, view, self._cut_shot(args, shot, getattr(view.tree, "tier", "full")))
+
+    @staticmethod
+    def _cut_shot(args: dict, shot: "tuple[int, bool] | None", tier: str) -> "tuple[int, bool] | None":
+        """(2.0) An action's picture: on a screen whose tree was cut short (`tier` shallow or root) the answer can't
+        list what changed, so the picture after it comes unless the call said `screenshot: false`."""
+        if shot is None and tier in ("shallow", "root") and args.get("screenshot") is not False:
+            return shotlib.DEFAULT_WIDTH, False
+        return shot
 
     def _recheck_later(self, client_id: str, before: tuple[str, str] | None, taken: str | None) -> None:
         """After a touch near the top that nothing was seen taking: the other app may come to the front a moment
@@ -5712,6 +5760,28 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         finished, _ = await asyncio.wait({task}, timeout=CLOSE_TERMINATE_CAP)
         return bool(finished)
 
+    async def _frozen_tool(self, client_id: str, name: str, args: dict, notes: list,
+                           shot: "tuple[int, bool] | None") -> dict | None:
+        """(2.0 seam, for the lead to wire once `tapwright/hands.py` is merged) A call in FROZEN_TOOLS while the app in
+        front blocks even the runner's bounded routes (`self.stuck` is an AppNotAnswering, state `not-answering`): the
+        answer, or None to refuse it `not_answering` as 1.10.0 does. Returns None today: nothing here may use the
+        runner, which is what is stuck.
+
+        Once hands exist, every one of these needs no read of the app and no runner:
+        - `look`: the picture from the stream (MJPEG over usbmuxd, or the HEVC display stream), and its text by
+          `ocr.read` on this computer (the runner's OCR route can't answer while it is stuck); the header says the app
+          doesn't answer, as a cut-short look's `ui.ELEMENTS_NONE` line does, with o refs (`view.ocr`) from that text.
+        - `tap` / `long_press` at {x, y} (an o ref is one: `_ocr_target` turned it into a point before this), `swipe`,
+          `press_button`: through hands at the point, upright only. Before each: the phone not locked and its process
+          list holding the stuck app alone (1.10.1's `_blind_tool` `checked()`: /wda/locked can't be asked, so the
+          lock state must come from hands or lockdown), the pause and a person's input (`self.control`), personal mode's
+          given apps (`_GIVEN`), Tapline told the touch is the agent's (`self._agent_touches.notify`). Never for a dry
+          run, `explore` or a repair (`_TOUCH_FLOOR`, `_EXPLORING`): there are no elements to judge.
+        - the answer: what was done, `ui.ELEMENTS_NONE`, and the picture after it unless `screenshot: false`.
+        1.10.1's `_blind_tool` (`git show wip/1.10.1-speed:tapwright/daemon.py`) has the wording and the failure codes
+        (a touch that went out and got no answer is `timeout`, never `internal`)."""
+        return None
+
     async def _close_stuck(self, stuck: AppNotAnswering, query: str, notes: list) -> dict:
         """close_app while the app in front is frozen: end its processes through iOS (WebDriverAgent's own
         terminate would wait on the app), then connect again at once. Only that app: the rest can wait."""
@@ -5934,12 +6004,45 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return args
         point = self.control.client(client_id).ocr.get(ref)
         if point is None:
-            raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again.")
+            raise Refused("not_found", f"{ref} isn't in your last OCR reading; look with ocr: true again (a screen "
+                                       "that doesn't answer accessibility reads gets o refs with any look).")
         return {**args, "target": {"x": round(point[0], 1), "y": round(point[1], 1)}}
 
-    async def _with_ocr(self, view, answer: dict) -> dict:
-        """`look` with `ocr: true`: the text the picture shows that no element carries, as lines with refs o1, o2…
-        after the list (before its notes). Read from the stream's newest frame when it is fresh, else a screenshot."""
+    def _tier_now(self) -> str:
+        """How much of the tree the newest read got (Session.last_tier, runner route version 9): "full", "shallow" or
+        "root". Always "full" with an older runner."""
+        tier = getattr(self.session, "last_tier", "full")
+        return tier if tier in ("shallow", "root") else "full"
+
+    def _ocr_possible(self) -> bool:
+        """Can text be read from the screen's picture: by the runner (route version 9) or on this computer?"""
+        return self._runner_reads_text() or ocr.available()
+
+    def _runner_reads_text(self) -> bool:
+        reads = getattr(self.session, "reads_text", None)
+        return bool(reads()) if callable(reads) and RUNNER_OCR != "0" else False
+
+    async def _screen_text(self, level: str = "accurate") -> "tuple[list[ocr.Seen], str]":
+        """(the text lines the screen shows now, a note for the answer or ""). The runner reads them on the phone
+        (route version 9, Apple's Vision: faster than this computer's CPU); RapidOCR reads the picture here when the
+        runner can't (an older runner, or its OCR failed: never a failed call). Neither: no lines, and the note says
+        how to install the extra."""
+        failed = ""
+        if self._runner_reads_text():
+            asked = self.hub.mono()
+            try:
+                seen = await self._read(lambda: self.session.read_text(level))
+            except Refused:
+                raise
+            except Exception as e:  # noqa: BLE001 - the picture is read here instead
+                self.log(f"runner OCR failed ({type(e).__name__}: {self._redact(str(e))[:160]}): reading the picture here")
+                failed = f"the phone's OCR failed ({type(e).__name__})"
+            else:
+                if self.unlocked_since(asked):  # (M1 as for a picture: an unlock's keypad is never read)
+                    raise Refused("busy", UNLOCK_BUSY)
+                return seen, ""
+        if not ocr.available():
+            return [], (f"{failed}, and " if failed else "no text read from the picture: ") + ocr.INSTALL
         frame, asked = self.hub.latest, self.hub.mono()
         if frame is not None and self.hub.now_ms() - frame.at <= FRESH_FRAME * 1000:
             if self.frame_private(frame):
@@ -5949,7 +6052,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             picture = await self._read(self.session.screenshot_png)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)
-        seen = await asyncio.to_thread(ocr.read, picture, self.session.screen)
+        try:
+            return await asyncio.to_thread(ocr.read, picture, self.session.screen), ""
+        except Exception as e:  # noqa: BLE001 - a broken install: the look is still the answer
+            if not failed:
+                raise
+            self.log(f"OCR here failed too: {type(e).__name__}: {e}")
+            return [], f"{failed}, and so did reading the picture here ({type(e).__name__})."
+
+    async def _with_ocr(self, view, answer: dict, tier: str = "full") -> dict:
+        """`look` with `ocr: true`, and (2.0) every look whose tree was cut short (`tier` shallow or root): the text the
+        picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
+        screen with no elements at all (root) the header's `Elements: none` line says the text follows."""
+        seen, note = await self._screen_text()
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -5959,9 +6074,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.ocr = {f"o{n}": s.center for n, s in enumerate(new, 1)}
         lines = answer["text"].split("\n")
         cut = next((i for i, line in enumerate(lines) if line.startswith("Note: ")), len(lines))
-        head = OCR_HEAD if new else OCR_NONE
-        lines[cut:cut] = [head, *(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1))]
-        return {**answer, "text": "\n".join(lines)}
+        refs = [dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(new, 1)]
+        none_line = next((i for i, line in enumerate(lines) if line == ui.ELEMENTS_NONE + "."), None)
+        if note:
+            pass  # nothing was read: the note says why (and how to read it)
+        elif tier == "root" and none_line is not None:
+            lines[none_line] = ui.ELEMENTS_NONE + ("; text read from the picture:" if new else
+                                                   "; no text read from the picture either.")
+            lines[cut:cut] = refs
+        else:
+            lines[cut:cut] = [OCR_HEAD if new else OCR_NONE, *refs]
+        text = "\n".join(lines) + (f"\nNote: {note}" if note else "")
+        return {**answer, "text": text}
 
     async def _audit(self, view, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §10: XCTest's own accessibility audit of the screen in front, plus `duplicate_id` from the
@@ -6692,7 +6816,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                              "wait again.") from None
                 raise timed_out from None
             seen = True
-            if self._missing(tree.items, target) == gone:
+            missing = self._missing(tree.items, target)
+            if missing and kind == "text" and _cut_short(tree) and self._ocr_possible():
+                # (2.0) a screen that doesn't answer the whole read: its text is read from the picture too
+                try:
+                    found, _ = await _wait_for(self._screen_text("fast"),
+                                               max(WAIT_FOR_MIN_LEFT, timeout - (clock() - began)))
+                except asyncio.TimeoutError:
+                    found = []  # (the wait's own time ran out while the picture was read)
+                missing = not _seen_text(str(args[kind]), found)
+            if missing == gone:
                 break
             left = timeout - (clock() - began)
             if left < WAIT_FOR_MIN_LEFT:
@@ -6705,7 +6838,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         full = view.seen != self.control.generation or view.dropped or view.read_at == float("-inf")
         # the last poll is the answer's tree: no read of its own, only the app lookup the polls left out
         snap = await self._read(lambda: self.session.snapshot_from(tree))
-        return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view, shot)
+        return await self._add_shot(await self._after(view, result, notes, full, snap=snap), view,
+                                    self._cut_shot(args, shot, getattr(tree, "tier", "full")))
 
     async def _type_text(self, view, a: dict) -> Typed:
         """Type into the target, or into the only input on screen (the fast tree has no focus attribute).
@@ -6726,6 +6860,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                        f"({view.aimed_app[1]}), where your last touch went. Nothing was typed; look, "
                                        "then pass a target.")
             inputs = [e for e in view.items if e.role == "input"]
+            if not inputs and self._tier_now() != "full":
+                return await self._type_focused(a)  # (2.0) the screen gave no fields: the keys go to the focused one
             if not inputs:
                 raise Refused("not_found", "No input on screen")
             if len(inputs) > 1 and sum(e.focused for e in inputs) == 1:
@@ -6844,6 +6980,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
 
 
+    async def _type_focused(self, a: dict) -> Noted:
+        """(2.0) type_text without a target on a screen whose tree was cut short (runner route version 9) and showed no
+        field: the keys go to whatever has the keyboard's focus (a field the agent tapped at its point first), as a
+        hardware keyboard's would. Nothing can be read of the field: it isn't cleared first, and a saved account's
+        value, which goes only into a field it was checked against (§20), isn't typed at all."""
+        text, submit = str(a["text"]), bool(a.get("submit", False))
+        if accountlib.mentions(text):
+            raise Refused("not_found", "this screen doesn't answer accessibility reads, so no field can be checked: a "
+                                       "saved account's value is typed only into a field Tapwright can read. Nothing "
+                                       "was typed.")
+        if not text and not submit:
+            raise Refused("not_actionable", "no_action: this screen doesn't answer accessibility reads, so a field "
+                                            "can't be cleared. Nothing was typed.")
+        await self._last_checks("type_text", a, None, hit=False, police=False)
+        self._dry(a, f"Would type {len(text)} character{'s' if len(text) != 1 else ''} into the focused field (this "
+                     "screen doesn't answer accessibility reads).")
+        await self.session.type_text(text, replace=False, submit=submit)
+        done = Noted(f"Typed {len(text)} character{'s' if len(text) != 1 else ''}"
+                     + (" and pressed return" if submit else "") + " into the focused field.")
+        if a.get("replace", True) and text:
+            done.note = ("the field wasn't cleared first: this screen doesn't answer accessibility reads, so nothing "
+                         "could tell what it held.")
+        return done
+
     def _typing_aim(self, point: tuple[float, float]) -> "Callable[[ui.Element], tuple[float, float]]":
         """The focusing tap of a type_text at a point: at that point, unless something is drawn over it there (the
         keyboard, a bar, a control of the app's)."""
@@ -6906,7 +7066,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         elif target.point is not None:
             x, y = target.point
             area = ui.scroll_at(view.items, target.point)
-            if area is None:
+            if area is None and self._tier_now() != "full":
+                pass  # (2.0) the screen gave no scroll view to find: the drag goes through the screen, as without a target
+            elif area is None:
                 raise Refused("not_actionable", f"no_action: Nothing at ({round(x)}, {round(y)}) takes a scroll.")
         else:
             hit = ui.resolve(view.items, target)
@@ -8689,14 +8851,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             app_changed = read_now.app is not None and view.app is not None and read_now.app != view.app
             head = _furniture(view, read_now.tree.alert, read_now.tree.keyboard)
             seen = ui.on_glass(read_now.tree.items) if ui.USERS_EYES.get() else read_now.tree.items  # (§17.1)
-            up = changes.update(view.items, seen, app_changed, view.top_ref, view.shown, full, head, moves_content)
+            # (2.0) a tree cut short is no list to measure changes by (what it left out would read as gone): the whole
+            # of what it gave is the answer, under the line that says it was cut short
+            whole = full or _cut_short(read_now.tree)
+            up = changes.update(view.items, seen, app_changed, view.top_ref, view.shown, whole, head, moves_content)
             return read_now, up
         try:
             snap, up = await self._read(read)
         except Exception as e:
             view.moved = True  # no list came back: the screen has probably changed
             return _answer([result, *tail], [*notes, f"couldn't look afterwards: {e}."])
-        covered = not snap.tree.items and bool(view.shown)  # the agent saw elements; now there are none
+        cut = _cut_short(snap.tree)
+        covered = not snap.tree.items and bool(view.shown) and not cut  # the agent saw elements; now there are none
         view.tree, view.place = snap.tree, None  # where the app is now is worked out by _learn, after this answer
         s.items = view.items = view.shown = up.items
         view.top_ref, view.app = up.top, snap.app or view.app
@@ -8713,7 +8879,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         same_app = not (snap.app is not None and app_before is not None and snap.app != app_before)
         still = not (moves_content is not False or drifted or view.unlooked)
         off = (changes.off_screen(off_was, view.shown_off, by_place=still, listed=listed_before)
-               if same_app and not full and not ui.USERS_EYES.get() else [])  # a user sees nothing change off screen
+               if same_app and not full and not cut and not ui.USERS_EYES.get() else [])  # (a user sees nothing change off screen)
         if off and not up.full:
             up.lines = [line for line in up.lines if line != changes.NO_CHANGE] + off
         earlier, view.unlooked = view.unlooked, 0
@@ -8724,7 +8890,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if up.full:
             tree = snap.tree
             parts = (up.items, s.screen, snap.scale, snap.app, tree.alert, tree.keyboard, tree.more,
-                     (tree.above, tree.below))
+                     (tree.above, tree.below), getattr(tree, "tier", "full"))
             if shorter:  # the header lines, the elements that matter, the lines after them
                 top, listed, rest = ui.describe_parts(*parts)
                 head = "\n".join([*top, *briefing.screen(listed, listed_before), *rest])
@@ -8733,6 +8899,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # the full list because most of the screen changed: what changed off screen still follows it, under
             # a heading of its own (bare `~` lines after a list read as a second, broken block)
             beyond = [changes.OFF_SCREEN, *off] if off else []
+            if cut:
+                view.ocr = {}  # (the last reading's o refs are of the screen before the action)
+                beyond = [*beyond, AFTER_CUT]
             return _answer([result, head, *beyond, *tail], [*notes, *([NOTE_COVERED] if covered else [])])
         if changes.NO_CHANGE in up.lines and _health_sheet(snap.tree.items):
             # iOS's own Health access sheet takes touches and changes nothing. With a host dialog, a person is asked to

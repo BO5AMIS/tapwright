@@ -1,7 +1,8 @@
-"""Text read from the screen's picture (`look` with `ocr: true`): for screens whose elements say little, such as a
-game, a canvas or a web view. It runs RapidOCR (ONNX, on the CPU) on this computer, so nothing is added to the
-phone; it is the optional extra `pip install "tapwright[ocr]"`. What it reads are no elements: they get refs
-`o1`, `o2`… that a touch turns into a touch at their centre."""
+"""Text read from the screen's picture (`look` with `ocr: true`, and every look whose screen doesn't answer the whole
+accessibility read): for screens whose elements say little, such as a game, a canvas, a video feed or a web view.
+Tapwright 2.0's runner (route version 9) reads it on the phone with Apple's Vision (`of_runner` parses its answer);
+otherwise RapidOCR (ONNX, on the CPU) reads it on this computer, the optional extra `pip install "tapwright[ocr]"`.
+What it reads are no elements: they get refs `o1`, `o2`… that a touch turns into a touch at their centre."""
 from __future__ import annotations
 
 import importlib.util
@@ -41,6 +42,42 @@ def installed() -> bool:
 
 def available() -> bool:
     return reader is not None or installed()
+
+
+RUNNER_MIN = 0.3  # Vision's own confidence below which a reading is left out (it says 0.3 to 1.0 for real text)
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{value!r} isn't a number")
+    return float(value)
+
+
+def of_runner(value: object, screen: tuple[float, float]) -> list[Seen]:
+    """The runner's OCR answer (GET /wda/tw/ocr, route version 9: {"screen": [w, h], "lines": [{"text", "rect": [x, y,
+    w, h] in points, "confidence"}]}) as Seen lines in `screen`'s points (the runner's screen may be the other way up
+    in landscape), in reading order as `read` gives them. Raises ValueError for an answer that isn't one."""
+    if not isinstance(value, dict) or not isinstance(value.get("lines"), list):
+        raise ValueError("no lines")
+    sx = sy = 1.0
+    size = value.get("screen")
+    if isinstance(size, list) and len(size) == 2:
+        w, h = _number(size[0]), _number(size[1])
+        if w > 0 and h > 0:
+            sx, sy = screen[0] / w, screen[1] / h
+    found = []
+    for line in value["lines"]:
+        if not isinstance(line, dict):
+            raise ValueError("a line isn't an object")
+        text, rect = line.get("text"), line.get("rect")
+        if not isinstance(text, str) or not isinstance(rect, list) or len(rect) != 4:
+            raise ValueError("a line has no text or no rect")
+        x, y, w, h = (_number(v) for v in rect)
+        score = _number(line.get("confidence", 1.0))
+        if score < RUNNER_MIN or not text.strip() or w <= 0 or h <= 0:
+            continue
+        found.append(Seen(text.strip(), (x * sx, y * sy, w * sx, h * sy), score))
+    return sorted(found, key=lambda s: (round(s.rect[1] / 8), s.rect[0]))
 
 
 def read(image: bytes, screen: tuple[float, float]) -> list[Seen]:

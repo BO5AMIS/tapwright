@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.0.0
+
+- Screens that never answer accessibility reads in time (TikTok's For You feed, games, canvases, some web views) no
+  longer stop Tapwright. With the new runner (route version 9) every read is bounded: a tree read answers within its
+  budget (3 s; `TAPWRIGHT_TREE_BUDGET` in ms) with what it could read, and every other accessibility read stops after
+  3 s (`TAPWRIGHT_AX_TIMEOUT`). An app whose read was cut short gets a 0.6 s budget for the next 20 s, so a look there
+  doesn't cost 3 s each time; once it answers whole again, the normal budget comes back.
+- A look at such a screen still answers: its header says `Elements: none (this screen doesn't answer accessibility
+  reads)` or `Elements: partly read`, lists what it could read, and the text in the picture follows as `o1`, `o2`…
+  refs without asking (`ocr: false` leaves it out), with the picture.
+- Text from the picture is read on the phone by Apple's Vision when the runner has it (faster than this computer's CPU),
+  also for `look {ocr: true}`; RapidOCR on this computer (`pip install "tapwright[ocr]"`) is the fallback, and a failed
+  read on the phone falls back to it instead of failing the look. `TAPWRIGHT_RUNNER_OCR=0` reads only on this computer.
+- Actions on such a screen work: a tap or long press at `{x, y}` or an `o` ref, `swipe`, `scroll` (by direction, or at a
+  point), `press_button`, and `type_text` without a target (into the focused field; it isn't cleared first, and a saved
+  account's value isn't typed there). The answer says what was done and `Elements: none…`, with the picture after it
+  unless `screenshot: false`. A target by id, label, text or `e` ref there answers `not_found` with how to reach the
+  screen instead. `wait_for` a text also looks for it in the picture's text there.
+- A new session reads the screen's size without reading the app in front, so a screen that never answers no longer
+  holds up the connection. `not_answering` is now only for an app that blocks even these bounded reads.
+- MCP: an action's `screenshot` and look's `ocr` are unset by default (the daemon decides, as above); `false` still
+  turns them off. `--lazy-tools` and `--no-hints` list 1.8.5's tools as before.
+
 ## 1.10.0 (2026-11-21), "the Always-On Update"
 
 Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter
