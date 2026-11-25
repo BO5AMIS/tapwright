@@ -413,7 +413,12 @@ class Hands:
             return HandsError(f"the phone didn't ack a HID report within {SEND_WAIT:g} s; the {kind} may have been "
                               "played: look before acting again")
         if device_module._line_dropped(e.cause) or isinstance(e.cause, OSError):
-            return ConnectionLost(f"the HID link to the phone dropped: {e}")
+            # Not a ConnectionLost (lead's decision): that would rebuild the whole connection, runner included, and a
+            # new runner can cost iOS's passcode prompt. Only the HID connection is known to be gone: it was dropped
+            # above and is opened again on the same tunnel by the next gesture; a tunnel that is really dead shows
+            # in the runner's own requests.
+            return HandsError(f"the HID connection to the phone dropped ({e}); the {kind} may have been played: look "
+                              "before acting again")
         return HandsError(f"sending a HID report failed ({type(e.cause).__name__}: {e}); the {kind} may have been "
                           "played: look before acting again")
 

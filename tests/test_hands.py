@@ -222,11 +222,12 @@ def test_a_failed_send_mid_path_is_not_sent_again_and_leaves_hands_dirty():
     assert (left.x, left.y) != (touches(wire)[-1][0][1], touches(wire)[-1][0][2])
 
 
-def test_a_dropped_link_is_connection_lost():
+def test_a_dropped_hid_connection_is_unanswered_and_never_resets_the_runner():
     hands, wire, _ = make()
     wire.fail[0] = ConnectionResetError("reset")
-    with pytest.raises(ConnectionLost):
+    with pytest.raises(Unanswered) as e:
         asyncio.run(hands.tap(10, 10, 20))
+    assert not isinstance(e.value, ConnectionLost) and "may have been played" in str(e.value)
 
 
 def test_a_send_that_never_acks_is_unanswered(monkeypatch):
