@@ -37,6 +37,7 @@ PHASES = {"touch": ("scope", "act", "still", "read", "resolved", "policy", "guar
                     "returned"),
           "read": ("sent", "received", "parsed", "built")}
 TOUCH_SUFFIXES = ("/wda/tw/tap", "/wda/tw/drag", "/actions")  # the routes a touch goes by (fast tap, fast drag, W3C)
+HANDS_PREFIX = "/hands/"  # a touch through the hands (CoreDevice HID, Session._by_hands): no request, traced as one
 READ_SUFFIX = "/wda/tw/tree"  # the fork's compact read (route version 4): a tree read as /source is
 
 _path: Path | None = None  # where lines go; None: off
@@ -189,7 +190,7 @@ def request(method: str, path: str) -> Pending | None:
     if _path is None:
         return None
     route = path.split("?", 1)[0]
-    if method == "POST" and route.endswith(TOUCH_SUFFIXES):
+    if method == "POST" and (route.endswith(TOUCH_SUFFIXES) or route.startswith(HANDS_PREFIX)):
         rec = _active.get()
         if rec is None:
             return None

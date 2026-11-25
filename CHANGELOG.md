@@ -6,6 +6,16 @@
   the cable's own channel (usbmuxd) instead of through the developer tunnel: a status check answers in 1 ms, a screenshot
   in about 240 ms instead of 400 ms. The tunnel stays for starting the runner and for what needs it, and carries
   everything on Wi-Fi, or over USB when `TAPWRIGHT_DIRECT=0` is set.
+- Hands: taps, long presses, swipes, scrolls and drags go from the computer straight to the phone's touchscreen through
+  CoreDevice HID, on the connection Tapwright already has. No XCTest touch synthesis: a tap is played in about 50 ms
+  instead of about 300, works while an app plays video, and in landscape too. Free swipes move as a finger does (a short
+  rest, an eased start and end, a slight curve); scrolls keep their shape, so a list still stops where the finger does.
+  `TAPWRIGHT_HUMAN=0` keeps straight swipes. Where HID can't be used (iOS older than 18, iOS 27 until the display stream
+  lands, or `TAPWRIGHT_HANDS=runner`), touches go through the runner as before; `TAPWRIGHT_HANDS_LANDSCAPE=0` leaves
+  landscape to the runner.
+- `press_button lock` locks the phone (the runner can't); `home` and the volume buttons are pressed through HID too.
+- `pinch`: two fingers spread (`scale` above 1, zoom in) or pinched (below 1, zoom out) about a point. Needs HID.
+- Needs pymobiledevice3 11.63 or later.
 
 ## 1.10.0 (2026-11-21), "the Always-On Update"
 

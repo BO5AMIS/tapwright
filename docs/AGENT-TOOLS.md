@@ -232,7 +232,8 @@ Arguments: `action`, `name`, `dry_run`, `look`, `screenshot`, `brief`.
 
 ### press_button
 
-Press a hardware button: `home`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; `open_app` brings it back.
+Press a hardware button: `home`, `lock`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps running; `open_app` brings it back. `lock` locks the phone (CoreDevice HID only: `unsupported` without it); `unlock` opens it again.
+Tapwright 2.0: with CoreDevice HID (iOS 18 to 26) every button is pressed from the computer, in about 50 ms; without it `home`, `volumeUp` and `volumeDown` go through the runner as before. `--no-hints` and `--lazy-tools` list 1.8.5's names (no `lock`); the daemon takes it from any caller.
 Tapwright: iOS reports the phone as locked while Notification Center is pulled down over an unlocked phone; `home` then closes it, only when a fresh read proves that sheet (its header and its Clear button on the screen, on one row, the header not a notification's text, and an enabled flashlight). Otherwise nothing is pressed (`locked`: "the phone reads as locked (or Notification Center is open where Tapwright can't prove it)"). A lit lock screen showing the same sheet may pass the proof, and Home there may wake Face ID: Pause in the live view is the owner's stop.
 
 Arguments: `name`, `look`, `screenshot`, `brief`.
@@ -251,6 +252,12 @@ Drag from `x0, y0` to `x1, y1`, in points, over `seconds` (default 0.35). For sl
 Tapwright: makes a real drag along the line, ending slowly so a list stops where the finger does.
 
 Arguments: `x0`, `y0`, `x1`, `y1`, `seconds`, `look`, `screenshot`, `dry_run`, `brief`.
+
+### pinch
+
+Tapwright 2.0 only. Pinch or spread two fingers about a point (`x`, `y`, in points), as on a photo or a map: `scale` above 1 spreads them to zoom in (2 = twice as far apart), below 1 pinches them to zoom out (0.2 to 5, not 1); `seconds` is how long the fingers move (0.1 to 3, default 0.5). The fingers lie on the horizontal line through the point, 60 points apart at the narrow end, and stay 10 points inside the screen's edges, so near an edge they spread less than asked. Needs touches through CoreDevice HID (iOS 18 to 26 today): `unsupported` otherwise, with nothing touched. Not listed with `--no-hints` or `--lazy-tools` (1.8.5's tools); the daemon takes it from any caller.
+
+Arguments: `x`, `y`, `scale`, `seconds`, `look`, `screenshot`, `brief`.
 
 ### rotate
 

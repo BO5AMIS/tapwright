@@ -29,6 +29,7 @@ EXPECTED = {
     "press_button": {"name", "look", "screenshot", "brief"},
     "unlock": set(),  # 1.7.8, Tapwright only: the passcode comes from serve's own vault, never from the call
     "swipe": {"x0", "y0", "x1", "y1", "seconds", "look", "screenshot", "dry_run", "brief"},
+    "pinch": {"x", "y", "scale", "seconds", "look", "screenshot", "brief"},  # 2.0, Tapwright only (CoreDevice HID)
     "rotate": {"to", "look", "screenshot", "brief"},
     "explore": {"minutes", "steps", "depth", "from", "focus", "fill", "continue", "guide"},  # (no account in 1.8.0: R180 M3)
     "bug_report": {"finding", "run", "from", "note", "expected", "verify", "reset", "account", "bug", "with_picture",
@@ -49,7 +50,7 @@ EXPECTED = {
 }
 REQUIRED = {"compare_screen": ["name"], "run": ["steps"], "tap": ["target"], "long_press": ["target"], "toggle": ["target"], "type_text": ["text"],
             "open_url": ["url"], "wait": ["seconds"], "open_app": ["app"], "close_app": ["app"],
-            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "rotate": ["to"], "network": ["mode"]}
+            "alert": ["action"], "press_button": ["name"], "swipe": ["x0", "y0", "x1", "y1"], "pinch": ["x", "y", "scale"], "rotate": ["to"], "network": ["mode"]}
 DEFAULTS = {
     "look": {"screenshot": True, "width": 600, "labels": False, "ocr": False},
     "tap": {"force": False, "look": True, "screenshot": False, "dry_run": False},
@@ -100,7 +101,7 @@ def test_enums_are_literals():
         prop = tools[tool].input_schema["properties"][arg]
         return set(prop.get("enum") or [v for part in prop.get("anyOf", []) for v in part.get("enum", [])])
     assert enum("alert", "action") == {"accept", "dismiss", "text", "cancel"}
-    assert enum("press_button", "name") == {"home", "volumeUp", "volumeDown"}
+    assert enum("press_button", "name") == {"home", "lock", "volumeUp", "volumeDown"}  # (2.0: lock by HID)
     assert enum("scroll", "direction") == {"up", "down", "left", "right"}
     assert enum("scroll", "to") == {"start", "end", "target"}
 

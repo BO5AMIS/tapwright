@@ -719,7 +719,17 @@ def _default_daemon(log, phone: str | None):
     actions = actionlog.ActionLog(actionlog.default_folder() if actionlog.enabled() else None, report=log)
     from .auditlog import AuditLog
     # the audit log (§23) has no off switch: --no-log turns off the action log only
-    return Daemon(Session(Device(host=phone, log=log)), log=log, actions=actions, audit=AuditLog())
+    device = Device(host=phone, log=log)
+    session = Session(device)
+    # (2.0) the hands: touches and buttons through CoreDevice HID on the device's own tunnel, opened with the first
+    # touch; they log one line when they come up ("hands: CoreDevice HID (touchscreen 257)") or why not
+    from . import session as session_module
+    if session_module.HANDS != "runner":
+        from .hands import Hands
+        session.hands = Hands(device, log=log)
+    else:
+        log("hands: off (TAPWRIGHT_HANDS=runner): touches go through the runner")
+    return Daemon(session, log=log, actions=actions, audit=AuditLog())
 
 
 def _lock_instance():
