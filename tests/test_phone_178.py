@@ -402,3 +402,20 @@ def test_home_over_notification_center_asks_no_person_first():
         assert not d._needs
         await finish(stop, task)
     run(go)
+
+
+def test_unlock_asks_the_phone_when_the_heartbeat_hasnt_seen_the_lock_yet(tmp_path):
+    """(2.0, phone test 2026-11-26) `press_button lock`, then `unlock` 2.5 s later, answered "The phone isn't locked."
+    on a locked phone: the daemon's state was still `live` until its next heartbeat."""
+    async def go():
+        d, s = locked_daemon(tmp_path, phone=False)
+        s.is_locked = False
+        d.heartbeat = 60  # the heartbeat won't notice in time
+        stop, task = await started(d, until=("live",))
+        s.is_locked = True  # the phone locks; the state still says live
+        assert d.state == "live"
+        r = await d.run_tool("a", "unlock", {})
+        assert r["text"].splitlines()[0] != "The phone isn't locked."
+        assert d.lock_screen.calls or d.lock_screen.pressed  # the unlock was tried
+        await finish(stop, task)
+    run(go)

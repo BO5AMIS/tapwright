@@ -5932,6 +5932,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if isinstance(self.stuck, PhoneLocked):  # the connect found it locked: no session to type through yet
                 raise Refused("locked", UNLOCK_NOT_YET)
             await self.wait_connected()
+        if self.state == "live":
+            # (2.0, phone test 2026-11-26) the heartbeat may not have seen a lock yet: `press_button lock` and `unlock`
+            # 2.5 s later answered "The phone isn't locked." on a locked phone. Ask the phone now (about 10 ms).
+            try:
+                if await self.control.read(lambda: self._connected_only(self.session.locked)):
+                    self._set_state("locked", "unlock the phone")
+            except (Refused, DeviceError):
+                pass  # (it can't say: the state as it was)
         if self.state != "locked":
             return _answer(["The phone isn't locked."], [])
         if self.passcode_for() is None:
