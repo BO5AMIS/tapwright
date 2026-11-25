@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -110,7 +111,11 @@ BOUNDED_VERSION = 9
 VERSION_PATH = "/wda/tw/version"  # (without a session: asked in ensure, before the session exists)
 SCREEN_PATH = "/wda/tw/screen"
 OCR_PATH = "/wda/tw/ocr"
-OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level reads a screen in about 0.3 s)
+OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: about 0.5-1.5 s, and the shot first)
+# BCP 47 codes, comma-separated, in order of preference, for the runner's OCR (Vision's recognitionLanguages), e.g.
+# "en-US,ar-SA"; empty: Vision's default (English). Vision's fast level reads Latin script only; a language the level
+# doesn't support fails the read, and the picture is then read on this computer instead
+OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
 TIERS = ("full", "shallow", "root")
 
 
@@ -333,13 +338,16 @@ class Session:
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
-        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
-        # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
-        locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
-        # (2.0) the runner's route version, by the route that needs no session and reads nothing of the app: version 9
-        # gives the screen's size without reading the app either, so a screen that never answers doesn't hold this up
+        # (2.0) the runner's route version, by the route that needs no session and reads nothing of the app. Version 9
+        # bounds every accessibility read by twAXTimeout, which each POST /session resets: given as a capability it
+        # bounds the session's own start too (RUNNER-V9-PROTOCOL §2), and the screen's size comes without reading the
+        # app, so a screen that never answers doesn't hold the connection up
         version = await self._probe_version()
         bounded = version is not None and version >= BOUNDED_VERSION
+        wanted = {"twAXTimeout": AX_TIMEOUT} if bounded else {}
+        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": wanted}}))["sessionId"]
+        # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
+        locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
         try:
             screen = await self._screen_of_runner() if bounded else None
             if screen is None:
@@ -370,7 +378,8 @@ class Session:
             answer = await self.device.http("GET", VERSION_PATH, timeout=LOCK_WAIT)
         except DeviceError as e:
             said = str(e).lower()
-            return 0 if not isinstance(e, ConnectionLost) and ("unknown command" in said or "unknown method" in said)                 else None
+            unknown = "unknown command" in said or "unknown method" in said
+            return 0 if unknown and not isinstance(e, ConnectionLost) else None
         value = answer.get("value") if isinstance(answer, dict) else None
         version = value.get("tapwright") if isinstance(value, dict) else None
         return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else None
@@ -764,7 +773,9 @@ class Session:
         runner can't (the caller reads the picture on this computer instead)."""
         if level not in ("fast", "accurate"):
             raise ValueError(f"level must be fast or accurate, not {level!r}")
-        answer = await self._call("GET", f"{OCR_PATH}?level={level}", timeout=OCR_WAIT, again=False)
+        languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
+        path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
+        answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
         value = answer.get("value", answer) if isinstance(answer, dict) else None
         if isinstance(value, dict) and isinstance(value.get("ms"), dict):
             trace.note("ocr_wda_ms", {k: v for k, v in value["ms"].items()

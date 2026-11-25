@@ -12,7 +12,8 @@
   refs without asking (`ocr: false` leaves it out), with the picture.
 - Text from the picture is read on the phone by Apple's Vision when the runner has it (faster than this computer's CPU),
   also for `look {ocr: true}`; RapidOCR on this computer (`pip install "tapwright[ocr]"`) is the fallback, and a failed
-  read on the phone falls back to it instead of failing the look. `TAPWRIGHT_RUNNER_OCR=0` reads only on this computer.
+  read on the phone falls back to it instead of failing the look. `TAPWRIGHT_RUNNER_OCR=0` reads only on this computer;
+  `TAPWRIGHT_OCR_LANGUAGES` (e.g. `en-US,ar-SA`) sets the languages the phone reads.
 - Actions on such a screen work: a tap or long press at `{x, y}` or an `o` ref, `swipe`, `scroll` (by direction, or at a
   point), `press_button`, and `type_text` without a target (into the focused field; it isn't cleared first, and a saved
   account's value isn't typed there). The answer says what was done and `Elements: none…`, with the picture after it

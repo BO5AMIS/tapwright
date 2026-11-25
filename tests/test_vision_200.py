@@ -91,6 +91,10 @@ def test_a_v9_session_starts_without_reading_the_app_and_sets_the_ax_timeout(sta
     assert s.screen == (430.0, 932.0) and s.scale == 3.0 and s.scale_read and s.bounded
     settings = next(body for m, p, body in runner.requests if p.endswith("/appium/settings"))["settings"]
     assert settings["twAXTimeout"] == session_module.AX_TIMEOUT == 3.0
+    # each POST /session resets it, and only the capability bounds the session's own start (RUNNER-V9-PROTOCOL §2)
+    assert paths.index("/wda/tw/version") < paths.index("/session")
+    created = next(body for m, p, body in runner.requests if p == "/session")
+    assert created == {"capabilities": {"alwaysMatch": {"twAXTimeout": 3.0}}}
     assert s.tw_version == 9 and s.fast_tap and s.fast_drag  # (the probe's answer: not asked again on a session route)
     asyncio.run(s.refresh())
     assert runner.paths("/wda/tw/version") == ["/wda/tw/version"]
@@ -104,6 +108,7 @@ def test_an_older_runner_starts_as_in_1_10(state):
         assert "/session/S/window/size" in paths and "/wda/tw/screen" not in paths
         settings = next(body for m, p, body in runner.requests if p.endswith("/appium/settings"))["settings"]
         assert "twAXTimeout" not in settings and not s.bounded
+        assert next(body for m, p, body in runner.requests if p == "/session") == {"capabilities": {"alwaysMatch": {}}}
     assert s.tw_version == 0 and s.fast_tap is False  # Appium's build said "unknown command": known, not asked again
 
 
@@ -249,7 +254,7 @@ def test_the_runners_ocr_answer_is_placed_in_points_in_reading_order():
             ocr.of_runner(bad, (430.0, 932.0))
 
 
-def test_the_session_reads_text_on_the_phone(state):
+def test_the_session_reads_text_on_the_phone(state, monkeypatch):
     runner = V9Runner()
     runner.ocr_value = {"screen": [430, 932], "ms": {"shot": 40, "ocr": 210},
                         "lines": [{"text": "For You", "rect": [220, 61, 70, 20], "confidence": 1.0}]}
@@ -258,6 +263,9 @@ def test_the_session_reads_text_on_the_phone(state):
     assert s.reads_text()
     seen = asyncio.run(s.read_text("fast"))
     assert [x.text for x in seen] == ["For You"] and runner.paths("/wda/tw/ocr") == ["/wda/tw/ocr?level=fast"]
+    monkeypatch.setattr(session_module, "OCR_LANGUAGES", " en-US, ar-SA ,")
+    asyncio.run(s.read_text())
+    assert runner.paths("/wda/tw/ocr")[-1] == "/wda/tw/ocr?level=accurate&languages=en-US,ar-SA"
     runner.ocr_value = {"no": "lines"}
     with pytest.raises(DeviceError):
         asyncio.run(s.read_text())
