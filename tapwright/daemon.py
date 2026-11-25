@@ -50,7 +50,11 @@ from .stream import (ALIKE_TOLERANCE, NO_IDLE_WAIT, PRESETS, Frame, FrameHub, Pi
 
 PROTOCOL = 1
 ACCEPTS = ["tap", "longPress", "drag", "scroll", "text", "enter", "backspace", "home", "volume", "quality"]
-BUTTONS = ("home", "volumeUp", "volumeDown")
+BUTTONS = ("home", "volumeUp", "volumeDown")  # the live view's buttons
+# press_button's (2.0: `lock` through the hands, CoreDevice HID; XCTest can't press it)
+AGENT_BUTTONS = ("home", "lock", "volumeUp", "volumeDown")
+PINCH_SCALE = (0.2, 5.0)  # the least and most a pinch may zoom by
+PINCH_SECONDS = (0.1, 3.0)
 STILL = 0.1  # seconds without a changed frame before a screen counts as still (docs/AGENT-TOOLS.md §6)
 RESOLVE_SETTLE = 1.0  # the longest a silent re-read waits for the screen to be still
 CAP = 2.0  # the longest an action's answer waits for the screen
@@ -62,7 +66,7 @@ CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, 
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
 # the agent tools that act, each written to the action log; reads (look, apps, wait_for, viewer) aren't
-LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "open_url", "open_app",
+LOGGED = frozenset({"tap", "long_press", "type_text", "scroll", "toggle", "back", "swipe", "pinch", "open_url", "open_app",
                     "close_app", "alert", "press_button", "rotate", "performance", "logs", "crash", "wait", "network", "media",
                     "unlock"})
 # AGENT-TOOLS §16.1: reads are logged too, with "kind": "read" (the ones in LOGGED above, and these)
@@ -504,7 +508,7 @@ def _size(jpeg: bytes | None) -> list[int] | None:
 
 MARK_NAME_MAX = 32  # characters of an element's name in the live view (VIEWER-PROTOCOL 1.4)
 CAPTION_MAX = 60  # characters of a step's caption (VIEWER-PROTOCOL 1.4)
-BUTTON_CAPTIONS = {"home": "Home", "volumeUp": "Volume up", "volumeDown": "Volume down"}
+BUTTON_CAPTIONS = {"home": "Home", "lock": "Lock the phone", "volumeUp": "Volume up", "volumeDown": "Volume down"}
 
 
 def element_name(result: str) -> str:
@@ -557,6 +561,8 @@ def step_caption(tool: str, result: str, args: dict) -> str | None:
             text = f"Scroll {args.get('direction') or {'end': 'down', 'start': 'up'}.get(to or '', '')}"
     elif tool == "swipe":
         text = "Swipe"
+    elif tool == "pinch":
+        text = "Zoom in" if float(args.get("scale") or 1) >= 1 else "Zoom out"
     elif tool == "toggle":
         text = f"Switch {quoted}"
     elif tool == "back":
@@ -680,6 +686,19 @@ def _checked(name: str, args: dict) -> dict:
         for key in ("replace", "submit", "force"):
             if key in args and not isinstance(args[key], bool):
                 raise Refused("bad_params", f"{key} must be true or false, not {args[key]!r}")
+    if name == "press_button" and args.get("name") not in AGENT_BUTTONS:
+        raise Refused("bad_params", f"name must be one of {', '.join(AGENT_BUTTONS)}, not {args.get('name')!r}")
+    if name == "pinch":
+        for key in ("x", "y", "scale"):
+            if (number := _number(args, key)) is not None:
+                checked[key] = number
+        low, high = PINCH_SCALE
+        if "scale" in checked and not (low <= checked["scale"] <= high and checked["scale"] != 1):
+            raise Refused("bad_params", f"scale must be from {low:g} to {high:g} and not 1 (above 1 spreads the fingers "
+                                        f"to zoom in, below 1 pinches them to zoom out), not {args.get('scale')!r}")
+        low, high = PINCH_SECONDS
+        if "seconds" in checked and not low <= checked["seconds"] <= high:
+            raise Refused("bad_params", f"seconds must be from {low:g} to {high:g}, not {args.get('seconds')!r}")
     if name == "rotate" and args.get("to") not in ("portrait", "landscape_left", "landscape_right"):
         raise Refused("bad_params", f"to must be portrait, landscape_left or landscape_right, not {args.get('to')!r}")
     if name == "alert" and args.get("action") not in ALERT_ACTIONS:
@@ -996,6 +1015,19 @@ def app_line(a: dict) -> str:
     return f"{a['bundle_id']}  {a['name']} {a['version']} ({a['build']})"
 
 
+async def _pinch(s, a: dict) -> str:
+    """`pinch` (2.0): two fingers through the hands (Session.pinch); a session without them answers unsupported."""
+    pinch = getattr(s, "pinch", None)
+    if pinch is None:
+        raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this Tapwright session doesn't "
+                                     "have; nothing was touched.")
+    x, y = float(a["x"]), float(a["y"])
+    w, h = s.screen
+    if not (0 <= x <= w and 0 <= y <= h):
+        raise Refused("bad_params", f"({x:g}, {y:g}) is off the screen ({w:g} x {h:g} points)")
+    return await pinch(x, y, float(a["scale"]), int(float(a.get("seconds", 0.5)) * 1000))
+
+
 def _target(a: dict) -> ui.Target:
     return a["target"]  # parsed by _checked; tap and long_press require it
 
@@ -1013,6 +1045,7 @@ ACTIONS = {
     "swipe": (lambda s, a: s.swipe(float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"]),
                                    int(float(a.get("seconds", 0.35)) * 1000)), CAP),
     "press_button": (lambda s, a: s.press_button(a["name"]), CAP),
+    "pinch": (lambda s, a: _pinch(s, a), CAP),
     "alert": (lambda s, a: s.alert(a["action"]), CAP),
     "open_url": (lambda s, a: s.open_url(a["url"]), LONG_CAP),
     "rotate": (lambda s, a: s.rotate(a["to"]), CAP),
@@ -1078,7 +1111,7 @@ MIN_VISIBLE = 10.0  # points: less of an element showing than this (high or wide
 # "Notifications" row at y 10 scrolled the list instead (seen on the phone 2026-11-11). 50 pt covers the status
 # bar of the current iPhones (47 to 54); in landscape an iPhone shows none.
 STATUS_BAR = 50.0
-MOVES_CONTENT = ("scroll", "swipe")  # a drag: identical elements can't be told apart after these
+MOVES_CONTENT = ("scroll", "swipe", "pinch")  # a drag: identical elements can't be told apart after these
 # These may show the same screen again, somewhere else in it, or another: the elements say which. Calling each a
 # move gave every element without an identifier a new ref, as a `+` and a `-` line for the same thing (seen on
 # the phone 2026-11-10: open_url to the screen already open).
@@ -1116,7 +1149,7 @@ BUNDLE_ID = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 SPECIAL = ("wait", "wait_for", "performance", "network", "media")
 REQUIRED = {"network": ("mode",), "rotate": ("to",), "open_app": ("app",), "close_app": ("app",), "toggle": ("target",), "wait": ("seconds",),
             "type_text": ("text",), "tap": ("target",), "long_press": ("target",),
-            "swipe": ("x0", "y0", "x1", "y1"), "press_button": ("name",), "alert": ("action",),
+            "swipe": ("x0", "y0", "x1", "y1"), "pinch": ("x", "y", "scale"), "press_button": ("name",), "alert": ("action",),
             "open_url": ("url",), "compare_screen": ("name",)}
 
 

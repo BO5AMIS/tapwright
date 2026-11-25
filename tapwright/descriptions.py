@@ -335,6 +335,12 @@ EXTRA = {
         'opens the authenticated whole-phone live view in a local browser for the owner.'
     ),
     'swipe': 'makes a real drag along the line, ending slowly so a list stops where the finger does.',
+    'pinch': (
+        'Pinch or spread two fingers about a point (`x`, `y` in points), as on a photo or a map: `scale` above 1 '
+        'spreads them to zoom in (2 = twice as far apart), below 1 pinches to zoom out; `seconds` is how long the '
+        'fingers move (0.5). Near an edge the fingers spread less than asked. Needs touches through CoreDevice HID '
+        '(Tapwright 2.0 on iOS 18 to 26): `unsupported` otherwise, with nothing touched.'
+    ),
     'run': '`expect` looks at what is on the screen.',
     'audit': "runs XCTest's own audit and adds `duplicate_id`.",
     'close_app': (
@@ -405,6 +411,12 @@ EXTRA_185 = {
 # 1.8.5's words byte for byte (tests/data/tools_185.json). The unlock: an unlock that works isn't limited, and never on
 # another SpringBoard keypad (review R191 item 7, L9).
 SHARED_1100 = {
+    # (2.0) `lock` through CoreDevice HID: the runner can't press it
+    'press_button': (
+        'Press a hardware button: `home`, `lock`, `volumeUp` or `volumeDown`. `home` leaves the app, which keeps '
+        'running; `open_app` brings it back. `lock` locks the phone (CoreDevice HID only: `unsupported` without it); '
+        '`unlock` opens it again.'
+    ),
     'unlock': (
         'Unlock a locked phone with the passcode saved for it (the vault Tapwright was started with, `--accounts FILE`, '
         '`phone.passcode`). You never see or send the passcode: the tool types it on iOS\'s own lock screen, never on '

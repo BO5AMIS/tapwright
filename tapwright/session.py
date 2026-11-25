@@ -5,6 +5,7 @@ import base64
 import contextvars
 import io
 import os
+import random
 import re
 import secrets
 import time
@@ -12,7 +13,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from . import device as device_module
-from . import media, store, trace, ui
+from . import hands as hands_module
+from . import media, motion, store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 from .stream import NO_IDLE_WAIT
@@ -100,8 +102,29 @@ HIT_CHECK = os.environ.get("TAPWRIGHT_HIT_CHECK", "1")
 HIT_PATH = "/wda/tw/hit"  # (without a session: it asks XCTest's daemon, not the session's app)
 HIT_IDENTITY_REFUSED = "tapwright hit: identity_unproven"  # terminal: the snapshot couldn't be bound to the AX hit
 HIT_WAIT = 5.0  # point lookup (0.3 s), direct attributes (2 s), then exact-identity app fallback (2 s)
+# Tapwright 2.0 hands (SPEC-2.0 D1): touches and buttons sent from the computer through CoreDevice HID (hands.py) when
+# the session has Hands and they can be used; the runner's synthesis otherwise, as before. TAPWRIGHT_HANDS=runner keeps
+# everything on the runner. The trace counts a hands gesture as a touch (trace.TOUCH_SUFFIXES).
+HANDS = os.environ.get("TAPWRIGHT_HANDS", "auto")
+HANDS_PATH = "/hands"
+# press_button's names -> hands.BUTTONS' (lock is hands-only: XCTest can't press it)
+HAND_BUTTONS = {"home": "home", "lock": "lock", "volumeUp": "volume_up", "volumeDown": "volume_down"}
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
+
+
+PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
+PINCH_MARGIN = 10.0  # points a pinch's fingers stay inside the screen's edges
+
+
+def pinch_spread(x: float, y: float, scale: float, screen: tuple[float, float]) -> tuple[float, float]:
+    """(start, end) distance of each of a pinch's two fingers from (x, y), along the horizontal line through it: from
+    PINCH_GAP / 2 out to `scale` times that (scale > 1), or the other way (scale < 1), kept PINCH_MARGIN inside the
+    screen (so a pinch near an edge spreads less than asked)."""
+    room = max(1.0, min(x, screen[0] - x) - PINCH_MARGIN)
+    narrow = min(PINCH_GAP / 2, room)
+    wide = min(narrow * max(scale, 1 / scale), room)
+    return (narrow, wide) if scale >= 1 else (wide, narrow)
 
 
 class FrontUnchecked(Refused):
@@ -244,6 +267,10 @@ class Session:
         # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
         # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
         self.on_tree = None
+        # Tapwright 2.0: the HID hands (hands.Hands), set by the server for the real phone; None (tests' fakes, or no
+        # hands): every touch goes through the runner. motion_rng shapes human-like taps and swipes (motion.py).
+        self.hands: "hands_module.Hands | None" = None
+        self.motion_rng = random.Random()
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -714,7 +741,10 @@ class Session:
     async def _fast_tap(self, x: float, y: float, hold_ms: int) -> bool:
         """Touch through the fork's fast tap route when this runner has it (see FAST_TAP). False when the touch is
         left to W3C actions: no route, not portrait (the route's points are portrait screen points), or an error
-        that says nothing was played. An error that may come after the touch was played is raised, never retried."""
+        that says nothing was played. An error that may come after the touch was played is raised, never retried.
+        Hands (HID) go first when they can be used: they need no runner route and work in landscape too."""
+        if await self._hands_tap(x, y, hold_ms):
+            return True
         if FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
         await self.ensure()
@@ -742,6 +772,93 @@ class Session:
         if checked:
             self.front_apps = None  # the app in front was one of them as the touch went out: the check is done
         return True
+
+    def hands_on(self) -> bool:
+        """May the next touch try the hands? Not with TAPWRIGHT_HANDS=runner, not without Hands, and not while a tap
+        is to check the app in front itself (front_apps: only the runner's tap can)."""
+        return self.hands is not None and HANDS != "runner" and self.front_apps is None
+
+    async def _by_hands(self, what: str, act: "Callable[[Callable[[], Awaitable[None]]], Awaitable[None]]",
+                        input_: bool = True) -> bool:
+        """Play a gesture through the hands: `act(before)` sends it, awaiting `before` right before its first report.
+        `before` makes the checks a runner request makes in _timed (the execution guard, then the one-use input check
+        for an input), and the trace notes the touch. False, with nothing sent, when the hands can't be used
+        (HandsUnavailable): the caller uses the runner, as before. Anything else is raised as it came (ConnectionLost,
+        HandsError = Unanswered: it may have been played; or a guard's refusal: nothing was sent)."""
+        if not self.hands_on():
+            return False
+        await self.ensure()  # (the tunnel, and the screen's size from the runner's session)
+        validate = self.before_input if input_ else None
+        pending: list = []
+
+        async def before() -> None:
+            guard = getattr(self, "execution_guard", None)
+            if guard is not None:
+                await guard()
+            if validate is not None:
+                await validate(self.input_point)
+            pending.append(None if QUIET.get() else trace.request("POST", f"{HANDS_PATH}/{what}"))
+
+        began = time.monotonic()
+        try:
+            await act(before)
+        except hands_module.HandsUnavailable:
+            return False
+        except BaseException:
+            if pending:
+                trace.response(pending[0], ok=False)
+            raise
+        if validate is not None and self.before_input is validate:
+            self.before_input = None
+        if pending:
+            trace.response(pending[0], {})
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(
+                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms")
+        return True
+
+    async def _hands_tap(self, x: float, y: float, hold_ms: int) -> bool:
+        """A tap or long press through the hands. A plain tap (TAP_MS) gets a human hold and lands within a point of
+        its target (motion.tap); a long press keeps its hold."""
+        hands = self.hands
+        if hands is None or not self.hands_on():
+            return False
+        if hold_ms == TAP_MS:
+            hx, hy, held = motion.tap(x, y, self.motion_rng)
+            if held:
+                x, y, hold_ms = hx, hy, held
+        return await self._by_hands("tap", lambda before: hands.tap(x, y, hold_ms, screen=self.screen,
+                                                                    turn=self.turn, before=before))
+
+    async def hands_keys(self, text: str) -> bool:
+        """Type US-ASCII text into whatever has focus through the HID keyboard (for later use: type_text still goes
+        through the runner). False when the hands can't be used; hands.Untypable before anything is sent."""
+        hands = self.hands
+        if hands is None:
+            return False
+        hands_module.plan_keys(text)  # (Untypable before any guard or touch hook runs)
+        return await self._by_hands("keys", lambda before: hands.keys(text, before=before))
+
+    async def pinch(self, x: float, y: float, scale: float, ms: int = 500) -> str:
+        """Two fingers about (x, y), moving apart (scale > 1: zoom in) or together (scale < 1) along a line through it,
+        over `ms`. Hands only: Refused(unsupported) when they can't be used (nothing was touched)."""
+        hands = self.hands
+        if hands is None or not self.hands_on():
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this phone or Tapwright "
+                                         "setup doesn't have; nothing was touched.")
+        self.typed_into = None
+        await self.ensure()
+        near, far = pinch_spread(x, y, scale, self.screen)
+        await self._touching(ms, (x, y))
+        ends = [(-1.0, 0.0), (1.0, 0.0)]
+        paths = [[(0.0, x + dx * near, y + dy * near), (float(ms), x + dx * far, y + dy * far)] for dx, dy in ends]
+        if not await self._by_hands("pinch", lambda before: hands.multi(paths, screen=self.screen, turn=self.turn,
+                                                                         before=before)):
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, and they can't be used now; "
+                                         "nothing was touched.")
+        self.last_point = (x, y)
+        return f"{'spread' if scale >= 1 else 'pinched'} two fingers at ({round(x)}, {round(y)}), " \
+               f"{2 * near:.0f} -> {2 * far:.0f} pt apart"
 
     async def hit_at(self, x: float, y: float) -> ui.Hit | None:
         """The element a touch at (x, y) would land on, as the fork's hit test says (HIT_PATH, route version 5). None
@@ -914,15 +1031,23 @@ class Session:
         deleted = value.get("deleted") if isinstance(value, dict) else None
         return deleted if isinstance(deleted, int) and not isinstance(deleted, bool) else 0
 
-    async def _drag(self, points: list, w3c: dict) -> None:
+    async def _drag(self, points: list, w3c: dict, shaped: list | None = None) -> None:
         """Play a finger path, [(t_ms from the press, x, y), ...] in points: through the fork's fast drag route when
-        this runner has it (see FAST_DRAG), else as the W3C actions `w3c`, which describe the same path."""
-        if not await self._fast_drag(points):
+        this runner has it (see FAST_DRAG), else as the W3C actions `w3c`, which describe the same path. `shaped`: the
+        human-like version of a free swipe (motion.swipe), played instead of `points` when hands play it."""
+        if not await self._fast_drag(points, shaped):
             await self._call("POST", "/session/{sid}/actions", w3c, timeout=points[-1][0] / 1000 + ACTION_WAIT)
 
-    async def _fast_drag(self, points: list) -> bool:
+    async def _fast_drag(self, points: list, shaped: list | None = None) -> bool:
         """False when the drag is left to W3C actions: no route, not portrait, or an error that says nothing was
-        played. An error that may come after the drag was played is raised, never retried: it would scroll twice."""
+        played. An error that may come after the drag was played is raised, never retried: it would scroll twice.
+        Hands (HID) go first when they can be used."""
+        hands = self.hands
+        if hands is not None:
+            path = shaped or points
+            if await self._by_hands("drag", lambda before: hands.path(path, screen=self.screen, turn=self.turn,
+                                                                      before=before)):
+                return True
         if FAST_DRAG == "0" or FAST_TAP == "0" or self.turn != 0 or self.screen[0] > self.screen[1]:
             return False
         await self.ensure()
@@ -1237,8 +1362,11 @@ class Session:
     async def swipe(self, x0: float, y0: float, x1: float, y1: float, duration_ms: int = 350, hold_ms: int = 0) -> str:
         self.typed_into = None
         await self._touching(duration_ms + hold_ms, (x0, y0))
+        # a free swipe through the hands moves as a person's finger does (motion.swipe); one that rests at its end
+        # (hold_ms) keeps the straight shape, as scroll drags keep theirs
+        shaped = motion.swipe(x0, y0, x1, y1, duration_ms, self.motion_rng) if motion.HUMAN and not hold_ms else None
         await self._drag(ui.swipe_points(x0, y0, x1, y1, duration_ms, hold_ms),
-                         ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms))
+                         ui.swipe(x0, y0, x1, y1, duration_ms, hold_ms), shaped)
         self.last_point = (x0, y0)
         return f"swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
 
@@ -1259,7 +1387,16 @@ class Session:
         return f"dragged through {len(points)} points"
 
     async def press_button(self, name: str) -> str:
+        """A hardware button: through the hands when they can be used (lock only there: XCTest can't press it), else
+        the runner (home by its home-screen route, which waits for the home screen)."""
         self.typed_into = None
+        hands, hand = self.hands, HAND_BUTTONS.get(name)
+        if hands is not None and hand is not None and await self._by_hands(
+                "button", lambda before: hands.button(hand, before=before), input_=False):
+            return f"pressed {name}"
+        if name == "lock":
+            raise Refused("unsupported", "lock needs CoreDevice HID, which this phone or Tapwright setup doesn't have "
+                                         "(the runner can't press it); nothing was pressed.")
         if name == "home":  # pressButton "home" does nothing on iOS 26 (measured); this one waits for the home screen
             await self._call("POST", "/wda/homescreen", {})
         else:
@@ -1339,4 +1476,9 @@ class Session:
         return f"opened {url}"
 
     async def close(self) -> None:
+        if self.hands is not None:
+            try:
+                await asyncio.wait_for(self.hands.close(), 5)  # (before the tunnel goes: its services close cleanly)
+            except Exception:
+                pass
         await self.device.close()

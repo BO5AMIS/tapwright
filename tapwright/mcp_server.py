@@ -112,6 +112,8 @@ class TapwrightServer(MCPServer):
         them without a ToolSearch turn; other hosts ignore the key). `--lazy-tools` (and `--no-hints`) leave every tool
         deferred, with their schemas as they were, as 1.8.5 did."""
         listed = await super().list_tools()
+        if LAZY_TOOLS:  # (2.0) 1.8.5's listing has no 2.0 tools; the daemon still takes them from a caller that sends them
+            listed = [tool for tool in listed if tool.name not in NEW_TOOLS_200]
         for tool in listed:
             tool.input_schema = copy.deepcopy(tool.input_schema)  # (the tool's own stays whole)
             if LAZY_TOOLS:
@@ -120,6 +122,10 @@ class TapwrightServer(MCPServer):
                 tool.description = describe(tool.name, hints=False)
                 for new in ROUND2_ARGS.get(tool.name, ()):
                     tool.input_schema.get("properties", {}).pop(new, None)
+                for arg, values in NEW_VALUES_200.get(tool.name, {}).items():
+                    prop = tool.input_schema.get("properties", {}).get(arg)
+                    if isinstance(prop, dict) and isinstance(prop.get("enum"), list):
+                        prop["enum"] = [v for v in prop["enum"] if v not in values]
                 continue
             _drop_titles(tool.input_schema)
             target = tool.input_schema.get("$defs", {}).get("Target")
@@ -132,6 +138,8 @@ class TapwrightServer(MCPServer):
 
 TARGET_SHORT = "Exactly one of ref, id, label, text, or x with y; index picks among matches."  # (1.9.0 round 2, eager only)
 ROUND2_ARGS = {"logs": ("all",)}  # (1.9.0 round 2) arguments 1.8.5's listing didn't have
+NEW_TOOLS_200 = ("pinch",)  # (2.0) tools 1.8.5's listing didn't have: left out of the lazy and --no-hints listing
+NEW_VALUES_200 = {"press_button": {"name": ("lock",)}}  # (2.0) values 1.8.5's listing didn't offer
 
 
 # (1.9.0) the tools nearly every session calls: loaded with the session, not found with a ToolSearch turn first
@@ -574,7 +582,7 @@ async def alert(action: Literal["accept", "dismiss", "text", "cancel"], look: bo
 
 
 @server.tool(description=describe("press_button"), structured_output=False)
-async def press_button(name: Literal["home", "volumeUp", "volumeDown"], look: bool = True,
+async def press_button(name: Literal["home", "lock", "volumeUp", "volumeDown"], look: bool = True,
                        screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("press_button", name=name, look=look, screenshot=screenshot, brief=brief)
 
@@ -590,6 +598,12 @@ async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.3
                 screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot,
                        dry_run=dry_run, brief=brief)
+
+
+@server.tool(description=describe("pinch"), structured_output=False)
+async def pinch(x: float, y: float, scale: float, seconds: float = 0.5, look: bool = True, screenshot: bool = False,
+                brief: bool | None = None) -> CallToolResult:
+    return await _tool("pinch", x=x, y=y, scale=scale, seconds=seconds, look=look, screenshot=screenshot, brief=brief)
 
 
 @server.tool(description=describe("rotate"), structured_output=False)
