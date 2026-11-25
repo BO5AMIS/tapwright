@@ -361,6 +361,24 @@ class FakeSession:
         self.center_opens: str | None = None
         self._center_before: str | None = None
         self.center_reads = 0
+        # (2.0, runner route version 9) how much of the tree each read gets: "full", "shallow" or "root" (the screen
+        # doesn't answer accessibility reads); `last_tier` is the newest read's, as on Session
+        self.tier = "full"
+        self.last_tier = "full"
+        # the runner's OCR (Session.read_text): None means this runner can't (older than 9); a list of ocr.Seen is what
+        # it reads; an Exception is raised by the read
+        self.runner_text = None
+        self.text_levels: list = []  # the level of each runner OCR read
+
+    def reads_text(self) -> bool:
+        return self.runner_text is not None
+
+    async def read_text(self, level="accurate"):
+        self._record("read_text")
+        self.text_levels.append(level)
+        if isinstance(self.runner_text, Exception):
+            raise self.runner_text
+        return list(self.runner_text or [])
 
     async def read_center(self, timeout=10.0):
         self._record("read_center")
@@ -419,6 +437,7 @@ class FakeSession:
     async def look(self, screenshot=True):
         self._record("look")
         self.items = list(self.tree)
+        self.last_tier = self.tier
         return self.SCREEN_TEXT, (b"JPEG" if screenshot else None)
 
     async def screenshot_png(self):
@@ -428,7 +447,8 @@ class FakeSession:
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
         self.items, self.read_app = list(self.tree), self.app
-        return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard), self.app, 3.0)
+        self.last_tier = self.tier
+        return Snapshot(ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, tier=self.tier), self.app, 3.0)
 
     async def read_scale(self, refresh=False):
         self.scale_reads += 1
@@ -485,13 +505,15 @@ class FakeSession:
     async def peek_tree(self, timeout=None):
         """A read that keeps nothing: `items` stay as they are (Session.peek_tree)."""
         self._record("peek_tree")
-        return ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        self.last_tier = self.tier
+        return ui.Tree(list(self.tree), 0, self.last_alert, self.last_keyboard, app=self.tree_app, tier=self.tier)
 
     async def refresh(self, timeout=None):
         self._record("refresh")
         self.read_timeouts.append(timeout)
         self.items = list(self.tree)
-        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app)
+        self.last_tier = self.tier
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, app=self.tree_app, tier=self.tier)
         self.read_app = self.tree_app
         if getattr(self, "on_tree", None) is not None:  # (as the real Session's reads do)
             self.on_tree(tree)
@@ -702,14 +724,17 @@ class DescribingSession(FakeSession):
     async def look(self, screenshot=True):
         self._record("look")
         self.items = list(self.tree)
+        self.last_tier = self.tier
         text = ui.describe(self.items, self.screen, 3.0, self.app, self.last_alert, self.last_keyboard, 0,
-                           (self.above, self.below))
+                           (self.above, self.below), tier=self.tier)
         return text, (b"JPEG" if screenshot else None)
 
     async def snapshot(self, keyboard=False, timeout=None):
         self._record("snapshot")
         self.items, self.read_app = list(self.tree), self.app
-        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, above=self.above, below=self.below)
+        self.last_tier = self.tier
+        tree = ui.Tree(self.items, 0, self.last_alert, self.last_keyboard, above=self.above, below=self.below,
+                       tier=self.tier)
         return Snapshot(tree, self.app, 3.0)
 
     async def rotate(self, to):

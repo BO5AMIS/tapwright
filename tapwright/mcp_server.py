@@ -126,6 +126,10 @@ class TapwrightServer(MCPServer):
                     prop = tool.input_schema.get("properties", {}).get(arg)
                     if isinstance(prop, dict) and isinstance(prop.get("enum"), list):
                         prop["enum"] = [v for v in prop["enum"] if v not in values]
+                properties = tool.input_schema.get("properties", {})
+                for arg, was in SCHEMA_185.get(tool.name, {}).items():
+                    if arg in properties:
+                        properties[arg] = dict(was)  # (2.0 made it unset by default; 1.8.5 listed it as false)
                 continue
             _drop_titles(tool.input_schema)
             target = tool.input_schema.get("$defs", {}).get("Target")
@@ -140,6 +144,12 @@ TARGET_SHORT = "Exactly one of ref, id, label, text, or x with y; index picks am
 ROUND2_ARGS = {"logs": ("all",)}  # (1.9.0 round 2) arguments 1.8.5's listing didn't have
 NEW_TOOLS_200 = ("pinch",)  # (2.0) tools 1.8.5's listing didn't have: left out of the lazy and --no-hints listing
 NEW_VALUES_200 = {"press_button": {"name": ("lock",)}}  # (2.0) values 1.8.5's listing didn't offer
+# (2.0) arguments whose default became "unset" (the daemon decides: an action's picture where a tree was cut short, a
+# look's OCR there), as 1.8.5 listed them: --lazy-tools and --no-hints keep listing 1.8.5's schemas byte for byte
+_FALSE_185 = {"screenshot": {"default": False, "title": "Screenshot", "type": "boolean"}}
+SCHEMA_185 = {**{name: _FALSE_185 for name in ("tap", "long_press", "type_text", "scroll", "swipe", "press_button",
+                                               "wait_for")},
+              "look": {"ocr": {"default": False, "title": "Ocr", "type": "boolean"}}}
 
 
 # (1.9.0) the tools nearly every session calls: loaded with the session, not found with a ToolSearch turn first
@@ -251,6 +261,10 @@ BRIEF_DEFAULT = False  # `tapwright mcp --brief`: every action and run asks for 
 async def _tool(tool: str, /, **args) -> CallToolResult:
     """Run one tool in the daemon; its answer is one text item, plus the screenshot if there is one."""
     args = {k: (v.model_dump(exclude_none=True) if isinstance(v, BaseModel) else v) for k, v in args.items()}
+    if args.get("screenshot", False) is None:
+        # (2.0) unset: the daemon's default, which is a picture after an action on a screen whose tree was cut short
+        # (no list of changes can be read there); an explicit false still turns it off
+        args.pop("screenshot")
     if "brief" in args:  # (the tools that take it; an argument overrides the server's setting, §13.4)
         if args["brief"] is None:
             args.pop("brief")
@@ -292,19 +306,20 @@ async def _tool(tool: str, /, **args) -> CallToolResult:
 
 
 @server.tool(annotations=READ_ONLY, description=describe("look"), structured_output=False)
-async def look(screenshot: bool = True, width: int = 600, labels: bool = False, ocr: bool = False) -> CallToolResult:
-    return await _tool("look", screenshot=screenshot, width=width, labels=labels, **({"ocr": True} if ocr else {}))
+async def look(screenshot: bool = True, width: int = 600, labels: bool = False, ocr: bool | None = None) -> CallToolResult:
+    # (2.0) `ocr` unset: the daemon reads the picture's text by itself only where the tree was cut short; false: never
+    return await _tool("look", screenshot=screenshot, width=width, labels=labels, **({} if ocr is None else {"ocr": ocr}))
 
 
 @server.tool(description=describe("tap"), structured_output=False)
-async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool = False,
+async def tap(target: Target, force: bool = False, look: bool = True, screenshot: bool | None = None,
               dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("tap", target=target, force=force, look=look, screenshot=screenshot, dry_run=dry_run, brief=brief)
 
 
 @server.tool(description=describe("long_press"), structured_output=False)
 async def long_press(target: Target, seconds: float = 1.0, force: bool = False, look: bool = True,
-                     screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
+                     screenshot: bool | None = None, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("long_press", target=target, seconds=seconds, force=force, look=look, screenshot=screenshot,
                        dry_run=dry_run, brief=brief)
 
@@ -327,7 +342,7 @@ def _wire_names(**aliases: str):
 @server.tool(description=describe("type_text"), structured_output=False)
 @_wire_names(**{"as": "variable"})
 async def type_text(text: str, target: Target | None = None, replace: bool = True, submit: bool = False,
-                    force: bool = False, look: bool = True, screenshot: bool = False,
+                    force: bool = False, look: bool = True, screenshot: bool | None = None,
                     dry_run: bool = False, brief: bool | None = None,
                     variable: str | None = Field(default=None, alias="as")) -> CallToolResult:
     # (`as` is Python's word: while recording a route, the text is saved as this variable, AGENT-TOOLS §18.5)
@@ -339,7 +354,7 @@ async def type_text(text: str, target: Target | None = None, replace: bool = Tru
 @server.tool(description=describe("scroll"), structured_output=False)
 async def scroll(direction: Literal["up", "down", "left", "right"] | None = None, amount: float = 0.8,
                  to: Literal["start", "end", "target"] | None = None, target: Target | None = None, look: bool = True,
-                 screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
+                 screenshot: bool | None = None, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("scroll", direction=direction, amount=amount, to=to, target=target, look=look,
                        screenshot=screenshot, dry_run=dry_run, brief=brief)
 
@@ -368,7 +383,7 @@ async def wait(seconds: float, look: bool = True, screenshot: bool = False, brie
 
 @server.tool(annotations=READ_ONLY, description=describe("wait_for"), structured_output=False)
 async def wait_for(text: str | None = None, id: str | None = None, label: str | None = None, gone: bool = False,
-                   timeout: float = 10.0, look: bool = True, screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+                   timeout: float = 10.0, look: bool = True, screenshot: bool | None = None, brief: bool | None = None) -> CallToolResult:
     return await _tool("wait_for", text=text, id=id, label=label, gone=gone, timeout=timeout, look=look,
                        screenshot=screenshot, brief=brief)
 
@@ -583,7 +598,7 @@ async def alert(action: Literal["accept", "dismiss", "text", "cancel"], look: bo
 
 @server.tool(description=describe("press_button"), structured_output=False)
 async def press_button(name: Literal["home", "lock", "volumeUp", "volumeDown"], look: bool = True,
-                       screenshot: bool = False, brief: bool | None = None) -> CallToolResult:
+                       screenshot: bool | None = None, brief: bool | None = None) -> CallToolResult:
     return await _tool("press_button", name=name, look=look, screenshot=screenshot, brief=brief)
 
 
@@ -595,7 +610,7 @@ async def unlock() -> CallToolResult:
 
 @server.tool(description=describe("swipe"), structured_output=False)
 async def swipe(x0: float, y0: float, x1: float, y1: float, seconds: float = 0.35, look: bool = True,
-                screenshot: bool = False, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
+                screenshot: bool | None = None, dry_run: bool = False, brief: bool | None = None) -> CallToolResult:
     return await _tool("swipe", x0=x0, y0=y0, x1=x1, y1=y1, seconds=seconds, look=look, screenshot=screenshot,
                        dry_run=dry_run, brief=brief)
 

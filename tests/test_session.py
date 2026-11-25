@@ -1111,11 +1111,11 @@ def test_landscape_and_the_off_switch_keep_w3c_actions(phone, monkeypatch):
     asyncio.run(s.ensure())
     s.screen, s.turn = (932.0, 430.0), 90
     asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
-    assert _paths(runner) == ["/actions"]
+    assert _paths(runner) == ["/wda/tw/version", "/actions"]  # (2.0: the version is asked as the session starts)
     monkeypatch.setattr(session_module, "FAST_TAP", "0")
     s.screen, s.turn = (430.0, 932.0), 0
     asyncio.run(s.tap(ui_module.Target(x=30, y=40)))
-    assert _paths(runner) == ["/actions", "/actions"]
+    assert _paths(runner) == ["/wda/tw/version", "/actions", "/actions"]
 
 
 def test_an_error_that_may_follow_the_touch_is_raised_not_touched_again(phone, monkeypatch):
@@ -1238,14 +1238,14 @@ def test_landscape_and_the_off_switches_drag_through_w3c_actions(phone, monkeypa
     asyncio.run(s.ensure())
     s.screen, s.turn = (932.0, 430.0), 90
     asyncio.run(s.scroll(400, 200, 100, 200))
-    assert _paths(runner) == ["/actions"]
+    assert _paths(runner) == ["/wda/tw/version", "/actions"]  # (2.0: the version is asked as the session starts)
     s.screen, s.turn = (430.0, 932.0), 0
     monkeypatch.setattr(session_module, "FAST_DRAG", "0")
     asyncio.run(s.scroll(215, 700, 215, 300))
     monkeypatch.setattr(session_module, "FAST_DRAG", "1")
     monkeypatch.setattr(session_module, "FAST_TAP", "0")
     asyncio.run(s.swipe(215, 700, 215, 300))
-    assert _paths(runner) == ["/actions", "/actions", "/actions"]
+    assert _paths(runner) == ["/wda/tw/version", "/actions", "/actions", "/actions"]
 
 
 def test_a_new_session_asks_for_the_drag_route_again(phone, monkeypatch):

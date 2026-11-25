@@ -9,12 +9,13 @@ import random
 import re
 import secrets
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from . import device as device_module
 from . import hands as hands_module
-from . import media, motion, store, trace, ui
+from . import media, motion, ocr, store, trace, ui
 from .control import TAP_MS, Refused
 from .device import AppNotAnswering, ConnectionLost, Device, DeviceError, NotSetUp, PasscodeNeeded, PhoneLocked, Unanswered
 from .stream import NO_IDLE_WAIT
@@ -111,6 +112,72 @@ HANDS_PATH = "/hands"
 HAND_BUTTONS = {"home": "home", "lock": "lock", "volumeUp": "volume_up", "volumeDown": "volume_down"}
 END_INSET = 40.0  # points from a field's right edge where typing's tap puts the caret at the end of short text
 BACKSPACE_MAX = 64  # retyping into the field just typed into deletes up to this many characters with backspaces
+# (2.0, runner route version 9) Every accessibility read is bounded on the runner: the tree route answers within a
+# budget with what it could read (`tier`: full, shallow, or root = the application node alone), the setting below caps
+# every other read, a screen-size route answers without reading the app, and an OCR route reads the screen's text with
+# Apple's Vision. A runner older than 9 works as in 1.10.0.
+BOUNDED_VERSION = 9
+VERSION_PATH = "/wda/tw/version"  # (without a session: asked in ensure, before the session exists)
+SCREEN_PATH = "/wda/tw/screen"
+OCR_PATH = "/wda/tw/ocr"
+OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: about 0.5-1.5 s, and the shot first)
+# BCP 47 codes, comma-separated, in order of preference, for the runner's OCR (Vision's recognitionLanguages), e.g.
+# "en-US,ar-SA"; empty: Vision's default (English). Vision's fast level reads Latin script only; a language the level
+# doesn't support fails the read, and the picture is then read on this computer instead
+OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
+TIERS = ("full", "shallow", "root")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+AX_TIMEOUT = _env_float("TAPWRIGHT_AX_TIMEOUT", 3.0)  # seconds: the runner's ceiling for any one accessibility read
+TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree read may take on the runner
+SHORT_BUDGET_MS = 600  # ms for an app whose last read was cut short (TikTok's profile answers in 0.2 s)
+BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
+
+
+class ReadBudget:
+    """How long the runner may spend on a tree read of an app (route version 9's `budget`). A screen that never answers
+    in time (TikTok's For You feed: a read of one element takes 14 s) would otherwise cost the whole budget on every
+    look and every action. So, per bundle id: when a read with the normal budget came back truncated, that app's reads
+    use the short budget for BUDGET_MEMORY seconds; a read that comes back full gives it the normal budget again at
+    once. A truncated answer to a short-budget read doesn't renew the time: once it runs out, one read with the normal
+    budget asks again (a screen that is only slow to read gets its whole tree back within BUDGET_MEMORY seconds)."""
+
+    def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
+                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic) -> None:
+        self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
+        self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
+
+    def budget(self, bundle: str | None) -> int:
+        """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget)."""
+        if bundle is None or bundle not in self._cut:
+            return self.normal_ms
+        if self.clock() - self._cut[bundle] >= self.memory:
+            del self._cut[bundle]
+            return self.normal_ms
+        return self.short_ms
+
+    def short(self, bundle: str | None) -> bool:
+        return self.budget(bundle) < self.normal_ms
+
+    def answered(self, bundle: str | None, truncated: bool, budget_ms: int) -> None:
+        """A read of `bundle` with `budget_ms` came back truncated or full."""
+        if bundle is None:
+            return
+        if not truncated:
+            self._cut.pop(bundle, None)
+        elif budget_ms >= self.normal_ms:
+            self._cut[bundle] = self.clock()
+
+    def forget(self) -> None:
+        self._cut.clear()
 
 
 PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
@@ -194,6 +261,13 @@ class _FieldGone(Exception):
 
 
 KEYS ={"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
+ROOT_BUNDLE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bbundleId="([^"]*)"')
+
+
+def _root_bundle(source: object) -> str | None:
+    """The bundle id the tree's root Application names, or None."""
+    found = ROOT_BUNDLE.search(source[:2000]) if isinstance(source, str) else None
+    return found.group(1) or None if found else None
 
 
 @dataclass
@@ -271,6 +345,13 @@ class Session:
         # hands): every touch goes through the runner. motion_rng shapes human-like taps and swipes (motion.py).
         self.hands: "hands_module.Hands | None" = None
         self.motion_rng = random.Random()
+        # (2.0, route version 9) how the newest tree read came back: "full", "shallow" (part of the tree, the runner's
+        # budget ran out) or "root" (the application node alone: the screen doesn't answer accessibility reads); and
+        # the runner's short reason for a cut. A runner older than 9 always reads the whole tree: "full".
+        self.last_tier = "full"
+        self.last_why = ""
+        self.budgets = ReadBudget()
+        self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -284,20 +365,77 @@ class Session:
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
         await self.device.start_wda(runner)
-        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
+        # (2.0) the runner's route version, by the route that needs no session and reads nothing of the app. Version 9
+        # bounds every accessibility read by twAXTimeout, which each POST /session resets: given as a capability it
+        # bounds the session's own start too (RUNNER-V9-PROTOCOL §2), and the screen's size comes without reading the
+        # app, so a screen that never answers doesn't hold the connection up
+        version = await self._probe_version()
+        bounded = version is not None and version >= BOUNDED_VERSION
+        wanted = {"twAXTimeout": AX_TIMEOUT} if bounded else {}
+        sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": wanted}}))["sessionId"]
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
         try:
-            size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
+            screen = await self._screen_of_runner() if bounded else None
+            if screen is None:
+                size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
+                screen = (float(size["width"]), float(size["height"]))
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
-        self.screen = (float(size["width"]), float(size["height"]))
-        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": dict(self.session_settings)},
+        self.screen = screen
+        settings = dict(self.session_settings)
+        if bounded:
+            settings["twAXTimeout"] = AX_TIMEOUT  # a ceiling for every accessibility read besides the tree's budget
+        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": settings},
                                timeout=READ_CUT)  # (before sid is committed: no read can run without them)
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
+        if version is not None:  # the session-less route said it (the fork has answered both since route 1): kept
+            self.fast_tap, self.fast_drag, self.tw_version = version >= 1, version >= 2, version
         self.fast_read, self.last_compact = None, None
+        self.bounded, self.last_tier, self.last_why = bounded, "full", ""
+        self.budgets.forget()
         self.sid = sid  # committed last: a failure above leaves no half-started session
+
+    async def _probe_version(self) -> int | None:
+        """The fork's route version by the session-less route (VERSION_PATH; the fork has answered it there and on the
+        session's route since its route 1): 0 for a runner without it (Appium's build), None when it can't be told (any
+        other error, a malformed answer: then the session starts as 1.10.0's did, and `_fast_routes` asks later)."""
+        try:
+            answer = await self.device.http("GET", VERSION_PATH, timeout=LOCK_WAIT)
+        except DeviceError as e:
+            said = str(e).lower()
+            unknown = "unknown command" in said or "unknown method" in said
+            return 0 if unknown and not isinstance(e, ConnectionLost) else None
+        value = answer.get("value") if isinstance(answer, dict) else None
+        version = value.get("tapwright") if isinstance(value, dict) else None
+        return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else None
+
+    async def _screen_of_runner(self) -> tuple[float, float] | None:
+        """(width, height) in points from SCREEN_PATH (route version 9), and the pixel scale with it; None when the
+        answer can't be used (window/size is asked instead). A dropped line is raised, as from window/size."""
+        try:
+            answer = await self.device.http("GET", SCREEN_PATH, timeout=LOCK_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError:
+            return None
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if not isinstance(value, dict):
+            return None
+        try:
+            w, h = float(value["width"]), float(value["height"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        try:
+            scale = float(value.get("scale"))
+        except (TypeError, ValueError):
+            scale = 0.0
+        if scale > 0:
+            self.scale, self.scale_read = scale, True  # (no read of the app needed for it later either)
+        return w, h
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
         """The first read of a fresh WebDriverAgent hung: say why when the phone can tell. A locked phone, or
@@ -477,21 +615,39 @@ class Session:
     async def _read_tree(self, timeout: float):
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
         else /source itself."""
+        self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
+            await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
             if self.fast_tap is None:
                 await self._fast_routes()  # (once per session: the version route doesn't read the app)
             if self.tw_version >= 4:
-                source = await self._compact_tree(timeout)
+                source = await self._bounded_tree(timeout) if self.tw_version >= BOUNDED_VERSION else \
+                    await self._compact_tree(timeout)
                 if source is not None:
                     return source
         return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
 
-    async def _compact_tree(self, timeout: float, since: bool = True) -> str | None:
+    async def _bounded_tree(self, timeout: float) -> str | None:
+        """(route version 9) The compact read with a budget: the app's own (ReadBudget), by the app the newest read
+        found in front. A read cut short on the short budget whose answer names another app than the one the budget
+        was for is read again with the normal budget: the short budget was that app's, not this one's."""
+        bundle = self.read_app[1] if isinstance(self.read_app, tuple) else None
+        budget = self.budgets.budget(bundle)
+        source = await self._compact_tree(timeout, budget_ms=budget)
+        if (source is not None and self.last_tier != "full" and budget < self.budgets.normal_ms
+                and _root_bundle(source) != bundle):
+            source = await self._compact_tree(timeout, budget_ms=self.budgets.normal_ms)
+        return source
+
+    async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
-        `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree."""
+        `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
+        `budget_ms` (route version 9): the runner answers within about that long with what it could read, and says
+        how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses."""
         last = self.last_compact if since else None
-        path = TREE_PATH + (f"?since={last[0]}" if last else "")
+        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []), *([f"since={last[0]}"] if last else [])]
+        path = TREE_PATH + ("?" + "&".join(query) if query else "")
         try:
             value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
         except ConnectionLost:
@@ -508,16 +664,29 @@ class Session:
             return None
         if value.get("unchanged") is True:
             if last is not None and last[0] == token:
-                return last[1]
+                return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
-            return await self._compact_tree(timeout, since=False) if since else None
+            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms) if since else None
         try:
             source = ui.xml_of_tree(value.get("tree"))
         except ValueError as e:
             getattr(self.device, "log", lambda *a: None)(f"compact read unreadable ({e}): /source instead")
             return None
         self.fast_read = True
-        self.last_compact = (token, source)
+        tier = "full"  # (a read without a budget, an older runner's: whole, as 1.10.0 took it)
+        if budget_ms is not None:
+            tier = value.get("tier") if value.get("tier") in TIERS else "full"
+            if tier == "full" and value.get("truncated") is True:
+                tier = "shallow"  # (said truncated: never taken for a whole tree)
+        why = value.get("why")
+        self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
+        if budget_ms is not None:
+            self.budgets.answered(_root_bundle(source), tier != "full", budget_ms)
+            if tier != "full":
+                getattr(self.device, "log", lambda *a: None)(
+                    f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
+        # a cut-short tree is no baseline for "unchanged": the next read asks for the whole tree again
+        self.last_compact = (token, source) if tier == "full" else None
         return source
 
     async def read_center(self, timeout: float = READ_CUT) -> str:
@@ -604,7 +773,7 @@ class Session:
     async def snapshot(self, keyboard: bool = False, timeout: float = 60) -> Snapshot:
         """Read the tree, the foreground app and the scale; `items` is the new list, numbered from e1."""
         source = await self._source(timeout)
-        return await self.snapshot_from(ui.read(source, self.screen, keyboard=keyboard))
+        return await self.snapshot_from(self._tiered(ui.read(source, self.screen, keyboard=keyboard)))
 
     async def snapshot_from(self, tree: ui.Tree) -> Snapshot:
         """A snapshot of a tree that was already read (`refresh`): this adds the foreground app, the one
@@ -621,6 +790,29 @@ class Session:
         """WebDriverAgent's /screenshot (PNG, full resolution): the fallback when the stream has no frame."""
         return base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
 
+    def reads_text(self) -> bool:
+        """Can the runner read the screen's text itself (OCR_PATH, route version 9)? Known once a read has asked the
+        runner's routes (the first look of a session)."""
+        return self.tw_version >= BOUNDED_VERSION
+
+    async def read_text(self, level: str = "accurate") -> "list[ocr.Seen]":
+        """The text lines on the screen now, read on the phone by Apple's Vision (OCR_PATH): placed in this session's
+        points, in reading order. `level`: "accurate" (a look) or "fast" (wait_for's polls). Raises DeviceError when the
+        runner can't (the caller reads the picture on this computer instead)."""
+        if level not in ("fast", "accurate"):
+            raise ValueError(f"level must be fast or accurate, not {level!r}")
+        languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
+        path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
+        answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("ocr_wda_ms", {k: v for k, v in value["ms"].items()
+                                      if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        try:
+            return ocr.of_runner(value, self.screen)
+        except ValueError as e:
+            raise DeviceError(f"the runner's OCR answer can't be read: {e}") from None
+
     async def look(self, screenshot: bool = True, keyboard: bool = False, max_width: int = 400):
         """(text, jpeg bytes or None): the screen as elements, and as a picture."""
         snap = await self.snapshot(keyboard)
@@ -636,7 +828,7 @@ class Session:
             img.save(buf, "JPEG", quality=80)
             image = buf.getvalue()
         return ui.describe(tree.items, self.screen, scale, app, tree.alert, tree.keyboard, tree.more,
-                           (tree.above, tree.below)), image
+                           (tree.above, tree.below), tier=tree.tier), image
 
     async def back_point(self) -> ui.Back:
         """The top navigation bar: whether there is one, and where its back button is, in points."""
@@ -665,12 +857,17 @@ class Session:
         """Read the tree and keep nothing of it: `items` and the rest stay as the last read left them (one request). For a
         check right before a touch that must see the screen as it is now without renumbering the agent's list (a draft's
         digest: Codex, PR #12 cycle 1, H3)."""
-        return ui.read(await self._source(timeout), self.screen)
+        return self._tiered(ui.read(await self._source(timeout), self.screen))
+
+    def _tiered(self, tree: ui.Tree) -> ui.Tree:
+        """The tree, marked with how much of it the read that made it got (`last_tier`, route version 9)."""
+        tree.tier = self.last_tier
+        return tree
 
     async def refresh(self, timeout: float = 60) -> ui.Tree:
         """Read the tree into `items` and nothing else (one request): what resolving a target needs."""
         source = await self._source(timeout)
-        tree = ui.read(source, self.screen)
+        tree = self._tiered(ui.read(source, self.screen))
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard

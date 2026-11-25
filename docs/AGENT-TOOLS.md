@@ -34,7 +34,7 @@ Do not claim that software can bypass a genuine XCTest passcode, trust, signing 
 ### look
 
 Read the current screen: one line per element (ref, role, text, id, position and size in points, actions), plus a screenshot. `screenshot` (default true), `width` (160-1320 px, default 600) and `labels` (draw each actionable element's box and ref) shape the picture. Answers the full list, starting with a header. Long text is cut; `wait_for` with the text checks all of it.
-Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note.
+Tapwright: reads the whole phone; the header may add `Keyboard:`. `ocr: true` also lists the text in the picture that no element carries, as `o1`, `o2`… (a target ref); without OCR installed, the look comes with a note. A screen that doesn't answer accessibility reads in time (a video feed, a game) says `Elements: none` or `Elements: partly read` in the header and lists the text in its picture that way by itself (`ocr: false` leaves it out); touch an `o` ref or a point there, and actions on it answer with the picture after them.
 
 Arguments: `screenshot`, `width`, `labels`, `ocr`.
 

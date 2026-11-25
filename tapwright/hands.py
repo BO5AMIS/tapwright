@@ -27,7 +27,7 @@ import os
 from typing import Any, Awaitable, Callable, NamedTuple, Sequence
 
 from . import device as device_module
-from .device import ConnectionLost, Unanswered
+from .device import Unanswered
 
 LANDSCAPE = os.environ.get("TAPWRIGHT_HANDS_LANDSCAPE", "1") != "0"
 UNIVERSAL_SERVICE = "com.apple.coredevice.hid.universalhidservice"
