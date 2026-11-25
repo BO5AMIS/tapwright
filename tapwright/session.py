@@ -145,6 +145,21 @@ TREE_BUDGET_MS = int(_env_float("TAPWRIGHT_TREE_BUDGET", 3000))  # ms a tree rea
 # tree took 0.4 s in Phase 0). 1500 ms leaves `full` about 0.9 s and room for `shallow`.
 SHORT_BUDGET_MS = 1500
 BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budget
+# (2.0) how the runner reads a tree (RUNNER-V9-PROTOCOL §1 `path`). Measured on the phone (lead, 2026-11-26): `direct`
+# keeps to its budget on TikTok's feed (1500 ms -> 1.43 s) where `xctest` takes 2.9-3.9 s whatever the budget, but on
+# a screen that reads (Settings > General, 264 nodes) `xctest` is about 30 % faster (0.97 s against 1.25-1.32 s). So
+# the normal budget reads by `xctest` and the short one (an app whose read was just cut, on a screen that isn't still)
+# by `direct`: a screen that never answers costs 3-4 s once, then stays bounded. TAPWRIGHT_TREE_PATH=direct|xctest
+# forces one (for measuring).
+TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
+
+
+def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
+    """The runner's way of reading for a read with `budget_ms` (see TREE_PATH_FORCED)."""
+    forced = TREE_PATH_FORCED if forced is None else forced
+    if forced in ("direct", "xctest"):
+        return forced
+    return "direct" if budget_ms < normal_ms else "xctest"
 
 
 class ReadBudget:
@@ -366,6 +381,7 @@ class Session:
         # read gets the normal budget even while its app is on the short one (ReadBudget). None: never taken as still.
         self.screen_still: Callable[[], bool] | None = None
         self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
+        self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
 
     async def ensure(self) -> None:
@@ -636,19 +652,26 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(False, e) from e
 
-    async def _read_tree(self, timeout: float):
+    async def _read_tree(self, timeout: float, center: bool = False):
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
-        else /source itself."""
+        else /source itself. `center` (Notification Center's read, review R200v L4): with the normal budget, outside the
+        budget memory and the "unchanged" token."""
         self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
             await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
             if self.fast_tap is None:
                 await self._fast_routes()  # (once per session: the version route doesn't read the app)
-            if self.tw_version >= 4:
+            if self.tw_version >= BOUNDED_VERSION and center:
+                normal = self.budgets.normal_ms
+                source = await self._compact_tree(timeout, since=False, budget_ms=normal, remember=False,
+                                                  read_path=tree_path(normal, normal))
+            elif self.tw_version >= 4:
                 source = await self._bounded_tree(timeout) if self.tw_version >= BOUNDED_VERSION else \
                     await self._compact_tree(timeout)
-                if source is not None:
-                    return source
+            else:
+                source = None
+            if source is not None:
+                return source
         return (await self._call("GET", ui.SOURCE_PATH, timeout=min(timeout, READ_CUT))).get("value")
 
     async def _bounded_tree(self, timeout: float) -> str | None:
@@ -659,27 +682,35 @@ class Session:
         # under the app the read was budgeted for, so the short budget still applies to it; and such a root is never
         # taken for another app's
         bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
+        normal = self.budgets.normal_ms
         budget = self.budgets.budget(bundle, still=self.screen_still)
-        source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle)
+        source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
+                                          read_path=tree_path(budget, normal))
         named = _root_bundle(source)
-        if (source is not None and self.last_tier != "full" and budget < self.budgets.normal_ms
+        if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
-            source = await self._compact_tree(timeout, budget_ms=self.budgets.normal_ms, budget_for=named)
+            source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
+                                              read_path=tree_path(normal, normal))
             named = _root_bundle(source)
         if source is not None:
             self.budget_app = named or bundle
         return source
 
     async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
-                            budget_for: str | None = None) -> str | None:
+                            budget_for: str | None = None, remember: bool = True,
+                            read_path: str | None = None) -> str | None:
         """The tree through the fork's compact read (TREE_PATH), as the XML /source would have sent; None when it
         can't be had that way (the caller reads /source). A dropped line or a frozen app is raised as from /source.
         `since`: send the last read's token, so an unchanged screen comes back as "unchanged" without the tree.
         `budget_ms` (route version 9): the runner answers within about that long with what it could read, and says
         how much (`tier`); a cut-short answer is kept as `last_tier`, never as the token an "unchanged" reuses.
-        `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none."""
+        `budget_for`: the app the budget was chosen for, which the answer is kept under when its root names none.
+        `remember` False: the answer feeds no budget memory (Notification Center's read). `read_path`: the runner's way
+        of reading (`direct` or `xctest`, tree_path), sent with a budget."""
         last = self.last_compact if since else None
-        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []), *([f"since={last[0]}"] if last else [])]
+        query = [*([f"budget={budget_ms}"] if budget_ms is not None else []),
+                 *([f"path={read_path}"] if budget_ms is not None and read_path else []),
+                 *([f"since={last[0]}"] if last else [])]
         path = TREE_PATH + ("?" + "&".join(query) if query else "")
         try:
             value = (await self._call("GET", path, timeout=min(timeout, READ_CUT))).get("value")
@@ -699,8 +730,8 @@ class Session:
             if last is not None and last[0] == token:
                 return last[1]  # (only a whole tree is kept as the token's: unchanged is a full read)
             # an "unchanged" this read can't use (it sent no such token): read the whole tree
-            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms,
-                                            budget_for=budget_for) if since else None
+            return await self._compact_tree(timeout, since=False, budget_ms=budget_ms, budget_for=budget_for,
+                                            remember=remember, read_path=read_path) if since else None
         try:
             source = ui.xml_of_tree(value.get("tree"))
         except ValueError as e:
@@ -715,7 +746,8 @@ class Session:
         why = value.get("why")
         self.last_tier, self.last_why = tier, why if isinstance(why, str) else ""
         if budget_ms is not None:
-            self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
+            if remember:
+                self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
@@ -727,10 +759,15 @@ class Session:
         """Notification Center's tree (SpringBoard's) as XML, read once and kept nowhere: not as the last read, not as the
         compact read's token, never traced but for its timing (notifications.py drops every other app's notification
         from it at once). No banner wait: its notifications are what is read."""
+        tier_was, why_was = self.last_tier, self.last_why
         try:
-            return str(await self._read_tree(timeout) or "")
+            source = str(await self._read_tree(timeout, center=True) or "")
+            self.center_tier = self.last_tier
+            return source
         finally:
             self.last_compact = None
+            # (R200v L4) not the newest read of the app either: its tier is left as the app's read left it
+            self.last_tier, self.last_why = tier_was, why_was
 
     async def foreground_bundle_id(self) -> str | None:
         try:

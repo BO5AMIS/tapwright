@@ -1579,6 +1579,20 @@ ELEMENTS_NONE = "Elements: none (the screen's elements weren't read within the t
 ELEMENTS_PART = "Elements: partly read (not all of the screen's elements were read within the time given; more may be missing)"
 
 
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements, or only some (the daemon's
+# not_found says it; a repair and a route's count read it: review R200v M1)
+HINT_NO_ELEMENTS = ("This screen's elements weren't read within the time given, so there are none to find: look shows "
+                    "the text read from its picture as o refs; touch one of them, or a point {x, y}.")
+HINT_PART_ELEMENTS = ("Not all of this screen's elements were read within the time given, so the element may be among "
+                      "those left out: look shows the text read from its picture as o refs; touch one of them, or a point "
+                      "{x, y}.")
+
+
+def cut_hint(text: str) -> bool:
+    """Does a refusal's text carry the hint of a screen read in part (not_found only because elements weren't read)?"""
+    return HINT_NO_ELEMENTS in text or HINT_PART_ELEMENTS in text
+
+
 def tier_line(tier: str) -> str | None:
     """The header line that says a read was cut short (route version 9), or None for a whole tree."""
     return {"root": ELEMENTS_NONE + ".", "shallow": ELEMENTS_PART + "."}.get(tier)

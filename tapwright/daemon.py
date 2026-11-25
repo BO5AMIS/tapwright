@@ -399,6 +399,7 @@ class UxRead(NamedTuple):
     alert_now: "tuple[str, tuple[str, ...], str] | None"
     screen: tuple
     app: "tuple[str, str] | None"
+    whole: bool = True  # (2.0) the tree was read whole: a cut-short one is no screen to check (R200v M1)
 
 
 class Settled(NamedTuple):
@@ -642,12 +643,22 @@ def unread(error: BaseException) -> bool:
 
 # (2.0) after an action on a screen whose tree was cut short: no list of what changed can be read
 AFTER_CUT = "The picture shows the screen after it; look reads its text again (as o refs)."
-# (2.0) a target by id, label, text or element ref on a screen that gave no elements
-HINT_NO_ELEMENTS = ("This screen's elements weren't read within the time given, so there are none to find: look shows "
-                    "the text read from its picture as o refs; touch one of them, or a point {x, y}.")
-HINT_PART_ELEMENTS = ("Not all of this screen's elements were read within the time given, so the element may be among "
-                      "those left out: look shows the text read from its picture as o refs; touch one of them, or a point "
-                      "{x, y}.")
+# (2.0) a target by id, label, text or element ref on a screen that gave no elements (kept in ui: a repair reads them)
+HINT_NO_ELEMENTS = ui.HINT_NO_ELEMENTS
+HINT_PART_ELEMENTS = ui.HINT_PART_ELEMENTS
+
+
+def cut_refusal(error: BaseException) -> bool:
+    """(R200v M1) A `not_found` only because the screen's elements weren't (all) read: no failed route, no break to repair."""
+    return isinstance(error, Refused) and error.code == "not_found" and ui.cut_hint(str(error))
+
+
+# (2.0, R200v M1) audit and ux_check on a screen the runner read only in part. `unsupported`: the report can't be made from
+# this read. Not `timeout`, which tells an agent the same call may simply work again: on a playing feed it won't, and a
+# report of "no issues" from a cut list would be false; the agent moves to a still screen (or pauses the video) first.
+CUT_REPORT = ("{tool}: {unread} within the time given (the screen kept moving, or the app didn't answer the "
+              "accessibility read in time), so it can't be checked: a report from part of a screen would say what isn't "
+              "known. Pause what plays or go to a still screen, then {tool} again.")
 
 
 def settled_line(seconds: float) -> str:
@@ -3211,7 +3222,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 if counts and made.bundle and made.route_done:
                     # (CodeRabbit, PR #22) the route ran and arrived; a `then` step after it failed: the route worked
                     await self._auto_counted(made.root, made.bundle, req.route, True, made.route_stamp, made.route_end_now)
-                elif (counts and made.bundle and made.route_started and e.code in autoroute.FAIL_CODES):
+                elif (counts and made.bundle and made.route_started and e.code in autoroute.FAIL_CODES
+                      and not cut_refusal(e)):  # (R200v M1: a screen that couldn't be read is no failed route)
                     # (review 1.9.0 H3) only a failure of the route's own steps counts: not the way to its start
                     said = await self._auto_counted(made.root, made.bundle, req.route, False, made.route_stamp)
                     if said is not None:
@@ -4203,18 +4215,19 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             answer = await self._look(view, shot, [], notes)
             # (2.0) the runner learns its routes with the look's read: now the runner's OCR may be known to be there
             no_ocr = no_ocr and not self._ocr_possible()
+            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
+            # another app that comes forward after the look (last Opus review, L); a cut-short look too (R200v M3)
+            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             if (tier := self._tier_now()) != "full" and args.get("ocr") is not False:
                 # a screen that didn't answer the whole read: its text, read from the picture, comes without asking
                 return await self._with_ocr(view, answer, tier=tier)
             if no_ocr:
                 # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
-            # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
-            # another app that comes forward after the look (last Opus review, L)
-            view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             given = _GIVEN.get()  # a screen of another app (personal mode withholds it) is no screen of the journey
-            if given is None or (self.session.app or (None, None))[1] in given:
-                uxcheck.note_screen(client_id, view.items)  # for naming drift on later ux_checks (AGENT-TOOLS §17.3)
+            if tier == "full" and (given is None or (self.session.app or (None, None))[1] in given):
+                # for naming drift on later ux_checks (AGENT-TOOLS §17.3); never a cut-short list (R200v M1)
+                uxcheck.note_screen(client_id, view.items)
             if args.get("ocr") and not no_ocr:  # (without the extra: the look and its note, never a read)
                 return await self._with_ocr(view, answer)
             if len(view.items) < FEW_ELEMENTS and ocr.available():  # (without the extra, the description says it)
@@ -4473,6 +4486,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             notes = [*notes, changed]
         if fresh[0]:  # its own action keeps what it knew current; after someone else's, it must look
             view.seen = self.control.generation
+        # (review R200v M2) the o refs are points of the screen the last reading saw: any action of this client's ends
+        # them, `look: false` included (a feed's swipe changes the video; a later tap on o2 would hit the old place)
+        view.ocr = {}
         if isinstance(result, Unchanged):  # nothing was done: nothing to settle or diff
             return _answer([str(result)], notes)
         reads_only = name == "alert" and args.get("action") == "text"  # it changes nothing on the phone
@@ -4965,6 +4981,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         seen = self.maps.observe(root, bundle, tree, arrived=None, lang=self._language.get(bundle), previous=previous)
         if seen is None:
             view.place = None
+            if (_cut_short(tree) and isinstance(view.auto, autoroute.Chain) and view.auto.app == bundle
+                    and name not in autoroute.NEUTRAL):
+                # (R200v M1) a move whose arrival couldn't be read: where it went isn't known, so no way through it is
+                # saved as a route (the next place read would otherwise follow on as if this step had led there)
+                view.auto.taint()
             return answer
         view.place, view.place_seen = (bundle, seen.name), self.control.generation
         typed_here = view.typed_at is not None and view.typed_at == before
@@ -6161,6 +6182,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         text = "\n".join(lines) + (f"\nNote: {note}" if note else "")
         return {**answer, "text": text}
 
+    def _refuse_cut_report(self, tool: str) -> None:
+        """(R200v M1) audit and ux_check are made only from a whole tree (CUT_REPORT)."""
+        if self._tier_now() != "full":
+            raise Refused("unsupported", CUT_REPORT.format(tool=tool, unread=UNREAD[0].upper() + UNREAD[1:]))
+
     async def _audit(self, view, args: dict, notes: list) -> dict:
         """AGENT-TOOLS §10: XCTest's own accessibility audit of the screen in front, plus `duplicate_id` from the
         tree, as one report. The tree is read first so each issue is named by the agent's current element line."""
@@ -6168,6 +6194,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         asked = [audit.XCTEST[t] for t in types if t in audit.XCTEST]
         await self._settle_pending()
         await self._read(lambda: self._silent_read(view))
+        self._refuse_cut_report("audit")
         issues = await self._read(lambda: self.session.audit(asked)) if asked else []
         app = getattr(self.session, "app", None)
         name = app[0] if app else "the screen"
@@ -6198,15 +6225,16 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             # tree and come back before the check; CodeRabbit, PR #7).
             first = await front() if given is not None else None
             await self._silent_read(view)
+            whole = self._tier_now() == "full"  # (R200v M1: a cut-short list is refused below, after the app check)
             try:
-                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT])
+                found: list | DeviceError = await session.audit([audit.XCTEST[t] for t in self.UX_AUDIT]) if whole else []
             except ConnectionLost:
                 raise
             except DeviceError as e:
                 found = e
             # What this turn read, kept for this call: the agent's view is shared with its other calls, and a look of
             # theirs can replace it before this one is done (Codex, PR #7 cycle 4)
-            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None))
+            seen = UxRead(list(view.items), view.alert_now, tuple(session.screen), getattr(session, "app", None), whole)
             return first, found, (await front() if given is not None else None), seen
         for attempt in (1, 2):
             first, issues, last, seen = await self._read(turn)
@@ -6223,6 +6251,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             shown = last if first == last else (last or first)
             raise Refused("not_allowed", _outside(shown, self.session.app_names.get(shown or ""),
                                                   ", ".join(given.values())))
+        if not seen.whole:
+            self._refuse_cut_report("ux_check")  # (nothing is checked, filed on the journey or kept for naming drift)
         rows: list[tuple[str, str, str]] = []
         notes = list(notes)
         if isinstance(issues, DeviceError):
@@ -6765,6 +6795,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                                                       ", ".join(given.values())))
             bundle = front
         folder = bundle or "unknown"  # (a recording copies the reference from this folder: it comes back in Compared)
+        if self._tier_now() != "full" and any(e.get("width") is None for e in ignore or []):
+            # (R200v M1) an element to paint out may be among what the cut-short read left out: a reference saved or
+            # compared without it would hold (or fail on) what it was meant to ignore. A rect needs no read.
+            raise Refused("unsupported", f"compare_screen: {UNREAD} within the time given, so the elements to ignore "
+                                         "can't be found. Ignore them by rect ({x, y, width, height}), or go to a still "
+                                         "screen first.")
         rects, notes = compare.ignored(view.items, ignore or [])
         if (other := compare.twin(folder, name, script["path"] if script else None)) is not None:  # before any read or write
             raise Refused("bad_params", namelib.twin_message("reference", name, other))
@@ -8616,7 +8652,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if was is not None and self.hub.latest is not None and not alike(was, self.hub.latest):
             return False
         # after the touch's turn: the read waits its turn in the phone's queue, as every read does
-        return _screen_sig((await self._read(self.session.refresh)).items) == before
+        tree = await self._read(self.session.refresh)
+        if _cut_short(tree):
+            return False  # (R200v M1) a tree cut short can't show that nothing changed (two roots always compare equal)
+        return _screen_sig(tree.items) == before
 
     async def _still_back(self) -> ui.Back:
         """Where `back` would touch, read until two reads in a row agree. A sheet that is still sliding in has

@@ -137,11 +137,11 @@ def test_a_v9_read_carries_the_budget_and_says_how_much_it_read(state):
                      "truncated": False}]
     s = Session(runner)
     tree = asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest"]
     assert tree.tier == "full" and not tree.truncated and s.last_tier == "full"
     assert [e.identifier for e in tree.items] == ["lab-taps"]
     asyncio.run(s.refresh())  # a whole tree is the next read's baseline
-    assert runner.paths("/wda/tw/tree")[-1] == "/wda/tw/tree?budget=3000&since=t1"
+    assert runner.paths("/wda/tw/tree")[-1] == "/wda/tw/tree?budget=3000&path=xctest&since=t1"
 
 
 def test_a_screen_that_doesnt_answer_comes_back_as_root_and_its_app_gets_the_short_budget(state):
@@ -154,12 +154,12 @@ def test_a_screen_that_doesnt_answer_comes_back_as_root_and_its_app_gets_the_sho
     assert tree.app == ("TikTok", TIKTOK)  # the root still names the app (personal mode's scope needs it)
     assert s.last_compact is None  # a cut-short tree is no baseline for "unchanged"
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000", "/wda/tw/tree?budget=1500"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest", "/wda/tw/tree?budget=1500&path=direct"]
     # the app answers whole again (its profile reads in 0.2 s): the normal budget comes back at once
     runner.trees = [{"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}]
     asyncio.run(s.refresh())
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=1500", "/wda/tw/tree?budget=3000&since=f1"]
+    assert runner.paths("/wda/tw/tree")[-2:] == ["/wda/tw/tree?budget=1500&path=direct", "/wda/tw/tree?budget=3000&path=xctest&since=f1"]
 
 
 def test_a_short_budget_meant_for_another_app_is_read_again_with_the_normal_one(state):
@@ -174,7 +174,7 @@ def test_a_short_budget_meant_for_another_app_is_read_again_with_the_normal_one(
                     {"token": "s2", "tree": _app("com.apple.Preferences", "Settings", [BUTTON]), "tier": "full",
                      "truncated": False}]
     tree = asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=1500", "/wda/tw/tree?budget=3000"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=1500&path=direct", "/wda/tw/tree?budget=3000&path=xctest"]
     assert tree.tier == "full" and not s.budgets.short("com.apple.Preferences")
 
 

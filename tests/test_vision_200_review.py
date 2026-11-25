@@ -70,8 +70,8 @@ def test_the_session_asks_the_daemons_stillness_before_a_short_budget(state):
     asyncio.run(s.refresh())
     s.screen_still = lambda: False
     asyncio.run(s.refresh())
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000", "/wda/tw/tree?budget=3000",
-                                            "/wda/tw/tree?budget=1500"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest", "/wda/tw/tree?budget=3000&path=xctest",
+                                            "/wda/tw/tree?budget=1500&path=direct"]
 
 
 def test_the_daemon_gives_the_session_its_stillness():
@@ -114,8 +114,8 @@ def test_a_root_without_an_app_is_kept_under_the_app_the_read_was_for(state):
     assert s.budgets.short(TIKTOK)
     asyncio.run(s.refresh())  # short budget, and its nameless root is not read again with the normal one
     asyncio.run(s.refresh())  # (the refresh above left read_app None: the budget's app is remembered)
-    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000", "/wda/tw/tree?budget=1500",
-                                            "/wda/tw/tree?budget=1500"]
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest", "/wda/tw/tree?budget=1500&path=direct",
+                                            "/wda/tw/tree?budget=1500&path=direct"]
 
 
 # ---- H2: nothing proven on a cut-short tree ----
@@ -231,3 +231,233 @@ def test_a_links_expect_on_a_root_tree_is_not_checked(no_pc_ocr):
         assert await d._expect_after_link(view, None, {"text": "For You", "timeout": 1}, []) is None
         await finish(stop, task)
     run(go)
+
+
+# ---- M2, M3 ----
+
+def test_o_refs_end_with_any_action_look_false_included(no_pc_ocr):
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        await d.run_tool("b", "look", {"screenshot": False})
+        await d.run_tool("a", "swipe", {"x0": 215, "y0": 700, "x1": 215, "y1": 200, "look": False})
+        with pytest.raises(Refused) as e:  # the video changed: o2 was a point of the screen before the swipe
+            await d.run_tool("a", "tap", {"target": {"ref": "o2"}, "look": False})
+        assert e.value.code == "not_found"
+        assert d.control.client("b").ocr  # (another client's refs are its own: kept)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_cut_short_look_aims_typing_at_the_app_it_shows(no_pc_ocr):
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        d.control.client("a").aimed_app = ("Lab", "com.example.lab")  # an earlier touch; TikTok came by a link
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert d.control.client("a").aimed_app == ("TikTok", TIKTOK)
+        r = await d.run_tool("a", "type_text", {"text": "dogs", "screenshot": False})
+        assert r["text"].startswith("Typed 4 characters into the focused field.")
+        await finish(stop, task)
+    run(go)
+
+
+# ---- M1: nothing presented or saved as a whole screen from a cut-short tree ----
+
+def test_audit_and_ux_check_refuse_a_screen_read_in_part(no_pc_ocr, monkeypatch):
+    from tapwright import uxcheck
+    filed = []
+    monkeypatch.setattr(uxcheck, "tell_journey", lambda *a, **k: filed.append(a))
+
+    async def go():
+        for tier in ("root", "shallow"):
+            s = feed_session(tier=tier)
+            s.tree = [button("e1", "Like", "like-button", rect=(380, 400, 40, 40))]
+            d = make(s)
+            stop, task = await started(d)
+            for tool in ("audit", "ux_check"):
+                with pytest.raises(Refused) as e:
+                    await d.run_tool("a", tool, {})
+                assert e.value.code == "unsupported" and daemon_module.UNREAD.capitalize() in str(e.value), (tier, tool)
+                assert "no issues" not in str(e.value) and "0 findings" not in str(e.value)
+            await finish(stop, task)
+        assert filed == []  # (nothing went on a journey)
+    run(go)
+
+
+def test_a_cut_short_look_is_no_screen_for_naming_drift(no_pc_ocr, monkeypatch):
+    from tapwright import uxcheck
+    noted = []
+    monkeypatch.setattr(uxcheck, "note_screen", lambda client, items: noted.append(items))
+
+    async def go():
+        s = feed_session(tier="shallow")
+        s.tree = [button("e1", "Like", "like-button")]
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert noted == []
+        s.tier = "full"
+        await d.run_tool("a", "look", {"screenshot": False})
+        assert len(noted) == 1
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_cut_short_tree_is_no_place():
+    import dataclasses
+    from mapfakes import screen
+    from tapwright import places
+    whole = screen("Settings", ids=("go-language",), back="Home")
+    data = {"places": {}, "titleKey": "k", "roads": []}
+    assert places.recognisable(whole) and places.read_place(whole).whole
+    for tier in ("shallow", "root"):
+        cut = dataclasses.replace(whole, tier=tier)
+        assert not places.recognisable(cut)
+        read = places.read_place(cut)
+        assert not read.whole and places.locate(data, read) == (None, 0.0)
+
+
+def test_explore_files_no_way_back_from_a_screen_it_couldnt_read(tmp_path):
+    import dataclasses
+    from explorefakes import FakePhone, build, standard
+    from mapfakes import screen
+    from test_explore import run as explore_run
+    screens, goes, back_to = standard()
+    # About's version row opens a feed that never answers whole; back there lands on the feed again
+    screens["feed"] = dataclasses.replace(screen("Feed", ids=("feed-video",), back="About"), tier="root")
+    goes[("about", "about-version")] = "feed"
+    back_to["feed"] = "feed"
+    phone = FakePhone(screens, "home", goes, back_to)
+    explorer, maps = build(tmp_path, phone)
+    result = explore_run(explorer, maps)
+    assert [f for f in result.findings if f.kind == "dead_end"] == []
+    assert any("couldn't be read" in n for n in explorer.notes)
+
+
+def test_a_move_to_a_screen_that_couldnt_be_read_breaks_the_way(no_pc_ocr, tmp_path):
+    from tapwright import autoroute, mapkeeper
+
+    async def go():
+        s = feed_session()
+        d = make(s)
+        d.maps = mapkeeper.Maps(str(tmp_path / "maps"))
+        d._may_map = lambda bundle: True
+        view = d.control.client("a")
+        chain = view.auto = autoroute.Chain(TIKTOK)
+        chain.begin("Home")
+        view.app, view.tree = ("TikTok", TIKTOK), ui.Tree([], tier="root")
+        await d._learn(view, "tap", {"target": {"x": 10, "y": 300}}, {"text": "Tapped."}, {"mapping": True}, 0.0)
+        assert view.place is None and chain.broken_at == 0
+    run(go)
+
+
+def test_back_never_takes_a_cut_short_tree_for_an_unchanged_screen(no_pc_ocr):
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        view = d.control.client("a")
+        view.back_before = (None, daemon_module._screen_sig([]))  # (a root before; a root after compares equal)
+        assert await d._back_unchanged(view) is False
+        await finish(stop, task)
+    run(go)
+
+
+def test_compare_screen_wont_ignore_elements_it_couldnt_read(no_pc_ocr):
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "compare_screen", {"name": "feed", "ignore": [{"id": "clock"}]})
+        assert e.value.code == "unsupported" and daemon_module.UNREAD in str(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_replay_that_couldnt_read_its_screen_is_no_break_to_repair_and_no_failed_route():
+    import types
+    from tapwright import explorefloor, policy, repairanalysis
+    steps = [{"tool": "tap", "target": {"id": "like-button"}, "expect": {"id": "liked"}}]
+    screen = types.SimpleNamespace(floor=explorefloor.Floor(policy.DEFAULT, TIKTOK), here=None)
+    text = ('Ran 0 of 1 steps; stopped at step 1 (tap id=like-button): no element with id "like-button"\n'
+            + ui.HINT_NO_ELEMENTS)
+    brk = repairanalysis.parse_break(text, "not_found", steps)
+    assert brk is not None and brk.unread
+    analysed = repairanalysis.analyse(steps, 0, brk, screen)
+    assert analysed.kind == "none" and "weren't read" in analysed.reason
+    plain = repairanalysis.parse_break("Ran 0 of 1 steps; stopped at step 1 (tap id=like-button): no element",
+                                       "not_found", steps)
+    assert plain is not None and not plain.unread
+    assert daemon_module.cut_refusal(Refused("not_found", "x\n" + ui.HINT_PART_ELEMENTS))
+    assert not daemon_module.cut_refusal(Refused("not_found", "no element with id x"))
+
+
+def test_a_journey_stress_on_a_cut_short_screen_doesnt_say_what_survived(no_pc_ocr):
+    import types
+
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        jr = types.SimpleNamespace(users_eyes=False, screens=[types.SimpleNamespace(index=1, title="Feed",
+                                                                                  signature="x")])
+        ok, said = d._survives("a", jr, {"text": "dogs"}, "")
+        assert ok is None and "couldn't be looked for" in said
+        ok, said = d._survives("a", jr, {"goal_step": 1}, "")
+        assert ok is None
+        await finish(stop, task)
+    run(go)
+
+
+# ---- L4: Notification Center ----
+
+def test_notification_center_is_read_with_the_normal_budget_and_kept_out_of_the_memory(state):
+    runner = V9Runner()
+    center = {"t": "Application", "r": [0, 0, 430, 932], "b": "com.apple.springboard", "l": "SpringBoard"}
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    s.read_app = ("TikTok", TIKTOK)
+    s.budgets.answered(TIKTOK, True, 3000)  # TikTok's feed is on the short budget
+    s.last_tier = "root"
+    runner.trees = [{"token": "c1", "tree": center, "tier": "shallow", "truncated": True}]
+    asyncio.run(s.read_center())
+    assert runner.paths("/wda/tw/tree") == ["/wda/tw/tree?budget=3000&path=xctest"]  # (not TikTok's short budget)
+    assert not s.budgets.short("com.apple.springboard") and s.budgets.short(TIKTOK)
+    assert s.center_tier == "shallow" and s.last_tier == "root" and s.last_compact is None
+
+
+def test_the_notifications_answer_says_when_the_center_was_read_in_part(tmp_path):
+    from test_notifications import BUNDLE, center_daemon
+    from tapwright.daemon import Scope
+    from tapwright import center_tool
+
+    async def go():
+        d, s = center_daemon(tmp_path, [])
+        s.center_tier = "root"
+        stop, task = await started(d)
+        r = await d.run_tool("a", "notifications", {}, scope=Scope((BUNDLE,)))
+        assert f"Note: {center_tool.CENTER_CUT}" in r["text"]
+        assert "Notifications: none from" not in r["text"]
+        s.center_tier = "full"
+        r = await d.run_tool("a", "notifications", {}, scope=Scope((BUNDLE,)))
+        assert center_tool.CENTER_CUT not in r["text"]
+        await finish(stop, task)
+    run(go)
+
+
+# ---- lead's addition 1: the runner's way of reading ----
+
+def test_the_read_path_follows_the_budget_unless_forced(monkeypatch):
+    assert session_module.tree_path(3000, 3000, forced="") == "xctest"
+    assert session_module.tree_path(1500, 3000, forced="") == "direct"
+    assert session_module.tree_path(1500, 3000, forced="xctest") == "xctest"
+    assert session_module.tree_path(3000, 3000, forced="direct") == "direct"
+    assert session_module.tree_path(3000, 3000, forced="nonsense") == "xctest"
+    monkeypatch.setattr(session_module, "TREE_PATH_FORCED", "direct")
+    assert session_module.tree_path(3000, 3000) == "direct"

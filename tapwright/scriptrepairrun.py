@@ -186,7 +186,7 @@ class RepairTools:
     async def _repair_one(self, client_id: str, scope, run: Run, brk: Break, offset: int, drafts_only: bool) -> bool:
         """Try to repair the break; True when a repair was made and the run goes on from after it."""
         at = offset + brk.index - 1
-        absolute = Break(at + 1, brk.code, brk.reason)
+        absolute = Break(at + 1, brk.code, brk.reason, brk.unread)
         if len(run.repairs) >= scriptrepair.MAX_REPAIRS:
             run.notes.append(f"Note: {scriptrepair.MAX_REPAIRS} repairs were made and the script still breaks; more than "
                              f"{scriptrepair.MAX_REPAIRS} breaks are left to a person.")
