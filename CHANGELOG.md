@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0
+
+- Faster over USB: Tapwright's requests to the runner on the phone and the live screen stream now go straight through
+  the cable's own channel (usbmuxd) instead of through the developer tunnel: a status check answers in 1 ms, a screenshot
+  in about 240 ms instead of 400 ms. The tunnel stays for starting the runner and for what needs it, and carries
+  everything on Wi-Fi, or over USB when `TAPWRIGHT_DIRECT=0` is set.
+
 ## 1.10.0 (2026-11-21), "the Always-On Update"
 
 Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter
