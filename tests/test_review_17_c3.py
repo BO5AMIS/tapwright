@@ -128,6 +128,7 @@ TOUCHES = {
     ("daemon", "Daemon._press", "tap"): "checked by Daemon._touch",  # (and a double tap's second: checked inside)
     ("daemon", "Daemon._toggle", "tap"): "checked",
     ("daemon", "Daemon._type_text", "type_text"): "checked",  # its focusing tap (typing itself: §11.1, Return guarded)
+    ("daemon", "Daemon._type_focused", "type_text"): "checked",  # (2.0) keys into the focused field of a screen with no elements
     ("daemon", "ACTIONS", "alert"): "checked by Daemon._alert",
     ("daemon", "Daemon._swipe", "ACTIONS"): "checked",  # a short swipe is a touch where it starts; a full one asks
     ("daemon", "ACTIONS", "swipe"): "checked by Daemon._swipe",
