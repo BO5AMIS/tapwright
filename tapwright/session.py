@@ -35,6 +35,22 @@ TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
 QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
+# (1.10.1) WebDriverAgent's snapshotMaxDepth for every session (its default is 50): TAPWRIGHT_SNAPSHOT_DEPTH=N sets it, for
+# an app whose deep tree makes every read hang (TikTok's For You feed, 2026-11-24). Unset: WebDriverAgent's own default.
+SNAPSHOT_DEPTH = os.environ.get("TAPWRIGHT_SNAPSHOT_DEPTH", "")
+# (1.10.1, blind mode) Requests that touch or type while the app in front doesn't answer accessibility reads: sent on the
+# session that app's first read hung on (Session.blind_sid), through routes that never read the app.
+# Measured on the phone (2026-11-25, TikTok's feed): with no read of the app pending, a screenshot answers in 0.4 s and a
+# touch in 0.3 s, but a read of the app takes 14.4 s, and WebDriverAgent serves its routes one at a time: whatever comes
+# after a read waits for it. The waits below outlast one such read (a cut one still runs on the runner).
+BLIND_TOUCH_WAIT = 30.0  # seconds beyond the touch itself that a blind touch's answer is waited for
+BLIND_KEYS_WAIT = 30.0  # seconds a blind typing's answer is waited for
+BLIND_SHOT_WAIT = 30.0  # seconds a blind screenshot is waited for (it is taken of the screen, not read from the app)
+# seconds the cheap read before a remembered blind app's tree read is waited for (_guard_read): as long as any read is
+# (READ_CUT), so a screen that reads, slowly, is never taken for one that doesn't (TikTok's feed: 14 s)
+GUARD_WAIT = READ_CUT
+BLIND_PROBE_WAIT = FIRST_READ_WAIT  # a reconnect asks the blind session as long as a first read is waited for (review R1101
+# M3: a slow app that answers in 3-10 s recovers as it did with a new session)
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
                 "landscape_right": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"}  # WebDriverAgent's names
 ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
@@ -241,6 +257,12 @@ class Session:
         # re-created mid-run waits for animations (a blinking caret) on every read, 1 to 3 s each. The daemon sets
         # the stream's preset into it too (stream.PRESETS), so a re-created session has the current quality as well.
         self.session_settings: dict = dict(NO_IDLE_WAIT)
+        # (1.10.1, blind mode) the session whose first read of the app hung (AppNotAnswering): touches, keys and pictures
+        # that never read the app go out on it while that app stays in front. None once a session works or is reset.
+        self.blind_sid: str | None = None
+        self.lost_sid: str | None = None  # the session a request last found unanswered (_call), for _source to keep
+        self.blind_read_again = False  # whether the last ensure took the kept blind session back (its app reads again)
+        self.guard_apps: set[str] = set()  # the daemon's remembered blind apps: their reads are guarded (_guard_read)
         # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
         # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
         self.on_tree = None
@@ -256,21 +278,84 @@ class Session:
         runner = store.load_state().get("runner_id")
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
+        self.blind_read_again = False
+        if self.blind_sid is not None and await self._blind_reads_again():
+            return
         await self.device.start_wda(runner)
         sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
+        self.blind_sid = None  # (a new session ends the one before it on the runner)
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        # (1.10.1) the settings before the first read of the app (they were sent after it): a depth limit
+        # (SNAPSHOT_DEPTH) has to be in force for that read too. Before sid is committed: no read runs without them.
         try:
+            # (inside the try, review R1101 L4: should a setting ever wait on the app, its hang is named as the read's is)
+            await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": self._settings_wanted()},
+                                   timeout=READ_CUT)
             size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
         except ConnectionLost as e:
-            raise await self._why_stuck(bool(locked), e) from e
+            why = await self._why_stuck(bool(locked), e)
+            if isinstance(why, AppNotAnswering):
+                # (1.10.1, blind mode) the session is there; only the app doesn't answer. Kept for the touches, typing and
+                # pictures that never read the app (blind_tap, blind_drag, blind_keys, blind_picture)
+                self.blind_sid = sid
+            raise why from e
         self.screen = (float(size["width"]), float(size["height"]))
-        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": dict(self.session_settings)},
-                               timeout=READ_CUT)  # (before sid is committed: no read can run without them)
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
         self.fast_read, self.last_compact = None, None
         self.sid = sid  # committed last: a failure above leaves no half-started session
+
+    async def _blind_reads_again(self) -> bool:
+        """(1.10.1) A connect while a blind session is kept: ask that session for the window's size, briefly, instead of
+        making a new session (which would end the blind one; WebDriverAgent keeps one). True when it answers: the app in
+        front reads again, and the blind session becomes this one. While it still hangs on a runner that is alive, the
+        app is still stuck: AppNotAnswering again, and the blind session stays. A runner that is gone, or a session it
+        no longer knows: False, and the caller starts as usual."""
+        sid = self.blind_sid
+        getattr(self.device, "log", lambda *a: None)("blind mode: asking whether the app in front reads again")
+        try:
+            size = (await self.device.http("GET", f"/session/{sid}/window/size", None, BLIND_PROBE_WAIT))["value"]
+        except ConnectionLost as e:
+            # whether the runner is alive by its test session's task, not by /status (phone test 2026-11-25: /status
+            # queues behind the read that just went unanswered, so it looked dead and the blind session was dropped)
+            runner_alive = getattr(self.device, "runner_alive", None)
+            try:
+                alive = runner_alive() if runner_alive is not None else await self.device.wda_alive()
+            except Exception:  # noqa: BLE001 - a runner that can't say counts as gone
+                alive = False
+            if not alive:
+                self.blind_sid = None
+                return False
+            try:
+                locked = (await self.device.http("GET", "/wda/locked", None, LOCK_WAIT)).get("value")
+            except (ConnectionLost, DeviceError):
+                locked = False
+            why = await self._why_stuck(bool(locked), e)
+            if isinstance(why, AppNotAnswering):
+                raise why from e  # (blind_sid kept)
+            self.blind_sid = None
+            return False
+        except DeviceError:
+            self.blind_sid = None  # (an invalid session: the runner started again)
+            return False
+        self.blind_sid = None
+        self.screen = (float(size["width"]), float(size["height"]))
+        self.fast_tap = self.fast_drag = None
+        self.tw_version = 0
+        self.fast_read, self.last_compact = None, None
+        self.sid = sid
+        self.blind_read_again = True  # (the daemon forgets the app then: its screen answers reads)
+        return True
+
+    def _settings_wanted(self) -> dict:
+        """The settings a new session gets: session_settings, with snapshotMaxDepth when TAPWRIGHT_SNAPSHOT_DEPTH asks for
+        it (a whole number from 1 to 200; anything else is ignored, as unset)."""
+        wanted = dict(self.session_settings)
+        depth = SNAPSHOT_DEPTH.strip()
+        if depth.isdigit() and 1 <= int(depth) <= 200:
+            wanted["snapshotMaxDepth"] = int(depth)
+        return wanted
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
         """The first read of a fresh WebDriverAgent hung: say why when the phone can tell. A locked phone, or
@@ -304,6 +389,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
+        self.blind_sid = self.lost_sid = None
         self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
@@ -348,6 +434,9 @@ class Session:
                 getattr(self.device, "log", lambda *a: None)(f"no answer to {method} {path.split('?')[0]} in {timeout:.0f} s: asked again")
                 return await self.device.http(method, full, payload, READ_AGAIN)
         except ConnectionLost:
+            # (1.10.1) kept: when the read was cut because the app in front doesn't answer, this session still plays touches
+            # (_source keeps it as blind_sid); a new one can't be had then (POST /session hangs too: TikTok, 2026-11-25)
+            self.lost_sid = self.sid
             self.sid = None  # the next call starts WebDriverAgent again
             raise
         except DeviceError as e:
@@ -423,10 +512,34 @@ class Session:
             return False
 
     # ---- seeing ----
+    async def _guard_read(self) -> None:
+        """(1.10.1, phone test 2026-11-25) Before a whole-tree read while an app known for screens that never answer
+        reads (guard_apps: the daemon's remembered blind apps) was the last read's: one cheap read first, the window's
+        size, with a short cap. On TikTok's profile it answers in about 0.5 s; on its feed it takes 14 s, and a whole-tree
+        read there seemingly never ends, holding the runner (and every later request) for minutes. When the cheap read
+        doesn't answer in time, this session is kept as the blind one and AppNotAnswering raised: blind mode, before the
+        read that would hold the runner."""
+        if not self.guard_apps or self.sid is None:
+            return
+        try:  # the app in front from the phone's process list (a fresh daemon has read nothing yet)
+            in_front = list(await asyncio.wait_for(self.device.foreground_apps(), 5))
+        except Exception:  # noqa: BLE001 - it can't say: the last read's app, if any
+            in_front = [self.read_app[1]] if isinstance(self.read_app, tuple) else []
+        if len(in_front) != 1 or in_front[0] not in self.guard_apps:
+            return
+        bundle, sid = in_front[0], self.sid
+        try:
+            await self.device.http("GET", f"/session/{sid}/window/size", None, GUARD_WAIT)
+        except ConnectionLost as e:
+            self.lost_sid = self.blind_sid = sid
+            self.sid = None
+            raise AppNotAnswering(bundle, self.app_names.get(bundle) or bundle) from e
+
     async def _source(self, timeout: float = 60) -> str:
         """The tree as WebDriverAgent's XML. A read normally takes about 0.2 s; one that hasn't answered within
         READ_CUT seconds is cut, and the phone is asked why: an app that is in front and doesn't answer
         accessibility queries is named (AppNotAnswering), so the caller can say so instead of waiting on it."""
+        await self._guard_read()
         try:
             # (asked a second time by _call when the first got no answer: a frozen app answers neither)
             source = await self._read_tree(timeout)
@@ -445,7 +558,13 @@ class Session:
         except (PhoneLocked, AppNotAnswering):
             raise
         except ConnectionLost as e:
-            raise await self._why_stuck(False, e) from e
+            why = await self._why_stuck(False, e)
+            if isinstance(why, AppNotAnswering) and self.lost_sid is not None:
+                # (1.10.1, blind mode; phone test 2026-11-25) the session this read was made on: WebDriverAgent still has
+                # it, and it plays touches without reading the app. A new session can't be had while that app is in
+                # front: POST /session waits on it too. A reconnect asks this one first (_blind_reads_again).
+                self.blind_sid = self.lost_sid
+            raise why from e
 
     async def _read_tree(self, timeout: float):
         """One read of the tree as /source's XML: through the fork's compact read when this runner has it (FAST_READ),
@@ -1279,6 +1398,76 @@ class Session:
         await self._touching(KEY_MS)
         await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
         return f"pressed {name}"
+
+    # ---- blind mode (1.10.1) ----
+    # While the app in front never answers accessibility reads (AppNotAnswering: TikTok's For You feed, 2026-11-24), the
+    # session its first read hung on (blind_sid) still plays touches and keys, and the screen's picture is still taken:
+    # the fork's tap and drag routes never read the app (TWFastTapCommands.m: no element lookup, no snapshot, no idle
+    # wait), nor does /screenshot. Nothing here reads the app, waits for it, or retries: a touch asked twice could be
+    # played twice. The daemon decides when these may be used (Daemon._blind_tool); none of them falls back to a read.
+
+    def _blind_path(self, path: str) -> str:
+        if self.blind_sid is None:
+            raise ConnectionLost("no session to act on while the app in front isn't answering")
+        return path.replace("{sid}", self.blind_sid)
+
+    async def blind_version(self) -> int:
+        """The fork's route version, asked without a session (0: not the fork, or it can't be told)."""
+        try:
+            answer = await self.device.http("GET", "/wda/tw/version", None, LOCK_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            said = str(e).lower()
+            if "unknown command" in said or "unknown method" in said:
+                return 0  # (review R1101 M1: Appium's build, or a fork older than its session-less route)
+            raise
+        value = answer.get("value") if isinstance(answer, dict) else None
+        version = value.get("tapwright") if isinstance(value, dict) else None
+        return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else 0
+
+    async def _blind_touching(self, ms: float, at: tuple[float, float] | None) -> None:
+        """What _touching does before a touch, minus the banner wait (it reads the app in front): Tapline is told the
+        touch is the agent's."""
+        self.typed_into = None
+        self.input_point = at
+        if self.touch_hook is not None:
+            await self.touch_hook(ms)
+
+    async def blind_tap(self, x: float, y: float, hold_ms: int = TAP_MS) -> None:
+        """One touch at a portrait point through the fork's fast tap, answered once played. No `apps` check: the fork
+        asks it of the app in front, which is what doesn't answer (the daemon checks the process list instead)."""
+        await self._blind_touching(hold_ms, (x, y))
+        await self.device.http("POST", self._blind_path(FAST_TAP_PATH),
+                               {"x": x, "y": y, "duration": hold_ms / 1000, "wait": True},
+                               hold_ms / 1000 + BLIND_TOUCH_WAIT)
+        self.last_point = (x, y)
+
+    async def blind_drag(self, points: list) -> None:
+        """A finger path [(t_ms, x, y), ...] in portrait points through the fork's fast drag, answered once played."""
+        await self._blind_touching(points[-1][0], (points[0][1], points[0][2]))
+        body = {"points": [[round(t), round(x), round(y)] for t, x, y in points]}
+        await self.device.http("POST", self._blind_path(FAST_DRAG_PATH), body, points[-1][0] / 1000 + BLIND_TOUCH_WAIT)
+        self.last_point = (points[0][1], points[0][2])
+
+    async def blind_keys(self, keys: str) -> None:
+        """Keys into whatever has the keyboard's focus. WebDriverAgent's keys route may itself wait on the app: then no
+        answer comes (ConnectionLost), and whether keys went in is not known."""
+        if not keys:
+            return
+        await self._blind_touching(KEY_MS * len(keys), None)
+        await self.device.http("POST", self._blind_path("/session/{sid}/wda/keys"), {"value": list(keys)},
+                               BLIND_KEYS_WAIT)
+
+    async def blind_picture(self) -> tuple[bytes, tuple[float, float]]:
+        """(PNG, the screen's size in points): WebDriverAgent's /screenshot without a session (a picture of the screen,
+        not a read of the app). The size comes from the picture and the known scale (else 3 for a picture 1000 or more
+        pixels wide, as every such iPhone is, and 2 below)."""
+        png = base64.b64decode((await self.device.http("GET", "/screenshot", None, BLIND_SHOT_WAIT))["value"])
+        from PIL import Image
+        width, height = Image.open(io.BytesIO(png)).size
+        scale = self.scale if isinstance(self.scale, float) and self.scale > 0 else (3.0 if width >= 1000 else 2.0)
+        return png, (width / scale, height / scale)
 
     async def settings(self, values: dict) -> None:
         """WebDriverAgent settings, e.g. the MJPEG stream's frame rate and size."""

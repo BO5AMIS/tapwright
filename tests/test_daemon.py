@@ -302,7 +302,8 @@ def test_a_frozen_app_is_named_at_once_and_close_app_ends_it():
         assert asyncio.get_running_loop().time() - began < 1.0  # not after the 2 s wait for a connection
         assert e.value.code == "not_answering"  # AGENT-TOOLS v1.4
         assert str(e.value) == ("Lab (com.example.lab) is in front and isn't answering, so nothing on the phone can be read. "
-                                "close_app can still close it; then open_app it again.")
+                                "If it stays like this, close_app it, then open_app it again: Tapwright then opens it "
+                                "without reading it, and these calls work at once.")  # (1.10.1, blind mode)
         assert (await d.viewer_message({"type": "button", "name": "home"}))["code"] == "not_answering"
         assert "wait a few seconds" not in str(e.value)
         with pytest.raises(Refused) as e:  # only the stuck app can be closed while it blocks the phone
