@@ -44,6 +44,7 @@ ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" hei
 # How far to turn a captured frame clockwise for each WebDriverAgent rotation z (checked on the phone 2026-11-11 with
 # Calculator in each landscape side: the frame turned this way reads upright)
 TURN_FOR_Z = {90: 90, 270: 270}
+TURN_UNKNOWN = -1  # landscape, but which side is up isn't known: every touch goes through the runner until it is
 TURN_RECHECK = 1.0  # seconds: in landscape, how often which side is asked again (the tree can't tell the sides apart)
 # Tapwright's own WebDriverAgent build (TAPWRIGHT_WDA=fork) has a fast tap route: one touch, with no element lookup and
 # no idle wait (WebDriverAgentLib/Commands/TWFastTapCommands.m in the fork). Asked for once per session; Appium's
@@ -383,6 +384,10 @@ class Session:
         except ConnectionLost as e:
             raise await self._why_stuck(bool(locked), e) from e
         self.screen = screen
+        # (review R200 H1) the phone may have turned while the line was down: upright is turn 0, and a landscape side
+        # is asked again by the next read (hands map points by `turn`, so a stale one puts a touch elsewhere)
+        self.turn = 0 if screen[0] <= screen[1] else TURN_UNKNOWN
+        self._turn_asked = -float("inf")
         settings = dict(self.session_settings)
         if bounded:
             settings["twAXTimeout"] = AX_TIMEOUT  # a ceiling for every accessibility read besides the tree's budget
@@ -560,18 +565,22 @@ class Session:
         if w <= 0 or h <= 0:
             return
         same = (w > h) == (self.screen[0] > self.screen[1])
-        if same and (w <= h or time.monotonic() - self._turn_asked < TURN_RECHECK):
+        if w <= h:  # upright: always turn 0, whatever it was (review R200 H1: a turn left from before a reconnect)
+            self.screen, self.turn = (w, h), 0
+            return
+        if same and self.turn != TURN_UNKNOWN and time.monotonic() - self._turn_asked < TURN_RECHECK:
             return  # (in landscape the phone may have turned to the other side: asked again now and then)
         self.screen = (w, h)
-        if w <= h:
-            self.turn = 0
-            return
         self._turn_asked = time.monotonic()
         try:
             z = int((await self._call("GET", "/session/{sid}/rotation", timeout=LOCK_WAIT)).get("value", {}).get("z", 0))
         except (DeviceError, TypeError, ValueError):
-            z = 90
-        self.turn = TURN_FOR_Z.get(z % 360, 90)
+            # not guessed (R200 H1): the two sides are 180 degrees apart for a touch sent by hands. Unknown keeps
+            # touches on the runner, and the next read asks again
+            self.turn = TURN_UNKNOWN
+            self._turn_asked = -float("inf")
+            return
+        self.turn = TURN_FOR_Z.get(z % 360, TURN_UNKNOWN)
 
     async def _banner_over_an_app(self, source: str | None) -> bool:
         """Is this tree only a notification banner sliding over the app in front? While one shows, WebDriverAgent
@@ -1046,6 +1055,9 @@ class Session:
                                          "setup doesn't have; nothing was touched.")
         self.typed_into = None
         await self.ensure()
+        if hands.why_not(getattr(self.device, "rsd", None)) is not None:  # (review R200 L1: before Tapline hears of it)
+            raise Refused("unsupported", "pinch needs touches through CoreDevice HID, which this phone doesn't take; "
+                                         "nothing was touched.")
         near, far = pinch_spread(x, y, scale, self.screen)
         await self._touching(ms, (x, y))
         ends = [(-1.0, 0.0), (1.0, 0.0)]
@@ -1605,6 +1617,9 @@ class Session:
     async def rotate(self, to: str) -> str:
         """Turn the phone (XCUIDevice's orientation, no touch). The screen's new size comes with the next read."""
         await self._call("POST", "/session/{sid}/orientation", {"orientation": ORIENTATIONS[to]})
+        # which side is up is asked again by the next read; until then no touch is mapped by the old side (R200 H1)
+        self.turn = TURN_UNKNOWN
+        self._turn_asked = -float("inf")
         return f"rotated to {to.replace('_', ' ')}"
 
     async def key(self, name: str) -> str:

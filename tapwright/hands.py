@@ -14,8 +14,10 @@ Safety rules, all here:
 - One gesture at a time (a lock). Timing is by `asyncio.sleep` against the loop's monotonic clock, so a long path doesn't
   drift.
 - `HandsUnavailable` is raised only before anything was sent: the caller may then use the runner instead. Once a report
-  may have gone out, a failure is `ConnectionLost` (the link dropped) or `HandsError` (an `Unanswered`: sent, outcome
-  unknown), never a reason to touch again some other way.
+  may have gone out, a failure is a `HandsError` (an `Unanswered`: sent, outcome unknown), also when the HID connection
+  dropped (never a `ConnectionLost`: that would rebuild the runner too), and never a reason to touch again some other
+  way. Reports get no answer from the phone: "sent" means written to the tunnel, and a report the phone drops silently
+  is not noticed here (the daemon's read afterwards shows what happened).
 
 Coordinates: callers give screen points as the session has them (`screen` is its size now, `turn` is `Session.turn`);
 `to_hid` maps them onto the portrait panel's 0..65535 (measured on the phone for both landscape sides, 2026-11-26).
@@ -39,6 +41,7 @@ STREAM_IOS = 27  # from here on the phone drops HID reports unless a display str
 STEP_MS = 12.0  # a contact report goes out at least this often while a finger moves (8-16 ms is a real digitizer's pace)
 OPEN_WAIT = 5.0  # seconds opening the services may take (a second tunnel's services opened in well under one)
 SEND_WAIT = 2.0  # seconds one report may take to be acked (1.3 ms measured)
+DIRTY_HOLD = 30.0  # seconds a finger, key or button that may still be down keeps touches off the runner too (R200 M2)
 RETRY_OPEN = 30.0  # seconds before an open that failed for a passing reason is tried again on the same tunnel
 BUTTON_MS = 50  # how long a button is held (Phase 0: 52 ms a press)
 KEY_GAP_MS = 12  # between two keyboard reports (15 characters in 396 ms, measured)
@@ -214,7 +217,7 @@ class Hands:
         self.log = log
         self._make = services
         self.screen: tuple[float, float] = (390.0, 844.0)  # the session's screen in points (a call may give its own)
-        self.stream_ok = False  # set when a display stream runs (iOS 27+ needs one); the eyes lane owns it
+        self._stream_ok = False
         self._lock = asyncio.Lock()
         self._rsd: Any = None  # the tunnel the open services belong to
         self._touch: Any = None  # UniversalHIDServiceService, connected
@@ -224,9 +227,21 @@ class Hands:
         self._told: tuple[Any, str] | None = None  # what was last logged about which tunnel (logged once each)
         # what may still be down on the phone, to let go of first thing on the next open
         self.dirty: dict[str, Any] = {}
+        self._dirty_at = 0.0  # loop time when `dirty` was first set (DIRTY_HOLD counts from it)
         self._pending: asyncio.Future | None = None  # a release still going out after its gesture was cancelled
 
     # ---- state ----
+    @property
+    def stream_ok(self) -> bool:
+        """Whether a display stream runs (iOS 27+ drops HID touches without one); the eyes lane sets it."""
+        return self._stream_ok
+
+    @stream_ok.setter
+    def stream_ok(self, value: bool) -> None:
+        if bool(value) != self._stream_ok:
+            self._stream_ok = bool(value)
+            self._failed = None  # (review R200 L4) "needs a stream" was remembered for the tunnel: ask again
+
     @property
     def available(self) -> bool:
         """Open on the device's current tunnel: the next gesture goes out without opening anything."""
@@ -257,6 +272,27 @@ class Hands:
 
     # ---- opening ----
     async def _ready(self) -> None:
+        """Open the services (see _open_now). While something from an earlier gesture may still be down on the phone
+        (`dirty`) and HID can't be opened to let go of it, no HandsUnavailable is raised for DIRTY_HOLD seconds: that
+        would send the touch through the runner as a second finger (review R200 M2). The caller hears a HandsError
+        (nothing was touched). After DIRTY_HOLD the phone is taken to have dropped it with the lost connection."""
+        try:
+            await self._open_now()
+        except HandsUnavailable as e:
+            if not self.dirty:
+                raise
+            loop = asyncio.get_running_loop()
+            if loop.time() - self._dirty_at >= DIRTY_HOLD:
+                self._say(getattr(self.device, "rsd", None),
+                          f"hands: what an earlier gesture left down ({', '.join(self.dirty)}) couldn't be let go of "
+                          f"for {DIRTY_HOLD:g} s; given up")
+                self.dirty = {}
+                raise
+            raise HandsError(f"a finger, key or button from an earlier gesture may still be down on the phone, and "
+                             f"CoreDevice HID can't be reached to let go of it ({e.reason}); nothing was touched: wait "
+                             "a few seconds, then look") from None
+
+    async def _open_now(self) -> None:
         """Open the services on the device's current tunnel (under the lock). HandsUnavailable when they can't be."""
         rsd = getattr(self.device, "rsd", None)
         if rsd is None:
@@ -374,8 +410,15 @@ class Hands:
         """Wait for a release that kept going after its gesture was cancelled."""
         pending, self._pending = self._pending, None
         if pending is not None and not pending.done():
-            with contextlib.suppress(BaseException):
+            try:
                 await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                # (review R200 M1) the caller was cancelled while waiting: it must not go on and play its gesture
+                if not pending.done():
+                    self._pending = pending
+                raise
+            except BaseException:  # noqa: BLE001 - the release's own failure was dealt with where it ran
+                pass
 
     async def _let_go(self, kind: str, send: Callable[[], Awaitable[None]], left: Any) -> None:
         """Send a release, shielded from cancellation: a cancelled caller leaves it running (the next gesture waits for
@@ -396,6 +439,8 @@ class Hands:
             self._pending = None
 
     def _mark_dirty(self, kind: str, left: Any) -> None:
+        if not self.dirty:
+            self._dirty_at = asyncio.get_running_loop().time()
         if kind == "buttons":
             self.dirty.setdefault("buttons", [])
             if left not in self.dirty["buttons"]:
@@ -430,6 +475,8 @@ class Hands:
             raise HandsUnavailable("landscape is left to the runner (TAPWRIGHT_HANDS_LANDSCAPE=0)")
         if turn == 0 and screen[0] > screen[1]:
             raise HandsUnavailable("the screen is landscape but which side is up isn't known yet")
+        if turn != 0 and screen[0] <= screen[1]:
+            raise HandsUnavailable("the screen is upright but the turn says landscape")  # (review R200 H1)
         return screen, turn
 
     # ---- touches ----
