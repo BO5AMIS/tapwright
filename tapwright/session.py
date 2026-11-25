@@ -590,6 +590,7 @@ class Session:
         else /source itself."""
         self.last_tier, self.last_why = "full", ""
         if FAST_READ != "0" and self.fast_read is not False:
+            await self.ensure()  # (2.0: a session's start learns the runner's version: no second question then)
             if self.fast_tap is None:
                 await self._fast_routes()  # (once per session: the version route doesn't read the app)
             if self.tw_version >= 4:
