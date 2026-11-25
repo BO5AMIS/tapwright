@@ -286,7 +286,7 @@ def test_the_refusal_of_other_calls_names_what_still_works():
     d, _ = _blind()
     got = _call(d, "scroll", {"direction": "down"})
     assert isinstance(got, Refused) and got.code == "not_answering"
-    assert "tap and long_press at {x, y} or an OCR ref" in str(got) and "close_app can still close it" in str(got)
+    assert "tap and long_press at {x, y} or an OCR ref" in str(got) and "close_app it, then open_app it again" in str(got)
 
 
 # ---- review R1101 (Opus 1) ----
@@ -413,3 +413,179 @@ def test_l6_an_empty_text_clears_nothing_blind():
     got = _call(d, "type_text", {"text": ""})
     assert isinstance(got, Refused) and got.code == "not_answering" and "cleared" in str(got)
     assert phone.touches() == []
+
+
+# ---- phone test 2026-11-25: POST /session hangs too while TikTok's feed is in front ----
+
+def test_a_read_cut_by_a_frozen_app_keeps_the_session_it_was_made_on(phone):
+    """The session from before TikTok came forward still plays touches; a new one can't be had (POST /session hangs)."""
+    phone.locked = False
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    assert s.sid == "S"
+    phone.in_front = [TIKTOK]
+    original = phone.http
+
+    async def frozen(method, path, payload=None, timeout=30.0):
+        if "/source" in path:
+            phone.requests.append((method, path, payload))
+            raise ConnectionLost(f"WebDriverAgent didn't answer GET {path} within {timeout:.0f} s")
+        return await original(method, path, payload, timeout)
+    phone.http = frozen
+    monkey_fast = session_module.FAST_READ
+    session_module.FAST_READ = "0"
+    try:
+        with pytest.raises(AppNotAnswering):
+            asyncio.run(s.refresh())
+    finally:
+        session_module.FAST_READ = monkey_fast
+    assert s.sid is None and s.blind_sid == "S"
+    # the reconnect asks that session, and never makes a new one while the app still hangs
+    phone.fail["/session/S/window/size"] = ConnectionLost("WebDriverAgent didn't answer within 10 s")
+
+    async def alive():
+        return True
+    phone.wda_alive = alive
+    posts = len([p for _, p, _ in phone.requests if p == "/session"])
+    with pytest.raises(AppNotAnswering):
+        asyncio.run(s.ensure())
+    assert s.blind_sid == "S" and len([p for _, p, _ in phone.requests if p == "/session"]) == posts
+
+
+# ---- phone test 2026-11-25 (2): a read of TikTok's feed holds the runner for minutes, so blind mode begins before it ----
+
+def test_an_app_found_stuck_is_remembered_across_restarts():
+    from tapwright import daemon as daemon_module
+    d = make()
+    d.state = "live"
+    d.lost(AppNotAnswering(TIKTOK, "TikTok"))
+    assert TIKTOK in d._blind_apps and TIKTOK in daemon_module._load_blind_apps()
+    assert TIKTOK in make()._blind_apps
+
+
+def test_the_refusal_says_to_close_and_open_it_again():
+    d, _ = _blind(blind_sid=None)
+    got = _call(d, "scroll", {"direction": "down"})
+    assert isinstance(got, Refused) and "close_app it, then open_app it again" in str(got)
+
+
+def test_open_app_of_a_remembered_app_goes_blind_without_reading_it(monkeypatch):
+    from tapwright import daemon as daemon_module
+    from test_daemon import finish, started
+    monkeypatch.setattr(daemon_module, "BLIND_OPEN_SETTLE", 0.0)
+
+    async def go():
+        phone = Phone()
+        d = make()
+        d._blind_apps = {TIKTOK}
+        stop, task = await started(d)
+        s = d.session
+        for name in BLIND:
+            setattr(s, name, types.MethodType(getattr(Session, name), s))
+        s.touch_hook, s.scale, s.typed_into, s.input_point = None, 3.0, None, None
+        s.device.http, s.device.foreground_apps = phone.http, phone.foreground_apps
+        s.sid = "S1"
+        launched = []
+
+        async def launch(bundle_id, arguments=None):
+            launched.append(bundle_id)
+            return "launched"
+        s.launch = launch
+        reads = len([c for c in s.calls if c in ("look", "refresh", "snapshot")])
+        got = await d.run_tool("a", "open_app", {"app": TIKTOK})
+        assert launched == [TIKTOK]
+        assert got["text"].startswith(f"Opened {TIKTOK} without reading it") and got["image"]
+        assert d.state == "not-answering" and s.blind_sid == "S1" and s.sid is None
+        assert len([c for c in s.calls if c in ("look", "refresh", "snapshot")]) == reads  # nothing read the app
+        got = await d.run_tool("a", "tap", {"target": {"x": 215, "y": 893}})
+        assert got["text"].startswith("Tapped (215, 893)")
+        await finish(stop, task)
+    asyncio.run(go())
+
+
+def test_open_app_of_another_app_is_as_before():
+    from test_daemon import finish, started
+
+    async def go():
+        d = make()
+        d._blind_apps = {TIKTOK}
+        stop, task = await started(d)
+        got = await d.run_tool("a", "open_app", {"app": "com.example.app"})
+        assert "without reading it" not in got["text"] and d.state == "live"
+        await finish(stop, task)
+    asyncio.run(go())
+
+
+def test_the_hold_waits_from_when_blind_mode_began():
+    import time as time_module
+    d, _ = _blind()
+    d._blind_since = time_module.monotonic()
+    assert asyncio.run(d._blind_hold()) is True  # just began: no try to connect (each is a read of the app)
+    d._blind_since = d._blind_at = d._blind_probe_at = time_module.monotonic() - 120
+    assert asyncio.run(d._blind_hold()) is False  # idle and due: one try
+    assert asyncio.run(d._blind_hold()) is True  # (and not again at once)
+
+
+def test_another_app_in_front_ends_the_hold():
+    d, _ = _blind(Phone(front="com.apple.mobileslideshow"))
+    import time as time_module
+    d._blind_since = time_module.monotonic()
+    assert asyncio.run(d._blind_hold()) is False
+
+
+def test_an_app_whose_kept_session_reads_again_stays_remembered():
+    from tapwright import daemon as daemon_module
+    from test_daemon import finish, started
+
+    async def go():
+        d = make()
+        d._blind_apps = {TIKTOK}
+        d.stuck = AppNotAnswering(TIKTOK, "TikTok")
+        d.session.blind_read_again = True
+        d.state = "not-answering"
+        stop, task = await started(d)
+        assert d.state == "live" and TIKTOK in d._blind_apps  # (its feed still won't read: its reads are guarded)
+        await finish(stop, task)
+    asyncio.run(go())
+
+
+def test_a_remembered_apps_read_is_guarded_and_goes_blind_before_the_tree_read(phone):
+    """On TikTok's feed one window-size read takes 14 s, and the whole-tree read never ends: the cheap read goes first."""
+    phone.locked, phone.in_front = False, [TIKTOK]
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    s.guard_apps, s.read_app = {TIKTOK}, ("TikTok", TIKTOK)
+    phone.fail["/session/S/window/size"] = ConnectionLost("WebDriverAgent didn't answer within 3 s")
+    before = len(phone.requests)
+    with pytest.raises(AppNotAnswering):
+        asyncio.run(s.refresh())
+    sent = [p for _, p, _ in phone.requests[before:]]
+    assert sent == ["/session/S/window/size"]  # no tree read went out
+    assert s.sid is None and s.blind_sid == "S"
+
+
+def test_a_remembered_apps_screen_that_reads_is_read_as_usual(phone):
+    phone.locked, phone.in_front = False, [TIKTOK]
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    s.guard_apps, s.read_app = {TIKTOK}, ("TikTok", TIKTOK)
+    before = len(phone.requests)
+    try:
+        asyncio.run(s.refresh())
+    except Exception:  # noqa: BLE001 - the fake's tree is empty; only what was asked matters here
+        pass
+    sent = [p for _, p, _ in phone.requests[before:]]
+    assert sent[0] == "/session/S/window/size" and len(sent) > 1 and s.blind_sid is None
+
+
+def test_other_apps_reads_are_not_guarded(phone):
+    phone.locked = False
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    s.guard_apps, s.read_app = {TIKTOK}, ("Lab", "com.example.lab")
+    before = len(phone.requests)
+    try:
+        asyncio.run(s.refresh())
+    except Exception:  # noqa: BLE001
+        pass
+    assert "/session/S/window/size" not in [p for _, p, _ in phone.requests[before:]]

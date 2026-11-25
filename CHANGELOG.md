@@ -2,18 +2,27 @@
 
 ## 1.10.1
 
-An app whose screen never answers accessibility reads (TikTok's For You feed: its video keeps every read waiting) could
-not be used at all: no session could be made, and every call was refused `not_answering` until it was closed, a tap at
-a point included.
+An app whose screen never answers accessibility reads could not be used at all: every call was refused `not_answering`
+until it was closed, a tap at a point included. On TikTok's For You feed (measured on the phone), one read of the app
+takes about 14 s and a whole-screen read seemingly never ends, and WebDriverAgent answers nothing else while one runs;
+with no read pending, a screenshot answers in 0.4 s and a touch in 0.3 s.
 
 - Blind mode: while such an app is in front, `look` answers with the screen's picture (and its text with OCR refs, when
-  OCR is installed), `tap` and `long_press` at `{x, y}` or an OCR ref, `swipe`, and `type_text` without a target (into
-  the field that has the keyboard's focus) still work. They go out through routes that never read the app, and each
-  answers with the picture after it, as no list of what changed can be read. Before each, the phone must say it isn't
-  locked and its process list must still have that app in front; anything else touches nothing. Targets by id, label,
-  text or element ref, typing into a target, a saved account's value, dry runs, `explore` and repairs stay refused:
-  there are no elements to check them on. `type_text` can't clear the field first, and says so. As soon as the app in
-  front answers again (another screen, another app), Tapwright connects as usual.
+  OCR is installed), and `tap` and `long_press` at `{x, y}` or an OCR ref, `swipe`, and `type_text` without a target
+  (into the field that has the keyboard's focus) still work. They go out through routes that never read the app, and
+  each answers with the picture after it, as no list of what changed can be read. Before each, the phone must say it
+  isn't locked and its process list must hold that app alone; anything else touches nothing. Targets by id, label, text
+  or element ref, typing into a target, a saved account's value, dry runs, `explore` and repairs stay refused: there
+  are no elements to check them on. `type_text` can't clear the field first, and says so.
+- Apps found this way are remembered (`~/.tapwright/blind-apps.json`; delete it to forget them). `open_app` opens a
+  remembered app without reading it, in blind mode at once. Before a whole-screen read while a remembered app is in
+  front, one cheap read goes first (the window's size, 10 s at most): a screen that doesn't answer it is used blind
+  before the read that would hold the phone. Screens of the app that answer (TikTok's profile) are used as usual.
+- Blind mode ends when another app comes to the front, or, while no blind call comes for 30 s, when the app's screen
+  answers a read again (asked at most once a minute: each ask of a screen that doesn't answer holds the phone ~14 s).
+- The first time an app's screen doesn't answer, the read in progress can hold the phone for minutes: the refusal says
+  to `close_app` it (which frees the phone at once) and `open_app` it again. A blind call can take up to 30 s while a
+  read of the app still runs on the phone.
 - The `not_answering` refusal says which calls still work.
 - `TAPWRIGHT_SNAPSHOT_DEPTH=N` (1-200) sets WebDriverAgent's snapshot depth for every session, to try on an app whose
   deep screen makes reads hang. A new session's settings now go out before its first read of the app.

@@ -64,6 +64,36 @@ HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
 BLIND_TOOLS = ("look", "tap", "long_press", "swipe", "type_text")
 BLIND_SETTLE = 1.0  # seconds a blind action is given to show what it did before its picture is taken
 BLIND_FRONT_CAP = 5.0  # seconds the phone's process list is waited for before a blind call
+BLIND_LOCK_CAP = 30.0  # seconds /wda/locked is waited for before a blind call: it queues behind a read still running
+# While the stuck app alone is in front, the supervisor doesn't try to connect (each try is a read of the app, about 14 s
+# on TikTok's feed, that every blind call queues behind). It tries when another app comes forward, or when no blind call
+# came for BLIND_PROBE_IDLE seconds and the last try is BLIND_PROBE_EVERY seconds old (a screen of that app may answer).
+BLIND_PROBE_IDLE = 30.0
+BLIND_PROBE_EVERY = 60.0
+BLIND_OPEN_SETTLE = 2.0  # seconds a remembered blind app is given to come up before its first picture
+# (phone test 2026-11-25) Apps whose screen didn't answer reads, remembered across restarts: open_app opens such an app
+# without reading it (Daemon._open_blind). A read of TikTok's feed takes about 14 s for one element and seemingly forever
+# for the whole tree, and WebDriverAgent answers nothing else meanwhile, so blind mode has to begin before any read.
+BLIND_APPS_FILE = "blind-apps.json"
+BLIND_AGAIN = ("If it stays like this, close_app it, then open_app it again: Tapwright then opens it without reading "
+               "it, and these calls work at once.")
+
+
+def _load_blind_apps() -> set[str]:
+    try:
+        data = json.loads((store.HOME / BLIND_APPS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    apps = data.get("apps") if isinstance(data, dict) else None
+    return {a for a in apps if isinstance(a, str) and a} if isinstance(apps, list) else set()
+
+
+def _save_blind_apps(apps: set[str]) -> None:
+    try:
+        store.HOME.mkdir(parents=True, exist_ok=True)
+        (store.HOME / BLIND_APPS_FILE).write_text(json.dumps({"apps": sorted(apps)}, indent=1), encoding="utf-8")
+    except OSError:
+        pass  # (remembering is a convenience: the app is found stuck again next time)
 BLIND_WAYS = ("look shows its picture (with OCR text refs when OCR is installed); tap and long_press at {x, y} or an "
               "OCR ref, swipe, and type_text without a target still work, without reading it")
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
@@ -1244,6 +1274,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._ever_connected = False
         # why the last connect couldn't finish, when the phone said: a PhoneLocked, or an AppNotAnswering
         self.stuck: PhoneLocked | AppNotAnswering | None = None
+        # (1.10.1, blind mode) when the last blind call came, and when the supervisor last tried to connect while blind
+        self._blind_at = self._blind_probe_at = float("-inf")
+        self._blind_since = float("-inf")  # when blind mode last began (the first try to connect waits from then)
+        self._blind_apps: set[str] = _load_blind_apps()
+        self.session.guard_apps = self._blind_apps  # (the same set: the session guards these apps' reads, _guard_read)
         self._connected = asyncio.Event()
         self._lost = asyncio.Event()
         self._wake = asyncio.Event()  # connect again now, without waiting out the backoff
@@ -1670,7 +1705,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return
         stuck = reason if isinstance(reason, AppNotAnswering) else None
         if stuck is not None:
+            if not self._same_stuck(stuck):
+                self._blind_since = time.monotonic()
             self.stuck = stuck
+            self._remember_blind(stuck.bundle_id, True)
         if self.state in ("live", "locked"):
             self.log(f"connection lost: {reason}")
             self._set_state("not-answering" if stuck is not None else "reconnecting", self._redact(str(reason))[:200])
@@ -1696,7 +1734,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
             blind = f" {BLIND_WAYS[0].upper()}{BLIND_WAYS[1:]}." if getattr(self.session, "blind_sid", None) is not None else ""
-            return Refused("not_answering", f"{self.stuck}.{blind} close_app can still close it; then open_app it again.")
+            return Refused("not_answering", f"{self.stuck}.{blind} {BLIND_AGAIN}")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
                                        "wait a few seconds, then look")
 
@@ -2010,6 +2048,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         attempt = failures = 0
         while not stop.is_set():
             if self.state not in ("live", "locked"):
+                if await self._blind_hold():
+                    await _first(self.backoff[min(attempt, len(self.backoff) - 1)], stop, self._wake)
+                    self._wake.clear()
+                    attempt += 1
+                    continue
                 self._connecting = True
                 try:
                     try:
@@ -2028,6 +2071,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 except (PhoneLocked, AppNotAnswering) as e:
                     if self.stuck is None:
                         self.log(f"connected, but {e}")
+                    if isinstance(e, AppNotAnswering):
+                        if not self._same_stuck(e):
+                            self._blind_since = time.monotonic()
+                        self._remember_blind(e.bundle_id, True)
                     self.stuck = e
                     state = "reconnecting" if self._ever_connected else "connecting"
                     self._set_state("not-answering" if isinstance(e, AppNotAnswering) else state, self._redact(str(e))[:200])
@@ -2036,6 +2083,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     self._set_state("reconnecting" if self._ever_connected else "connecting", self._redact(str(e))[:200])
                 else:
                     attempt = failures = 0
+                    # (an app whose screen reads again stays remembered: TikTok's profile reads, its feed never does. Its
+                    # reads are guarded from now on, Session._guard_read, so going back to such a screen is blind at once)
                     self.stuck = None
                     if not self._ever_connected:  # this daemon's first line to the phone: before any agent's call
                         await self._clear_leftover_network()
@@ -4075,6 +4124,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if name in BLIND_TOOLS and isinstance(self.stuck, AppNotAnswering) and getattr(self.session, "blind_sid", None) is not None:
             return await self._blind_tool(client_id, name, args, notes, shot)
         await self.wait_connected()
+        if name == "open_app" and self._blind_apps and not launchlib.arguments(args) and not _NESTED.get():
+            bundle_id, shown = await self._app(args["app"])
+            if bundle_id in self._blind_apps:
+                return await self._open_blind(client_id, bundle_id, shown, notes, shot)
         if (taken := self._taken_notes.pop(client_id, None)) is not None:
             notes = [*notes, taken]
         if name == "apps":
@@ -5831,6 +5884,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         action wakes the supervisor, which connects normally as soon as the app in front answers again."""
         stuck = self.stuck
         assert isinstance(stuck, AppNotAnswering)
+        self._blind_at = time.monotonic()  # (the supervisor holds its connect tries while blind calls come: _blind_hold)
         what = f"{stuck.name} ({stuck.bundle_id})"
         if _TOUCH_FLOOR.get() is not None or _EXPLORING.get():
             raise self._not_connected()  # (no element to judge: explore and a repair touch nothing blind)
@@ -5858,10 +5912,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         async def checked() -> None:
             """The phone isn't locked and still has the stuck app in front, both asked without reading the app."""
             try:
-                locked = (await device.http("GET", "/wda/locked", None, timeout=HOME_LOCK_CAP)).get("value")
+                locked = (await device.http("GET", "/wda/locked", None, timeout=BLIND_LOCK_CAP)).get("value")
             except (ConnectionLost, DeviceError):
-                raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked; nothing was "
-                                               f"{verb}.") from None
+                raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked (a read of the "
+                                               f"app may still be running on it); nothing was {verb}. {BLIND_AGAIN}") from None
             if locked is not False:
                 raise Refused("locked", "the phone is locked (or didn't say it isn't); call unlock, or ask the user to "
                                         f"unlock it. Nothing was {verb}.")
@@ -5902,7 +5956,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             lines = [head, blind, f"Screen {round(screen[0])}x{round(screen[1])} pt."]
             view.ocr = {}
             if ocr.available() and args.get("ocr", True) is not False:
-                seen = await asyncio.to_thread(ocr.read, png, screen)
+                try:
+                    seen = await asyncio.to_thread(ocr.read, png, screen)
+                except Exception as e:  # noqa: BLE001 - the picture is still the answer (phone test: a broken OCR install)
+                    self.log(f"blind look: OCR failed: {type(e).__name__}: {e}")
+                    seen, notes = [], [*notes, f"OCR failed ({type(e).__name__}), so this look is the picture alone."]
                 top = STATUS_BAR if screen[1] > screen[0] else 0.0  # the clock and the battery are the phone's
                 found = [s for s in seen if s.rect[1] >= top]
                 view.ocr = {f"o{n}": s.center for n, s in enumerate(found, 1)}
@@ -6020,6 +6078,71 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         lines = [f"{said} in {what} without reading it (it doesn't answer accessibility reads); the picture shows the "
                  "screen after. look (with OCR) reads its text."]
         return _answer(lines, notes, jpeg)
+
+    def _remember_blind(self, bundle_id: str, blind: bool) -> None:
+        """Remember (or forget) an app whose screen doesn't answer reads, across restarts (BLIND_APPS_FILE)."""
+        if (bundle_id in self._blind_apps) == blind:
+            return
+        if blind:
+            self._blind_apps.add(bundle_id)
+        else:
+            self._blind_apps.discard(bundle_id)
+        _save_blind_apps(self._blind_apps)
+        self.log(f"blind mode: {bundle_id} {'remembered: open_app opens it without reading it' if blind else 'reads again: forgotten'}")
+
+    async def _open_blind(self, client_id: str, bundle_id: str, shown: str,
+                          notes: list, shot: "tuple[int, bool] | None") -> dict:
+        """(1.10.1, phone test 2026-11-25) open_app of an app whose screen didn't answer reads before: launched, then
+        blind mode at once, before anything reads it (one read of TikTok's feed holds the runner for minutes). The
+        session that launched it is kept as the blind one, and the answer is a blind look. When the app's screen answers
+        again (the supervisor asks now and then while no blind call comes), it is used as usual and forgotten."""
+        name = shown.split(" (")[0]
+
+        async def launch():
+            await self.session.launch(bundle_id)
+        try:
+            await self.control.agent(launch)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            raise Refused("not_found", f"couldn't open {bundle_id}: {e}; call apps for the installed apps") from None
+        s = self.session
+        if s.sid is None:
+            raise self._not_connected()
+        s.blind_sid, s.sid = s.sid, None
+        self.lost(AppNotAnswering(bundle_id, name))  # (state not-answering; the supervisor holds while it stays in front)
+        self._opened = bundle_id
+        view = self.control.client(client_id)
+        view.aimed_app, view.typed_field = (shown, bundle_id), None
+        self.restart_logs(bundle_id)
+        self.log(f"opened {bundle_id} blind: its screen didn't answer reads before")
+        await asyncio.sleep(BLIND_OPEN_SETTLE)
+        answer = await self._blind_tool(client_id, "look", {}, notes, shot)
+        return {**answer, "text": f"Opened {shown} without reading it: its screen didn't answer reads before, so it is "
+                                  f"used blind until it does.\n" + answer["text"]}
+
+    async def _blind_hold(self) -> bool:
+        """(1.10.1, blind mode) Should the supervisor skip this connect try? Yes while a blind session is kept and the
+        stuck app alone is in front (the phone's process list, which doesn't read the app): a try reads the app, which
+        takes about 14 s on TikTok's feed, and every blind call waits behind it. No once another app is in front, when the
+        list can't be had (as before blind mode), and every BLIND_PROBE_EVERY seconds once no blind call came for
+        BLIND_PROBE_IDLE seconds: a screen of the app that answers reads ends blind mode then."""
+        stuck = self.stuck
+        if not isinstance(stuck, AppNotAnswering) or getattr(self.session, "blind_sid", None) is None:
+            return False
+        device = self.session.device
+        try:
+            in_front = await asyncio.wait_for(device.foreground_apps(), BLIND_FRONT_CAP)
+        except Exception:  # noqa: BLE001 - the list can't be had: connect as before blind mode
+            return False
+        if list(in_front or ()) != [stuck.bundle_id]:
+            return False
+        now = time.monotonic()
+        idle = now - max(self._blind_at, self._blind_since)
+        if idle >= BLIND_PROBE_IDLE and now - max(self._blind_probe_at, self._blind_since) >= BLIND_PROBE_EVERY:
+            self._blind_probe_at = now
+            return False
+        return True
 
     def _blind_failed(self, error: Exception) -> None:
         """A blind request failed: a session the runner no longer knows is dropped (the next blind call is refused
