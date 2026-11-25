@@ -127,6 +127,15 @@ OCR_WAIT = 8.0  # seconds the runner's OCR may take (Vision's accurate level: ab
 # doesn't support fails the read, and the picture is then read on this computer instead
 OCR_LANGUAGES = os.environ.get("TAPWRIGHT_OCR_LANGUAGES", "").strip()
 TIERS = ("full", "shallow", "root")
+# (review R200v M4) the languages Vision's fast level reads (Latin script; Apple's fast revision lists English, French,
+# Italian, German, Spanish and Portuguese), by their primary subtag. A fast read asked in any other language fails with
+# `unknown error` (RUNNER-V9-PROTOCOL §4), so wait_for's polls read at the accurate level then.
+FAST_LANGUAGES = frozenset({"en", "fr", "it", "de", "es", "pt"})
+
+
+def fast_reads(languages: str) -> bool:
+    """Can Vision's fast level read every one of these comma-separated BCP 47 codes ("" = its default, English)?"""
+    return all(code.strip().split("-")[0].lower() in FAST_LANGUAGES for code in languages.split(",") if code.strip())
 
 
 def _env_float(name: str, default: float) -> float:
@@ -204,6 +213,51 @@ class ReadBudget:
 
     def forget(self) -> None:
         self._cut.clear()
+
+
+SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
+
+
+class SettleCap:
+    """(2.0, lead's decision) How long an action's answer waits for the screen of an app to stand still. A screen that
+    never does (TikTok's playing feed) made every settle wait its whole cap (2 s, 4 s after a launch): a swipe there took
+    3.2 s. So, per bundle id: when a settle ended by its cap with the picture still changing while the newest tree of that
+    app was cut short, its next settles wait at most `short` seconds; a settle of the app that ends still, or a read of it
+    that comes back whole, gives it the normal cap again. Pure: the daemon says what happened and asks for the cap."""
+
+    def __init__(self, short: float = SHORT_SETTLE) -> None:
+        self.short = short
+        self._restless: set[str] = set()
+
+    def cap(self, bundle: str | None, cap: float) -> float:
+        """The cap for a settle of `bundle`'s screen whose normal cap is `cap`."""
+        return min(cap, self.short) if bundle is not None and bundle in self._restless else cap
+
+    def settled(self, bundle: str | None, capped: bool, cut: bool) -> bool:
+        """A settle of `bundle` ended: by its cap with frames still changing (`capped`), the newest tree cut short (`cut`).
+        True when the app's cap switched (the caller logs it)."""
+        if bundle is None:
+            return False
+        if capped and cut and bundle not in self._restless:
+            self._restless.add(bundle)
+            return True
+        if not capped and bundle in self._restless:
+            self._restless.discard(bundle)
+            return True
+        return False
+
+    def read_whole(self, bundle: str | None) -> bool:
+        """A read of `bundle` came back whole: the normal cap again. True when it switched."""
+        if bundle is not None and bundle in self._restless:
+            self._restless.discard(bundle)
+            return True
+        return False
+
+    def restless(self, bundle: str | None) -> bool:
+        return bundle is not None and bundle in self._restless
+
+    def forget(self) -> None:
+        self._restless.clear()
 
 
 PINCH_GAP = 60.0  # points between a pinch's two fingers at its narrow end
@@ -382,6 +436,7 @@ class Session:
         self.screen_still: Callable[[], bool] | None = None
         self.budget_app: str | None = None  # the app the newest bounded read was budgeted for or named (L2)
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
+        self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
 
     async def ensure(self) -> None:
@@ -430,6 +485,7 @@ class Session:
         self.fast_read, self.last_compact = None, None
         self.bounded, self.last_tier, self.last_why = bounded, "full", ""
         self.budgets.forget()
+        self.settles.forget()
         self.budget_app = None
         self.sid = sid  # committed last: a failure above leaves no half-started session
 
@@ -748,6 +804,9 @@ class Session:
         if budget_ms is not None:
             if remember:
                 self.budgets.answered(_root_bundle(source) or budget_for, tier != "full", budget_ms)
+                if tier == "full" and self.settles.read_whole(_root_bundle(source) or budget_for):
+                    getattr(self.device, "log", lambda *a: None)(
+                        f"{_root_bundle(source) or budget_for} read whole again: actions settle with the normal cap")
             if tier != "full":
                 getattr(self.device, "log", lambda *a: None)(
                     f"tree read cut short ({tier}, budget {budget_ms} ms){': ' + self.last_why if self.last_why else ''}")
@@ -873,6 +932,8 @@ class Session:
         if level not in ("fast", "accurate"):
             raise ValueError(f"level must be fast or accurate, not {level!r}")
         languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
+        if level == "fast" and not fast_reads(languages):
+            level = "accurate"  # (review R200v M4) the fast level would fail every read in these languages
         path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
         answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
         value = answer.get("value", answer) if isinstance(answer, dict) else None
@@ -1211,6 +1272,23 @@ class Session:
             return  # do not cache a malformed response as proof of a legacy runner
         self.fast_tap, self.fast_drag = version >= 1, version >= 2
         self.tw_version = version
+        if version >= BOUNDED_VERSION and not self.bounded and self.sid is not None:
+            await self._bound_late()
+
+    async def _bound_late(self) -> None:
+        """(review R200v L6) ensure's version probe couldn't tell, so the session started as 1.10.0's did; a later probe
+        says version 9: the runner's ceiling for every accessibility read is set now (its reads are budgeted from now
+        on too), so the session isn't half-bounded. A setting that can't be posted leaves it as it was (asked again by
+        the next session)."""
+        try:
+            await self._call("POST", "/session/{sid}/appium/settings", {"settings": {"twAXTimeout": AX_TIMEOUT}},
+                             timeout=READ_CUT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner's AX timeout couldn't be set ({e})")
+            return
+        self.bounded = True
 
     async def runner_version(self) -> int:
         """The fork's route version of this phone's runner (0: not the fork)."""

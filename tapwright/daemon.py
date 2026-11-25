@@ -406,6 +406,7 @@ class Settled(NamedTuple):
     seconds: float
     changed: bool  # False only when the stream showed the screen unchanged for certain
     capped: bool  # the cap ended the wait with frames still changing
+    still: bool = False  # (2.0) it ended on frames that stood still (not a stall, no frames, or the cap)
 WAIT_MIN, WAIT_MAX = 0.1, 30.0  # seconds, for `wait`
 WAIT_FOR_MIN, WAIT_FOR_DEFAULT = 0.5, 10.0  # `wait_for`'s timeout in seconds (its upper end is WAIT_MAX)
 WAIT_FOR_KINDS = ("text", "id", "label")
@@ -4460,8 +4461,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 e.args = (f"{e}\nNote: {taken}",)
             if (e.code == "not_found" and target is not None and target.point is None
                     and (tier := self._tier_now()) != "full"):
-                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows
-                raise Refused("not_found", f"{e}\n{HINT_NO_ELEMENTS if tier == 'root' else HINT_PART_ELEMENTS}") from None
+                # (2.0) the screen gave no elements (or only some): say so, and how to reach what it shows; a near
+                # miss among the elements it did give comes first (review R200v L3)
+                near = self._closest(view, target, str(e)) if tier == "shallow" else None
+                raise Refused("not_found", "\n".join([str(e), *([near] if near else []),
+                                                      HINT_NO_ELEMENTS if tier == "root" else HINT_PART_ELEMENTS])) from None
             if e.code == "not_found" and (near := self._closest(view, target, str(e))):
                 raise Refused("not_found", f"{e}\n{near}") from None
             if e.code == "ambiguous" and self._other_app_shown():
@@ -6117,11 +6121,12 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         reads = getattr(self.session, "reads_text", None)
         return bool(reads()) if callable(reads) and RUNNER_OCR != "0" else False
 
-    async def _screen_text(self, level: str = "accurate") -> "tuple[list[ocr.Seen], str]":
+    async def _screen_text(self, level: str = "accurate", implicit: bool = False) -> "tuple[list[ocr.Seen], str]":
         """(the text lines the screen shows now, a note for the answer or ""). The runner reads them on the phone
         (route version 9, Apple's Vision: faster than this computer's CPU); RapidOCR reads the picture here when the
         runner can't (an older runner, or its OCR failed: never a failed call). Neither: no lines, and the note says
-        how to install the extra."""
+        how to install the extra. `implicit`: a read the agent didn't ask for (a cut-short look, a wait's picture): a
+        broken install here is a note too, never a failed call (review R200v L5)."""
         failed = ""
         if self._runner_reads_text():
             asked = self.hub.mono()
@@ -6150,16 +6155,18 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         try:
             return await asyncio.to_thread(ocr.read, picture, self.session.screen), ""
         except Exception as e:  # noqa: BLE001 - a broken install: the look is still the answer
-            if not failed:
+            if not failed and not implicit:
                 raise
-            self.log(f"OCR here failed too: {type(e).__name__}: {e}")
+            self.log(f"OCR here failed{' too' if failed else ''}: {type(e).__name__}: {e}")
+            if not failed:
+                return [], f"no text read from the picture: reading it here failed ({type(e).__name__})."
             return [], f"{failed}, and so did reading the picture here ({type(e).__name__})."
 
     async def _with_ocr(self, view, answer: dict, tier: str = "full") -> dict:
         """`look` with `ocr: true`, and (2.0) every look whose tree was cut short (`tier` shallow or root): the text the
         picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
         screen with no elements at all (root) the header's `Elements: none` line says the text follows."""
-        seen, note = await self._screen_text()
+        seen, note = await self._screen_text(implicit=tier != "full")
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -8433,7 +8440,11 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         at what that list's moment showed there; if something moved in (a sheet, a banner, a scrolled row) the
         touch would land on something else. Only a fresh stream frame against the frame of the agent's last read
         can tell; without both, or after the agent chose an answer without a list (`look: false`), it can't, and
-        the touch goes ahead as before."""
+        the touch goes ahead as before. (2.0, lead's decision) Not when the agent's last list of this view was cut
+        short: on such a screen (a playing feed) every pixel around a point changes all the time, so the guard would
+        refuse every touch by point or o ref and mean nothing (the o refs already end with any action, R200v M2)."""
+        if _cut_short(getattr(view, "tree", None)):
+            return False
         (_, was), now = view.read_mark, self.hub.latest
         if view.moved or was is None or now is None or now is was or self.hub.now_ms() - now.at > FRESH_FRAME * 1000:
             return False
@@ -8768,7 +8779,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if kind != "text" or not self._ocr_possible():
             return None
         try:
-            found, note = await _wait_for(self._screen_text("fast"), max(WAIT_FOR_MIN_LEFT, left))
+            found, note = await _wait_for(self._screen_text("fast", implicit=True), max(WAIT_FOR_MIN_LEFT, left))
         except asyncio.TimeoutError:
             return None  # (the time ran out while the picture was read)
         if note:
@@ -8791,6 +8802,22 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
                       since: Frame | None = None, early: int | None = None) -> Settled:
+        """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
+        the app in front is known for it, and learned from how this settle ends."""
+        caps = getattr(self.session, "settles", None)
+        if caps is None:
+            return await self._settle_frames(after_seq, still, cap, since, early)
+        bundle = self._read_bundle()
+        done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap), since, early)
+        if done.still or done.capped:
+            cut = self._tier_now() != "full"
+            if caps.settled(bundle, done.capped, cut):
+                self.log(f"{bundle}'s screen never stands still: actions settle within {caps.short:g} s"
+                         if caps.restless(bundle) else f"{bundle}'s screen stood still: actions settle as usual")
+        return done
+
+    async def _settle_frames(self, after_seq: int, still: float | None = None, cap: float = CAP,
+                             since: Frame | None = None, early: int | None = None) -> Settled:
         """Wait for the screen to be still, as the stream shows it. `after_seq` is the newest frame when the
         phone call returned: the settle ends only on a later frame, since earlier ones may predate the effect.
         WebDriverAgent streams continuously even when nothing changes, so a silence is a stall, not stillness.
@@ -8828,7 +8855,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 run, run_start, first_of_run = 0, began, None
             elif (gap and last is not None and run >= 2 and began - run_start >= still
                   and began - last <= 1.5 * gap):
-                return Settled(0.0, True, False)  # changed, then still up to a fresh frame at the return
+                return Settled(0.0, True, False, True)  # changed, then still up to a fresh frame at the return
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
             wait = min(left, self.settle_first_frame if first else stall)
@@ -8850,7 +8877,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
                 if differs or (seq - after_seq >= 3 and now - began >= self.settle_quiet):
-                    return Settled(now - began, differs, False)
+                    return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 
     def _still_for_budget(self) -> bool:

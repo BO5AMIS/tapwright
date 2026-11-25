@@ -167,7 +167,7 @@ def test_a_text_gone_needs_a_picture_read_that_worked(no_pc_ocr):
             await d.run_tool("a", "wait_for", {"text": "For You", "gone": True, "timeout": 0.6})
         assert daemon_module.unread(e.value) and "picture's text wasn't read either" in str(e.value)
 
-        async def slow(level="accurate"):
+        async def slow(level="accurate", implicit=False):
             await asyncio.sleep(5)
             return [], ""
         d._screen_text = slow
@@ -461,3 +461,153 @@ def test_the_read_path_follows_the_budget_unless_forced(monkeypatch):
     assert session_module.tree_path(3000, 3000, forced="nonsense") == "xctest"
     monkeypatch.setattr(session_module, "TREE_PATH_FORCED", "direct")
     assert session_module.tree_path(3000, 3000) == "direct"
+
+
+# ---- lead's addition 2: the moved-under guard over a playing feed ----
+
+def test_a_touch_by_point_on_a_cut_short_screen_isnt_refused_for_a_picture_that_moves():
+    import types
+    from PIL import Image
+    s = DescribingSession()
+    d = make(s)
+    view = d.control.client("a")
+    before = types.SimpleNamespace(thumb=Image.new("L", (43, 93), 0), at=d.hub.now_ms())
+    after = types.SimpleNamespace(thumb=Image.new("L", (43, 93), 255), at=d.hub.now_ms())
+    view.read_mark, view.moved = (1, before), False
+    d.hub.latest = after
+    view.tree = ui.Tree([], tier="full")
+    assert d._moved_under(view, 200, 400)  # a whole screen: the guard holds, as before
+    for tier in ("root", "shallow"):
+        view.tree = ui.Tree([], tier=tier)
+        assert not d._moved_under(view, 200, 400), tier  # a video plays under every point there
+
+
+# ---- lead's addition 3: the settle on a screen that never stands still ----
+
+def test_the_settle_cap_memory():
+    from tapwright.session import SettleCap
+    caps = SettleCap(short=0.5)
+    assert caps.cap("a", 2.0) == 2.0 and caps.cap(None, 2.0) == 2.0
+    assert not caps.settled("a", capped=True, cut=False)  # a whole tree: a long animation, not a feed
+    assert caps.cap("a", 2.0) == 2.0
+    assert caps.settled("a", capped=True, cut=True)  # capped, still moving, its tree cut short: switched
+    assert caps.cap("a", 2.0) == 0.5 and caps.cap("a", 4.0) == 0.5 and caps.cap("a", 0.3) == 0.3
+    assert caps.cap("b", 2.0) == 2.0
+    assert not caps.settled("a", capped=True, cut=True)  # (already: no second log line)
+    assert caps.settled("a", capped=False, cut=True)  # it stood still: the normal cap again
+    assert caps.cap("a", 2.0) == 2.0
+    caps.settled("a", capped=True, cut=True)
+    assert caps.read_whole("a") and caps.cap("a", 2.0) == 2.0 and not caps.read_whole("a")
+    caps.settled("a", capped=True, cut=True)
+    caps.forget()
+    assert caps.cap("a", 2.0) == 2.0
+
+
+def test_the_daemons_settle_shortens_on_a_feed_and_comes_back_when_it_stands_still(no_pc_ocr):
+    from tapwright.daemon import Settled
+
+    async def go():
+        s = feed_session()
+        s.settles = session_module.SettleCap()
+        s.read_app = ("TikTok", TIKTOK)
+        s.last_tier = "root"
+        logged = []
+        d = make(s, log=logged.append)
+        caps_asked, ends = [], [Settled(2.0, True, True), Settled(0.5, True, True), Settled(0.3, True, False, True),
+                                Settled(2.0, True, True)]
+
+        async def frames(after_seq, still=None, cap=2.0, since=None, early=None):
+            caps_asked.append(cap)
+            return ends.pop(0)
+        d._settle_frames = frames
+        for _ in range(3):
+            await d._settle(0, cap=2.0)
+        s.last_tier = "full"  # a whole tree: capped is only a long animation
+        await d._settle(0, cap=4.0)
+        assert caps_asked == [2.0, 0.5, 0.5, 4.0]
+        assert sum("never stands still" in str(x) for x in logged) == 1
+        assert sum("stood still" in str(x) for x in logged) == 1
+    run(go)
+
+
+def test_a_whole_read_gives_the_app_the_normal_settle_cap_again(state):
+    runner = V9Runner()
+    runner.trees = [{"token": "f1", "tree": _app(children=[BUTTON]), "tier": "full", "truncated": False}]
+    s = Session(runner)
+    s.settles.settled(TIKTOK, capped=True, cut=True)
+    asyncio.run(s.refresh())
+    assert not s.settles.restless(TIKTOK)
+
+
+# ---- M4, L1, L3, L5, L6 ----
+
+def test_a_fast_read_in_a_language_the_fast_level_cant_read_goes_accurate(state, monkeypatch):
+    runner = V9Runner()
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    monkeypatch.setattr(session_module, "OCR_LANGUAGES", "ar-SA,en-US")
+    asyncio.run(s.read_text("fast"))
+    assert runner.paths("/wda/tw/ocr")[-1] == "/wda/tw/ocr?level=accurate&languages=ar-SA,en-US"
+    monkeypatch.setattr(session_module, "OCR_LANGUAGES", "en-US,fr-FR")
+    asyncio.run(s.read_text("fast"))
+    assert runner.paths("/wda/tw/ocr")[-1] == "/wda/tw/ocr?level=fast&languages=en-US,fr-FR"
+    assert session_module.fast_reads("") and not session_module.fast_reads("zh-Hans")
+
+
+def test_an_ocr_answer_from_a_turned_screen_is_refused_not_stretched():
+    from tapwright import ocr
+    with pytest.raises(ValueError):
+        ocr.of_runner({"screen": [932, 430], "lines": [{"text": "A", "rect": [10, 10, 20, 10]}]}, (430.0, 932.0))
+    same = ocr.of_runner({"screen": [430, 932], "lines": [{"text": "A", "rect": [10, 10, 20, 10]}]}, (430.0, 932.0))
+    assert same[0].rect == (10.0, 10.0, 20.0, 10.0)
+
+
+def test_a_near_miss_on_a_partly_read_screen_keeps_its_closest_line(no_pc_ocr):
+    async def go():
+        s = feed_session(tier="shallow")
+        s.tree = [button("e1", "Profile", "profile-tab", rect=(330, 870, 70, 40))]
+        d = make(s)
+        stop, task = await started(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        with pytest.raises(Refused) as e:
+            await d.run_tool("a", "tap", {"target": {"id": "profile-tabs"}})
+        said = str(e.value)
+        assert e.value.code == "not_found" and "Closest:" in said and daemon_module.HINT_PART_ELEMENTS in said
+        assert said.index("Closest:") < said.index(daemon_module.HINT_PART_ELEMENTS)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_broken_ocr_install_never_fails_a_look_the_agent_didnt_ask_ocr_for(monkeypatch):
+    from tapwright import ocr
+
+    def broken(image, screen):
+        raise ImportError("onnxruntime DLL load failed")
+    monkeypatch.setattr(ocr, "reader", broken)
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(daemon_module, "RUNNER_OCR", "0")
+
+    async def go():
+        s = feed_session()
+        d = make(s)
+        stop, task = await started(d)
+        r = await d.run_tool("a", "look", {"screenshot": False})
+        assert ui.ELEMENTS_NONE + "." in r["text"].splitlines()
+        assert "reading it here failed (ImportError)" in r["text"].splitlines()[-1]
+        with pytest.raises(Refused) as e:  # wait_for's picture read: nothing proven, never `internal`
+            await d.run_tool("a", "wait_for", {"text": "For You", "timeout": 0.5})
+        assert daemon_module.unread(e.value)
+        await finish(stop, task)
+    run(go)
+
+
+def test_a_session_that_learns_version_9_late_sets_the_runners_ax_timeout(state):
+    from tapwright.device import DeviceError
+    runner = V9Runner()
+    runner.fail["/wda/tw/version"] = DeviceError("HTTP 500: boom")  # ensure's probe can't tell
+    s = Session(runner)
+    asyncio.run(s.ensure())
+    assert not s.bounded
+    asyncio.run(s.refresh())  # the session's own route says 9
+    posted = [body for m, p, body in runner.requests if p.endswith("/appium/settings")]
+    assert s.bounded and posted[-1] == {"settings": {"twAXTimeout": session_module.AX_TIMEOUT}}
