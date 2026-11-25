@@ -611,3 +611,47 @@ def test_a_session_that_learns_version_9_late_sets_the_runners_ax_timeout(state)
     asyncio.run(s.refresh())  # the session's own route says 9
     posted = [body for m, p, body in runner.requests if p.endswith("/appium/settings")]
     assert s.bounded and posted[-1] == {"settings": {"twAXTimeout": session_module.AX_TIMEOUT}}
+
+
+# ---- M1: a drive (trip) on a screen it couldn't read ----
+
+def _bare_trip(**fields):
+    import types
+    from tapwright import trip
+
+    async def no_after(*a, **k):
+        raise RuntimeError("no screen in this test")
+    t = object.__new__(trip.Trip)
+    t.d = types.SimpleNamespace(_after=no_after)
+    t.view, t.notes, t.moves, t.jumps, t.unread, t.foreign = None, [], 0, 0, False, False
+    for k, v in fields.items():
+        setattr(t, k, v)
+    return t
+
+
+def test_a_drive_that_stops_on_a_screen_it_couldnt_read_says_so_as_timeout_not_off_route():
+    from tapwright import trip
+    t = _bare_trip()
+    assert t.place_of(ui.Tree([], tier="root")) is None and t.unread
+    with pytest.raises(Refused) as e:
+        asyncio.run(t.off_route(2, 3, None, trip.NOT_KNOWN, None))
+    assert e.value.code == "timeout" and "couldn't be read" in str(e.value) and "map doesn't know" not in str(e.value)
+    t.unread = False
+    with pytest.raises(Refused) as e:
+        asyncio.run(t.off_route(2, 3, None, trip.NOT_KNOWN, None))
+    assert e.value.code == "off_route"  # (a whole screen the map doesn't know: as before)
+
+
+def test_an_arrival_that_couldnt_be_read_is_no_failed_road():
+    import types
+    from tapwright import trip
+    failed = []
+    t = _bare_trip(writes=True, chain=[], root=None, bundle=TIKTOK, clock=lambda: 0.0)
+    t.d = types.SimpleNamespace(maps=types.SimpleNamespace(fail=lambda *a: failed.append(a) or []))
+    t.dropped = lambda pairs: None
+    hop = types.SimpleNamespace(dst="Profile", jump=False, kind="road", road={"move": {"tool": "tap"}}, src="Feed",
+                                fixed=None, move={"tool": "tap"}, names={})
+    asyncio.run(t.judge(hop, trip.Seen(None, False, ui.Tree([], tier="root")), 0.0))
+    assert failed == []
+    asyncio.run(t.judge(hop, trip.Seen(None, False, ui.Tree([], tier="full")), 0.0))
+    assert len(failed) == 1  # (a whole screen that isn't the road's end: counted, as before)
