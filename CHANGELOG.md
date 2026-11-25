@@ -35,6 +35,16 @@
   unless `screenshot: false`. A target by id, label, text or `e` ref there answers `not_found` with how to reach the
   screen instead. `wait_for` a text also looks for it in the picture's text there; an id or label there can't be
   checked, so `wait_for` and `expect` answer `timeout` saying so (never `Done`, never a failed check).
+- On such a screen nothing is reported as known that wasn't read: `audit` and `ux_check` answer `unsupported` (a
+  report from part of a screen would be false), no place, road or route is saved from it, `explore` files no "no way
+  back" from it, a journey's stress says survival couldn't be checked, `compare_screen` won't ignore elements it
+  couldn't read, and a replay stopped there is no failed route and no break to repair. `notifications` says when
+  Notification Center was read only in part.
+- A read with the normal budget asks the runner to read the way XCTest does (faster where the app answers); the short
+  budget reads the runner's bounded way, which keeps to its time on a screen that never answers
+  (`TAPWRIGHT_TREE_PATH=direct|xctest` forces one). Touches by point or `o` ref there aren't refused as `stale` for a
+  picture that keeps moving, and an action's answer waits at most 0.5 s for such a screen to stand still (instead of
+  2 s), until it does or reads whole again.
 - A new session reads the screen's size without reading the app in front, so a screen that never answers no longer
   holds up the connection. `not_answering` is now only for an app that blocks even these bounded reads.
 - MCP: an action's `screenshot` and look's `ocr` are unset by default (the daemon decides, as above); `false` still
