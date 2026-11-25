@@ -346,6 +346,12 @@ class _Direct:
 
 
 class Device:
+    # class-level defaults: a Device built without __init__ (tests do) reaches the runner through the tunnel
+    via: str | None = None
+    _mux = None
+    _route: tuple | None = None
+    _direct_off: tuple | None = None
+
     def __init__(self, udid: str | None = None, host: str | None = None, port: int | None = None, log=print):
         state = store.load_state()
         self.udid = udid or state.get("udid")
@@ -1130,7 +1136,9 @@ class Device:
         """Log once per tunnel and kind which way the runner is reached."""
         if self._route != (self.rsd, kind):
             self._route = (self.rsd, kind)
-            self.log(line)
+            log = getattr(self, "log", None)  # (a Device built without __init__ has none)
+            if log is not None:
+                log(line)
 
     async def _drop_kept(self) -> None:
         held, self._kept = self._kept, None
