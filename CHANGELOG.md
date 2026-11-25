@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.10.1
+
+An app whose screen never answers accessibility reads (TikTok's For You feed: its video keeps every read waiting) could
+not be used at all: no session could be made, and every call was refused `not_answering` until it was closed, a tap at
+a point included.
+
+- Blind mode: while such an app is in front, `look` answers with the screen's picture (and its text with OCR refs, when
+  OCR is installed), `tap` and `long_press` at `{x, y}` or an OCR ref, `swipe`, and `type_text` without a target (into
+  the field that has the keyboard's focus) still work. They go out through routes that never read the app, and each
+  answers with the picture after it, as no list of what changed can be read. Before each, the phone must say it isn't
+  locked and its process list must still have that app in front; anything else touches nothing. Targets by id, label,
+  text or element ref, typing into a target, a saved account's value, dry runs, `explore` and repairs stay refused:
+  there are no elements to check them on. `type_text` can't clear the field first, and says so. As soon as the app in
+  front answers again (another screen, another app), Tapwright connects as usual.
+- The `not_answering` refusal says which calls still work.
+- `TAPWRIGHT_SNAPSHOT_DEPTH=N` (1-200) sets WebDriverAgent's snapshot depth for every session, to try on an app whose
+  deep screen makes reads hang. A new session's settings now go out before its first read of the app.
+
 ## 1.10.0 (2026-11-21), "the Always-On Update"
 
 Plug and forget: a phone that stays plugged in needs a person only after it restarts. iOS asks for the passcode ("Enter

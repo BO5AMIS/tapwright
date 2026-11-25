@@ -49,7 +49,7 @@ For structured QA, use `journey` and `ux_check` with the [persona guide](referen
 | `busy` | A person or another operation owns the phone; wait for it to finish. |
 | `paused` | Respect the pause; resume only under the owner's direction. |
 | `locked` | The phone is locked: call `unlock` (it types the passcode saved for this phone); with none saved, or when `unlock` says why it couldn't, ask the user to unlock it. The XCTest prompt always needs the person. |
-| `not_answering` | Inspect app state before considering close/open. |
+| `not_answering` | Inspect app state before considering close/open: `look` still shows its picture, and point taps, swipes and focused-field typing still work. |
 | `reconnecting` | Wait for reconnection, then inspect. |
 | `not_connected` | Check the cable, pairing and daemon connection. |
 | `timeout` | Inspect before retrying: input may have arrived. |

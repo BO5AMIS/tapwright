@@ -1,0 +1,289 @@
+"""1.10.1 (blind mode): TikTok's For You feed never answers accessibility reads (2026-11-24), so no session could be made
+and every call was refused `not_answering`, a point tap included. Each test fails on e9e511b (1.10.0) and passes after."""
+import asyncio
+import base64
+import types
+
+import pytest
+
+from fakes import image_bytes
+from test_daemon import make
+from test_session import Recorder
+
+from tapwright import ocr, session as session_module
+from tapwright.control import Refused
+from tapwright.device import AppNotAnswering, ConnectionLost
+from tapwright.session import Session
+
+TIKTOK = "com.zhiliaoapp.musically"
+BLIND = ("_blind_path", "blind_version", "_blind_touching", "blind_tap", "blind_drag", "blind_keys", "blind_picture")
+PNG = image_bytes((1290, 2796), (20, 20, 20))  # an iPhone 15 Pro Max's screenshot: 430x932 pt at 3x
+
+
+# ---- the session: the session a frozen app's first read hung on is kept ----
+
+@pytest.fixture
+def phone(monkeypatch):
+    monkeypatch.setattr(session_module.store, "load_state", lambda: {"runner_id": "runner"})
+    return Recorder()
+
+
+def test_the_session_whose_first_read_hung_is_kept_for_blind_mode(phone):
+    phone.locked, phone.in_front = False, [TIKTOK]
+    phone.fail["/window/size"] = ConnectionLost("WebDriverAgent didn't answer GET /session/S/window/size within 15 s")
+    s = Session(phone)
+    with pytest.raises(AppNotAnswering):
+        asyncio.run(s.ensure())
+    assert s.sid is None and s.blind_sid == "S"
+    asyncio.run(s.reset())
+    assert s.blind_sid is None
+
+
+def test_a_working_session_has_no_blind_session(phone):
+    phone.locked = False
+    s = Session(phone)
+    asyncio.run(s.ensure())
+    assert s.sid == "S" and s.blind_sid is None
+
+
+def _kept(phone, alive=True) -> Session:
+    async def wda_alive():
+        return alive
+    phone.wda_alive = wda_alive
+    s = Session(phone)
+    s.blind_sid = "B1"
+    return s
+
+
+def test_a_reconnect_asks_the_blind_session_and_takes_it_when_the_app_reads_again(phone):
+    phone.locked = False
+    s = _kept(phone)
+    asyncio.run(s.ensure())
+    assert s.sid == "B1" and s.blind_sid is None and s.screen == (430.0, 932.0)
+    assert ("POST", "/session", {"capabilities": {"alwaysMatch": {}}}) not in phone.requests and phone.started == []
+
+
+def test_a_reconnect_while_the_app_still_hangs_keeps_the_blind_session(phone):
+    phone.locked, phone.in_front = False, [TIKTOK]
+    phone.fail["/session/B1/window/size"] = ConnectionLost("WebDriverAgent didn't answer within 3 s")
+    s = _kept(phone)
+    with pytest.raises(AppNotAnswering):
+        asyncio.run(s.ensure())
+    assert s.sid is None and s.blind_sid == "B1"
+    assert not any(p == "/session" for _, p, _ in phone.requests)  # no new session to end the blind one
+
+
+def test_a_reconnect_after_the_runner_died_starts_as_usual(phone):
+    phone.locked = False
+    phone.fail["/session/B1/window/size"] = ConnectionLost("WebDriverAgent didn't answer within 3 s")
+    s = _kept(phone, alive=False)
+    asyncio.run(s.ensure())
+    assert s.sid == "S" and s.blind_sid is None and phone.started == ["runner"]
+
+
+def test_settings_go_before_the_first_read_with_the_depth_asked_for(phone, monkeypatch):
+    monkeypatch.setattr(session_module, "SNAPSHOT_DEPTH", "12")
+    phone.locked = False
+    asyncio.run(Session(phone).ensure())
+    paths = [p for _, p, _ in phone.requests]
+    settings = paths.index("/session/S/appium/settings")
+    assert settings < paths.index("/session/S/window/size")
+    assert phone.requests[settings][2]["settings"]["snapshotMaxDepth"] == 12
+
+
+@pytest.mark.parametrize("depth", ["", "0", "abc", "999"])
+def test_no_depth_setting_unless_a_sane_one_is_asked_for(phone, monkeypatch, depth):
+    monkeypatch.setattr(session_module, "SNAPSHOT_DEPTH", depth)
+    phone.locked = False
+    asyncio.run(Session(phone).ensure())
+    sent = next(b for _, p, b in phone.requests if p == "/session/S/appium/settings")
+    assert "snapshotMaxDepth" not in sent["settings"]
+
+
+# ---- the daemon: what works while the app in front doesn't answer ----
+
+class Phone:
+    """WebDriverAgent's answers while TikTok hangs every read: the session-less routes and the fork's touch routes."""
+
+    def __init__(self, locked=False, front=TIKTOK, version=8):
+        self.sent: list = []
+        self.locked, self.front, self.version = locked, front, version
+        self.fail: dict = {}
+
+    async def http(self, method, path, payload=None, timeout=30.0):
+        self.sent.append((method, path, payload))
+        for suffix in list(self.fail):
+            if path.endswith(suffix):
+                raise self.fail.pop(suffix)
+        if path == "/wda/locked":
+            return {"value": self.locked}
+        if path == "/wda/tw/version":
+            return {"value": {"tapwright": self.version}}
+        if path == "/screenshot":
+            return {"value": base64.b64encode(PNG).decode()}
+        if "/window/size" in path or "/source" in path or "/wda/tw/tree" in path:
+            raise AssertionError(f"blind mode read the app: {path}")
+        return {"value": None}
+
+    async def foreground_apps(self):
+        return [self.front] if self.front else []
+
+    def touches(self):
+        return [(p, b) for m, p, b in self.sent if m == "POST"]
+
+
+def _blind(phone: Phone | None = None, blind_sid: "str | None" = "B1"):
+    phone = phone or Phone()
+    d = make()
+    d.stuck = AppNotAnswering(TIKTOK, "TikTok")
+    s = d.session
+    for name in BLIND:
+        setattr(s, name, types.MethodType(getattr(Session, name), s))
+    s.blind_sid, s.touch_hook, s.scale, s.typed_into, s.input_point = blind_sid, None, 3.0, None, None
+    s.device.http, s.device.foreground_apps = phone.http, phone.foreground_apps
+    return d, phone
+
+
+def _call(d, name, args):
+    async def go():
+        try:
+            return await d.run_tool("a", name, args)
+        except Refused as e:
+            return e
+    return asyncio.run(go())
+
+
+@pytest.fixture(autouse=True)
+def quick(monkeypatch):
+    from tapwright import daemon as daemon_module
+    monkeypatch.setattr(daemon_module, "BLIND_SETTLE", 0.0)
+    monkeypatch.setattr(ocr, "reader", None)
+    monkeypatch.setattr(ocr, "installed", lambda: False)
+
+
+def test_a_point_tap_goes_out_on_the_blind_session_without_reading_the_app():
+    d, phone = _blind()
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert not isinstance(got, Refused), got
+    from tapwright.control import TAP_MS
+    assert ("/session/B1/wda/tw/tap", {"x": 215.0, "y": 893.0, "duration": TAP_MS / 1000, "wait": True}) in phone.touches()
+    assert got["text"].startswith("Tapped (215, 893) in TikTok (com.zhiliaoapp.musically) without reading it")
+    assert got["image"] and got["image_size"][0] == 600  # the screen after it
+
+
+def test_long_press_holds_for_its_seconds():
+    d, phone = _blind()
+    _call(d, "long_press", {"target": {"x": 100, "y": 200}, "seconds": 2})
+    assert [b["duration"] for p, b in phone.touches() if p.endswith("/wda/tw/tap")] == [2.0]
+
+
+def test_a_swipe_goes_through_the_fast_drag():
+    d, phone = _blind()
+    got = _call(d, "swipe", {"x0": 215, "y0": 700, "x1": 215, "y1": 200})
+    assert not isinstance(got, Refused), got
+    drags = [b for p, b in phone.touches() if p == "/session/B1/wda/tw/drag"]
+    assert len(drags) == 1 and drags[0]["points"][0][1:] == [215, 700] and drags[0]["points"][-1][1:] == [215, 200]
+
+
+def test_typing_goes_to_the_focused_field_and_says_it_wasnt_cleared():
+    d, phone = _blind()
+    got = _call(d, "type_text", {"text": "Day 12", "submit": True})
+    assert ("/session/B1/wda/keys", {"value": list("Day 12\n")}) in phone.touches()
+    assert "Typed 6 characters and pressed return into the focused field" in got["text"]
+    assert "wasn't cleared" in got["text"]
+
+
+@pytest.mark.parametrize("name,args", [
+    ("tap", {"target": {"label": "Post"}}),
+    ("tap", {"target": {"ref": "e3"}}),
+    ("type_text", {"text": "hi", "target": {"label": "Caption"}}),
+])
+def test_only_points_while_blind(name, args):
+    d, phone = _blind()
+    got = _call(d, name, args)
+    assert isinstance(got, Refused) and got.code == "not_answering" and "Nothing was" in str(got)
+    assert phone.touches() == []
+
+
+def test_a_saved_accounts_value_is_never_typed_blind():
+    d, phone = _blind()
+    got = _call(d, "type_text", {"text": "${account.password}"})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "saved account" in str(got)
+    assert phone.touches() == []
+
+
+def test_nothing_is_touched_when_another_app_is_in_front():
+    d, phone = _blind(Phone(front="com.apple.mobileslideshow"))
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "reconnecting" and "isn't in front" in str(got)
+    assert phone.touches() == []
+
+
+def test_nothing_is_touched_on_a_locked_phone():
+    d, phone = _blind(Phone(locked=True))
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "locked"
+    assert phone.touches() == []
+
+
+def test_a_point_off_the_screen_is_refused():
+    d, phone = _blind()
+    got = _call(d, "tap", {"target": {"x": 215, "y": 2000}})
+    assert isinstance(got, Refused) and got.code == "bad_params" and "430x932" in str(got)
+    assert phone.touches() == []
+
+
+def test_an_older_runner_without_the_touch_route_touches_nothing():
+    d, phone = _blind(Phone(version=1))
+    got = _call(d, "swipe", {"x0": 215, "y0": 700, "x1": 215, "y1": 200})  # the drag came with version 2
+    assert isinstance(got, Refused) and got.code == "not_answering" and "tapwright setup" in str(got)
+    assert phone.touches() == []
+
+
+def test_a_dry_run_is_refused_blind():
+    d, phone = _blind()
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}, "dry_run": True})
+    assert isinstance(got, Refused) and got.code == "not_answering" and phone.touches() == []
+
+
+def test_a_touch_with_no_answer_is_a_timeout_that_may_have_happened():
+    phone = Phone()
+    phone.fail["/wda/tw/tap"] = ConnectionLost("WebDriverAgent didn't answer within 10 s")
+    d, _ = _blind(phone)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "timeout" and "may still have happened" in str(got)
+
+
+def test_look_is_the_picture_with_the_ways_that_work():
+    d, phone = _blind()
+    got = _call(d, "look", {})
+    assert not isinstance(got, Refused), got
+    lines = got["text"].split("\n")
+    assert lines[0] == "App: TikTok (com.zhiliaoapp.musically)"
+    assert "doesn't answer accessibility reads" in lines[1] and "Screen 430x932 pt." in lines
+    assert got["image"] and "no OCR reading" in got["text"]
+
+
+def test_look_reads_the_text_and_its_refs_are_touched_at_their_centre(monkeypatch):
+    seen = [ocr.Seen("Upload", (180.0, 880.0, 70.0, 26.0), 0.97), ocr.Seen("9:41", (20.0, 10.0, 40.0, 16.0), 0.99)]
+    monkeypatch.setattr(ocr, "reader", lambda image, screen: seen)
+    d, phone = _blind()
+    got = _call(d, "look", {})
+    assert 'o1 "Upload" @180,880 70x26' in got["text"] and "9:41" not in got["text"]  # the clock is the phone's
+    got = _call(d, "tap", {"target": {"ref": "o1"}})
+    assert not isinstance(got, Refused), got
+    assert [b["x"] for p, b in phone.touches() if p.endswith("/wda/tw/tap")] == [215.0]
+
+
+def test_without_a_blind_session_everything_is_refused_as_before():
+    d, phone = _blind(blind_sid=None)
+    got = _call(d, "tap", {"target": {"x": 215, "y": 893}})
+    assert isinstance(got, Refused) and got.code == "not_answering" and "OCR ref" not in str(got)
+    assert phone.touches() == []
+
+
+def test_the_refusal_of_other_calls_names_what_still_works():
+    d, _ = _blind()
+    got = _call(d, "scroll", {"direction": "down"})
+    assert isinstance(got, Refused) and got.code == "not_answering"
+    assert "tap and long_press at {x, y} or an OCR ref" in str(got) and "close_app can still close it" in str(got)

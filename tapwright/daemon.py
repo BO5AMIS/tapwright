@@ -58,6 +58,13 @@ LONG_CAP = 4.0  # the same after launching an app or opening a URL
 CLOSE_KILL_CAP = 5.0  # the longest close_app waits for iOS's process control to end the app
 HOME_STUCK_CAP = 10.0  # press_button home while the app in front is frozen: WebDriverAgent's home screen route
 HOME_LOCK_CAP = 2.0  # ... and the lock question asked before it
+# (1.10.1, blind mode) the calls that still work while the app in front never answers accessibility reads: its picture,
+# touches at points (or OCR refs), swipes and typing into the focused field (Daemon._blind_tool)
+BLIND_TOOLS = ("look", "tap", "long_press", "swipe", "type_text")
+BLIND_SETTLE = 1.0  # seconds a blind action is given to show what it did before its picture is taken
+BLIND_FRONT_CAP = 5.0  # seconds the phone's process list is waited for before a blind call
+BLIND_WAYS = ("look shows its picture (with OCR text refs when OCR is installed); tap and long_press at {x, y} or an "
+              "OCR ref, swipe, and type_text without a target still work, without reading it")
 CLOSE_TERMINATE_CAP = 3.0  # ... and for WebDriverAgent's terminate afterwards, which has nothing left to wait for
 LIVE_AGE = 2.0  # seconds a list stays current for id, label and text targets (docs/AGENT-TOOLS.md §2)
 FRESH_FRAME = 2.0  # seconds a stream frame counts as "the screen now"
@@ -1687,7 +1694,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if isinstance(self.stuck, PhoneLocked):
             return Refused("locked", PHONE_LOCKED)
         if isinstance(self.stuck, AppNotAnswering):
-            return Refused("not_answering", f"{self.stuck}. close_app can still close it; then open_app it again.")
+            blind = f" {BLIND_WAYS[0].upper()}{BLIND_WAYS[1:]}." if getattr(self.session, "blind_sid", None) is not None else ""
+            return Refused("not_answering", f"{self.stuck}.{blind} close_app can still close it; then open_app it again.")
         return Refused("reconnecting", f"not connected to the phone ({self.detail or self.state}); "
                                        "wait a few seconds, then look")
 
@@ -4063,6 +4071,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return await self._close_stuck(self.stuck, args["app"], notes)
         if name == "press_button" and args.get("name") == "home" and isinstance(self.stuck, AppNotAnswering):
             return await self._home_stuck(self.stuck, notes)
+        if name in BLIND_TOOLS and isinstance(self.stuck, AppNotAnswering) and getattr(self.session, "blind_sid", None) is not None:
+            return await self._blind_tool(client_id, name, args, notes, shot)
         await self.wait_connected()
         if (taken := self._taken_notes.pop(client_id, None)) is not None:
             notes = [*notes, taken]
@@ -5806,6 +5816,173 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         self._announce("agent", "press_button", label="home")
         return _answer([f"Pressed home while {stuck.name} ({stuck.bundle_id}) wasn't answering; look before acting."],
                        notes)
+
+    async def _blind_tool(self, client_id: str, name: str, args: dict, notes: list,
+                          shot: "tuple[int, bool] | None") -> dict:
+        """(1.10.1, blind mode) `look`, `tap`, `long_press`, `swipe` and `type_text` while the app in front never answers
+        accessibility reads (TikTok's For You feed, 2026-11-24: every read of it hangs, so no session could be made and
+        every call was refused). They go out on the session that app's first read hung on (Session.blind_sid), through
+        routes that never read the app: a look is the screen's picture (and OCR's text when it is installed), a touch is
+        at a point (an OCR ref is one), typing goes to whatever has the keyboard's focus. Each answer carries the
+        picture after it: no list of what changed can be read. Before each call the phone's process list (not
+        WebDriverAgent, which would ask the app) must still have that app in front, and the phone must say it isn't
+        locked. Not for `explore`, a repair's trial or a dry run: they judge elements, and there are none. Every
+        action wakes the supervisor, which connects normally as soon as the app in front answers again."""
+        stuck = self.stuck
+        assert isinstance(stuck, AppNotAnswering)
+        what = f"{stuck.name} ({stuck.bundle_id})"
+        if _TOUCH_FLOOR.get() is not None or _EXPLORING.get():
+            raise self._not_connected()  # (no element to judge: explore and a repair touch nothing blind)
+        if args.get("dry_run"):
+            raise Refused("not_answering", f"{stuck}; a dry run judges elements, and it gives none. Nothing was done.")
+        if self.control.paused:
+            raise Refused("paused", "paused by the user in the live view; ask them to resume")
+        device = self.session.device
+        if device.rsd is None:
+            raise self._not_connected()
+        verb = "shown" if name == "look" else "typed" if name == "type_text" else "touched"
+        given = _GIVEN.get()
+        generation = self.control.person_generation
+        view = self.control.client(client_id)
+
+        async def guard():
+            if self.control.paused:
+                raise Refused("paused", "the phone is paused; ask the user to resume it")
+            if self.control.person_generation != generation or self.control.person_active():
+                raise Refused("busy", "a person used the phone before delivery; look again before acting")
+            if not self._same_stuck(stuck) or self.session.device is not device or self.session.blind_sid is None:
+                raise Refused("reconnecting", "the phone connection changed; look before acting")
+
+        async def checked() -> None:
+            """The phone isn't locked and still has the stuck app in front, both asked without reading the app."""
+            try:
+                locked = (await device.http("GET", "/wda/locked", None, timeout=HOME_LOCK_CAP)).get("value")
+            except (ConnectionLost, DeviceError):
+                raise Refused("not_answering", f"{stuck}, and the phone didn't say whether it is locked; nothing was "
+                                               f"{verb}.") from None
+            if locked is not False:
+                raise Refused("locked", "the phone is locked (or didn't say it isn't); call unlock, or ask the user to "
+                                        f"unlock it. Nothing was {verb}.")
+            try:
+                in_front = await asyncio.wait_for(device.foreground_apps(), BLIND_FRONT_CAP)
+            except Exception:  # noqa: BLE001 - whatever stopped the question, nothing is done on doubt
+                raise Refused("not_answering", f"{stuck}, and the phone didn't say which app is in front; nothing was "
+                                               f"{verb}.") from None
+            if not in_front or in_front[0] != stuck.bundle_id:
+                self._wake.set()  # another app is in front: the supervisor's next connect may simply work
+                raise Refused("reconnecting", f"{stuck.name} isn't in front any more; nothing was {verb}. Wait a few "
+                                              "seconds, then look.")
+            if given is not None and stuck.bundle_id not in given:
+                raise Refused("not_allowed", _outside(stuck.bundle_id, stuck.name, ", ".join(given)))
+
+        async def picture(width: int) -> tuple[bytes, tuple[float, float], bytes]:
+            png, screen = await self.session.blind_picture()
+            jpeg, _, _ = shotlib.render(png, screen, width)
+            return png, screen, jpeg
+
+        width = shot[0] if shot is not None else shotlib.DEFAULT_WIDTH
+        head = f"App: {what}"
+        blind = (f"Not answering: {stuck.name} doesn't answer accessibility reads, so nothing of it can be read as "
+                 f"elements. {BLIND_WAYS[0].upper()}{BLIND_WAYS[1:]}.")
+        if name == "look":
+            async def look():
+                await guard()
+                await checked()
+                return await picture(width)
+            png, screen, jpeg = await self.control.read(look)
+            lines = [head, blind, f"Screen {round(screen[0])}x{round(screen[1])} pt."]
+            view.ocr = {}
+            if ocr.available() and args.get("ocr", True) is not False:
+                seen = await asyncio.to_thread(ocr.read, png, screen)
+                top = STATUS_BAR if screen[1] > screen[0] else 0.0  # the clock and the battery are the phone's
+                found = [s for s in seen if s.rect[1] >= top]
+                view.ocr = {f"o{n}": s.center for n, s in enumerate(found, 1)}
+                lines += [OCR_HEAD if found else "Text in the picture (OCR): none.",
+                          *(dataclasses.replace(s, text=ui.shown(s.text)).line(f"o{n}") for n, s in enumerate(found, 1))]
+            elif not ocr.available():
+                notes = [*notes, "no OCR reading, so this look is the picture alone. " + ocr.INSTALL]
+            self._announce("agent", "look", label=stuck.name)
+            return _answer(lines, notes, None if args.get("screenshot") is False else jpeg)
+
+        target = args.get("target")
+        if name in ("tap", "long_press"):
+            if not isinstance(target, ui.Target) or target.point is None:
+                raise Refused("not_answering", f"{stuck}: only a point ({{x, y}}) or an OCR ref can be touched while it "
+                                               "doesn't answer; look (it shows the picture and its text) for one. "
+                                               "Nothing was touched.")
+            points = [target.point]
+        elif name == "swipe":
+            points = [(float(args["x0"]), float(args["y0"])), (float(args["x1"]), float(args["y1"]))]
+        else:  # type_text
+            if target is not None:
+                raise Refused("not_answering", f"{stuck}: typing goes only to the field that already has the keyboard's "
+                                               "focus while it doesn't answer (tap the field at its point first, then "
+                                               "type_text without a target). Nothing was typed.")
+            if accountlib.mentions(str(args["text"])):
+                # a saved account's value goes only into a field it was checked against (§20), and there is no field
+                # to check: the app gives no elements
+                raise Refused("not_answering", f"{stuck}: a saved account's value is typed only into a field Tapwright "
+                                               "can read, and this app gives none. Nothing was typed.")
+            points = []
+        async def act() -> tuple[str, tuple[float, float]]:
+            await guard()
+            await checked()
+            _, screen, _ = await picture(shotlib.MIN_WIDTH)  # the screen's size now, in points
+            if screen[0] > screen[1]:
+                raise Refused("not_answering", f"{stuck}, and the phone is turned sideways: touches without reading "
+                                               "the app are made upright only. Nothing was touched.")
+            for x, y in points:
+                if not (0 <= x <= screen[0] and 0 <= y <= screen[1]):
+                    raise Refused("bad_params", f"({round(x)}, {round(y)}) is off the screen "
+                                                f"({round(screen[0])}x{round(screen[1])} pt). Nothing was touched.")
+            if points and await self.session.blind_version() < (2 if name == "swipe" else 1):
+                raise Refused("not_answering", f"{stuck}, and this phone's runner has no touch route that skips reading "
+                                               "the app (tapwright setup installs one). Nothing was touched.")
+            token = device_module.BEFORE_SEND.set(guard)
+            try:
+                if name == "tap":
+                    x, y = points[0]
+                    await self.session.blind_tap(x, y)
+                    said = f"Tapped ({round(x)}, {round(y)})"
+                elif name == "long_press":
+                    x, y = points[0]
+                    await self.session.blind_tap(x, y, int(float(args.get("seconds", 1.0)) * 1000))
+                    said = f"Long-pressed ({round(x)}, {round(y)})"
+                elif name == "swipe":
+                    (x0, y0), (x1, y1) = points
+                    ms = int(float(args.get("seconds", 0.35)) * 1000)
+                    await self.session.blind_drag(ui.swipe_points(x0, y0, x1, y1, ms))
+                    said = f"Swiped ({round(x0)}, {round(y0)}) -> ({round(x1)}, {round(y1)})"
+                else:
+                    text = str(args["text"]) + ("\n" if args.get("submit") else "")
+                    await self.session.blind_keys(text)
+                    said = (f"Typed {len(str(args['text']))} characters" + (" and pressed return" if args.get("submit")
+                                                                             else "") + " into the focused field")
+            finally:
+                device_module.BEFORE_SEND.reset(token)
+            return said, screen
+
+        try:
+            said, _ = await self.control.agent(act)
+        except ConnectionLost:
+            # no answer in time: the runner may still play it (the `timeout` contract)
+            self._wake.set()
+            raise Refused("timeout", f"{stuck}, and the phone didn't answer the {name} in time; it may still have "
+                                     "happened: look before acting again.") from None
+        self.log(f"{name} without reading {stuck.bundle_id}, which wasn't answering")
+        self._wake.set()  # the app may be on a screen that answers now: the supervisor connects as usual then
+        self._announce("agent", name, label=stuck.name)
+        view.ocr = {}  # (the last reading's refs are of the screen before)
+        if name == "type_text" and args.get("replace", True) and args.get("text"):
+            notes = [*notes, "the field wasn't cleared first: without reading the app, nothing can tell what it held."]
+        await asyncio.sleep(BLIND_SETTLE)
+        try:
+            _, _, jpeg = await self.control.read(lambda: picture(width))
+        except (ConnectionLost, DeviceError):
+            jpeg, notes = None, [*notes, "the picture after it couldn't be taken; look."]
+        lines = [f"{said} in {what} without reading it (it doesn't answer accessibility reads); the picture shows the "
+                 "screen after. look (with OCR) reads its text."]
+        return _answer(lines, notes, jpeg)
 
     async def _unlock_tool(self, client_id: str) -> dict:
         """`unlock` (1.7.8, the owner's decision of 2026-11-18): the agent asks the daemon to unlock a locked phone with

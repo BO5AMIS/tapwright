@@ -35,6 +35,15 @@ TRACE = os.environ.get("TAPWRIGHT_TRACE") == "1"
 QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("tapwright_quiet_trace", default=False)
 READ_AGAIN = 5.0  # seconds: the second try of a question that got no answer (see Session._call)
 READ_CUT = 10.0  # seconds: the longest a tree read is waited for before asking why (50 times its usual time)
+# (1.10.1) WebDriverAgent's snapshotMaxDepth for every session (its default is 50): TAPWRIGHT_SNAPSHOT_DEPTH=N sets it, for
+# an app whose deep tree makes every read hang (TikTok's For You feed, 2026-11-24). Unset: WebDriverAgent's own default.
+SNAPSHOT_DEPTH = os.environ.get("TAPWRIGHT_SNAPSHOT_DEPTH", "")
+# (1.10.1, blind mode) Requests that touch or type while the app in front doesn't answer accessibility reads: sent on the
+# session that app's first read hung on (Session.blind_sid), through routes that never read the app.
+BLIND_TOUCH_WAIT = 10.0  # seconds beyond the touch itself that a blind touch's answer is waited for
+BLIND_KEYS_WAIT = 15.0  # seconds a blind typing's answer is waited for (its keys may wait on the app: then a timeout)
+BLIND_SHOT_WAIT = 15.0  # seconds a blind screenshot is waited for (it is taken of the screen, not read from the app)
+BLIND_PROBE_WAIT = 3.0  # seconds a reconnect waits for the blind session's window size: does the app in front read again?
 ORIENTATIONS = {"portrait": "PORTRAIT", "landscape_left": "LANDSCAPE",
                 "landscape_right": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT"}  # WebDriverAgent's names
 ROOT_SIZE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bwidth="([\d.]+)" height="([\d.]+)"')
@@ -241,6 +250,9 @@ class Session:
         # re-created mid-run waits for animations (a blinking caret) on every read, 1 to 3 s each. The daemon sets
         # the stream's preset into it too (stream.PRESETS), so a re-created session has the current quality as well.
         self.session_settings: dict = dict(NO_IDLE_WAIT)
+        # (1.10.1, blind mode) the session whose first read of the app hung (AppNotAnswering): touches, keys and pictures
+        # that never read the app go out on it while that app stays in front. None once a session works or is reset.
+        self.blind_sid: str | None = None
         # Called with each tree the daemon's reads build (refresh, snapshot): what tells it an app showed a one-time code
         # field (§20.4). Never with Notification Center's tree, which is read raw (notifications.py).
         self.on_tree = None
@@ -256,21 +268,77 @@ class Session:
         runner = store.load_state().get("runner_id")
         if not runner:
             raise NotSetUp("WebDriverAgent isn't set up on this phone yet: run `tapwright setup`")
+        if self.blind_sid is not None and await self._blind_reads_again():
+            return
         await self.device.start_wda(runner)
         sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": {}}}))["sessionId"]
+        self.blind_sid = None  # (a new session ends the one before it on the runner)
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        # (1.10.1) the settings before the first read of the app (they were sent after it): a depth limit
+        # (SNAPSHOT_DEPTH) has to be in force for that read too. Before sid is committed: no read runs without them.
+        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": self._settings_wanted()},
+                               timeout=READ_CUT)
         try:
             size = (await self.device.http("GET", f"/session/{sid}/window/size", timeout=FIRST_READ_WAIT))["value"]
         except ConnectionLost as e:
-            raise await self._why_stuck(bool(locked), e) from e
+            why = await self._why_stuck(bool(locked), e)
+            if isinstance(why, AppNotAnswering):
+                # (1.10.1, blind mode) the session is there; only the app doesn't answer. Kept for the touches, typing and
+                # pictures that never read the app (blind_tap, blind_drag, blind_keys, blind_picture)
+                self.blind_sid = sid
+            raise why from e
         self.screen = (float(size["width"]), float(size["height"]))
-        await self.device.http("POST", f"/session/{sid}/appium/settings", {"settings": dict(self.session_settings)},
-                               timeout=READ_CUT)  # (before sid is committed: no read can run without them)
         self.fast_tap = self.fast_drag = None  # a new session may be a new runner: ask again
         self.tw_version = 0
         self.fast_read, self.last_compact = None, None
         self.sid = sid  # committed last: a failure above leaves no half-started session
+
+    async def _blind_reads_again(self) -> bool:
+        """(1.10.1) A connect while a blind session is kept: ask that session for the window's size, briefly, instead of
+        making a new session (which would end the blind one; WebDriverAgent keeps one). True when it answers: the app in
+        front reads again, and the blind session becomes this one. While it still hangs on a runner that is alive, the
+        app is still stuck: AppNotAnswering again, and the blind session stays. A runner that is gone, or a session it
+        no longer knows: False, and the caller starts as usual."""
+        sid = self.blind_sid
+        try:
+            size = (await self.device.http("GET", f"/session/{sid}/window/size", None, BLIND_PROBE_WAIT))["value"]
+        except ConnectionLost as e:
+            try:
+                alive = await self.device.wda_alive()
+            except Exception:  # noqa: BLE001 - a runner that can't say counts as gone
+                alive = False
+            if not alive:
+                self.blind_sid = None
+                return False
+            try:
+                locked = (await self.device.http("GET", "/wda/locked", None, LOCK_WAIT)).get("value")
+            except (ConnectionLost, DeviceError):
+                locked = False
+            why = await self._why_stuck(bool(locked), e)
+            if isinstance(why, AppNotAnswering):
+                raise why from e  # (blind_sid kept)
+            self.blind_sid = None
+            return False
+        except DeviceError:
+            self.blind_sid = None  # (an invalid session: the runner started again)
+            return False
+        self.blind_sid = None
+        self.screen = (float(size["width"]), float(size["height"]))
+        self.fast_tap = self.fast_drag = None
+        self.tw_version = 0
+        self.fast_read, self.last_compact = None, None
+        self.sid = sid
+        return True
+
+    def _settings_wanted(self) -> dict:
+        """The settings a new session gets: session_settings, with snapshotMaxDepth when TAPWRIGHT_SNAPSHOT_DEPTH asks for
+        it (a whole number from 1 to 200; anything else is ignored, as unset)."""
+        wanted = dict(self.session_settings)
+        depth = SNAPSHOT_DEPTH.strip()
+        if depth.isdigit() and 1 <= int(depth) <= 200:
+            wanted["snapshotMaxDepth"] = int(depth)
+        return wanted
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
         """The first read of a fresh WebDriverAgent hung: say why when the phone can tell. A locked phone, or
@@ -304,6 +372,7 @@ class Session:
             pass
         self.device.rsd = self.device.tunnel = self.device.runner = None
         self.sid = None
+        self.blind_sid = None
         self.scale = self.app = self.read_app = None
         self.scale_read = False
         self.items, self.offscreen, self.behind = [], [], []
@@ -1279,6 +1348,68 @@ class Session:
         await self._touching(KEY_MS)
         await self._call("POST", "/session/{sid}/wda/keys", {"value": [KEYS[name]]})
         return f"pressed {name}"
+
+    # ---- blind mode (1.10.1) ----
+    # While the app in front never answers accessibility reads (AppNotAnswering: TikTok's For You feed, 2026-11-24), the
+    # session its first read hung on (blind_sid) still plays touches and keys, and the screen's picture is still taken:
+    # the fork's tap and drag routes never read the app (TWFastTapCommands.m: no element lookup, no snapshot, no idle
+    # wait), nor does /screenshot. Nothing here reads the app, waits for it, or retries: a touch asked twice could be
+    # played twice. The daemon decides when these may be used (Daemon._blind_tool); none of them falls back to a read.
+
+    def _blind_path(self, path: str) -> str:
+        if self.blind_sid is None:
+            raise ConnectionLost("no session to act on while the app in front isn't answering")
+        return path.replace("{sid}", self.blind_sid)
+
+    async def blind_version(self) -> int:
+        """The fork's route version, asked without a session (0: not the fork, or it can't be told)."""
+        answer = await self.device.http("GET", "/wda/tw/version", None, LOCK_WAIT)
+        value = answer.get("value") if isinstance(answer, dict) else None
+        version = value.get("tapwright") if isinstance(value, dict) else None
+        return version if isinstance(version, int) and not isinstance(version, bool) and version >= 0 else 0
+
+    async def _blind_touching(self, ms: float, at: tuple[float, float] | None) -> None:
+        """What _touching does before a touch, minus the banner wait (it reads the app in front): Tapline is told the
+        touch is the agent's."""
+        self.typed_into = None
+        self.input_point = at
+        if self.touch_hook is not None:
+            await self.touch_hook(ms)
+
+    async def blind_tap(self, x: float, y: float, hold_ms: int = TAP_MS) -> None:
+        """One touch at a portrait point through the fork's fast tap, answered once played. No `apps` check: the fork
+        asks it of the app in front, which is what doesn't answer (the daemon checks the process list instead)."""
+        await self._blind_touching(hold_ms, (x, y))
+        await self.device.http("POST", self._blind_path(FAST_TAP_PATH),
+                               {"x": x, "y": y, "duration": hold_ms / 1000, "wait": True},
+                               hold_ms / 1000 + BLIND_TOUCH_WAIT)
+        self.last_point = (x, y)
+
+    async def blind_drag(self, points: list) -> None:
+        """A finger path [(t_ms, x, y), ...] in portrait points through the fork's fast drag, answered once played."""
+        await self._blind_touching(points[-1][0], (points[0][1], points[0][2]))
+        body = {"points": [[round(t), round(x), round(y)] for t, x, y in points]}
+        await self.device.http("POST", self._blind_path(FAST_DRAG_PATH), body, points[-1][0] / 1000 + BLIND_TOUCH_WAIT)
+        self.last_point = (points[0][1], points[0][2])
+
+    async def blind_keys(self, keys: str) -> None:
+        """Keys into whatever has the keyboard's focus. WebDriverAgent's keys route may itself wait on the app: then no
+        answer comes (ConnectionLost), and whether keys went in is not known."""
+        if not keys:
+            return
+        await self._blind_touching(KEY_MS * len(keys), None)
+        await self.device.http("POST", self._blind_path("/session/{sid}/wda/keys"), {"value": list(keys)},
+                               BLIND_KEYS_WAIT)
+
+    async def blind_picture(self) -> tuple[bytes, tuple[float, float]]:
+        """(PNG, the screen's size in points): WebDriverAgent's /screenshot without a session (a picture of the screen,
+        not a read of the app). The size comes from the picture and the known scale (else 3 for a picture 1000 or more
+        pixels wide, as every such iPhone is, and 2 below)."""
+        png = base64.b64decode((await self.device.http("GET", "/screenshot", None, BLIND_SHOT_WAIT))["value"])
+        from PIL import Image
+        width, height = Image.open(io.BytesIO(png)).size
+        scale = self.scale if isinstance(self.scale, float) and self.scale > 0 else (3.0 if width >= 1000 else 2.0)
+        return png, (width / scale, height / scale)
 
     async def settings(self, values: dict) -> None:
         """WebDriverAgent settings, e.g. the MJPEG stream's frame rate and size."""
