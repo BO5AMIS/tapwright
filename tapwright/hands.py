@@ -41,7 +41,10 @@ STREAM_IOS = 27  # from here on the phone drops HID reports unless a display str
 STEP_MS = 12.0  # a contact report goes out at least this often while a finger moves (8-16 ms is a real digitizer's pace)
 OPEN_WAIT = 5.0  # seconds opening the services may take (a second tunnel's services opened in well under one)
 SEND_WAIT = 2.0  # seconds one report may take to be acked (1.3 ms measured)
-DIRTY_HOLD = 30.0  # seconds a finger, key or button that may still be down keeps touches off the runner too (R200 M2)
+# Seconds a finger, key or button that may still be down keeps touches off the runner too (R200 M2). Short: measured on
+# the phone (2026-11-26, Calculator) the phone lifts a finger by itself when its HID connection closes (the key it was
+# on was entered), and a failed release closes the connection.
+DIRTY_HOLD = 5.0
 RETRY_OPEN = 30.0  # seconds before an open that failed for a passing reason is tried again on the same tunnel
 BUTTON_MS = 50  # how long a button is held (Phase 0: 52 ms a press)
 KEY_GAP_MS = 12  # between two keyboard reports (15 characters in 396 ms, measured)
