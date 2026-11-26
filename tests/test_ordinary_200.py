@@ -243,3 +243,41 @@ def test_back_waits_for_fresh_frames_to_prove_its_list_instead_of_reading_again(
 
 def test_back_reads_when_no_fresh_frame_comes_within_its_wait():
     assert _back_after_a_stalled_read(resumes=False) == 1
+
+
+# ---- the agent's own home press is no crash sign ----
+
+def test_the_agents_own_home_press_asks_the_phone_nothing_about_a_crash_and_a_tap_that_lands_home_still_does():
+    from test_daemon import finish, run, started
+    from test_diagnostics import SPRINGBOARD, die, opened, tuned
+
+    async def go():
+        d = tuned(make())
+        d.crash_polls = 1
+        s = d.session
+        stop, task = await started(d)
+        await opened(d)
+        await d.run_tool("a", "look", {"screenshot": False})
+        asked = []
+        real_pids = s.device.app_pids
+
+        async def app_pids(bundle_id):
+            asked.append(bundle_id)
+            return await real_pids(bundle_id)
+        s.device.app_pids = app_pids
+        real_press = s.press_button
+
+        async def press_button(name):
+            text = await real_press(name)
+            s.app, s.foreground = ("Home screen", SPRINGBOARD), SPRINGBOARD  # the app went to the background
+            return text
+        s.press_button = press_button
+        r = await d.run_tool("a", "press_button", {"name": "home"})
+        assert r["text"].startswith("pressed home") and asked == []  # (iOS's process list took 0.56 s on the phone)
+        await d.run_tool("a", "open_app", {"app": "Example", "look": False})
+        await d.run_tool("a", "look", {"screenshot": False})
+        die(d)  # a tap the app answers by going away: that is looked into as before
+        await d.run_tool("a", "tap", {"target": {"ref": "e1"}})
+        assert asked
+        await finish(stop, task)
+    run(go)

@@ -2987,10 +2987,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return None
 
     async def _crash_note(self, client_id: str, scope: "Scope | None", name: str, before: str | None,
-                          error: Refused | None, pid_before: int | None) -> str | None:
+                          error: Refused | None, pid_before: int | None, sent_away: bool = False) -> str | None:
         """_crash_check, which never fails a call: a note is a nicety."""
         try:
-            return await self._crash_check(client_id, scope, name, before, error, pid_before)
+            return await self._crash_check(client_id, scope, name, before, error, pid_before, sent_away)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -2998,12 +2998,14 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
 
     async def _crash_check(self, client_id: str, scope: "Scope | None", name: str, before: str | None,
-                           error: Refused | None, pid_before: int | None) -> str | None:
+                           error: Refused | None, pid_before: int | None, sent_away: bool = False) -> str | None:
         """The note for an answer when the app under test stopped: it was in front (`before`) and is no longer running,
         and a crash report of it has come. Cheap: the phone is asked only when the app left the front (or the call
         ended in an error a crash causes), and then once whether it still runs. A crash whose report hasn't come yet is
         looked for again on this client's next calls while it drives that app (CRASH_LATE_TRIES), and told once, with
-        its time, to this client only: another client's call, or this client's call in another app, never gets it."""
+        its time, to this client only: another client's call, or this client's call in another app, never gets it.
+        `sent_away`: (2.0, worker I) the call itself sent the app to the background (press_button home), which explains
+        why it left the front: nothing is asked of the phone (iOS's process list took 0.56 s of every home press)."""
         pending = self._crash_pending.get(client_id)
         # the client is in another app when that app is in front (the stopped one isn't, and the home screen is no app)
         elsewhere = [b for b in (before, self._bundle(), self._opened if name == "open_app" else None)
@@ -3028,6 +3030,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return None
         if closed == target and name != "open_app":
             return None  # (2.0) the agent's own close_app ended it: nothing to look for (it cost the next call 1-2 s)
+        if sent_away and error is None and left != target:
+            return None  # (2.0) the agent's own home press sent it away
         cut = error is not None and error.code in CRASH_CUT_CODES
         if self._bundle() == target and not cut and left != target:
             return None
@@ -3992,7 +3996,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                         enriched.hit_check = e.hit_check
                         e = enriched
                     raise e from None
-                note = await self._crash_note(client_id, scope, name, before, None, pid_before)
+                note = await self._crash_note(client_id, scope, name, before, None, pid_before,
+                                              sent_away=name == "press_button" and args.get("name") == "home")
                 if note is not None:
                     answer = {**answer, "text": f"{answer['text']}\nNote: {note}"}
                 elif client_id not in self._crash_pending and name not in DIAG_TOOLS:
