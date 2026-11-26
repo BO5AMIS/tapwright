@@ -126,6 +126,12 @@ MIN_QUIET = 0.3  # seconds a screen must stay as it was before "No visible chang
 # cold start showed nothing for over 0.4 s: it was answered "No visible change." while the page was opening (11 of 11).
 HANDS_QUIET = 0.8
 HANDS_FRESH = 1.5  # seconds after a hands touch ended within which a settle is that touch's
+# (2.0, phone 2026-11-26) the earliest a settle may end "changed, then still" after a touch the hands sent, counted from
+# the touch's end. A HID tap is acked at once (60-110 ms after it starts): in Settings a row shows its highlight first,
+# then stands still for a moment, then the push animation runs (0.7-0.9 s to stillness). A settle that ended on the
+# highlight (0.11 s) read the tree mid-transition: right after a back, `tap {"label": "General"}` found the outgoing
+# page's title too ("2 elements match"). The stillness after a highlight is about 0.1-0.2 s; 0.35 s lets the push start.
+HANDS_SETTLE_MIN = 0.35
 NOTE_CAPPED = ("the screen was still changing after {cap:g} s (an animation or video); "
                "positions may be mid-change.")
 
@@ -417,6 +423,19 @@ WAIT_FOR_MIN, WAIT_FOR_DEFAULT = 0.5, 10.0  # `wait_for`'s timeout in seconds (i
 WAIT_FOR_KINDS = ("text", "id", "label")
 WAIT_FOR_POLL = 0.3  # seconds between tree reads while waiting
 SCROLL_MIN, SCROLL_MAX = 0.1, 1.0  # `scroll`'s amount: a share of the scroll area
+def _bare_name(shown: str, bundle: str) -> str:
+    """An app's name as `Daemon._app` shows it ("Wayfare (com.example.wayfare)") without the bundle id it ends with."""
+    tail = f" ({bundle})"
+    return shown[:-len(tail)] if shown.endswith(tail) and len(shown) > len(tail) else shown
+
+
+def _app_words(app: tuple[str, str]) -> str:
+    """(name, bundle id) as an answer says it: `Name (bundle id)`, or the bundle id once when that is all the name is."""
+    name, bundle = app
+    name = _bare_name(name, bundle)
+    return bundle if not name or name == bundle else f"{name} ({bundle})"
+
+
 def _screen_sig(items: list[ui.Element]) -> tuple:
     """What a light read says the screen holds: for comparing two reads when there is no stream."""
     return tuple((e.role, e.label, e.value, e.rect) for e in items)
@@ -1845,7 +1864,9 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             s.session_settings = {**PRESETS[self.preset], **NO_IDLE_WAIT}  # (a session re-created later gets them in ensure)
             await s.settings(s.session_settings)
             self._fps = self._preset_fps()
-            await s.read_scale(refresh=True)  # once per connection, so every header says @3x, not only SpringBoard's
+            # once per connection, so every header says @3x, not only SpringBoard's; (2.0) not asked again when the
+            # session's start had it from the runner's screen route, which doesn't read the app (/wda/screen does)
+            await s.read_scale(refresh=not getattr(s, "scale_by_runner", False))
             await s.read_app_names(refresh=True)  # so the header's App: line says "Settings", not a bundle id
 
     async def _session_again_on_runner(self, s, error: Exception) -> bool:
@@ -4218,15 +4239,17 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if no_ocr and not self._hints_wanted():
                 raise Refused("unsupported", ocr.INSTALL)  # (--no-hints: 1.8.5's refusal)
             view.ocr = {}  # refs o1… belong to one look with ocr: true, and go with the next look
-            answer = await self._look(view, shot, [], notes)
+            answer = await self._look(view, shot, [], notes, paired=args.get("ocr") is not False)
             # (2.0) the runner learns its routes with the look's read: now the runner's OCR may be known to be there
             no_ocr = no_ocr and not self._ocr_possible()
             # the agent sees what is in front now: typing without a target goes there (1.7.8, X item 4), and not into
             # another app that comes forward after the look (last Opus review, L); a cut-short look too (R200v M3)
             view.aimed_app = self.session.app if isinstance(self.session.app, tuple) else None
             if (tier := self._tier_now()) != "full" and args.get("ocr") is not False:
-                # a screen that didn't answer the whole read: its text, read from the picture, comes without asking
-                return await self._with_ocr(view, answer, tier=tier)
+                # a screen that didn't answer the whole read: its text, read from the picture, comes without asking (and
+                # the picture with it in one request, when the stream had none: _pairs_text)
+                return await self._with_ocr(view, answer, tier=tier,
+                                            shot=shot if self._pairs_text(view, shot) else None)
             if no_ocr:
                 # (1.9.0 round 2) the look the agent asked for, with a note: no failed call and its retry
                 answer = {**answer, "text": answer["text"] + "\nNote: " + NOTE_NO_OCR}
@@ -4551,8 +4574,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         if landed is not None:
             done = Settled(landed[1], True, False)
         else:
+            # (a launch settles with the launched app's cap: one known never to stand still waits SHORT_SETTLE)
             done = await self._settle(self._mark()[0], cap=settle, since=mark[1],
-                                      early=mark[0] if settle == CAP else None)
+                                      early=mark[0] if settle == CAP else None,
+                                      **({"bundle": self._opened} if name == "open_app" else {}))
         trace.settled()
         if session_module.TRACE:
             self.log(f"trace {name} settle {done.seconds:.2f} s, changed={done.changed}")
@@ -5783,7 +5808,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         view.auto_begun.add(bundle_id)
         # (1.7.8, X item 4) nothing aimed at or typed into before belongs to the app that is opened: typing without a
         # target goes only to it, and no field of the app before is typed into again
-        view.aimed_app, view.typed_field = (shown, bundle_id), None
+        # (its name alone: `shown` already ends with the bundle id, and the stale-app refusal adds it once more)
+        view.aimed_app, view.typed_field = (_bare_name(shown, bundle_id), bundle_id), None
         self.session.typed_into = self.session.typed_place = None
         if a.get("language"):  # the language its titles are kept under (§18.9); a start in the phone's own language clears it
             self._language[bundle_id] = str(a["language"])
@@ -6162,7 +6188,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 raise Refused("busy", UNLOCK_BUSY)
             picture = await jpeg_of(frame)
         else:
-            picture = await self._read(self.session.screenshot_png)
+            picture = await self._phone_picture()  # (full size: this computer's OCR reads it)
             if self.unlocked_since(asked):
                 raise Refused("busy", UNLOCK_BUSY)
         try:
@@ -6175,11 +6201,36 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                 return [], f"no text read from the picture: reading it here failed ({type(e).__name__})."
             return [], f"{failed}, and so did reading the picture here ({type(e).__name__})."
 
-    async def _with_ocr(self, view, answer: dict, tier: str = "full") -> dict:
+    async def _with_ocr(self, view, answer: dict, tier: str = "full", shot: "tuple[int, bool] | None" = None) -> dict:
         """`look` with `ocr: true`, and (2.0) every look whose tree was cut short (`tier` shallow or root): the text the
         picture shows that no element carries, as lines with refs o1, o2… after the list (before its notes). On a
-        screen with no elements at all (root) the header's `Elements: none` line says the text follows."""
-        seen, note = await self._screen_text(implicit=tier != "full")
+        screen with no elements at all (root) the header's `Elements: none` line says the text follows. `shot`: the
+        look's picture is added here, read with the text in one request (_pairs_text)."""
+        if shot is None:
+            seen, note = await self._screen_text(implicit=tier != "full")
+            return self._ocr_lines(view, answer, tier, seen, note)
+        seen, note, picture = await self._screen_text_and_picture(shot[0])
+        return await self._add_shot(self._ocr_lines(view, answer, tier, seen, note), view, shot, picture=picture)
+
+    async def _screen_text_and_picture(self, width: int) -> "tuple[list[ocr.Seen], str, bytes | None]":
+        """(the text lines, a note or "", the picture they were read from or None) by one runner request (route version
+        11's `image=1`). If it fails, the text is read as _screen_text reads it and the picture is left to _add_shot."""
+        asked = self.hub.mono()
+        try:
+            seen, picture = await self._read(lambda: self.session.read_text_and_picture("accurate", width))
+        except Refused:
+            raise
+        except Exception as e:  # noqa: BLE001 - the text and the picture are had the usual ways
+            self.log(f"runner OCR with its picture failed ({type(e).__name__}: {self._redact(str(e))[:160]}): "
+                     "reading them apart")
+            seen, note = await self._screen_text(implicit=True)
+            return seen, note, None
+        if self.unlocked_since(asked):  # (M1: an unlock's keypad is never read, nor shown)
+            raise Refused("busy", UNLOCK_BUSY)
+        return seen, "", picture
+
+    def _ocr_lines(self, view, answer: dict, tier: str, seen: "list[ocr.Seen]", note: str) -> dict:
+        """The answer with the text read from the picture (`seen`, or the `note` saying why there is none): _with_ocr."""
         # compared in the screen's own words with the tree's; shown as an answer shows text (a password the picture
         # shows is its placeholder, §18.6)
         known = [k.casefold() for e in view.items for k in (e.text, e.label, e.value, e.placeholder) if k]
@@ -6988,9 +7039,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
                     and view.alert_now is None):  # (an OS alert's own field is typed into over any app)
                 # (1.7.8, X item 4) another app came to the front since the agent's last touch or open_app (Safari, after
                 # a tap in Files): its only input is no field the agent chose
-                raise Refused("stale", f"{front[0]} ({front[1]}) is in front now, not {view.aimed_app[0]} "
-                                       f"({view.aimed_app[1]}), where your last touch went. Nothing was typed; look, "
-                                       "then pass a target.")
+                raise Refused("stale", f"{_app_words(front)} is in front now, not {_app_words(view.aimed_app)}, where "
+                                       "your last touch went. Nothing was typed; look, then pass a target.")
             inputs = [e for e in view.items if e.role == "input"]
             if not inputs and self._tier_now() != "full":
                 return await self._type_focused(a)  # (2.0) the screen gave no fields: the keys go to the focused one
@@ -8623,7 +8673,10 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         button. A bar without one is a root screen (or has only Cancel,
         Done and the like): nothing is tapped. The edge swipe is only for screens with no bar at all."""
         s = self.session
-        back = await self._still_back()
+        listed = self._back_from_list(view)
+        back = listed if listed is not None else await self._still_back()
+        if listed is not None:
+            trace.note("back_from_list", True)  # (the timing trace only: no read before the touch)
         if back.dismiss is not None:  # AGENT-TOOLS v1.4: what is open on top closes first, as "up one screen"
             self._dry(a, "Would close the sheet.")
             await s.tap(ui.Target(x=back.dismiss[0], y=back.dismiss[1]))
@@ -8643,27 +8696,52 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             raise Refused("not_actionable", HOSTED_BACK)
         if back.point is not None:
             self._dry(a, "Would tap the back button.")
-            await self._back_before(view, a)
+            await self._back_before(view, a, listed is not None)
             await s.tap(ui.Target(x=back.point[0], y=back.point[1]))
             return "Tapped the back button."
         if back.bar:
             raise Refused("not_actionable", "no_action: the navigation bar has no back button")
         width, height = s.screen
         self._dry(a, "Would swipe from the left edge.")
-        await self._back_before(view, a)
+        await self._back_before(view, a, listed is not None)
         await s.swipe(2, height / 2, 0.6 * width, height / 2, 300)
         return "Swiped from the left edge."
 
-    async def _back_before(self, view, a: dict) -> None:
+    def _back_from_list(self, view) -> ui.Back | None:
+        """(2.0, worker H) What `back` would touch, from the agent's own list when nothing can have changed since it was
+        read: then reading the tree again before the touch only costs time (0.5-1.0 s on a heavy page, measured on the
+        phone 2026-11-26). The same test the tap path uses before it reads live (_current), and stricter: the list's
+        tree is the session's newest read (no other read since, of this agent or another), whole, with nothing open on
+        top (a sheet or popover is read until it stands still, _still_back); the agent's list is current, the stream's
+        newest frame is fresh and like the one the list was read against (_screen_unchanged), and the screen stands
+        still now (_proven_still). Any doubt: None, and `back` reads as before."""
+        s = self.session
+        tree = getattr(view, "tree", None)
+        if (tree is None or tree is not getattr(s, "last_tree", None) or getattr(tree, "tier", "full") != "full"
+                or tree.back is None or tree.back.dismiss is not None or tree.behind):
+            return None
+        if view.opened or self.unsettled or not self._current(view) or not self._screen_unchanged(view):
+            return None
+        try:
+            if not self._proven_still(noted=False):
+                return None
+        except Exception:  # noqa: BLE001 - a picture that can't be compared proves nothing: read as before
+            return None
+        s.behind, s.front_items = tree.behind, tree.items  # (as back_point leaves them, for `back`'s own checks)
+        return tree.back
+
+    async def _back_before(self, view, a: dict, listed: bool = False) -> None:
         """`back` with `look: false`: the state before the touch, to compare with the one after it (see
         `_back_unchanged`): the newest frame, if there is a stream, and a light read of the tree. The edge swipe
         makes the picture move (an interactive pop that snaps back), so movement says nothing: the end state does.
         Kept on the agent's own view, never on the daemon: another agent's back can't take it. (It runs inside the
-        touch's turn of the phone's queue, so its read is a direct one.)"""
+        touch's turn of the phone's queue, so its read is a direct one.) `listed`: the agent's list was proven the
+        screen now (_back_from_list): it is the state before, with no read."""
         view.back_before = None
         if a.get("look", True):
             return
-        view.back_before = (self.hub.latest, _screen_sig((await self.session.refresh()).items))
+        items = view.tree.items if listed else (await self.session.refresh()).items
+        view.back_before = (self.hub.latest, _screen_sig(items))
 
     async def _back_unchanged(self, view) -> bool:
         """Is the end state of `back`'s touch the one before it? The settled frame against the frame before (when
@@ -8814,17 +8892,20 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         return done.seconds, done.changed
 
     async def _settle(self, after_seq: int, still: float | None = None, cap: float = CAP,
-                      since: Frame | None = None, early: int | None = None) -> Settled:
+                      since: Frame | None = None, early: int | None = None, bundle: str | None = None) -> Settled:
         """_settle_frames, with the cap of a screen that never stands still (Session.settles, SettleCap): shorter while
-        the app in front is known for it, and learned from how this settle ends."""
+        the app in front is known for it, and learned from how this settle ends. `bundle`: the app whose screen this is
+        when the newest read isn't of it (open_app's launch settle: the app launched, known for it from an earlier
+        visit); a settle is learned from only when the newest read is of that app (its tier says whether it reads)."""
         caps = getattr(self.session, "settles", None)
         if caps is None:
             return await self._settle_frames(after_seq, still, cap, since, early)
-        bundle = self._read_bundle()
+        read = self._read_bundle()
+        bundle = bundle or read
         done = await self._settle_frames(after_seq, still, caps.cap(bundle, cap), since, early)
-        if done.still or done.capped:
+        if (done.still or done.capped) and bundle == read:
             cut = self._tier_now() != "full"
-            if caps.settled(bundle, done.capped, cut):
+            if caps.settled(bundle, done.capped, cut, done.seconds):
                 self.log(f"{bundle}'s screen never stands still: actions settle within {caps.short:g} s"
                          if caps.restless(bundle) else f"{bundle}'s screen stood still: actions settle as usual")
         return done
@@ -8843,6 +8924,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         so a slow stream isn't called still too soon). Each frame is compared with the first of its run, so a
         slow fade, close to the last frame every time, is not still. `changed`: a frame is unlike the one at the
         start of the action (`since`, from _mark; None means there was no frame, so any frame counts).
+        After a touch the hands sent (Session.hands_at), "changed, then still" ends it no sooner than HANDS_SETTLE_MIN
+        from the touch's end: a row's highlight and the stillness after it come before the page's push.
         `changed` is False only when the answer is certain: 3 frames, all like `since`, and `quiet` seconds.
         A stall, no frames at all (it sleeps `settle_fallback` in total, first-frame wait included), too
         few frames, or the cap all report changed=True, so the tree gets read."""
@@ -8854,8 +8937,13 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         # "nothing changed" is believed later after a touch the hands just sent (HANDS_QUIET, counted from its end)
         touched = getattr(self.session, "hands_at", None)
         quiet = self.settle_quiet
-        if isinstance(touched, float) and self.settle_quiet >= MIN_QUIET and 0 <= time.monotonic() - touched < HANDS_FRESH:
-            quiet = max(quiet, HANDS_QUIET - (time.monotonic() - touched))
+        floor = began  # (loop time) the earliest "changed, then still" may end the settle
+        if isinstance(touched, float) and 0 <= time.monotonic() - touched < HANDS_FRESH:
+            since_touch = time.monotonic() - touched
+            if self.settle_quiet >= MIN_QUIET:
+                quiet = max(quiet, HANDS_QUIET - since_touch)
+            # a highlight followed by a moment of stillness is not the touch's end (HANDS_SETTLE_MIN)
+            floor = began + max(0.0, HANDS_SETTLE_MIN - since_touch)
         deadline = began + cap
         seq, differs, run, run_start, first_of_run = after_seq, False, 0, began, None
         if early is not None:
@@ -8872,7 +8960,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             if not differs:  # nothing showed during the call: only frames after the return count
                 run, run_start, first_of_run = 0, began, None
             elif (gap and last is not None and run >= 2 and began - run_start >= still
-                  and began - last <= 1.5 * gap):
+                  and began - last <= 1.5 * gap and began >= floor):
                 return Settled(0.0, True, False, True)  # changed, then still up to a fresh frame at the return
         while (left := deadline - loop.time()) > 0:
             first = seq == after_seq
@@ -8894,7 +8982,7 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             else:
                 run, run_start, first_of_run = 1, now, frame
             if run >= 2 and now - run_start >= still:
-                if differs or (seq - after_seq >= 3 and now - began >= quiet):
+                if (now >= floor) if differs else (seq - after_seq >= 3 and now - began >= quiet):
                     return Settled(now - began, differs, False, True)
         return Settled(loop.time() - began, True, differs)
 
@@ -8968,28 +9056,30 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             return latest
         return await self.hub.next_after(latest.seq if latest else 0, timeout=self.shot_wait)
 
-    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True) -> dict:
-        """Add the picture to an answer: from the stream (full resolution), else the phone's /screenshot.
-        A picture that can't be had is a Note line, never an error. Decoding and resizing happen only here,
-        so only when a picture was asked for. The picture is the frame from when the tree was read (`at_read`),
-        else the newest one (the no-change shortcut read no tree); /screenshot only when there is no frame."""
+    async def _add_shot(self, answer: dict, view, shot: tuple[int, bool] | None, at_read: bool = True,
+                        picture: bytes | None = None) -> dict:
+        """Add the picture to an answer: from the stream (full resolution), else the phone's own (the runner's JPEG shot,
+        route version 11, else /screenshot's PNG). A picture that can't be had is a Note line, never an error. Decoding
+        and resizing happen only here, so only when a picture was asked for. The picture is the frame from when the tree
+        was read (`at_read`), else the newest one (the no-change shortcut read no tree); the phone's only when there is
+        no frame. `picture`: one already taken for this answer (a cut-short look's, with its text: _with_ocr)."""
         if shot is None:
             return answer
         width, labels = shot
         try:
-            frame = view.read_frame if at_read else await self._newest_frame()
+            frame = None if picture is not None else view.read_frame if at_read else await self._newest_frame()
             if self.frame_private(frame):  # (M1: an unlock ran when it was taken; a Note, the call itself is done)
                 raise Refused("busy", UNLOCK_BUSY)
             try:
-                source = await jpeg_of(frame) if frame is not None else None  # a video picture is encoded here
+                source = await jpeg_of(frame) if frame is not None else picture  # a video picture is encoded here
             except PictureGone:  # it was one of the older pictures, whose pixels are let go
                 source = None
             turn = getattr(self.session, "turn", 0)
-            if source is not None and turn and getattr(frame, "picture", None) is None:
+            if source is not None and turn and frame is not None and getattr(frame, "picture", None) is None:
                 source = await self.turned(frame.seq, source, turn)  # landscape: the stream's frame comes as captured
             if source is None:
                 asked = self.hub.mono()
-                source = await self._read(self.session.screenshot_png)
+                source = await self._phone_picture(width)
                 if self.unlocked_since(asked):
                     raise Refused("busy", UNLOCK_BUSY)
             boxes = [(e.ref, *e.rect) for e in view.items if e.actions] if labels else None
@@ -9002,7 +9092,27 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
         answer["image"], answer["image_size"] = base64.b64encode(jpeg).decode(), [size[0], size[1]]
         return answer
 
-    async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list) -> dict:
+    async def _phone_picture(self, width: int | None = None) -> bytes:
+        """The screen as the phone takes it, through the queue: the runner's JPEG shot (route version 11, about 50 ms;
+        `width` pixels wide, None: full size), else /screenshot's PNG (250-640 ms). The caller checks the unlock rule."""
+        picture = getattr(self.session, "screen_picture", None)
+        if callable(picture):
+            return await self._read(lambda: picture(width))
+        return await self._read(self.session.screenshot_png)
+
+    def _pairs_text(self, view, shot: "tuple[int, bool] | None") -> bool:
+        """(2.0, worker H) Does a look's picture come with its text in ONE request (the OCR read's `image=1`, route version
+        11)? When the look's tree was cut short (its text is read from the picture anyway), a picture is wanted, and the
+        stream had no fresh frame at the read (else the picture is the stream's and only the text is asked for)."""
+        if shot is None or self._tier_now() == "full" or getattr(view, "read_frame", None) is not None:
+            return False
+        shoots = getattr(self.session, "shoots", None)
+        return self._runner_reads_text() and callable(shoots) and bool(shoots())
+
+    async def _look(self, view, shot: tuple[int, bool] | None, lines: list, notes: list,
+                    paired: bool = False) -> dict:
+        """The agent's look: the tree read into its list, and the picture when `shot`. `paired`: a look whose text is
+        read with its picture in one request (_pairs_text) leaves the picture to _with_ocr."""
         async def read():
             self._mark_read(view)
             text, image = await self.session.look(screenshot=False)
@@ -9026,6 +9136,8 @@ class Daemon(bugtool.BugTools, exploretool.ExploreTools, journey_tool.JourneyToo
             view.place = None
             return _answer(lines, [*notes, f"couldn't look afterwards: {e}."])
         text, mapped = self._mapped_look(view, text)
+        if paired and self._pairs_text(view, shot):
+            return _answer([*lines, text], [*notes, *mapped], image)  # (its picture comes with its text: _with_ocr)
         return await self._add_shot(_answer([*lines, text], [*notes, *mapped], image), view, shot)
 
     async def _after(self, view, result: str, notes: list, full: bool, moves_content: bool | None = False,

@@ -2,6 +2,7 @@
 holds the connection and WebDriverAgent's session, connecting on first use."""
 import asyncio
 import base64
+import binascii
 import contextvars
 import io
 import os
@@ -162,6 +163,22 @@ BUDGET_MEMORY = 20.0  # seconds a cut-short read keeps its app on the short budg
 # forces one (for measuring).
 TREE_PATH_FORCED = os.environ.get("TAPWRIGHT_TREE_PATH", "").strip().lower()
 TREE_ATTRS = os.environ.get("TAPWRIGHT_TREE_ATTRS", "lean").strip().lower()  # `std` turns the lean read off (version 10)
+# (2.0, runner route version 11: RUNNER-V11-PROTOCOL.md) the app in front without reading it (a few ms, where
+# /wda/activeAppInfo took 1.7-30 s on TikTok's feed), the screen as a JPEG in about 50 ms (the PNG /screenshot took
+# 250-640 ms), and the OCR read's picture in its own answer (`image=1`)
+FRONT_VERSION = 11
+FRONT_PATH = "/wda/tw/front"
+SHOT_PATH = "/wda/tw/shot"
+FRONT_WAIT = 3.0  # seconds: the runner's own worst case is about 1.8 s (an AX lookup bounded to 0.5 s, then the daemon's)
+SHOT_WAIT = 10.0  # seconds a JPEG shot may take (about 50 ms)
+SHOT_QUALITY = 80  # the JPEG quality asked of the runner's shot (shot.render encodes the answer's picture again)
+# (2.0, worker H) seconds a read of an app whose screen doesn't answer and keeps moving may be left unasked after a real
+# one went out (ReadBudget.plan): on TikTok's feed each read cost its whole budget (1.3-1.4 s at 1500 ms), before and
+# after every action. One real short-budget read goes out every UNASKED_FOR seconds, so a screen of that app that reads
+# (a profile, while a video plays in it) is found again; a still screen gets the normal budget at once (ReadBudget).
+UNASKED_FOR = 8.0
+UNASKED_WHY = ("not asked: {bundle} is still in front, its screen keeps moving, and its read {age:.1f} s ago gave no "
+               "elements in time")
 
 
 def tree_path(budget_ms: int, normal_ms: int, forced: str | None = None) -> str:
@@ -184,9 +201,33 @@ class ReadBudget:
     that reads whole (review R200v H1)."""
 
     def __init__(self, normal_ms: int = TREE_BUDGET_MS, short_ms: int = SHORT_BUDGET_MS,
-                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic) -> None:
+                 memory: float = BUDGET_MEMORY, clock: Callable[[], float] = time.monotonic,
+                 unasked_for: float = UNASKED_FOR) -> None:
         self.normal_ms, self.short_ms, self.memory, self.clock = normal_ms, short_ms, memory, clock
+        self.unasked_for = unasked_for
         self._cut: dict[str, float] = {}  # bundle id -> when a normal-budget read of it was last cut short
+        self._tried: dict[str, float] = {}  # bundle id -> when a real read of it last went out
+
+    def plan(self, bundle: str | None, still: Callable[[], bool] | None = None) -> tuple[int, bool]:
+        """(the budget in ms, whether the read may be left unasked) for a read of `bundle`. (2.0, worker H) Unasked only
+        where the short budget applies (the app's memory of a cut read is fresh, and the screen isn't still) and a real
+        read of the app went out within `unasked_for` seconds: the caller then asks the runner only which app is in front
+        (route version 11), and makes the `root` answer itself when it is still this app."""
+        budget = self.budget(bundle, still)
+        if bundle is None or budget >= self.normal_ms:
+            return budget, False
+        at = self._tried.get(bundle)
+        return budget, at is not None and self.clock() - at < self.unasked_for
+
+    def tried(self, bundle: str | None) -> None:
+        """A real read of `bundle` goes out now."""
+        if bundle is not None:
+            self._tried[bundle] = self.clock()
+
+    def tried_ago(self, bundle: str | None) -> float | None:
+        """Seconds since a real read of `bundle` went out (None: none did)."""
+        at = self._tried.get(bundle) if bundle is not None else None
+        return None if at is None else self.clock() - at
 
     def budget(self, bundle: str | None, still: Callable[[], bool] | None = None) -> int:
         """The budget, in ms, for a read of the app `bundle` (None: not known, the normal budget). `still` is asked only
@@ -214,6 +255,7 @@ class ReadBudget:
 
     def forget(self) -> None:
         self._cut.clear()
+        self._tried.clear()
 
 
 SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never stands still (SettleCap)
@@ -222,9 +264,15 @@ SHORT_SETTLE = 0.5  # seconds an action's settle may wait on a screen that never
 class SettleCap:
     """(2.0, lead's decision) How long an action's answer waits for the screen of an app to stand still. A screen that
     never does (TikTok's playing feed) made every settle wait its whole cap (2 s, 4 s after a launch): a swipe there took
-    3.2 s. So, per bundle id: when a settle ended by its cap with the picture still changing while the newest tree of that
-    app was cut short, its next settles wait at most `short` seconds; a settle of the app that ends still, or a read of it
-    that comes back whole, gives it the normal cap again. Pure: the daemon says what happened and asks for the cap."""
+    3.2 s. So, per bundle id: when a settle of the app ran past `short` seconds with the picture still changing (it ended
+    by its cap, or stood still only later) while the newest tree of that app was cut short, its next settles wait at most
+    `short` seconds; a settle that ends still while the app's newest tree is whole, or a read of it that comes back whole,
+    gives it the normal cap again. Pure: the daemon says what happened and asks for the cap.
+
+    (Worker H, phone log 2026-11-26) It switched only on the third swipe on the feed: the first two settles ended still
+    (0.77 s and 1.64 s: the feed stands still for a moment while the next video starts), and only a capped settle
+    counted, while a still end cleared the memory again. Now a settle still moving at `short` seconds counts (the short
+    cap would have ended it there), and a still end on a screen that still doesn't read keeps the short cap."""
 
     def __init__(self, short: float = SHORT_SETTLE) -> None:
         self.short = short
@@ -234,15 +282,17 @@ class SettleCap:
         """The cap for a settle of `bundle`'s screen whose normal cap is `cap`."""
         return min(cap, self.short) if bundle is not None and bundle in self._restless else cap
 
-    def settled(self, bundle: str | None, capped: bool, cut: bool) -> bool:
-        """A settle of `bundle` ended: by its cap with frames still changing (`capped`), the newest tree cut short (`cut`).
-        True when the app's cap switched (the caller logs it)."""
+    def settled(self, bundle: str | None, capped: bool, cut: bool, seconds: float = 0.0) -> bool:
+        """A settle of `bundle` ended after `seconds`: by its cap with frames still changing (`capped`), else on frames
+        that stood still; the newest tree of the app cut short (`cut`). True when the app's cap switched (the caller
+        logs it)."""
         if bundle is None:
             return False
-        if capped and cut and bundle not in self._restless:
+        moving = capped or seconds > self.short  # still changing when the short cap would have ended it
+        if moving and cut and bundle not in self._restless:
             self._restless.add(bundle)
             return True
-        if not capped and bundle in self._restless:
+        if not capped and not cut and bundle in self._restless:
             self._restless.discard(bundle)
             return True
         return False
@@ -345,6 +395,20 @@ KEYS ={"backspace": "\b", "enter": "\n"}  # what /wda/keys types for these keys
 ROOT_BUNDLE = re.compile(r'<XCUIElementTypeApplication[^>]*?\bbundleId="([^"]*)"')
 
 
+def _jpeg_of(value: object, what: str) -> bytes:
+    """The JPEG bytes of a runner answer's `jpeg` (base64, route version 11). Raises DeviceError when there are none."""
+    data = value.get("jpeg") if isinstance(value, dict) else None
+    if not isinstance(data, str) or not data:
+        raise DeviceError(f"the runner's {what} came without a picture")
+    try:
+        picture = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise DeviceError(f"the runner's {what} sent a picture that can't be read") from None
+    if not picture.startswith(b"\xff\xd8"):
+        raise DeviceError(f"the runner's {what} sent no JPEG")
+    return picture
+
+
 def _root_bundle(source: object) -> str | None:
     """The bundle id the tree's root Application names, or None."""
     found = ROOT_BUNDLE.search(source[:2000]) if isinstance(source, str) else None
@@ -440,6 +504,10 @@ class Session:
         self.center_tier = "full"  # how much of Notification Center the newest read_center got (R200v L4)
         self.settles = SettleCap()  # (2.0) which apps' screens never stand still: their settles wait less
         self.bounded = False  # whether this session's runner said version 9 or later at ensure (bounded reads)
+        # whether this session's start had the pixel scale from the runner's screen route (version 9), which doesn't read
+        # the app: then nothing asks /wda/screen for it, which reads the app (worker H: on TikTok's feed, the AX timeout)
+        self.scale_by_runner = False
+        self._made_root: str | None = None  # the newest root made here without asking for the tree (_unasked_root)
 
     async def ensure(self) -> None:
         """Connect, mount and start WebDriverAgent when needed. Once there is a session this is
@@ -463,6 +531,7 @@ class Session:
         sid = (await self.device.http("POST", "/session", {"capabilities": {"alwaysMatch": wanted}}))["sessionId"]
         # Asked before anything reads the app: once a read hangs behind a frozen app, nothing else gets an answer.
         locked = (await self.device.http("GET", f"/session/{sid}/wda/locked", timeout=LOCK_WAIT)).get("value")
+        self.scale_by_runner = False
         try:
             screen = await self._screen_of_runner() if bounded else None
             if screen is None:
@@ -529,6 +598,7 @@ class Session:
             scale = 0.0
         if scale > 0:
             self.scale, self.scale_read = scale, True  # (no read of the app needed for it later either)
+            self.scale_by_runner = True
         return w, h
 
     async def _why_stuck(self, locked: bool, lost: ConnectionLost) -> ConnectionLost:
@@ -645,8 +715,8 @@ class Session:
     async def _follow_orientation(self, source: str | None) -> None:
         """Keep `screen` and `turn` with the phone's orientation: the tree's root says the screen's size in points
         now (932x430 in landscape), and WebDriverAgent's rotation says which way it turned (z 90 or 270)."""
-        if not isinstance(source, str):
-            return
+        if not isinstance(source, str) or source is getattr(self, "_made_root", None):
+            return  # (a root made here from `screen` says nothing new: the rotation question isn't asked for it)
         root = ROOT_SIZE.search(source[:2000])
         if root is None:
             return
@@ -741,18 +811,69 @@ class Session:
         # taken for another app's
         bundle = (self.read_app[1] if isinstance(self.read_app, tuple) else None) or self.budget_app
         normal = self.budgets.normal_ms
-        budget = self.budgets.budget(bundle, still=self.screen_still)
+        budget, unasked = self.budgets.plan(bundle, still=self.screen_still)
+        if unasked and self.tw_version >= FRONT_VERSION and bundle is not None:
+            source = await self._unasked_root(bundle)
+            if source is not None:
+                return source
+        self.budgets.tried(bundle)
         source = await self._compact_tree(timeout, budget_ms=budget, budget_for=bundle,
                                           read_path=tree_path(budget, normal))
         named = _root_bundle(source)
         if (source is not None and self.last_tier != "full" and budget < normal
                 and named is not None and named != bundle):
+            self.budgets.tried(named)
             source = await self._compact_tree(timeout, budget_ms=normal, budget_for=named,
                                               read_path=tree_path(normal, normal))
             named = _root_bundle(source)
         if source is not None:
             self.budget_app = named or bundle
         return source
+
+    async def _unasked_root(self, bundle: str) -> str | None:
+        """(2.0, worker H) The `root` answer a read of `bundle` would get, made here without asking the runner for the
+        tree (ReadBudget.plan said it may be left unasked): only when the runner's FRONT_PATH says that app is still in
+        front, with its pid. The XML is the one a runner's `root` answer becomes (RUNNER-V9-PROTOCOL §1: the
+        application node, the screen in points). None (read as before) when another app is in front or it can't say."""
+        front = await self.front_app()
+        if front is None or front[0] != bundle:
+            return None
+        node: dict = {"t": "Application", "r": [0, 0, self.screen[0], self.screen[1]], "b": bundle}
+        if front[1] is not None:
+            node["pid"] = front[1]
+        label = self.read_app[0] if isinstance(self.read_app, tuple) and self.read_app[1] == bundle else \
+            self.app_names.get(bundle)
+        if label and label != bundle:
+            node["l"] = label
+        source = self._made_root = ui.xml_of_tree(node)
+        age = self.budgets.tried_ago(bundle) or 0.0
+        self.last_tier, self.last_why = "root", UNASKED_WHY.format(bundle=bundle, age=age)
+        self.last_compact = None  # (a cut-short tree is never the "unchanged" baseline)
+        self.budget_app = bundle
+        if TRACE and not QUIET.get():
+            getattr(self.device, "log", lambda *a: None)(f"trace tree {self.last_why}")
+        return source
+
+    async def front_app(self) -> tuple[str, int | None] | None:
+        """(bundle id, pid or None) of the app in front, by the runner's FRONT_PATH (route version 11): found the way a
+        tree read finds it, without reading the app (a few ms). None when this runner is older, the app can't be told,
+        or the question failed; a dropped line is raised."""
+        if self.tw_version < FRONT_VERSION:
+            return None
+        try:
+            answer = await self._call("GET", FRONT_PATH, timeout=FRONT_WAIT)
+        except ConnectionLost:
+            raise
+        except DeviceError as e:
+            getattr(self.device, "log", lambda *a: None)(f"the runner couldn't say which app is in front ({e})")
+            return None
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if not isinstance(value, dict):
+            return None
+        bundle, pid = value.get("b"), value.get("pid")
+        if not isinstance(bundle, str) or not bundle or bundle == "unknown":
+            return None
+        return bundle, pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
     async def _compact_tree(self, timeout: float, since: bool = True, budget_ms: int | None = None,
                             budget_for: str | None = None, remember: bool = True,
@@ -840,6 +961,12 @@ class Session:
             self.last_tier, self.last_why = tier_was, why_was
 
     async def foreground_bundle_id(self) -> str | None:
+        """The bundle id of the app in front. (2.0, worker H) By route version 11's FRONT_PATH when the runner has it:
+        found as a tree read finds its root's app, without reading the app (a few ms, where /wda/activeAppInfo took
+        1.7-30 s on TikTok's feed); activeAppInfo only when that can't say."""
+        await self.ensure()
+        if (front := await self.front_app()) is not None:
+            return front[0]
         try:
             info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
         except ConnectionLost:
@@ -866,6 +993,8 @@ class Session:
         root's (label, bundle id): the same answer without a request (activeAppInfo cost 70 ms an answer)."""
         if known is not None:
             info = {"name": known[0], "bundleId": known[1]}
+        elif self.tw_version >= FRONT_VERSION and (front := await self.front_app()) is not None:
+            info = {"name": "", "bundleId": front[0]}  # (route version 11: without reading the app, as foreground_bundle_id)
         else:
             try:
                 info = (await self._call("GET", "/wda/activeAppInfo")).get("value") or {}
@@ -921,7 +1050,19 @@ class Session:
         request a tree-only read leaves out."""
         self.items, self.offscreen, self.behind = tree.items, tree.offscreen, tree.behind
         self.last_insets = (tree.top_inset, tree.bottom_inset)
-        self.app = self.read_app = await self._app(tree.app)
+        known = tree.app
+        if known is None and tree.tier != "full" and self.tw_version >= FRONT_VERSION:
+            # (2.0, worker H) a cut-short root that names no app: activeAppInfo reads the app (1.7-30 s on TikTok's feed);
+            # route version 11 says which app is in front without reading it, and if it can't say, the app isn't known
+            front = await self.front_app()
+            known = (self.app_names.get(front[0]) or front[0], front[0]) if front is not None else None
+            if known is None:
+                self.app = self.read_app = None
+                self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
+                self.last_tree = tree
+                self._seen_tree(tree)
+                return Snapshot(tree, None, self.scale)
+        self.app = self.read_app = await self._app(known)
         self.last_alert, self.last_keyboard = tree.alert, tree.keyboard
         self.last_tree = tree
         self._seen_tree(tree)
@@ -930,6 +1071,36 @@ class Session:
     async def screenshot_png(self) -> bytes:
         """WebDriverAgent's /screenshot (PNG, full resolution): the fallback when the stream has no frame."""
         return base64.b64decode((await self._call("GET", "/screenshot", timeout=60))["value"])
+
+    def shoots(self) -> bool:
+        """Does the runner take JPEG shots, and send the OCR read's picture with its text (route version 11)? Known
+        once the session has started."""
+        return self.tw_version >= FRONT_VERSION
+
+    async def shot_jpeg(self, width: int | None = None) -> bytes:
+        """(route version 11) The screen as a JPEG by SHOT_PATH, `width` pixels wide (None: the screenshot's own),
+        upright as /screenshot's PNG is: about 50 ms, where the PNG took 250-640 ms. Raises DeviceError when the answer
+        has no picture that can be read."""
+        query = [*([f"width={int(width)}"] if width else []), f"quality={SHOT_QUALITY}"]
+        answer = await self._call("GET", f"{SHOT_PATH}?{'&'.join(query)}", timeout=SHOT_WAIT)
+        value = answer.get("value", answer) if isinstance(answer, dict) else None
+        if isinstance(value, dict) and isinstance(value.get("ms"), dict):
+            trace.note("shot_wda_ms", {k: v for k, v in value["ms"].items()
+                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        return _jpeg_of(value, "shot")
+
+    async def screen_picture(self, width: int | None = None) -> bytes:
+        """A picture of the screen now, for an answer when the stream has none: the runner's JPEG shot (route version
+        11; `width` pixels wide, None: full size), else /screenshot's PNG. A shot that fails is taken as a PNG."""
+        await self.ensure()
+        if self.shoots():
+            try:
+                return await self.shot_jpeg(width)
+            except ConnectionLost:
+                raise
+            except DeviceError as e:
+                getattr(self.device, "log", lambda *a: None)(f"the runner's JPEG shot failed ({e}): /screenshot instead")
+        return await self.screenshot_png()
 
     def reads_text(self) -> bool:
         """Can the runner read the screen's text itself (OCR_PATH, route version 9)? Known once a read has asked the
@@ -940,19 +1111,36 @@ class Session:
         """The text lines on the screen now, read on the phone by Apple's Vision (OCR_PATH): placed in this session's
         points, in reading order. `level`: "accurate" (a look) or "fast" (wait_for's polls). Raises DeviceError when the
         runner can't (the caller reads the picture on this computer instead)."""
+        return (await self._read_text(level, None))[0]
+
+    async def read_text_and_picture(self, level: str = "accurate",
+                                    width: int | None = None) -> "tuple[list[ocr.Seen], bytes]":
+        """(route version 11) read_text, and the picture the text was read from as a JPEG `width` pixels wide (None:
+        full size), in one request (`image=1`): a look whose tree was cut short needs both. Raises DeviceError when the
+        runner can't, or its answer has no picture (an older runner ignores `image`)."""
+        if not self.shoots():
+            raise DeviceError("this runner can't send the OCR read's picture (route version 11)")
+        seen, value = await self._read_text(level, width or 0)
+        return seen, _jpeg_of(value, "OCR read")
+
+    async def _read_text(self, level: str, image: int | None) -> "tuple[list[ocr.Seen], object]":
+        """(the lines, the answer's value): read_text's request; with `image` (a width, 0: full size) it asks for the
+        picture too."""
         if level not in ("fast", "accurate"):
             raise ValueError(f"level must be fast or accurate, not {level!r}")
         languages = ",".join(p.strip() for p in OCR_LANGUAGES.split(",") if p.strip())
         if level == "fast" and not fast_reads(languages):
             level = "accurate"  # (review R200v M4) the fast level would fail every read in these languages
         path = f"{OCR_PATH}?level={level}" + (f"&languages={urllib.parse.quote(languages, safe=',-')}" if languages else "")
+        if image is not None:
+            path += f"&image=1{f'&width={int(image)}' if image else ''}&quality={SHOT_QUALITY}"
         answer = await self._call("GET", path, timeout=OCR_WAIT, again=False)
         value = answer.get("value", answer) if isinstance(answer, dict) else None
         if isinstance(value, dict) and isinstance(value.get("ms"), dict):
             trace.note("ocr_wda_ms", {k: v for k, v in value["ms"].items()
                                       if isinstance(v, (int, float)) and not isinstance(v, bool)})
         try:
-            return ocr.of_runner(value, self.screen)
+            return ocr.of_runner(value, self.screen), value
         except ValueError as e:
             raise DeviceError(f"the runner's OCR answer can't be read: {e}") from None
 
@@ -1120,7 +1308,7 @@ class Session:
         return self.hands is not None and HANDS != "runner" and self.front_apps is None
 
     async def _by_hands(self, what: str, act: "Callable[[Callable[[], Awaitable[None]]], Awaitable[None]]",
-                        input_: bool = True) -> bool:
+                        input_: bool = True, detail: str = "") -> bool:
         """Play a gesture through the hands: `act(before)` sends it, awaiting `before` right before its first report.
         `before` makes the checks a runner request makes in _timed (the execution guard, then the one-use input check
         for an input), and the trace notes the touch. False, with nothing sent, when the hands can't be used
@@ -1156,7 +1344,7 @@ class Session:
         self.hands_at = time.monotonic()  # (the daemon's settle believes "nothing changed" later after a hands touch)
         if TRACE and not QUIET.get():
             getattr(self.device, "log", lambda *a: None)(
-                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms")
+                f"trace hands {what} {(time.monotonic() - began) * 1000:.0f} ms{detail}")
         return True
 
     async def _hands_tap(self, x: float, y: float, hold_ms: int) -> bool:
@@ -1169,11 +1357,9 @@ class Session:
             hx, hy, held = motion.tap(x, y, self.motion_rng)
             if held:
                 x, y, hold_ms = hx, hy, held
-        if TRACE and not QUIET.get():
-            getattr(self.device, "log", lambda *a: None)(
-                f"trace hands tap at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, screen {self.screen}, turn {self.turn}")
         return await self._by_hands("tap", lambda before: hands.tap(x, y, hold_ms, screen=self.screen,
-                                                                    turn=self.turn, before=before))
+                                                                    turn=self.turn, before=before),
+                                    detail=f" at ({x:.1f}, {y:.1f}) hold {hold_ms} ms, turn {self.turn}")
 
     async def hands_keys(self, text: str) -> bool:
         """Type US-ASCII text into whatever has focus through the HID keyboard (for later use: type_text still goes
